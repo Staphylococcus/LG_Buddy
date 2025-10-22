@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#Script goes in /etc/NetworkManager/dispatcher.d/pre-down.d/
+#This was not my first choice but other options I tried would not work:
+# a.) systemd service that runs before shutdown - The system would go to sleep somewhere in the middle of the script.
+# b.) Place in /lib/systemd/system-sleep/ - Putting an applicable 'Pre' script in here did run, but the network would already be down, thus the script would fail.
+
+#We only want this to run when the network is going down due to sleep/suspend
+#This might need to be more fleshed out ot handle different types such as hibernate
+if journalctl -u NetworkManager | tail -1 | grep -q "reason 'sleeping'"
+then
+    tv_ip="192.168.X.X"
+    power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+
+    active1="{'state': 'Active', 'returnValue': True}"
+    active2="{'returnValue': True, 'state': 'Active'}"
+
+    if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
+    then
+        /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+    else
+        echo "TV is powered off already."
+    fi
+fi
+
+exit 0

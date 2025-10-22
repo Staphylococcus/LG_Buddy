@@ -1,0 +1,13 @@
+[Unit]
+Description=Controls LG WebOS TV at wake-up
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=false
+ExecStart=/usr/bin/LG_Buddy_Startup
+
+[Install]
+Alias=LG_Buddy_wake.service
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+

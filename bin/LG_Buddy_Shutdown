@@ -1,5 +1,12 @@
 #!/bin/bash
 
+#Ignore if reboot. We only care about shutdown.
+if systemctl list-jobs | grep -q -E 'reboot.target.*start'
+then
+    echo "Reboot; ignoring"
+    exit 0
+fi
+
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
 tv_ip="192.168.X.X"
 
@@ -7,10 +14,11 @@ tv_ip="192.168.X.X"
 power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
 
 #Expected value of power_state when TV is on.
-active="{'state': 'Active', 'returnValue': True}"
+active1="{'state': 'Active', 'returnValue': True}"
+active2="{'returnValue': True, 'state': 'Active'}"
 
 #If the TV is on, proceed to turn it off. Otherwise do nothing.
-if [[ "$power_state" == "$active" ]]
+if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
 then
     /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
 else

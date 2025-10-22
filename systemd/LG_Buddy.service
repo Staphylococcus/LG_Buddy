@@ -1,6 +1,6 @@
 [Unit]
 Description=Controls LG WebOS TV at Startup and Shutdown
-After=network.target
+After=network-online.target
 StartLimitIntervalSec=30
 StartLimitBurst=5
 
