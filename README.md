@@ -3,22 +3,19 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 
 # PREREQUISITES #
 
-Before installation, you will need Python and PIP packages installed. Get these using your distro's package manager. Then we install bscpylgtv using pip.
+Before installation, you will need `python3`, `wakeonlan`, and `zenity` installed on your system. 
 
-For Arch based distros for example, you can run these commands to install:
+Then, the easiest way to install the required TV control library is using **uv**:
 
-1. INSTALL PYTHON, PIP, AND WAKEONELAN:
-```
-  sudo pacman -S python python-pip wakeonlan
-```
-2. CREATE A VIRUTAL ENVIRONMENT FOR LG_BUDDY:
-```
-  sudo python -m venv /usr/bin/LG_Buddy_PIP
-```
-3. INSTALL BSCPYLGTV INTO OUR VIRTUAL ENVIRONMENT:
-```
-  sudo /usr/bin/LG_Buddy_PIP/bin/pip install bscpylgtv
-```
+1. **Install uv** (if you don't have it):
+   Refer to [uv installation guide](https://github.com/astral-sh/uv).
+
+2. **Install bscpylgtv tool**:
+   ```bash
+   uv tool install bscpylgtv
+   ```
+
+*(Alternatively, you can install `bscpylgtv` using `pip`, but ensure the `bscpylgtvcommand` binary is in your PATH).*
 # INSTALLATION #
 
 1. Download the latest release of LG Buddy.
