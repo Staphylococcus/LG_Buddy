@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=LG TV Brightness
+Comment=Change LG OLED Pixel Brightness
+Exec=/usr/bin/LG_Buddy_Brightness
+Icon=preferences-system-display
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;

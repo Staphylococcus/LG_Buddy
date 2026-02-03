@@ -9,15 +9,15 @@
 #This might need to be more fleshed out ot handle different types such as hibernate
 if journalctl -u NetworkManager | tail -1 | grep -q "reason 'sleeping'"
 then
-    tv_ip="192.168.X.X"
-    power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+    tv_ip="192.168.178.28"
+    power_state=$(/home/tazztone/.local/bin/bscpylgtvcommand $tv_ip get_power_state)
 
     active1="{'state': 'Active', 'returnValue': True}"
     active2="{'returnValue': True, 'state': 'Active'}"
 
     if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
     then
-        /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+        /home/tazztone/.local/bin/bscpylgtvcommand $tv_ip button POWER
     else
         echo "TV is powered off already."
     fi

@@ -23,17 +23,29 @@ For Arch based distros for example, you can run these commands to install:
 
 1. Download the latest release of LG Buddy.
 
-2. In the 'bin' folder, Open all 3 files in your text editor and set the variables at the top of the files for your TV. Particularly the IP address of your TV, The MAC address of your TV, and the Input you use for your PC.
+2. Set install.sh as executable:
+```bash
+chmod +x ./install.sh
+```
 
-3. Set install.sh as executable
+3. Run the interactive installer:
+```bash
+./install.sh
 ```
-    sudo chmod +x ./install.sh
-```
-4. Run install.sh
-```
-    sh ./install.sh
-```
-5. Enter root password. Install should now be complete.
+The installer will now guide you through:
+*   **Auto-detecting** your `bscpylgtv` installation.
+*   **Discovering** your TV's IP and MAC address.
+*   **Configuring** your custom HDMI input.
+*   **Installing** a GUI Brightness Control app.
+
+4. Enter your sudo password when prompted to finalize the system integration.
+
+# FEATURES #
+
+### TV Brightness Control
+LG Buddy now includes a desktop integration for controlling your OLED Pixel Brightness. 
+* Search for **"TV Brightness"** in your application menu.
+* Move the slider to adjust your TV's backlight instantly.
 
 Restart your computer
 

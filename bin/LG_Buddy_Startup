@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
+tv_ip="192.168.178.28"
 #Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
-tv_mac="XX:XX:XX:XX:XX:XX"
+tv_mac="f8:b9:5a:43:ee:32"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
-input="HDMI_1"
+input="HDMI_2"
 
 #Wait for local network to actually be connected.
 nm-online -q -t 60
@@ -16,7 +16,7 @@ ping -c 1 $tv_ip >/dev/null && pingable=true || pingable=false
 if [[ "$pingable" == true ]]
 then
     #Get the current power state of the TV.
-    power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+    power_state=$(/home/tazztone/.local/bin/bscpylgtvcommand $tv_ip get_power_state)
 fi
 
 #Expected value of power_state when TV is off (and its network is awake).
@@ -28,12 +28,12 @@ if [[ "$pingable" == false ]]
 then
     wakeonlan -q $tv_mac
     sleep 1
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip set_input $input
+    /home/tazztone/.local/bin/bscpylgtvcommand $tv_ip set_input $input
 elif [[ "$power_state" == "$standby1" || "$power_state" == "$standby2" ]]
 then
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+    /home/tazztone/.local/bin/bscpylgtvcommand $tv_ip button POWER
     sleep 1
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip set_input $input
+    /home/tazztone/.local/bin/bscpylgtvcommand $tv_ip set_input $input
 else
     echo "TV is powered on already."
 fi

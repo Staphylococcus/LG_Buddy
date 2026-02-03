@@ -8,10 +8,10 @@ then
 fi
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
+tv_ip="192.168.178.28"
 
 #Get the current power state of the TV.
-power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+power_state=$(/home/tazztone/.local/bin/bscpylgtvcommand $tv_ip get_power_state)
 
 #Expected value of power_state when TV is on.
 active1="{'state': 'Active', 'returnValue': True}"
@@ -20,7 +20,7 @@ active2="{'returnValue': True, 'state': 'Active'}"
 #If the TV is on, proceed to turn it off. Otherwise do nothing.
 if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
 then
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+    /home/tazztone/.local/bin/bscpylgtvcommand $tv_ip button POWER
 else
     echo "TV is powered off already."
 fi

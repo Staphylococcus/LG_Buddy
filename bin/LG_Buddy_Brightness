@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Configuration
+TV_IP="192.168.178.28"
+CMD="/home/tazztone/.local/bin/bscpylgtvcommand"
+
+# Check if command exists
+if [ ! -f "$CMD" ]; then
+    zenity --error --text="bscpylgtvcommand not found at $CMD"
+    exit 1
+fi
+
+# Ask user for brightness level
+BRIGHTNESS=$(zenity --scale --title="LG TV Brightness" --text="Set OLED Pixel Brightness:" --min-value=0 --max-value=100 --value=0 --step=5)
+
+# If user cancelled, exit
+if [ $? -ne 0 ]; then
+    exit 0
+fi
+
+# Apply setting
+$CMD $TV_IP set_current_picture_settings "{\"backlight\": $BRIGHTNESS}"
+
+# Notification (Optional, can be removed if annoying)
+notify-send "LG TV" "Brightness set to $BRIGHTNESS%"
