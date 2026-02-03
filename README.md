@@ -43,6 +43,7 @@ The installer will now guide you through:
 # FEATURES #
 
 ### TV Brightness Control
+![alt text](image.png)
 LG Buddy now includes a desktop integration for controlling your OLED Pixel Brightness. 
 * Search for **"TV Brightness"** in your application menu.
 * Move the slider to adjust your TV's backlight instantly.
