@@ -3,9 +3,12 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 
 # PREREQUISITES #
 
-Before installation, you will need `python3`, `wakeonlan`, and `zenity` installed on your system. 
+Before installation, ensure you have the necessary system dependencies. For example, on Ubuntu/Debian:
+```bash
+sudo apt install python3 wakeonlan zenity
+```
 
-Then, the easiest way to install the required TV control library is using **uv**:
+Then, install the TV control library using **uv** (do **not** use sudo for this):
 
 1. **Install uv** (if you don't have it):
    Refer to [uv installation guide](https://github.com/astral-sh/uv).
