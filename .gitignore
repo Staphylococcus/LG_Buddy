@@ -1,0 +1,19 @@
+# User-specific data
+.aiopylgtv.sqlite
+dbus_log.txt
+
+# Python virtual environment
+.venv/
+
+# Security - sensitive files
+.env
+.env.local
+.env*.local
+*.pem
+*.key
+credentials.json
+oauth_creds.json
+secrets.json
+*.secret
+id_rsa
+id_ed25519

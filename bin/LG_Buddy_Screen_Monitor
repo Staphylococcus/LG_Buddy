@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# This script uses swayidle to detect screen idle/wake events via the
+# ext-idle-notify-v1 Wayland protocol. This works on COSMIC desktop
+# where loginctl-based detection fails.
+#
+# IMPORTANT: Set IDLE_TIMEOUT to match your COSMIC screen blank setting.
+# Default COSMIC setting is 120 seconds (2 minutes).
+
+IDLE_TIMEOUT=300
+
+echo "Starting LG Buddy Screen Monitor using swayidle (timeout: ${IDLE_TIMEOUT}s)..."
+
+exec swayidle -w \
+    timeout "$IDLE_TIMEOUT" '/usr/bin/LG_Buddy_Screen_Off' \
+    resume '/usr/bin/LG_Buddy_Screen_On'

@@ -1,0 +1,37 @@
+#!/bin/bash
+
+tv_ip="192.168.X.X"
+input="HDMI_4"
+STATE_DIR="/run/user/$(id -u)/lg_buddy"
+STATE_FILE="${STATE_DIR}/screen_off_by_us"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+
+# Convert HDMI_4 -> com.webos.app.hdmi4
+expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+
+# Check current TV input
+current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+get_input_rc=$?
+
+if [ $get_input_rc -ne 0 ] || [ -z "$current_input" ]; then
+    # get_input failed (TV off, unreachable, or timeout)
+    # Default: act as before (power_off is idempotent and harmless)
+    echo "Could not query TV input (rc=$get_input_rc). Proceeding with power_off."
+    mkdir -p "$STATE_DIR"
+    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || \
+        echo "Could not turn TV off (may already be off or unreachable)"
+    touch "$STATE_FILE"
+    exit 0
+fi
+
+if [ "$current_input" = "$expected_app" ]; then
+    echo "TV is on $input. Turning TV off (screen idle)..."
+    mkdir -p "$STATE_DIR"
+    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || \
+        echo "Could not turn TV off (may already be off or unreachable)"
+    touch "$STATE_FILE"
+else
+    echo "TV is on $current_input (not $input). Skipping power_off."
+    # Remove stale state file if it exists
+    rm -f "$STATE_FILE"
+fi

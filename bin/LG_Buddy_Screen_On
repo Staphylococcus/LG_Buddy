@@ -1,0 +1,28 @@
+#!/bin/bash
+
+tv_ip="192.168.X.X"
+tv_mac="XX:XX:XX:XX:XX:XX"
+input="HDMI_4"
+STATE_DIR="/run/user/$(id -u)/lg_buddy"
+STATE_FILE="${STATE_DIR}/screen_off_by_us"
+
+# Only wake the TV if we were the ones who turned it off
+if [ ! -f "$STATE_FILE" ]; then
+    echo "State file not found. TV was not turned off by LG Buddy. Skipping wake."
+    exit 0
+fi
+
+echo "Turning TV on (screen wake)..."
+
+# Remove state file first (before potentially slow operations)
+rm -f "$STATE_FILE"
+
+# Send Wake-on-LAN to wake the TV from standby
+wakeonlan "$tv_mac"
+
+# Wait for TV to fully wake up and accept WebSocket connections
+sleep 8
+
+# Set the input - this also turns on the TV if it's in standby
+/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1 || \
+    echo "set_input failed (TV may need more time to wake)"
