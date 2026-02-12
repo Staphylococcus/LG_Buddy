@@ -5,35 +5,39 @@ tv_ip="192.168.X.X"
 #Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
 tv_mac="XX:XX:XX:XX:XX:XX"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
-input="HDMI_1"
+input="HDMI_4"
+user_id="1000"
+STATE_DIR="/run/user/${user_id}/lg_buddy"
+STATE_FILE="${STATE_DIR}/screen_off_by_us"
 
 #Wait for local network to actually be connected.
 nm-online -q -t 60
 
-#TV network is sometimes off when in standby. Check for this
-ping -c 1 $tv_ip >/dev/null && pingable=true || pingable=false
-
-if [[ "$pingable" == true ]]
-then
-    #Get the current power state of the TV.
-    power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
-fi
-
-#Expected value of power_state when TV is off (and its network is awake).
-standby1="{'state': 'Active Standby', 'returnValue': True}"
-standby2="{'returnValue': True, 'state': 'Active Standby'}"
-
-#If the TV is off, proceed to turn it on. Otherwise do nothing.
-if [[ "$pingable" == false ]]
-then
-    wakeonlan -q $tv_mac
-    sleep 1
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip set_input $input
-elif [[ "$power_state" == "$standby1" || "$power_state" == "$standby2" ]]
-then
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
-    sleep 1
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip set_input $input
+# Determine if this is a cold boot or wake-from-sleep
+if [ -d "$STATE_DIR" ]; then
+    # State directory exists -> user session has been running -> this is wake from sleep
+    if [ -f "$STATE_FILE" ]; then
+        echo "Wake from sleep: LG Buddy turned TV off. Restoring."
+        rm -f "$STATE_FILE"
+        # Proceed to turn TV on (fall through)
+    else
+        echo "Wake from sleep: TV was not on our input. Skipping."
+        exit 0
+    fi
 else
-    echo "TV is powered on already."
+    # State directory does not exist -> fresh boot
+    echo "Cold boot: Turning TV on and switching to $input."
+    mkdir -p "$STATE_DIR"
+    # Proceed to turn TV on (fall through)
 fi
+
+#TV network is sometimes off when in standby. Check for this
+ping -c 1 "$tv_ip" >/dev/null 2>&1 && pingable=true || pingable=false
+
+if [ "$pingable" = false ]; then
+    wakeonlan -q "$tv_mac"
+    sleep 1
+fi
+
+/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1 || \
+    echo "set_input failed (TV may need more time to wake)"

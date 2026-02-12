@@ -9,18 +9,23 @@ fi
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
 tv_ip="192.168.X.X"
+input="HDMI_4"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
-#Get the current power state of the TV.
-power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+# Convert HDMI_4 -> com.webos.app.hdmi4
+expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
 
-#Expected value of power_state when TV is on.
-active1="{'state': 'Active', 'returnValue': True}"
-active2="{'returnValue': True, 'state': 'Active'}"
+# Check current TV input
+current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+get_input_rc=$?
 
-#If the TV is on, proceed to turn it off. Otherwise do nothing.
-if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
-then
-    /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+if [ $get_input_rc -ne 0 ] || [ -z "$current_input" ]; then
+    # TV unreachable or already off. power_off is idempotent.
+    echo "Could not query TV input. Proceeding with power_off."
+    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
+elif [ "$current_input" = "$expected_app" ]; then
+    echo "TV is on $input. Turning off for shutdown."
+    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
 else
-    echo "TV is powered off already."
+    echo "TV is on $current_input (not $input). Skipping."
 fi
