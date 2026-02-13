@@ -21,4 +21,8 @@ sudo rm /usr/bin/LG_Buddy_Screen_On
 sudo rm /usr/bin/LG_Buddy_Screen_Off
 sudo rm /usr/bin/LG_Buddy_Screen_Monitor
 sudo rm /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+
+echo "Removing python viurtual environment"
+sudo rm -rf /usr/bin/LG_Buddy_PIP
+
 echo "Done."
