@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
+tv_ip="192.168.1.59"
 #Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
-tv_mac="XX:XX:XX:XX:XX:XX"
+tv_mac="4c:ba:d7:e1:bd:ca"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
-input="HDMI_4"
+input="HDMI_1"
 user_id="1000"
 STATE_DIR="/run/user/${user_id}/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
@@ -31,13 +31,8 @@ else
     # Proceed to turn TV on (fall through)
 fi
 
-#TV network is sometimes off when in standby. Check for this
-ping -c 1 "$tv_ip" >/dev/null 2>&1 && pingable=true || pingable=false
-
-if [ "$pingable" = false ]; then
-    wakeonlan -q "$tv_mac"
-    sleep 1
-fi
+wakeonlan -q "$tv_mac"
+sleep 1
 
 /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1 || \
     echo "set_input failed (TV may need more time to wake)"
