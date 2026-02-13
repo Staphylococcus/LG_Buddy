@@ -1,0 +1,11 @@
+[Unit]
+Description=LG Buddy Screen Monitor Service
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/LG_Buddy_Screen_Monitor
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
