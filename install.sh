@@ -5,11 +5,14 @@ set -e
 
 echo "Starting LG Buddy Installation"
 
-# 1. INSTALL PREREQUISITES
-echo "Installing prerequisites (python3-venv, python3-pip, wakeonlan, swayidle)..."
-sudo apt-get update
-sudo apt-get install -y python3-venv python3-pip wakeonlan swayidle
-echo "Done."
+# 1. CHECK PREREQUISITES
+echo "Please ensure the following packages are installed before continuing:"
+echo "  - python3-venv"
+echo "  - python3-pip"
+echo "  - wakeonlan"
+echo "  - swayidle"
+echo ""
+read -p "Press Enter to continue (or Ctrl+C to cancel and install prerequisites first)..."
 
 # 2. CONFIGURE SCRIPTS
 echo "Running configuration script..."
