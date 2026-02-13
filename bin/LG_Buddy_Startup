@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.1.59"
+tv_ip="192.168.X.X"
 #Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
-tv_mac="4c:ba:d7:e1:bd:ca"
+tv_mac="XX:XX:XX:XX:XX:XX"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
 input="HDMI_1"
 user_id="1000"
