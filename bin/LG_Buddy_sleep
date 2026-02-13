@@ -1,25 +1,38 @@
 #!/bin/bash
 
 #Script goes in /etc/NetworkManager/dispatcher.d/pre-down.d/
-#This was not my first choice but other options I tried would not work:
-# a.) systemd service that runs before shutdown - The system would go to sleep somewhere in the middle of the script.
-# b.) Place in /lib/systemd/system-sleep/ - Putting an applicable 'Pre' script in here did run, but the network would already be down, thus the script would fail.
 
 #We only want this to run when the network is going down due to sleep/suspend
-#This might need to be more fleshed out ot handle different types such as hibernate
 if journalctl -u NetworkManager | tail -1 | grep -q "reason 'sleeping'"
 then
     tv_ip="192.168.X.X"
-    power_state=$(/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip get_power_state)
+    input="HDMI_4"
+    user_id="1000"
+    STATE_DIR="/run/user/${user_id}/lg_buddy"
+    STATE_FILE="${STATE_DIR}/screen_off_by_us"
+    BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
-    active1="{'state': 'Active', 'returnValue': True}"
-    active2="{'returnValue': True, 'state': 'Active'}"
+    # Convert HDMI_4 -> com.webos.app.hdmi4
+    expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
 
-    if [[ "$power_state" == "$active1" || "$power_state" == "$active2" ]]
-    then
-        /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand $tv_ip button POWER
+    # Check current TV input
+    current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+    get_input_rc=$?
+
+    if [ $get_input_rc -ne 0 ] || [ -z "$current_input" ]; then
+        # TV unreachable or already off. power_off is idempotent.
+        echo "Could not query TV input. Proceeding with power_off."
+        mkdir -p "$STATE_DIR"
+        "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
+        touch "$STATE_FILE"
+    elif [ "$current_input" = "$expected_app" ]; then
+        echo "TV is on $input. Turning off for sleep."
+        mkdir -p "$STATE_DIR"
+        "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
+        touch "$STATE_FILE"
     else
-        echo "TV is powered off already."
+        echo "TV is on $current_input (not $input). Skipping."
+        rm -f "$STATE_FILE"
     fi
 fi
 
