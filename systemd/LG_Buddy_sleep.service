@@ -1,0 +1,14 @@
+[Unit]
+Description=Turn off LG TV before sleep
+Before=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+Before=systemd-suspend.service systemd-hibernate.service systemd-hybrid-sleep.service systemd-suspend-then-hibernate.service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/LG_Buddy_sleep_pre
+TimeoutStartSec=30
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

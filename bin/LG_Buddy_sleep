@@ -1,39 +1,47 @@
 #!/bin/bash
 
-#Script goes in /etc/NetworkManager/dispatcher.d/pre-down.d/
+# NetworkManager pre-down hook. Installed to:
+# /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 
-#We only want this to run when the network is going down due to sleep/suspend
-if journalctl -u NetworkManager | tail -1 | grep -q "reason 'sleeping'"
-then
-    tv_ip="192.168.X.X"
-    input="HDMI_4"
-    user_id="1000"
-    STATE_DIR="/run/user/${user_id}/lg_buddy"
-    STATE_FILE="${STATE_DIR}/screen_off_by_us"
-    BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+tv_ip="192.168.X.X"
+input="HDMI_4"
+STATE_DIR="/run/lg_buddy"
+STATE_FILE="${STATE_DIR}/screen_off_by_us"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
-    # Convert HDMI_4 -> com.webos.app.hdmi4
-    expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
-
-    # Check current TV input
-    current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
-    get_input_rc=$?
-
-    if [ $get_input_rc -ne 0 ] || [ -z "$current_input" ]; then
-        # TV unreachable or already off. power_off is idempotent.
-        echo "Could not query TV input. Proceeding with power_off."
-        mkdir -p "$STATE_DIR"
-        "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
-        touch "$STATE_FILE"
-    elif [ "$current_input" = "$expected_app" ]; then
-        echo "TV is on $input. Turning off for sleep."
-        mkdir -p "$STATE_DIR"
-        "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
-        touch "$STATE_FILE"
-    else
-        echo "TV is on $current_input (not $input). Skipping."
-        rm -f "$STATE_FILE"
-    fi
+# Only run this logic when NM is entering sleep (suspend/hibernate path).
+if ! journalctl -u NetworkManager -n 30 --no-pager | grep -q "manager: sleep: sleep requested"; then
+    exit 0
 fi
 
+mkdir -p "$STATE_DIR"
+
+expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+
+current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+get_input_rc=$?
+
+if [ $get_input_rc -ne 0 ]; then
+    for retry in 1 2 3; do
+        sleep 1
+        current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+        get_input_rc=$?
+        [ $get_input_rc -eq 0 ] && break
+    done
+fi
+
+if [ $get_input_rc -eq 0 ] && [ "$current_input" != "$expected_app" ]; then
+    rm -f "$STATE_FILE"
+    exit 0
+fi
+
+for retry in 1 2 3 4; do
+    if "$BSCPYLGTV" "$tv_ip" power_off 2>&1; then
+        touch "$STATE_FILE"
+        exit 0
+    fi
+    sleep 1
+done
+
+rm -f "$STATE_FILE"
 exit 0

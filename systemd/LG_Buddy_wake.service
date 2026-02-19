@@ -5,7 +5,7 @@ After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate
 [Service]
 Type=oneshot
 RemainAfterExit=false
-ExecStart=/usr/bin/LG_Buddy_Startup
+ExecStart=/usr/bin/LG_Buddy_Startup wake
 
 [Install]
 Alias=LG_Buddy_wake.service

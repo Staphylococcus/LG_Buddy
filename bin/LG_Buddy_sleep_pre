@@ -1,0 +1,60 @@
+#!/bin/bash
+
+tv_ip="192.168.X.X"
+input="HDMI_4"
+STATE_DIR="/run/lg_buddy"
+STATE_FILE="${STATE_DIR}/screen_off_by_us"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+
+state_was_set=0
+if [ -f "$STATE_FILE" ]; then
+    state_was_set=1
+fi
+
+mkdir -p "$STATE_DIR"
+
+expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+
+current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+get_input_rc=$?
+
+if [ $get_input_rc -ne 0 ]; then
+    for retry in 1 2 3; do
+        sleep 1
+        current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+        get_input_rc=$?
+        [ $get_input_rc -eq 0 ] && break
+    done
+fi
+
+if [ $get_input_rc -eq 0 ] && [ "$current_input" = "$expected_app" ]; then
+    echo "TV is on $input. Turning off for sleep."
+    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
+    touch "$STATE_FILE"
+elif [ $get_input_rc -ne 0 ]; then
+    echo "Could not query TV input. Attempting power_off fallback."
+    fallback_ok=0
+    for retry in 1 2 3 4; do
+        if "$BSCPYLGTV" "$tv_ip" power_off 2>&1; then
+            fallback_ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ $fallback_ok -eq 1 ]; then
+        touch "$STATE_FILE"
+    else
+        if [ $state_was_set -eq 1 ]; then
+            echo "Fallback power_off failed, but state already set by another hook. Keeping state."
+        else
+            echo "Fallback power_off failed after retries. Leaving state unset."
+            rm -f "$STATE_FILE"
+        fi
+    fi
+else
+    echo "TV is on $current_input (not $input). Skipping."
+    rm -f "$STATE_FILE"
+fi
+
+exit 0
