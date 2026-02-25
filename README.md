@@ -13,12 +13,17 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 You will need the following packages installed:
 
 - `python3`, `python3-venv`, `python3-pip` — for bscpylgtv
-- `wakeonlan` — to wake TV from standby
+- `wakeonlan` (or `wol`) — to wake TV from standby
 - `swayidle` — for screen idle detection (Wayland only, optional)
 
 **Debian/Ubuntu/Pop!_OS:**
 ```bash
 sudo apt install python3-venv python3-pip wakeonlan swayidle
+```
+
+**Fedora:**
+```bash
+sudo dnf install python3 python3-pip wol swayidle
 ```
 
 **Arch:**
@@ -39,7 +44,7 @@ chmod +x ./install.sh
 ```
 
 3. The installer will:
-   - Install prerequisites (`python3-venv`, `wakeonlan`, `swayidle`)
+   - Install prerequisites (`python3-venv`, `wakeonlan` or `wol`, `swayidle`)
    - Run `configure.sh` to set your TV's IP, MAC address, and HDMI input
    - Create the Python virtual environment and install bscpylgtv
    - Copy scripts to `/usr/bin/` and set up systemd services

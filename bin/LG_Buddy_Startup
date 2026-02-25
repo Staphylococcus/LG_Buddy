@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
+tv_ip="192.168.100.17"
 #Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
-tv_mac="XX:XX:XX:XX:XX:XX"
+tv_mac="20:28:BC:26:28:FE"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
 input="HDMI_1"
 STATE_DIR="/run/lg_buddy"
@@ -33,7 +33,17 @@ else
     fi
 fi
 
-wakeonlan "$tv_mac"
+send_wol() {
+    if command -v wakeonlan >/dev/null 2>&1; then
+        wakeonlan "$tv_mac"
+    elif command -v wol >/dev/null 2>&1; then
+        wol "$tv_mac"
+    else
+        echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
+    fi
+}
+
+send_wol
 
 # Let the TV fully bring up its WebSocket endpoint after WoL.
 sleep 6
@@ -45,6 +55,7 @@ for i in 1 2 3 4 5 6; do
     fi
     retry_delay=$((i + 2))
     echo "Attempt $i failed, retrying in ${retry_delay}s..."
+    send_wol # Retry sending WOL in case network wasn't ready earlier
     sleep "$retry_delay"
 done
 
