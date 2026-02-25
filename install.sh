@@ -90,13 +90,12 @@ read -r REPLY
 case "$REPLY" in
     [Yy]*)
         echo "Disabling suspend/resume services..."
-        sudo systemctl disable LG_Buddy.service
         sudo systemctl disable LG_Buddy_wake.service
         sudo systemctl disable LG_Buddy_sleep.service
-        echo "Suspend/resume services disabled."
+        echo "Suspend/resume services disabled. Startup/shutdown will still work."
         ;;
     *)
-        echo "Leaving suspend/resume services enabled."
+        echo "Leaving all services enabled (startup, shutdown, suspend, wake)."
         ;;
 esac
 
