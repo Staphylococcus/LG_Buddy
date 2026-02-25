@@ -3,8 +3,8 @@
 # NetworkManager pre-down hook. Installed to:
 # /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 
-tv_ip="192.168.100.17"
-input="HDMI_1"
+tv_ip="192.168.X.X"
+input="HDMI_4"
 STATE_DIR="/run/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
 BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
