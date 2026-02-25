@@ -18,7 +18,13 @@ echo "Turning TV on (screen wake)..."
 rm -f "$STATE_FILE"
 
 # Send Wake-on-LAN to wake the TV from standby
-wakeonlan "$tv_mac"
+if command -v wakeonlan >/dev/null 2>&1; then
+    wakeonlan "$tv_mac"
+elif command -v wol >/dev/null 2>&1; then
+    wol "$tv_mac"
+else
+    echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
+fi
 
 # Wait for TV to fully wake up and accept WebSocket connections
 sleep 8

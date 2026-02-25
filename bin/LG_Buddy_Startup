@@ -6,33 +6,57 @@ tv_ip="192.168.X.X"
 tv_mac="XX:XX:XX:XX:XX:XX"
 #Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
 input="HDMI_1"
-user_id="1000"
-STATE_DIR="/run/user/${user_id}/lg_buddy"
+STATE_DIR="/run/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
 
-#Wait for local network to actually be connected.
 nm-online -q -t 60
 
-# Determine if this is a cold boot or wake-from-sleep
-if [ -d "$STATE_DIR" ]; then
-    # State directory exists -> user session has been running -> this is wake from sleep
+mode="${1:-auto}"
+
+if [ "$mode" = "wake" ]; then
     if [ -f "$STATE_FILE" ]; then
         echo "Wake from sleep: LG Buddy turned TV off. Restoring."
         rm -f "$STATE_FILE"
-        # Proceed to turn TV on (fall through)
     else
         echo "Wake from sleep: TV was not on our input. Skipping."
         exit 0
     fi
-else
-    # State directory does not exist -> fresh boot
+elif [ "$mode" = "boot" ]; then
     echo "Cold boot: Turning TV on and switching to $input."
-    mkdir -p "$STATE_DIR"
-    # Proceed to turn TV on (fall through)
+    rm -f "$STATE_FILE"
+else
+    if [ -f "$STATE_FILE" ]; then
+        echo "Wake from sleep: LG Buddy turned TV off. Restoring."
+        rm -f "$STATE_FILE"
+    else
+        echo "Cold boot: Turning TV on and switching to $input."
+    fi
 fi
 
-wakeonlan -q "$tv_mac"
-sleep 1
+send_wol() {
+    if command -v wakeonlan >/dev/null 2>&1; then
+        wakeonlan "$tv_mac"
+    elif command -v wol >/dev/null 2>&1; then
+        wol "$tv_mac"
+    else
+        echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
+    fi
+}
 
-/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1 || \
-    echo "set_input failed (TV may need more time to wake)"
+send_wol
+
+# Let the TV fully bring up its WebSocket endpoint after WoL.
+sleep 6
+
+for i in 1 2 3 4 5 6; do
+    if /usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1; then
+        echo "TV turned on and set to $input."
+        exit 0
+    fi
+    retry_delay=$((i + 2))
+    echo "Attempt $i failed, retrying in ${retry_delay}s..."
+    send_wol # Retry sending WOL in case network wasn't ready earlier
+    sleep "$retry_delay"
+done
+
+echo "set_input failed after 6 attempts"

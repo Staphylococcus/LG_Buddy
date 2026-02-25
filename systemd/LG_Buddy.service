@@ -7,7 +7,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 RemainAfterExit=true
-ExecStart=/usr/bin/LG_Buddy_Startup
+ExecStart=/usr/bin/LG_Buddy_Startup boot
 ExecStop=/usr/bin/LG_Buddy_Shutdown
 
 [Install]

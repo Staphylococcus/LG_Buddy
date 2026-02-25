@@ -3,13 +3,18 @@
 # Exit on any error
 set -e
 
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Error: Do not run this script with sudo. It will prompt for sudo when needed."
+    exit 1
+fi
+
 echo "Starting LG Buddy Installation"
 
 # 1. CHECK PREREQUISITES
 echo "Please ensure the following packages are installed before continuing:"
 echo "  - python3-venv"
 echo "  - python3-pip"
-echo "  - wakeonlan"
+echo "  - wakeonlan (or wol)"
 echo "  - swayidle"
 echo ""
 read -p "Press Enter to continue (or Ctrl+C to cancel and install prerequisites first)..."
@@ -40,26 +45,34 @@ sudo cp ./bin/LG_Buddy_Shutdown /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_On /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Off /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Monitor /usr/bin/
+sudo cp ./bin/LG_Buddy_sleep_pre /usr/bin/
+sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
+sudo cp ./bin/LG_Buddy_sleep /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 sudo chmod +x /usr/bin/LG_Buddy_Startup
 sudo chmod +x /usr/bin/LG_Buddy_Shutdown
 sudo chmod +x /usr/bin/LG_Buddy_Screen_On
 sudo chmod +x /usr/bin/LG_Buddy_Screen_Off
 sudo chmod +x /usr/bin/LG_Buddy_Screen_Monitor
-
-# Ensure the NetworkManager dispatcher directory exists
-sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
-sudo cp ./bin/LG_Buddy_sleep /etc/NetworkManager/dispatcher.d/pre-down.d/
+sudo chmod +x /usr/bin/LG_Buddy_sleep_pre
 sudo chmod +x /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+
+sudo mkdir -p /run/lg_buddy
+sudo chmod 777 /run/lg_buddy
+
+sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
 echo "Done."
 
 # 6. SETUP SYSTEMD SERVICES
 echo "Copying and enabling systemd services..."
 sudo cp ./systemd/LG_Buddy.service /etc/systemd/system/
 sudo cp ./systemd/LG_Buddy_wake.service /etc/systemd/system/
+sudo cp ./systemd/LG_Buddy_sleep.service /etc/systemd/system/
+sudo cp ./systemd/lg_buddy.conf /etc/tmpfiles.d/
 
 sudo systemctl daemon-reload
 sudo systemctl enable LG_Buddy.service
 sudo systemctl enable LG_Buddy_wake.service
+sudo systemctl enable LG_Buddy_sleep.service
 echo "Done."
 
 # 7. SETUP SCREEN MONITOR USER SERVICE
@@ -72,18 +85,17 @@ systemctl --user start LG_Buddy_screen.service
 echo "Done."
 
 # 8. ASK TO DISABLE SUSPEND/RESUME FUNCTIONALITY
-echo "Do you want to disable the TV power management on system suspend/resume? (y/N) "
+echo "Do you want to disable automatic TV power on/off during system sleep/wake? (y/N) "
 read -r REPLY
 case "$REPLY" in
     [Yy]*)
-        echo "Disabling suspend/resume services..."
-        sudo systemctl disable LG_Buddy.service
+        echo "Disabling sleep/wake TV control..."
         sudo systemctl disable LG_Buddy_wake.service
-        sudo rm /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
-        echo "Suspend/resume services disabled."
+        sudo systemctl disable LG_Buddy_sleep.service
+        echo "Sleep/wake TV control disabled. Startup/shutdown will still work."
         ;;
     *)
-        echo "Leaving suspend/resume services enabled."
+        echo "Leaving all services enabled (startup, shutdown, sleep, wake)."
         ;;
 esac
 
