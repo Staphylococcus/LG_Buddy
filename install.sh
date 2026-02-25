@@ -85,17 +85,17 @@ systemctl --user start LG_Buddy_screen.service
 echo "Done."
 
 # 8. ASK TO DISABLE SUSPEND/RESUME FUNCTIONALITY
-echo "Do you want to disable the TV power management on system suspend/resume? (y/N) "
+echo "Do you want to disable automatic TV power on/off during system sleep/wake? (y/N) "
 read -r REPLY
 case "$REPLY" in
     [Yy]*)
-        echo "Disabling suspend/resume services..."
+        echo "Disabling sleep/wake TV control..."
         sudo systemctl disable LG_Buddy_wake.service
         sudo systemctl disable LG_Buddy_sleep.service
-        echo "Suspend/resume services disabled. Startup/shutdown will still work."
+        echo "Sleep/wake TV control disabled. Startup/shutdown will still work."
         ;;
     *)
-        echo "Leaving all services enabled (startup, shutdown, suspend, wake)."
+        echo "Leaving all services enabled (startup, shutdown, sleep, wake)."
         ;;
 esac
 
