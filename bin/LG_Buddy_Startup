@@ -53,7 +53,7 @@ for i in 1 2 3 4 5 6; do
         echo "TV turned on and set to $input."
         exit 0
     fi
-    retry_delay=$((i + 2))
+    retry_delay=$(( (i * 2) > 30 ? 30 : (i * 2) ))
     echo "Attempt $i failed, retrying in ${retry_delay}s..."
     send_wol # Retry sending WOL in case network wasn't ready earlier
     sleep "$retry_delay"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=TV Brightness
+Comment=Control LG TV OLED Pixel Brightness
+Exec=/usr/bin/LG_Buddy_Brightness
+Icon=display-brightness
+Terminal=false
+Categories=Utility;

@@ -24,10 +24,15 @@ sudo rm -f /usr/bin/LG_Buddy_Screen_On
 sudo rm -f /usr/bin/LG_Buddy_Screen_Off
 sudo rm -f /usr/bin/LG_Buddy_Screen_Monitor
 sudo rm -f /usr/bin/LG_Buddy_sleep_pre
+sudo rm -f /usr/bin/LG_Buddy_Brightness
 sudo rm -f /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
 sudo rm -f /etc/tmpfiles.d/lg_buddy.conf
 sudo rm -rf /run/lg_buddy
+
+echo "Removing desktop entries"
+sudo rm -f /usr/share/applications/LG_Buddy_Brightness.desktop
+rm -f ~/Desktop/LG_Buddy_Brightness.desktop
 
 echo "Removing python virtual environment"
 sudo rm -rf /usr/bin/LG_Buddy_PIP

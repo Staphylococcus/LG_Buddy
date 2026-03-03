@@ -11,15 +11,69 @@ fi
 echo "Starting LG Buddy Installation"
 
 # 1. CHECK PREREQUISITES
-echo "Please ensure the following packages are installed before continuing:"
-echo "  - python3-venv"
-echo "  - python3-pip"
-echo "  - wakeonlan (or wol)"
-echo "  - swayidle"
 echo ""
-read -p "Press Enter to continue (or Ctrl+C to cancel and install prerequisites first)..."
+echo "Checking prerequisites..."
+
+MISSING_PKGS=()
+
+check_dep() {
+    local label="$1"
+    local pkg="$2"
+    local check_cmd="$3"
+    if eval "$check_cmd" &>/dev/null; then
+        echo "  [OK]      $label"
+    else
+        echo "  [MISSING] $label"
+        MISSING_PKGS+=("$pkg")
+    fi
+}
+
+check_dep "python3-venv"    "python3-venv"  "python3 -c 'import venv'"
+check_dep "python3-pip"     "python3-pip"   "python3 -m pip --version"
+check_dep "wakeonlan / wol" "wakeonlan"     "command -v wakeonlan || command -v wol"
+check_dep "swayidle"        "swayidle"      "command -v swayidle"
+check_dep "zenity"          "zenity"        "command -v zenity"
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo ""
+    echo "Missing: ${MISSING_PKGS[*]}"
+
+    # Detect package manager
+    if command -v apt &>/dev/null; then
+        PM="apt"
+        INSTALL_CMD="sudo apt install -y"
+    elif command -v dnf &>/dev/null; then
+        PM="dnf"
+        INSTALL_CMD="sudo dnf install -y"
+    elif command -v pacman &>/dev/null; then
+        PM="pacman"
+        INSTALL_CMD="sudo pacman -S --noconfirm"
+    else
+        PM=""
+    fi
+
+    if [ -n "$PM" ]; then
+        read -p "Install missing packages with $PM now? (y/N) " AUTO_INSTALL
+        case "$AUTO_INSTALL" in
+            [Yy]*)
+                $INSTALL_CMD "${MISSING_PKGS[@]}"
+                ;;
+            *)
+                echo "Please install the missing packages manually and re-run install.sh."
+                exit 1
+                ;;
+        esac
+    else
+        echo "Could not detect a supported package manager (apt/dnf/pacman)."
+        echo "Please install the missing packages manually and re-run install.sh."
+        exit 1
+    fi
+else
+    echo "All prerequisites satisfied."
+fi
 
 # 2. CONFIGURE SCRIPTS
+echo ""
 echo "Running configuration script..."
 # Make sure configure.sh is executable
 if [ ! -x "./configure.sh" ]; then
@@ -46,6 +100,7 @@ sudo cp ./bin/LG_Buddy_Screen_On /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Off /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Monitor /usr/bin/
 sudo cp ./bin/LG_Buddy_sleep_pre /usr/bin/
+sudo cp ./bin/LG_Buddy_Brightness /usr/bin/
 sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
 sudo cp ./bin/LG_Buddy_sleep /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 sudo chmod +x /usr/bin/LG_Buddy_Startup
@@ -55,11 +110,17 @@ sudo chmod +x /usr/bin/LG_Buddy_Screen_Off
 sudo chmod +x /usr/bin/LG_Buddy_Screen_Monitor
 sudo chmod +x /usr/bin/LG_Buddy_sleep_pre
 sudo chmod +x /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+sudo chmod +x /usr/bin/LG_Buddy_Brightness
 
 sudo mkdir -p /run/lg_buddy
 sudo chmod 777 /run/lg_buddy
 
 sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
+
+echo "Installing brightness control desktop entry..."
+sudo mkdir -p /usr/share/applications
+sudo cp ./LG_Buddy_Brightness.desktop /usr/share/applications/
+cp ./LG_Buddy_Brightness.desktop ~/Desktop/ 2>/dev/null || true
 echo "Done."
 
 # 6. SETUP SYSTEMD SERVICES

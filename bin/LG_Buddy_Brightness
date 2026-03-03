@@ -1,0 +1,26 @@
+#!/bin/bash
+
+tv_ip="192.168.X.X"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+
+# Check if TV is reachable before showing the slider
+if ! ping -c 1 -W 2 "$tv_ip" &>/dev/null; then
+    zenity --error --title="LG Buddy" --text="TV is not reachable at $tv_ip."
+    exit 1
+fi
+
+BRIGHTNESS=$(zenity --scale \
+    --title="LG TV Brightness" \
+    --text="Set OLED Pixel Brightness:" \
+    --min-value=0 --max-value=100 --value=50 --step=5)
+
+if [ $? -ne 0 ]; then
+    exit 0
+fi
+
+if "$BSCPYLGTV" "$tv_ip" set_settings picture "{\"backlight\": $BRIGHTNESS}"; then
+    notify-send "LG TV" "Brightness set to $BRIGHTNESS%"
+else
+    notify-send "LG TV" "Failed to set brightness"
+    exit 1
+fi
