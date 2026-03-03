@@ -18,5 +18,9 @@ if [ $? -ne 0 ]; then
     exit 0
 fi
 
-"$BSCPYLGTV" "$tv_ip" set_settings picture "{\"backlight\": $BRIGHTNESS}"
-notify-send "LG TV" "Brightness set to $BRIGHTNESS%"
+if "$BSCPYLGTV" "$tv_ip" set_settings picture "{\"backlight\": $BRIGHTNESS}"; then
+    notify-send "LG TV" "Brightness set to $BRIGHTNESS%"
+else
+    notify-send "LG TV" "Failed to set brightness"
+    exit 1
+fi

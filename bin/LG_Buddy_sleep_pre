@@ -29,8 +29,11 @@ fi
 
 if [ $get_input_rc -eq 0 ] && [ "$current_input" = "$expected_app" ]; then
     echo "TV is on $input. Turning off for sleep."
-    "$BSCPYLGTV" "$tv_ip" power_off 2>&1 || true
-    touch "$STATE_FILE"
+    if "$BSCPYLGTV" "$tv_ip" power_off 2>&1; then
+        touch "$STATE_FILE"
+    else
+        echo "power_off failed on known input. State not set."
+    fi
 elif [ $get_input_rc -ne 0 ]; then
     echo "Could not query TV input. Attempting power_off fallback."
     fallback_ok=0

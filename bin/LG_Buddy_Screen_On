@@ -12,6 +12,13 @@ if [ ! -f "$STATE_FILE" ]; then
     exit 0
 fi
 
+# Guard against stale state files from crashes / abnormal session ends
+if [ -n "$(find "$STATE_FILE" -mmin +720 2>/dev/null)" ]; then
+    echo "State file is stale (>12h old). Removing and skipping wake."
+    rm -f "$STATE_FILE"
+    exit 0
+fi
+
 echo "Turning TV on (screen wake)..."
 
 # Remove state file first (before potentially slow operations)
