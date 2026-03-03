@@ -97,6 +97,7 @@ This updates the IP, MAC, and HDMI input in all scripts at once. It also detects
 | `bin/LG_Buddy_Brightness` | Interactive brightness control |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Automated installer |
+| `LG_Buddy_Brightness.desktop` | OLED Brightness Control app |
 | `systemd/LG_Buddy.service` | Shutdown systemd service |
 | `systemd/LG_Buddy_wake.service` | Startup systemd service |
 | `systemd/LG_Buddy_screen.service` | Screen monitor user service |
