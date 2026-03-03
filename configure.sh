@@ -33,17 +33,16 @@ else
     SUGGESTED_IP=""
 fi
 
-# IP prompt with format validation loop
-while true; do
-    if [ -n "$SUGGESTED_IP" ]; then
-        read -p "Enter your TV's IP address [$SUGGESTED_IP]: " INPUT_IP
-        tv_ip="${INPUT_IP:-$SUGGESTED_IP}"
-    else
+# Use confirmed IP directly, or prompt with validation if not yet known
+if [ -n "$SUGGESTED_IP" ]; then
+    tv_ip="$SUGGESTED_IP"
+else
+    while true; do
         read -p "Enter your TV's IP address (e.g. 192.168.1.100): " tv_ip
-    fi
-    [[ $tv_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
-    echo "  Invalid format. Expected: 192.168.1.100"
-done
+        [[ $tv_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
+        echo "  Invalid format. Expected: 192.168.1.100"
+    done
+fi
 
 # Soft reachability check — warn but don't block (TV may be in standby)
 if ! ping -c 1 -W 2 "$tv_ip" &>/dev/null; then
