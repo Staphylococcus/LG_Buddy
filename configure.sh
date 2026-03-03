@@ -64,10 +64,20 @@ else
 fi
 
 # --- HDMI Input ---
+echo "Which HDMI input is your PC connected to?"
+echo "  1) HDMI_1"
+echo "  2) HDMI_2"
+echo "  3) HDMI_3"
+echo "  4) HDMI_4"
 while true; do
-    read -p "Enter your PC's HDMI input (e.g. HDMI_1, HDMI_2): " pc_input
-    [[ $pc_input =~ ^HDMI_[0-9]+$ ]] && break
-    echo "  Invalid format. Expected HDMI_1, HDMI_2, HDMI_3, or HDMI_4."
+    read -p "Enter number (1-4): " HDMI_CHOICE
+    case "$HDMI_CHOICE" in
+        1) pc_input="HDMI_1"; break ;;
+        2) pc_input="HDMI_2"; break ;;
+        3) pc_input="HDMI_3"; break ;;
+        4) pc_input="HDMI_4"; break ;;
+        *) echo "  Please enter a number between 1 and 4." ;;
+    esac
 done
 
 # --- Summary + Confirm ---
