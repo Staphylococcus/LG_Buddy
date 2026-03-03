@@ -52,16 +52,16 @@ fi
 # --- TV MAC Detection ---
 DETECTED_MAC=$(ip neigh show "$tv_ip" | awk 'NR==1{print $5}')
 
-while true; do
-    if [ -n "$DETECTED_MAC" ]; then
-        read -p "Enter your TV's MAC address [$DETECTED_MAC]: " INPUT_MAC
-        tv_mac="${INPUT_MAC:-$DETECTED_MAC}"
-    else
+# Use detected MAC directly, or prompt with validation if not found
+if [ -n "$DETECTED_MAC" ]; then
+    tv_mac="$DETECTED_MAC"
+else
+    while true; do
         read -p "Enter your TV's MAC address (e.g. aa:bb:cc:dd:ee:ff): " tv_mac
-    fi
-    [[ $tv_mac =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]] && break
-    echo "  Invalid format. Expected: aa:bb:cc:dd:ee:ff"
-done
+        [[ $tv_mac =~ ^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$ ]] && break
+        echo "  Invalid format. Expected: aa:bb:cc:dd:ee:ff"
+    done
+fi
 
 # --- HDMI Input ---
 while true; do
