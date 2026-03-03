@@ -46,6 +46,7 @@ sudo cp ./bin/LG_Buddy_Screen_On /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Off /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_Monitor /usr/bin/
 sudo cp ./bin/LG_Buddy_sleep_pre /usr/bin/
+sudo cp ./bin/LG_Buddy_Brightness /usr/bin/
 sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
 sudo cp ./bin/LG_Buddy_sleep /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
 sudo chmod +x /usr/bin/LG_Buddy_Startup
@@ -55,6 +56,7 @@ sudo chmod +x /usr/bin/LG_Buddy_Screen_Off
 sudo chmod +x /usr/bin/LG_Buddy_Screen_Monitor
 sudo chmod +x /usr/bin/LG_Buddy_sleep_pre
 sudo chmod +x /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+sudo chmod +x /usr/bin/LG_Buddy_Brightness
 
 sudo mkdir -p /run/lg_buddy
 sudo chmod 777 /run/lg_buddy

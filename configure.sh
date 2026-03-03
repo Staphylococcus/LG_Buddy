@@ -26,4 +26,6 @@ sed -i "s/tv_ip=\"[^\"]*\"/tv_ip=\"$tv_ip\"/" bin/LG_Buddy_Screen_On
 sed -i "s/tv_mac=\"[^\"]*\"/tv_mac=\"$tv_mac\"/" bin/LG_Buddy_Screen_On
 sed -i "s/input=\"[^\"]*\"/input=\"$pc_input\"/" bin/LG_Buddy_Screen_On
 
+sed -i "s/tv_ip=\"[^\"]*\"/tv_ip=\"$tv_ip\"/" bin/LG_Buddy_Brightness
+
 echo "Configuration updated successfully."

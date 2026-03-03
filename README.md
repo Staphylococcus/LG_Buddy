@@ -6,6 +6,7 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 - **Startup/Shutdown:** Automatically turn TV on at boot and off at shutdown
 - **Sleep/Wake:** Turn TV off on suspend, back on at wake
 - **Screen Idle/Resume:** Turn TV off when screen goes idle, back on when you return (Wayland)
+- **Brightness Control:** Interactive slider to adjust OLED pixel brightness (via `zenity`)
 - **Interactive Setup:** `configure.sh` prompts for TV settings and updates all scripts automatically
 
 ## Prerequisites
@@ -92,6 +93,7 @@ This updates the IP, MAC, and HDMI input in all scripts at once. It also detects
 | `bin/LG_Buddy_Screen_Monitor` | swayidle daemon for idle detection |
 | `bin/LG_Buddy_Screen_Off` | Turn TV off on screen idle |
 | `bin/LG_Buddy_Screen_On` | Turn TV back on on resume |
+| `bin/LG_Buddy_Brightness` | Interactive brightness control |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Automated installer |
 | `systemd/LG_Buddy.service` | Shutdown systemd service |
