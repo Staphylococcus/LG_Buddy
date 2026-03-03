@@ -16,6 +16,7 @@ echo "  - python3-venv"
 echo "  - python3-pip"
 echo "  - wakeonlan (or wol)"
 echo "  - swayidle"
+echo "  - zenity"
 echo ""
 read -p "Press Enter to continue (or Ctrl+C to cancel and install prerequisites first)..."
 
@@ -62,6 +63,11 @@ sudo mkdir -p /run/lg_buddy
 sudo chmod 777 /run/lg_buddy
 
 sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
+
+echo "Installing brightness control desktop entry..."
+sudo mkdir -p /usr/share/applications
+sudo cp ./LG_Buddy_Brightness.desktop /usr/share/applications/
+cp ./LG_Buddy_Brightness.desktop ~/Desktop/ 2>/dev/null || true
 echo "Done."
 
 # 6. SETUP SYSTEMD SERVICES
