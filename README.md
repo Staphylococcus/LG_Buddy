@@ -16,20 +16,21 @@ You will need the following packages installed:
 - `python3`, `python3-venv`, `python3-pip` — for bscpylgtv
 - `wakeonlan` (or `wol`) — to wake TV from standby
 - `swayidle` — for screen idle detection (Wayland only, optional)
+- `zenity` — for OLED Pixel Brightness Control (optional)
 
 **Debian/Ubuntu/Pop!_OS:**
 ```bash
-sudo apt install python3-venv python3-pip wakeonlan swayidle
+sudo apt install python3-venv python3-pip wakeonlan swayidle zenity
 ```
 
 **Fedora:**
 ```bash
-sudo dnf install python3 python3-pip wol swayidle
+sudo dnf install python3 python3-pip wol swayidle zenity
 ```
 
 **Arch:**
 ```bash
-sudo pacman -S python python-pip wakeonlan swayidle
+sudo pacman -S python python-pip wakeonlan swayidle zenity
 ```
 
 > **Note:** `swayidle` is only needed if you want screen idle/resume support. It uses the `ext-idle-notify-v1` Wayland protocol and works on COSMIC, sway, and other Wayland compositors.
