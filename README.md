@@ -74,7 +74,7 @@ When idle:
 
 Startup, shutdown, suspend, and resume still use full TV power transitions.
 
-The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it with `./configure.sh`.
+The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it with `./configure.sh`. The installer and configurator only prompt for that timeout when `swayidle` is the selected backend.
 
 **Check status:**
 ```bash

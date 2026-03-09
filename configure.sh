@@ -151,13 +151,16 @@ while true; do
     esac
 done
 
-while true; do
-    screen_idle_timeout="$(prompt_with_default "Enter swayidle timeout in seconds" "$current_screen_idle_timeout")"
-    if [[ "$screen_idle_timeout" =~ ^[0-9]+$ ]] && [ "$screen_idle_timeout" -gt 0 ]; then
-        break
-    fi
-    echo "  Please enter a positive number of seconds."
-done
+screen_idle_timeout="$current_screen_idle_timeout"
+if [ "$screen_backend" = "swayidle" ]; then
+    while true; do
+        screen_idle_timeout="$(prompt_with_default "Enter swayidle timeout in seconds" "$current_screen_idle_timeout")"
+        if [[ "$screen_idle_timeout" =~ ^[0-9]+$ ]] && [ "$screen_idle_timeout" -gt 0 ]; then
+            break
+        fi
+        echo "  Please enter a positive number of seconds."
+    done
+fi
 
 echo ""
 echo "Configuration to apply:"
@@ -165,7 +168,9 @@ echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
 echo "  Screen Backend:      $screen_backend"
-echo "  Screen Idle Timeout: $screen_idle_timeout"
+if [ "$screen_backend" = "swayidle" ]; then
+    echo "  Screen Idle Timeout: $screen_idle_timeout"
+fi
 echo "  Config File:         $CONFIG_FILE"
 echo ""
 
