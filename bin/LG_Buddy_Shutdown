@@ -1,5 +1,17 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
+
+lg_buddy_load_config || exit 1
+
 #Ignore if reboot. We only care about shutdown.
 if systemctl list-jobs | grep -q -E 'reboot.target.*start'
 then
@@ -7,13 +19,9 @@ then
     exit 0
 fi
 
-#Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
-input="HDMI_4"
 BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
-# Convert HDMI_4 -> com.webos.app.hdmi4
-expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+expected_app="$(lg_buddy_expected_app "$input")"
 
 # Check current TV input
 current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)

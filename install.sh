@@ -104,6 +104,8 @@ if [ ! -x "./configure.sh" ]; then
     chmod +x ./configure.sh
 fi
 ./configure.sh
+CONFIG_FILE="$(bash ./bin/LG_Buddy_Common --user-config-path)"
+echo "Using configuration file at $CONFIG_FILE"
 echo "Configuration complete."
 
 # 3. CREATE VIRTUAL ENVIRONMENT
@@ -118,6 +120,11 @@ echo "Done."
 
 # 5. COPY SCRIPTS AND MAKE EXECUTABLE
 echo "Copying scripts to system directories and making executable..."
+sudo install -d /usr/lib/lg-buddy
+sudo install -m 755 ./bin/LG_Buddy_Common /usr/lib/lg-buddy/common.sh
+printf '%s\n' "$CONFIG_FILE" | sudo tee /usr/lib/lg-buddy/config-path >/dev/null
+sudo chmod 644 /usr/lib/lg-buddy/config-path
+
 sudo cp ./bin/LG_Buddy_Startup /usr/bin/
 sudo cp ./bin/LG_Buddy_Shutdown /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_On /usr/bin/

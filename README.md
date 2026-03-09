@@ -7,7 +7,7 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 - **Sleep/Wake:** Turn TV off on suspend, back on at wake
 - **Screen Idle/Resume:** Turn TV off when your GNOME or wlroots-based Wayland session goes idle, back on when you return
 - **Brightness Control:** Interactive slider to adjust OLED pixel brightness (via `zenity`)
-- **Interactive Setup:** `configure.sh` prompts for TV settings and updates all scripts automatically
+- **Interactive Setup:** `configure.sh` prompts for TV and screen settings and writes them to your home directory
 
 ## Prerequisites
 
@@ -50,9 +50,9 @@ chmod +x ./install.sh
 
 3. The installer will:
    - Install prerequisites (`python3-venv`, `wakeonlan` or `wol`)
-   - Run `configure.sh` to set your TV's IP, MAC address, and HDMI input
+   - Run `configure.sh` to create `~/.config/lg-buddy/config.env`
    - Create the Python virtual environment and install bscpylgtv
-   - Copy scripts to `/usr/bin/` and set up systemd services
+   - Copy scripts to system locations and set up systemd services
    - Install the screen monitor user service and optionally enable it during install
 
 4. Restart your computer.
@@ -70,14 +70,19 @@ When idle:
 - **LG_Buddy_Screen_Off** turns the TV off (if it's on the configured HDMI input)
 - **LG_Buddy_Screen_On** turns the TV back on when you move the mouse or press a key
 
-The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it in `bin/LG_Buddy_Screen_Monitor`.
+The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it with `./configure.sh`.
 
 **Check status:**
 ```bash
 systemctl --user status LG_Buddy_screen.service
 ```
 
-**Force a backend manually:**
+**Preferred way to change backend or timeout:**
+```bash
+./configure.sh
+```
+
+**Temporary backend override for testing:**
 ```bash
 systemctl --user edit LG_Buddy_screen.service
 ```
@@ -107,7 +112,14 @@ To reconfigure your TV settings after installation, run:
 ./configure.sh
 ```
 
-This updates the IP, MAC, and HDMI input in all scripts at once. It also detects your user ID automatically for scripts that run as root.
+This updates `~/.config/lg-buddy/config.env`. It does not rewrite the installed scripts, and it does not require `sudo`.
+
+The config file currently contains:
+- `tv_ip`
+- `tv_mac`
+- `input`
+- `screen_backend`
+- `screen_idle_timeout`
 
 ## File Layout
 
@@ -116,6 +128,7 @@ This updates the IP, MAC, and HDMI input in all scripts at once. It also detects
 | `bin/LG_Buddy_Startup` | Turn TV on at boot/wake |
 | `bin/LG_Buddy_Shutdown` | Turn TV off at shutdown |
 | `bin/LG_Buddy_sleep` | Turn TV off on suspend |
+| `bin/LG_Buddy_Common` | Shared config and helper functions |
 | `bin/LG_Buddy_Screen_Monitor` | Multi-backend idle monitor (GNOME or swayidle) |
 | `bin/LG_Buddy_Screen_Off` | Turn TV off on screen idle |
 | `bin/LG_Buddy_Screen_On` | Turn TV back on on resume |

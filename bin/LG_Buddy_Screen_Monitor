@@ -1,10 +1,21 @@
 #!/bin/bash
 
-# Supported values: auto, gnome, swayidle
-SCREEN_BACKEND="${LG_BUDDY_SCREEN_BACKEND:-auto}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
 
-# Only used by the swayidle backend.
-IDLE_TIMEOUT=300
+screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
+screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
+lg_buddy_load_config >/dev/null 2>&1 || true
+
+SCREEN_BACKEND="${LG_BUDDY_SCREEN_BACKEND:-$screen_backend}"
+IDLE_TIMEOUT="${LG_BUDDY_IDLE_TIMEOUT:-$screen_idle_timeout}"
 
 SCREEN_OFF_CMD="/usr/bin/LG_Buddy_Screen_Off"
 SCREEN_ON_CMD="/usr/bin/LG_Buddy_Screen_On"

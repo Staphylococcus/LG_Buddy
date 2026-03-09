@@ -1,13 +1,22 @@
 #!/bin/bash
 
-tv_ip="192.168.X.X"
-input="HDMI_4"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
+
+lg_buddy_load_config || exit 1
+
 STATE_DIR="/run/user/$(id -u)/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
 BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
-# Convert HDMI_4 -> com.webos.app.hdmi4
-expected_app="com.webos.app.$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+expected_app="$(lg_buddy_expected_app "$input")"
 
 # Check current TV input
 current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)

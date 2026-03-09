@@ -1,0 +1,134 @@
+#!/bin/bash
+
+LG_BUDDY_INSTALL_DIR="/usr/lib/lg-buddy"
+LG_BUDDY_POINTER_FILE="${LG_BUDDY_INSTALL_DIR}/config-path"
+LG_BUDDY_DEFAULT_SCREEN_BACKEND="auto"
+LG_BUDDY_DEFAULT_IDLE_TIMEOUT=300
+
+lg_buddy_user_config_path() {
+    if [ -n "${LG_BUDDY_CONFIG:-}" ]; then
+        echo "$LG_BUDDY_CONFIG"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        echo "${XDG_CONFIG_HOME}/lg-buddy/config.env"
+    elif [ -n "${HOME:-}" ]; then
+        echo "${HOME}/.config/lg-buddy/config.env"
+    else
+        return 1
+    fi
+}
+
+lg_buddy_effective_config_path() {
+    local config_path=""
+    local user_home=""
+
+    if [ -n "${LG_BUDDY_CONFIG:-}" ]; then
+        echo "$LG_BUDDY_CONFIG"
+        return 0
+    fi
+
+    if [ -r "$LG_BUDDY_POINTER_FILE" ]; then
+        read -r config_path <"$LG_BUDDY_POINTER_FILE"
+        if [ -n "$config_path" ]; then
+            echo "$config_path"
+            return 0
+        fi
+    fi
+
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        user_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        if [ -n "$user_home" ]; then
+            echo "${user_home}/.config/lg-buddy/config.env"
+            return 0
+        fi
+    fi
+
+    lg_buddy_user_config_path
+}
+
+lg_buddy_config_get_raw() {
+    local key="$1"
+    local config_file="${2:-}"
+
+    if [ -z "$config_file" ]; then
+        config_file="$(lg_buddy_effective_config_path)" || return 1
+    fi
+
+    [ -r "$config_file" ] || return 1
+
+    sed -n "s/^${key}=//p" "$config_file" | tail -n1
+}
+
+lg_buddy_config_get_valid() {
+    local key="$1"
+    local regex="$2"
+    local default_value="$3"
+    local config_file="$4"
+    local value=""
+
+    value="$(lg_buddy_config_get_raw "$key" "$config_file")"
+    if [ -n "$value" ] && [[ "$value" =~ $regex ]]; then
+        echo "$value"
+    else
+        echo "$default_value"
+    fi
+}
+
+lg_buddy_load_config() {
+    LG_BUDDY_CONFIG_FILE="$(lg_buddy_effective_config_path)" || {
+        echo "LG Buddy: could not determine config path."
+        return 1
+    }
+
+    if [ ! -r "$LG_BUDDY_CONFIG_FILE" ]; then
+        echo "LG Buddy: config file not found at $LG_BUDDY_CONFIG_FILE"
+        return 1
+    fi
+
+    tv_ip="$(lg_buddy_config_get_valid "tv_ip" '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "" "$LG_BUDDY_CONFIG_FILE")"
+    tv_mac="$(lg_buddy_config_get_valid "tv_mac" '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE")"
+    input="$(lg_buddy_config_get_valid "input" '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE")"
+    screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
+    screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"
+
+    if [ -z "$tv_ip" ] || [ -z "$tv_mac" ] || [ -z "$input" ]; then
+        echo "LG Buddy: config file is missing required TV settings."
+        return 1
+    fi
+
+    export LG_BUDDY_CONFIG_FILE
+    return 0
+}
+
+lg_buddy_expected_app() {
+    local input_name="${1:-$input}"
+
+    echo "com.webos.app.$(echo "$input_name" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
+}
+
+lg_buddy_send_wol() {
+    local mac="$1"
+
+    if command -v wakeonlan >/dev/null 2>&1; then
+        wakeonlan "$mac"
+    elif command -v wol >/dev/null 2>&1; then
+        wol "$mac"
+    else
+        echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
+        return 1
+    fi
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    case "${1:-}" in
+        --user-config-path)
+            lg_buddy_user_config_path
+            ;;
+        --effective-config-path)
+            lg_buddy_effective_config_path
+            ;;
+        *)
+            echo "Usage: $0 [--user-config-path|--effective-config-path]"
+            exit 1
+            ;;
+    esac
+fi
