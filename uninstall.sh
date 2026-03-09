@@ -1,6 +1,18 @@
 #!/bin/bash
 
-CONFIG_FILE="${LG_BUDDY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/lg-buddy/config.env}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+if [ -r "$SCRIPT_DIR/bin/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/bin/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+fi
+
+if declare -F lg_buddy_effective_config_path >/dev/null 2>&1; then
+    CONFIG_FILE="$(lg_buddy_effective_config_path 2>/dev/null || true)"
+fi
+
+CONFIG_FILE="${CONFIG_FILE:-${LG_BUDDY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/lg-buddy/config.env}}"
 CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 
 echo "Disabling & removing services..."
