@@ -24,7 +24,7 @@ BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 expected_app="$(lg_buddy_expected_app "$input")"
 
 # Check current TV input
-current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+current_input="$(lg_buddy_get_current_input "$BSCPYLGTV" "$tv_ip")"
 get_input_rc=$?
 
 if [ $get_input_rc -ne 0 ] || [ -z "$current_input" ]; then

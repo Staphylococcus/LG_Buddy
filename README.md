@@ -5,7 +5,7 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 
 - **Startup/Shutdown:** Automatically turn TV on at boot and off at shutdown
 - **Sleep/Wake:** Turn TV off on suspend, back on at wake
-- **Screen Idle/Resume:** Turn TV off when your GNOME or wlroots-based Wayland session goes idle, back on when you return
+- **Screen Idle/Resume:** Blank the TV panel when your GNOME or wlroots-based Wayland session goes idle, unblank it when you return
 - **Brightness Control:** Interactive slider to adjust OLED pixel brightness (via `zenity`)
 - **Interactive Setup:** `configure.sh` prompts for TV and screen settings and writes them to your home directory
 
@@ -67,8 +67,10 @@ The screen monitor auto-detects a supported backend:
 - **wlroots/COSMIC:** Uses `swayidle`
 
 When idle:
-- **LG_Buddy_Screen_Off** turns the TV off (if it's on the configured HDMI input)
-- **LG_Buddy_Screen_On** turns the TV back on when you move the mouse or press a key
+- **LG_Buddy_Screen_Off** blanks the TV panel (if it's on the configured HDMI input)
+- **LG_Buddy_Screen_On** unblanks the panel when you move the mouse or press a key
+
+Startup, shutdown, suspend, and resume still use full TV power transitions.
 
 The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it with `./configure.sh`.
 
@@ -130,8 +132,8 @@ The config file currently contains:
 | `bin/LG_Buddy_sleep` | Turn TV off on suspend |
 | `bin/LG_Buddy_Common` | Shared config and helper functions |
 | `bin/LG_Buddy_Screen_Monitor` | Multi-backend idle monitor (GNOME or swayidle) |
-| `bin/LG_Buddy_Screen_Off` | Turn TV off on screen idle |
-| `bin/LG_Buddy_Screen_On` | Turn TV back on on resume |
+| `bin/LG_Buddy_Screen_Off` | Blank the TV panel on screen idle |
+| `bin/LG_Buddy_Screen_On` | Unblank the TV panel on resume |
 | `bin/LG_Buddy_Brightness` | Interactive brightness control |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Automated installer |

@@ -28,13 +28,13 @@ mkdir -p "$STATE_DIR"
 
 expected_app="$(lg_buddy_expected_app "$input")"
 
-current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+current_input="$(lg_buddy_get_current_input "$BSCPYLGTV" "$tv_ip")"
 get_input_rc=$?
 
 if [ $get_input_rc -ne 0 ]; then
     for retry in 1 2 3; do
         sleep 1
-        current_input=$("$BSCPYLGTV" "$tv_ip" get_input 2>/dev/null)
+        current_input="$(lg_buddy_get_current_input "$BSCPYLGTV" "$tv_ip")"
         get_input_rc=$?
         [ $get_input_rc -eq 0 ] && break
     done

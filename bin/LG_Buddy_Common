@@ -118,6 +118,21 @@ lg_buddy_send_wol() {
     fi
 }
 
+lg_buddy_get_current_input() {
+    local client="$1"
+    local tv_address="$2"
+    local output=""
+    local rc=0
+
+    output="$("$client" "$tv_address" get_input 2>/dev/null)"
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        return $rc
+    fi
+
+    printf '%s\n' "$output" | awk 'NF { last = $0 } END { if (last) print last }'
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
         --user-config-path)
