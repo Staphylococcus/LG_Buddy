@@ -15,6 +15,9 @@ echo ""
 echo "Checking prerequisites..."
 
 MISSING_PKGS=()
+SCREEN_MONITOR_AVAILABLE=0
+SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
+SCREEN_MONITOR_RUNTIME_BACKEND=""
 
 check_dep() {
     local label="$1"
@@ -31,7 +34,6 @@ check_dep() {
 check_dep "python3-venv"    "python3-venv"  "python3 -c 'import venv'"
 check_dep "python3-pip"     "python3-pip"   "python3 -m pip --version"
 check_dep "wakeonlan / wol" "wakeonlan"     "command -v wakeonlan || command -v wol"
-check_dep "swayidle"        "swayidle"      "command -v swayidle"
 check_dep "zenity"          "zenity"        "command -v zenity"
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
@@ -80,7 +82,56 @@ if [ ! -x "./configure.sh" ]; then
     chmod +x ./configure.sh
 fi
 ./configure.sh
+CONFIG_FILE="$(bash ./bin/LG_Buddy_Common --user-config-path)"
+SCREEN_MONITOR_CONFIGURED_BACKEND="$(sed -n 's/^screen_backend=//p' "$CONFIG_FILE" | tail -n1)"
+SCREEN_MONITOR_CONFIGURED_BACKEND="${SCREEN_MONITOR_CONFIGURED_BACKEND:-auto}"
+echo "Using configuration file at $CONFIG_FILE"
 echo "Configuration complete."
+
+echo ""
+echo "Checking screen idle/resume backend for configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)..."
+case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
+    gnome)
+        if command -v gdbus &>/dev/null; then
+            echo "  [OK]      gdbus (GNOME backend)"
+            SCREEN_MONITOR_AVAILABLE=1
+            SCREEN_MONITOR_RUNTIME_BACKEND="gnome"
+        else
+            echo "  [MISSING] gdbus (required for GNOME backend)"
+        fi
+        ;;
+    swayidle)
+        if command -v swayidle &>/dev/null; then
+            echo "  [OK]      swayidle (configured backend)"
+            SCREEN_MONITOR_AVAILABLE=1
+            SCREEN_MONITOR_RUNTIME_BACKEND="swayidle"
+        else
+            echo "  [MISSING] swayidle (required for the configured backend)"
+        fi
+        ;;
+    *)
+        if command -v gdbus &>/dev/null; then
+            echo "  [OK]      gdbus (GNOME backend)"
+            SCREEN_MONITOR_AVAILABLE=1
+        else
+            echo "  [OPTIONAL] gdbus (required for GNOME backend)"
+        fi
+
+        if command -v swayidle &>/dev/null; then
+            echo "  [OK]      swayidle (wlroots/COSMIC backend)"
+            SCREEN_MONITOR_AVAILABLE=1
+        else
+            echo "  [OPTIONAL] swayidle (required for wlroots/COSMIC backend)"
+        fi
+
+        SCREEN_MONITOR_RUNTIME_BACKEND="$(bash ./bin/LG_Buddy_Screen_Monitor --detect-backend 2>/dev/null || true)"
+        if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
+            echo "  [OK]      current session backend: $SCREEN_MONITOR_RUNTIME_BACKEND"
+        else
+            echo "  [INFO]    no supported backend detected in the current session"
+        fi
+        ;;
+esac
 
 # 3. CREATE VIRTUAL ENVIRONMENT
 echo "Creating Python virtual environment at /usr/bin/LG_Buddy_PIP..."
@@ -94,6 +145,11 @@ echo "Done."
 
 # 5. COPY SCRIPTS AND MAKE EXECUTABLE
 echo "Copying scripts to system directories and making executable..."
+sudo install -d /usr/lib/lg-buddy
+sudo install -m 755 ./bin/LG_Buddy_Common /usr/lib/lg-buddy/common.sh
+printf '%s\n' "$CONFIG_FILE" | sudo tee /usr/lib/lg-buddy/config-path >/dev/null
+sudo chmod 644 /usr/lib/lg-buddy/config-path
+
 sudo cp ./bin/LG_Buddy_Startup /usr/bin/
 sudo cp ./bin/LG_Buddy_Shutdown /usr/bin/
 sudo cp ./bin/LG_Buddy_Screen_On /usr/bin/
@@ -136,14 +192,43 @@ sudo systemctl enable LG_Buddy_wake.service
 sudo systemctl enable LG_Buddy_sleep.service
 echo "Done."
 
-# 7. SETUP SCREEN MONITOR USER SERVICE
-echo "Setting up screen monitor user service..."
+# 7. INSTALL SCREEN MONITOR USER SERVICE
+echo "Installing screen monitor user service..."
 mkdir -p ~/.config/systemd/user/
 cp ./systemd/LG_Buddy_screen.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable LG_Buddy_screen.service
-systemctl --user start LG_Buddy_screen.service
-echo "Done."
+
+if [ "$SCREEN_MONITOR_AVAILABLE" -eq 1 ]; then
+    read -p "Enable the screen idle/resume monitor now? [Y/n] " ENABLE_SCREEN_MONITOR
+    case "$ENABLE_SCREEN_MONITOR" in
+        [Nn]*)
+            echo "Leaving LG_Buddy_screen.service installed but disabled."
+            ;;
+        *)
+            systemctl --user enable LG_Buddy_screen.service
+            if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
+                systemctl --user restart LG_Buddy_screen.service
+                echo "LG_Buddy_screen.service enabled and started using the $SCREEN_MONITOR_RUNTIME_BACKEND backend."
+            else
+                echo "LG_Buddy_screen.service enabled."
+                echo "It will start automatically the next time a supported graphical session is available."
+            fi
+            ;;
+    esac
+else
+    echo "No supported screen idle backend detected for the configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)."
+    case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
+        gnome)
+            echo "Install gdbus, then enable LG_Buddy_screen.service later."
+            ;;
+        swayidle)
+            echo "Install swayidle, then enable LG_Buddy_screen.service later."
+            ;;
+        *)
+            echo "Install gdbus for GNOME or swayidle for wlroots/COSMIC, then enable LG_Buddy_screen.service later."
+            ;;
+    esac
+fi
 
 # 8. ASK TO DISABLE SUSPEND/RESUME FUNCTIONALITY
 echo "Do you want to disable automatic TV power on/off during system sleep/wake? (y/N) "
@@ -162,6 +247,6 @@ esac
 
 
 echo "Installation complete!"
-echo "The screen monitor service has been started."
+echo "The screen monitor service has been installed."
 echo "Please restart your computer for all changes to take full effect."
 echo "NOTE: On first use, you may need to accept a prompt on your TV to allow this application to connect."

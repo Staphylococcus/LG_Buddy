@@ -1,6 +1,17 @@
 #!/bin/bash
 
-tv_ip="192.168.X.X"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
+
+lg_buddy_load_config || exit 1
+
 BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
 
 # Check if TV is reachable before showing the slider

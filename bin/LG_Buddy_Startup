@@ -1,11 +1,17 @@
 #!/bin/bash
 
-#Change tv_ip to the IP Address of your TV. It's recommended to set your TV IP to static or make a DHCP reservation on your modem/router to ensure this never changes.
-tv_ip="192.168.X.X"
-#Change tv_mac to the MAC address of your TV's network card (I'm using wired. Wireless is untested)
-tv_mac="XX:XX:XX:XX:XX:XX"
-#Change input to whichever input your PC is plugged into. E.g For HDMI4 change below to HDMI_4.
-input="HDMI_1"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
+
+lg_buddy_load_config || exit 1
+
 STATE_DIR="/run/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
 
@@ -33,17 +39,7 @@ else
     fi
 fi
 
-send_wol() {
-    if command -v wakeonlan >/dev/null 2>&1; then
-        wakeonlan "$tv_mac"
-    elif command -v wol >/dev/null 2>&1; then
-        wol "$tv_mac"
-    else
-        echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
-    fi
-}
-
-send_wol
+lg_buddy_send_wol "$tv_mac" || true
 
 # Let the TV fully bring up its WebSocket endpoint after WoL.
 sleep 6
@@ -55,7 +51,7 @@ for i in 1 2 3 4 5 6; do
     fi
     retry_delay=$(( (i * 2) > 30 ? 30 : (i * 2) ))
     echo "Attempt $i failed, retrying in ${retry_delay}s..."
-    send_wol # Retry sending WOL in case network wasn't ready earlier
+    lg_buddy_send_wol "$tv_mac" || true
     sleep "$retry_delay"
 done
 
