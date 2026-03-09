@@ -30,7 +30,12 @@ else
 fi
 GNOME_DBUS_NAME="org.gnome.ScreenSaver"
 GNOME_DBUS_PATH="/org/gnome/ScreenSaver"
+GNOME_IDLE_MONITOR_NAME="org.gnome.Mutter.IdleMonitor"
+GNOME_IDLE_MONITOR_PATH="/org/gnome/Mutter/IdleMonitor/Core"
+GNOME_ACTIVE_THRESHOLD_MS=1000
+GNOME_ACTIVE_POLL_INTERVAL=0.25
 GNOME_WAIT_TIMEOUT=15
+SCREEN_STATE_FILE="/run/user/$(id -u)/lg_buddy/screen_off_by_us"
 
 log() {
     echo "LG Buddy Screen Monitor: $*"
@@ -50,6 +55,57 @@ dbus_name_has_owner() {
 
 wait_for_dbus_name() {
     gdbus wait --session --timeout "$2" "$1" >/dev/null 2>&1
+}
+
+get_gnome_idletime() {
+    local idletime=""
+
+    idletime="$(gdbus call --session \
+        --dest "$GNOME_IDLE_MONITOR_NAME" \
+        --object-path "$GNOME_IDLE_MONITOR_PATH" \
+        --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null |
+        sed -n 's/^(uint64 \([0-9][0-9]*\),)$/\1/p')"
+
+    [ -n "$idletime" ] || return 1
+    echo "$idletime"
+}
+
+stop_gnome_activity_watch() {
+    if [ -n "${GNOME_ACTIVITY_WATCH_PID:-}" ] && kill -0 "$GNOME_ACTIVITY_WATCH_PID" 2>/dev/null; then
+        kill "$GNOME_ACTIVITY_WATCH_PID" 2>/dev/null || true
+        wait "$GNOME_ACTIVITY_WATCH_PID" 2>/dev/null || true
+    fi
+
+    GNOME_ACTIVITY_WATCH_PID=""
+}
+
+start_gnome_activity_watch() {
+    stop_gnome_activity_watch
+
+    if [ "${GNOME_IDLE_MONITOR_AVAILABLE:-0}" -ne 1 ]; then
+        return 0
+    fi
+
+    (
+        local idletime=""
+
+        while [ -f "$SCREEN_STATE_FILE" ]; do
+            idletime="$(get_gnome_idletime)" || {
+                sleep "$GNOME_ACTIVE_POLL_INTERVAL"
+                continue
+            }
+
+            if [ "$idletime" -lt "$GNOME_ACTIVE_THRESHOLD_MS" ]; then
+                log "Mutter idle monitor detected user activity."
+                "$SCREEN_ON_CMD"
+                exit 0
+            fi
+
+            sleep "$GNOME_ACTIVE_POLL_INTERVAL"
+        done
+    ) &
+
+    GNOME_ACTIVITY_WATCH_PID=$!
 }
 
 detect_backend() {
@@ -94,6 +150,9 @@ detect_backend() {
 }
 
 run_gnome_backend() {
+    GNOME_IDLE_MONITOR_AVAILABLE=0
+    GNOME_ACTIVITY_WATCH_PID=""
+
     if ! wait_for_dbus_name org.gnome.Shell "$GNOME_WAIT_TIMEOUT"; then
         log "Timed out waiting for GNOME Shell on the session bus."
         return 1
@@ -107,7 +166,18 @@ run_gnome_backend() {
         return 1
     fi
 
+    if gdbus call --session \
+        --dest "$GNOME_IDLE_MONITOR_NAME" \
+        --object-path "$GNOME_IDLE_MONITOR_PATH" \
+        --method org.gnome.Mutter.IdleMonitor.GetIdletime >/dev/null 2>&1; then
+        GNOME_IDLE_MONITOR_AVAILABLE=1
+    else
+        log "Could not connect to org.gnome.Mutter.IdleMonitor. Early wake detection disabled."
+    fi
+
     log "Using GNOME backend."
+
+    trap 'stop_gnome_activity_watch' EXIT
 
     gdbus monitor --session --dest "$GNOME_DBUS_NAME" --object-path "$GNOME_DBUS_PATH" |
         while IFS= read -r line; do
@@ -115,9 +185,16 @@ run_gnome_backend() {
                 *"org.gnome.ScreenSaver.ActiveChanged (true,)"*)
                     log "GNOME reported the screen inactive."
                     "$SCREEN_OFF_CMD"
+                    start_gnome_activity_watch
+                    ;;
+                *"org.gnome.ScreenSaver.WakeUpScreen"*|*"member=WakeUpScreen"*)
+                    log "GNOME requested the screen wake."
+                    stop_gnome_activity_watch
+                    "$SCREEN_ON_CMD"
                     ;;
                 *"org.gnome.ScreenSaver.ActiveChanged (false,)"*)
                     log "GNOME reported the screen active."
+                    stop_gnome_activity_watch
                     "$SCREEN_ON_CMD"
                     ;;
             esac

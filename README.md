@@ -36,7 +36,7 @@ sudo pacman -S python python-pip wakeonlan zenity
 
 If `gdbus` is missing on GNOME, install your distro's GLib utilities package (`libglib2.0-bin` on Debian/Ubuntu, `glib2` on Fedora/Arch).
 
-> **Note:** The screen monitor now supports multiple backends. On GNOME it listens to `org.gnome.ScreenSaver` over D-Bus. On wlroots/COSMIC desktops it uses `swayidle`.
+> **Note:** The screen monitor now supports multiple backends. On GNOME it uses `org.gnome.ScreenSaver` plus `org.gnome.Mutter.IdleMonitor` over D-Bus. On wlroots/COSMIC desktops it uses `swayidle`.
 
 ## Installation
 
@@ -63,8 +63,10 @@ chmod +x ./install.sh
 ## Screen Idle/Resume (Wayland)
 
 The screen monitor auto-detects a supported backend:
-- **GNOME:** Uses `org.gnome.ScreenSaver` over D-Bus and follows GNOME's own blank/lock timing
+- **GNOME:** Uses `org.gnome.ScreenSaver` for idle transitions and `org.gnome.Mutter.IdleMonitor` for early wake-on-activity, while still following GNOME's own blank/lock timing
 - **wlroots/COSMIC:** Uses `swayidle`
+
+In a normal GNOME Shell session, Mutter is part of the GNOME stack. No separate Mutter package needs to be installed for this backend.
 
 When idle:
 - **LG_Buddy_Screen_Off** blanks the TV panel (if it's on the configured HDMI input)

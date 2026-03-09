@@ -36,10 +36,24 @@ fi
 log "Turning TV on (screen wake) using input $input..."
 
 log "Attempting screen unblank..."
-if "$BSCPYLGTV" "$tv_ip" turn_screen_on 2>&1; then
+turn_screen_on_output="$("$BSCPYLGTV" "$tv_ip" turn_screen_on 2>&1)"
+turn_screen_on_rc=$?
+if [ $turn_screen_on_rc -eq 0 ]; then
+    printf '%s\n' "$turn_screen_on_output"
     log "Screen unblank succeeded. Clearing wake state."
     rm -f "$STATE_FILE"
     exit 0
+fi
+
+printf '%s\n' "$turn_screen_on_output"
+
+if printf '%s\n' "$turn_screen_on_output" | grep -q "errorCode': '-102'"; then
+    log "TV reported an active screen state. Trying immediate input restore before full wake."
+    if "$BSCPYLGTV" "$tv_ip" set_input "$input" 2>&1; then
+        log "Immediate input restore succeeded. Clearing wake state."
+        rm -f "$STATE_FILE"
+        exit 0
+    fi
 fi
 
 log "Screen unblank failed. Falling back to full wake."
