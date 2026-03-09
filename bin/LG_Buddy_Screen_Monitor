@@ -1,16 +1,143 @@
 #!/bin/bash
 
-# This script uses swayidle to detect screen idle/wake events via the
-# ext-idle-notify-v1 Wayland protocol. This works on COSMIC desktop
-# where loginctl-based detection fails.
-#
-# IMPORTANT: Set IDLE_TIMEOUT to match your COSMIC screen blank setting.
-# Default COSMIC setting is 120 seconds (2 minutes).
+# Supported values: auto, gnome, swayidle
+SCREEN_BACKEND="${LG_BUDDY_SCREEN_BACKEND:-auto}"
 
+# Only used by the swayidle backend.
 IDLE_TIMEOUT=300
 
-echo "Starting LG Buddy Screen Monitor using swayidle (timeout: ${IDLE_TIMEOUT}s)..."
+SCREEN_OFF_CMD="/usr/bin/LG_Buddy_Screen_Off"
+SCREEN_ON_CMD="/usr/bin/LG_Buddy_Screen_On"
+GNOME_DBUS_NAME="org.gnome.ScreenSaver"
+GNOME_DBUS_PATH="/org/gnome/ScreenSaver"
+GNOME_WAIT_TIMEOUT=15
 
-exec swayidle -w \
-    timeout "$IDLE_TIMEOUT" '/usr/bin/LG_Buddy_Screen_Off' \
-    resume '/usr/bin/LG_Buddy_Screen_On'
+log() {
+    echo "LG Buddy Screen Monitor: $*"
+}
+
+have_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+dbus_name_has_owner() {
+    gdbus call --session \
+        --dest org.freedesktop.DBus \
+        --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner \
+        "$1" 2>/dev/null | grep -q "(true,)"
+}
+
+wait_for_dbus_name() {
+    gdbus wait --session --timeout "$2" "$1" >/dev/null 2>&1
+}
+
+detect_backend() {
+    case "$SCREEN_BACKEND" in
+        auto)
+            if have_command gdbus && (dbus_name_has_owner org.gnome.Shell || wait_for_dbus_name org.gnome.Shell 2); then
+                echo "gnome"
+                return 0
+            fi
+
+            if have_command swayidle; then
+                echo "swayidle"
+                return 0
+            fi
+
+            log "No supported screen backend detected. Install swayidle or run under GNOME."
+            return 1
+            ;;
+        gnome)
+            if ! have_command gdbus; then
+                log "Backend forced to GNOME, but gdbus is not installed."
+                return 1
+            fi
+
+            echo "gnome"
+            return 0
+            ;;
+        swayidle)
+            if ! have_command swayidle; then
+                log "Backend forced to swayidle, but swayidle is not installed."
+                return 1
+            fi
+
+            echo "swayidle"
+            return 0
+            ;;
+        *)
+            log "Unsupported backend '$SCREEN_BACKEND'. Use auto, gnome, or swayidle."
+            return 1
+            ;;
+    esac
+}
+
+run_gnome_backend() {
+    if ! wait_for_dbus_name org.gnome.Shell "$GNOME_WAIT_TIMEOUT"; then
+        log "Timed out waiting for GNOME Shell on the session bus."
+        return 1
+    fi
+
+    if ! gdbus call --session \
+        --dest "$GNOME_DBUS_NAME" \
+        --object-path "$GNOME_DBUS_PATH" \
+        --method org.gnome.ScreenSaver.GetActive >/dev/null 2>&1; then
+        log "Could not connect to org.gnome.ScreenSaver."
+        return 1
+    fi
+
+    log "Using GNOME backend."
+
+    gdbus monitor --session --dest "$GNOME_DBUS_NAME" --object-path "$GNOME_DBUS_PATH" |
+        while IFS= read -r line; do
+            case "$line" in
+                *"org.gnome.ScreenSaver.ActiveChanged (true,)"*)
+                    log "GNOME reported the screen inactive."
+                    "$SCREEN_OFF_CMD"
+                    ;;
+                *"org.gnome.ScreenSaver.ActiveChanged (false,)"*)
+                    log "GNOME reported the screen active."
+                    "$SCREEN_ON_CMD"
+                    ;;
+            esac
+        done
+
+    return "${PIPESTATUS[0]}"
+}
+
+run_swayidle_backend() {
+    log "Using swayidle backend (timeout: ${IDLE_TIMEOUT}s)."
+
+    exec swayidle -w \
+        timeout "$IDLE_TIMEOUT" "$SCREEN_OFF_CMD" \
+        resume "$SCREEN_ON_CMD"
+}
+
+main() {
+    local backend
+
+    case "${1:-}" in
+        --detect-backend)
+            detect_backend
+            return $?
+            ;;
+        --help)
+            echo "Usage: $0 [--detect-backend]"
+            return 0
+            ;;
+    esac
+
+    backend="$(detect_backend)" || exit 1
+
+    case "$backend" in
+        gnome)
+            run_gnome_backend
+            ;;
+        swayidle)
+            run_swayidle_backend
+            ;;
+    esac
+}
+
+main "$@"
