@@ -1,41 +1,82 @@
 #!/bin/bash
 
-tv_ip="192.168.X.X"
-tv_mac="XX:XX:XX:XX:XX:XX"
-input="HDMI_4"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
+    . "$SCRIPT_DIR/LG_Buddy_Common"
+elif [ -r "/usr/lib/lg-buddy/common.sh" ]; then
+    . "/usr/lib/lg-buddy/common.sh"
+else
+    echo "LG Buddy common helper not found."
+    exit 1
+fi
+
+lg_buddy_load_config || exit 1
+
 STATE_DIR="/run/user/$(id -u)/lg_buddy"
 STATE_FILE="${STATE_DIR}/screen_off_by_us"
+BSCPYLGTV="/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+
+log() {
+    echo "LG Buddy Screen On: $*"
+}
 
 # Only wake the TV if we were the ones who turned it off
 if [ ! -f "$STATE_FILE" ]; then
-    echo "State file not found. TV was not turned off by LG Buddy. Skipping wake."
+    log "State file not found. TV was not turned off by LG Buddy. Skipping wake."
     exit 0
 fi
 
 # Guard against stale state files from crashes / abnormal session ends
 if [ -n "$(find "$STATE_FILE" -mmin +720 2>/dev/null)" ]; then
-    echo "State file is stale (>12h old). Removing and skipping wake."
+    log "State file is stale (>12h old). Removing and skipping wake."
     rm -f "$STATE_FILE"
     exit 0
 fi
 
-echo "Turning TV on (screen wake)..."
+log "Turning TV on (screen wake) using input $input..."
 
-# Remove state file first (before potentially slow operations)
-rm -f "$STATE_FILE"
-
-# Send Wake-on-LAN to wake the TV from standby
-if command -v wakeonlan >/dev/null 2>&1; then
-    wakeonlan "$tv_mac"
-elif command -v wol >/dev/null 2>&1; then
-    wol "$tv_mac"
-else
-    echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
+log "Attempting screen unblank..."
+turn_screen_on_output="$("$BSCPYLGTV" "$tv_ip" turn_screen_on 2>&1)"
+turn_screen_on_rc=$?
+if [ $turn_screen_on_rc -eq 0 ]; then
+    printf '%s\n' "$turn_screen_on_output"
+    log "Screen unblank succeeded. Clearing wake state."
+    rm -f "$STATE_FILE"
+    exit 0
 fi
 
-# Wait for TV to fully wake up and accept WebSocket connections
-sleep 8
+printf '%s\n' "$turn_screen_on_output"
 
-# Set the input - this also turns on the TV if it's in standby
-/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand "$tv_ip" set_input "$input" 2>&1 || \
-    echo "set_input failed (TV may need more time to wake)"
+if printf '%s\n' "$turn_screen_on_output" | grep -q "errorCode': '-102'"; then
+    log "TV reported an active screen state. Trying immediate input restore before full wake."
+    if "$BSCPYLGTV" "$tv_ip" set_input "$input" 2>&1; then
+        log "Immediate input restore succeeded. Clearing wake state."
+        rm -f "$STATE_FILE"
+        exit 0
+    fi
+fi
+
+log "Screen unblank failed. Falling back to full wake."
+
+log "Sending initial Wake-on-LAN packet..."
+lg_buddy_send_wol "$tv_mac" || true
+
+# Wait for TV to fully wake up and accept WebSocket connections
+sleep 6
+
+for i in 1 2 3 4 5 6; do
+    log "Wake attempt $i: setting input to $input..."
+    if "$BSCPYLGTV" "$tv_ip" set_input "$input" 2>&1; then
+        log "Wake attempt $i succeeded. Clearing wake state."
+        rm -f "$STATE_FILE"
+        exit 0
+    fi
+
+    retry_delay=$(( (i * 2) > 30 ? 30 : (i * 2) ))
+    log "Wake attempt $i failed. Resending WoL and retrying in ${retry_delay}s..."
+    lg_buddy_send_wol "$tv_mac" || true
+    sleep "$retry_delay"
+done
+
+log "Wake failed after 6 attempts. Leaving state file in place for another resume event."
+exit 1

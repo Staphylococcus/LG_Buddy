@@ -5,9 +5,9 @@ Inspired by LG Companion for Windows (https://github.com/JPersson77/LGTVCompanio
 
 - **Startup/Shutdown:** Automatically turn TV on at boot and off at shutdown
 - **Sleep/Wake:** Turn TV off on suspend, back on at wake
-- **Screen Idle/Resume:** Turn TV off when screen goes idle, back on when you return (Wayland)
+- **Screen Idle/Resume:** Blank the TV panel when your GNOME or wlroots-based Wayland session goes idle, unblank it when you return
 - **Brightness Control:** Interactive slider to adjust OLED pixel brightness (via `zenity`)
-- **Interactive Setup:** `configure.sh` prompts for TV settings and updates all scripts automatically
+- **Interactive Setup:** `configure.sh` prompts for TV and screen settings and writes them to your home directory
 
 ## Prerequisites
 
@@ -15,25 +15,28 @@ You will need the following packages installed:
 
 - `python3`, `python3-venv`, `python3-pip` — for bscpylgtv
 - `wakeonlan` (or `wol`) — to wake TV from standby
-- `swayidle` — for screen idle detection (Wayland only, optional)
+- `gdbus` — for GNOME screen idle detection (usually installed with GNOME/GLib)
+- `swayidle` — for wlroots/COSMIC screen idle detection (optional)
 - `zenity` — for OLED Pixel Brightness Control (optional)
 
 **Debian/Ubuntu/Pop!_OS:**
 ```bash
-sudo apt install python3-venv python3-pip wakeonlan swayidle zenity
+sudo apt install python3-venv python3-pip wakeonlan zenity
 ```
 
 **Fedora:**
 ```bash
-sudo dnf install python3 python3-pip wol swayidle zenity
+sudo dnf install python3 python3-pip wol zenity
 ```
 
 **Arch:**
 ```bash
-sudo pacman -S python python-pip wakeonlan swayidle zenity
+sudo pacman -S python python-pip wakeonlan zenity
 ```
 
-> **Note:** `swayidle` is only needed if you want screen idle/resume support. It uses the `ext-idle-notify-v1` Wayland protocol and works on COSMIC, sway, and other Wayland compositors.
+If `gdbus` is missing on GNOME, install your distro's GLib utilities package (`libglib2.0-bin` on Debian/Ubuntu, `glib2` on Fedora/Arch).
+
+> **Note:** The screen monitor now supports multiple backends. On GNOME it uses `org.gnome.ScreenSaver` plus `org.gnome.Mutter.IdleMonitor` over D-Bus. On wlroots/COSMIC desktops it uses `swayidle`.
 
 ## Installation
 
@@ -46,11 +49,11 @@ chmod +x ./install.sh
 ```
 
 3. The installer will:
-   - Install prerequisites (`python3-venv`, `wakeonlan` or `wol`, `swayidle`)
-   - Run `configure.sh` to set your TV's IP, MAC address, and HDMI input
+   - Install prerequisites (`python3-venv`, `wakeonlan` or `wol`)
+   - Run `configure.sh` to create `~/.config/lg-buddy/config.env`
    - Create the Python virtual environment and install bscpylgtv
-   - Copy scripts to `/usr/bin/` and set up systemd services
-   - Set up the screen monitor user service (optional — you can disable it during install)
+   - Copy scripts to system locations and set up systemd services
+   - Install the screen monitor user service and optionally enable it during install
 
 4. Restart your computer.
 
@@ -59,18 +62,49 @@ chmod +x ./install.sh
 
 ## Screen Idle/Resume (Wayland)
 
-The screen monitor uses `swayidle` to detect when your screen goes idle. When idle:
-- **LG_Buddy_Screen_Off** turns the TV off (if it's on the configured HDMI input)
-- **LG_Buddy_Screen_On** turns the TV back on when you move the mouse or press a key
+The screen monitor auto-detects a supported backend:
+- **GNOME:** Uses `org.gnome.ScreenSaver` for idle transitions and `org.gnome.Mutter.IdleMonitor` for early wake-on-activity, while still following GNOME's own blank/lock timing
+- **wlroots/COSMIC:** Uses `swayidle`
 
-The idle timeout defaults to 300 seconds (5 minutes). You can change it in `bin/LG_Buddy_Screen_Monitor`.
+In a normal GNOME Shell session, Mutter is part of the GNOME stack. No separate Mutter package needs to be installed for this backend.
+
+When idle:
+- **LG_Buddy_Screen_Off** blanks the TV panel (if it's on the configured HDMI input)
+- **LG_Buddy_Screen_On** unblanks the panel when you move the mouse or press a key
+
+Startup, shutdown, suspend, and resume still use full TV power transitions.
+
+The `swayidle` backend defaults to a 300 second (5 minute) timeout. You can change it with `./configure.sh`. The installer and configurator only prompt for that timeout when `swayidle` is the selected backend.
 
 **Check status:**
 ```bash
 systemctl --user status LG_Buddy_screen.service
 ```
 
-**Test swayidle manually:**
+**Preferred way to change backend or timeout:**
+```bash
+./configure.sh
+```
+
+**Temporary backend override for testing:**
+```bash
+systemctl --user edit LG_Buddy_screen.service
+```
+
+Then add:
+```ini
+[Service]
+Environment=LG_BUDDY_SCREEN_BACKEND=gnome
+```
+
+Supported values are `auto`, `gnome`, and `swayidle`.
+
+**Test the GNOME backend manually:**
+```bash
+gdbus monitor --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver
+```
+
+**Test the swayidle backend manually:**
 ```bash
 swayidle -w timeout 10 'echo IDLE' resume 'echo RESUMED'
 ```
@@ -82,7 +116,14 @@ To reconfigure your TV settings after installation, run:
 ./configure.sh
 ```
 
-This updates the IP, MAC, and HDMI input in all scripts at once. It also detects your user ID automatically for scripts that run as root.
+This updates `~/.config/lg-buddy/config.env`. It does not rewrite the installed scripts, and it does not require `sudo`.
+
+The config file currently contains:
+- `tv_ip`
+- `tv_mac`
+- `input`
+- `screen_backend`
+- `screen_idle_timeout`
 
 ## File Layout
 
@@ -91,9 +132,10 @@ This updates the IP, MAC, and HDMI input in all scripts at once. It also detects
 | `bin/LG_Buddy_Startup` | Turn TV on at boot/wake |
 | `bin/LG_Buddy_Shutdown` | Turn TV off at shutdown |
 | `bin/LG_Buddy_sleep` | Turn TV off on suspend |
-| `bin/LG_Buddy_Screen_Monitor` | swayidle daemon for idle detection |
-| `bin/LG_Buddy_Screen_Off` | Turn TV off on screen idle |
-| `bin/LG_Buddy_Screen_On` | Turn TV back on on resume |
+| `bin/LG_Buddy_Common` | Shared config and helper functions |
+| `bin/LG_Buddy_Screen_Monitor` | Multi-backend idle monitor (GNOME or swayidle) |
+| `bin/LG_Buddy_Screen_Off` | Blank the TV panel on screen idle |
+| `bin/LG_Buddy_Screen_On` | Unblank the TV panel on resume |
 | `bin/LG_Buddy_Brightness` | Interactive brightness control |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Automated installer |
