@@ -346,27 +346,15 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
                 })
         })?;
 
-    let screen_backend = match entries.get("screen_backend") {
-        Some(value) => value
-            .parse::<ScreenBackend>()
-            .map_err(|_| ConfigError::InvalidValue {
-                key: "screen_backend",
-                value: value.clone(),
-                expected: "one of auto, gnome, swayidle",
-            })?,
-        None => ScreenBackend::Auto,
-    };
+    let screen_backend = entries
+        .get("screen_backend")
+        .and_then(|value| value.parse::<ScreenBackend>().ok())
+        .unwrap_or(ScreenBackend::Auto);
 
-    let screen_idle_timeout = match entries.get("screen_idle_timeout") {
-        Some(value) => value
-            .parse::<u64>()
-            .map_err(|_| ConfigError::InvalidValue {
-                key: "screen_idle_timeout",
-                value: value.clone(),
-                expected: "a non-negative integer",
-            })?,
-        None => DEFAULT_IDLE_TIMEOUT,
-    };
+    let screen_idle_timeout = entries
+        .get("screen_idle_timeout")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT);
 
     Ok(Config {
         tv_ip,
@@ -390,10 +378,19 @@ fn parse_entries(contents: &str) -> HashMap<String, String> {
             continue;
         };
 
-        entries.insert(key.trim().to_string(), value.trim().to_string());
+        entries.insert(key.trim().to_string(), sanitize_config_value(value));
     }
 
     entries
+}
+
+fn sanitize_config_value(value: &str) -> String {
+    value
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -544,6 +541,43 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,
             }
         );
+    }
+
+    #[test]
+    fn parse_sanitizes_inline_comments_on_values() {
+        let config = parse_config(
+            "\
+            tv_ip=192.168.1.42 # living room
+            tv_mac=aa:bb:cc:dd:ee:ff # detected
+            input=HDMI_3 # main PC
+            screen_backend=gnome # use GNOME
+            screen_idle_timeout=450 # seconds
+            ",
+        )
+        .expect("parse sanitized config");
+
+        assert_eq!(config.tv_ip.to_string(), "192.168.1.42");
+        assert_eq!(config.tv_mac.to_string(), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(config.input, HdmiInput::Hdmi3);
+        assert_eq!(config.screen_backend, ScreenBackend::Gnome);
+        assert_eq!(config.screen_idle_timeout, 450);
+    }
+
+    #[test]
+    fn parse_invalid_optional_values_fall_back_to_defaults() {
+        let config = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            screen_backend=not-a-backend
+            screen_idle_timeout=not-a-number
+            ",
+        )
+        .expect("parse config with malformed optional values");
+
+        assert_eq!(config.screen_backend, ScreenBackend::Auto);
+        assert_eq!(config.screen_idle_timeout, DEFAULT_IDLE_TIMEOUT);
     }
 
     #[test]
