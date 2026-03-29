@@ -510,17 +510,20 @@ fn startup_retry_delay(attempt: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    mod support {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+    }
+
     use super::{
         run_screen_off_with, run_screen_on_with, run_shutdown_with, run_startup_with,
         RebootDetector, Sleeper,
     };
     use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
     use crate::state::ScreenOwnershipMarker;
-    use crate::tv::{CommandOutput, TvClient, TvError};
+    use crate::tv::BscpylgtvCommandClient;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::StartupMode;
     use std::cell::RefCell;
-    use std::collections::VecDeque;
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
@@ -528,14 +531,15 @@ mod tests {
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use support::MockBscpylgtv;
 
     #[test]
     fn matching_input_blanks_screen_and_sets_marker() {
         let temp_dir = TestDir::new("screen-off-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new()
-            .with_current_input(Ok("com.webos.app.hdmi2".to_string()))
-            .with_turn_screen_off(Ok(command_output("blanked\n")));
+        let mock = MockBscpylgtv::new("screen-off-success-tv");
+        mock.set_input("HDMI_2");
+        let client = client_for_mock(&mock);
 
         let mut output = Vec::new();
         run_screen_off_with(
@@ -547,7 +551,7 @@ mod tests {
         .expect("screen-off should succeed");
 
         assert!(marker.exists());
-        assert_eq!(client.calls(), vec!["get_input", "turn_screen_off"]);
+        assert_call_commands(&mock, &["get_input", "turn_screen_off"]);
         assert!(rendered(&output).contains("Screen blank command succeeded."));
     }
 
@@ -555,10 +559,10 @@ mod tests {
     fn matching_input_falls_back_to_power_off() {
         let temp_dir = TestDir::new("screen-off-fallback");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new()
-            .with_current_input(Ok("com.webos.app.hdmi3".to_string()))
-            .with_turn_screen_off(Err(command_failed("turn_screen_off", 1, "blank failed\n")))
-            .with_power_off(Ok(command_output("powered off\n")));
+        let mock = MockBscpylgtv::new("screen-off-fallback-tv");
+        mock.set_input("HDMI_3");
+        mock.queue_error("turn_screen_off", 1, "blank failed\n");
+        let client = client_for_mock(&mock);
 
         let mut output = Vec::new();
         run_screen_off_with(
@@ -570,10 +574,7 @@ mod tests {
         .expect("screen-off fallback should succeed");
 
         assert!(marker.exists());
-        assert_eq!(
-            client.calls(),
-            vec!["get_input", "turn_screen_off", "power_off"]
-        );
+        assert_call_commands(&mock, &["get_input", "turn_screen_off", "power_off"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Screen blank failed."));
         assert!(rendered.contains("Fallback power_off succeeded."));
@@ -583,9 +584,9 @@ mod tests {
     fn get_input_failure_falls_back_to_power_off() {
         let temp_dir = TestDir::new("screen-off-get-input-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new()
-            .with_current_input(Err(command_failed("get_input", 1, "unreachable\n")))
-            .with_power_off(Ok(command_output("powered off\n")));
+        let mock = MockBscpylgtv::new("screen-off-get-input-failure-tv");
+        mock.queue_error("get_input", 1, "unreachable\n");
+        let client = client_for_mock(&mock);
 
         let mut output = Vec::new();
         run_screen_off_with(
@@ -597,7 +598,7 @@ mod tests {
         .expect("screen-off fallback should succeed");
 
         assert!(marker.exists());
-        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert_call_commands(&mock, &["get_input", "power_off"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Could not query TV input."));
         assert!(rendered.contains("Fallback power_off succeeded."));
@@ -608,7 +609,9 @@ mod tests {
         let temp_dir = TestDir::new("screen-off-skip");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create stale marker");
-        let client = FakeTvClient::new().with_current_input(Ok("com.webos.app.hdmi4".to_string()));
+        let mock = MockBscpylgtv::new("screen-off-skip-tv");
+        mock.set_input("HDMI_4");
+        let client = client_for_mock(&mock);
 
         let mut output = Vec::new();
         run_screen_off_with(
@@ -620,7 +623,7 @@ mod tests {
         .expect("screen-off skip should succeed");
 
         assert!(!marker.exists());
-        assert_eq!(client.calls(), vec!["get_input"]);
+        assert_call_commands(&mock, &["get_input"]);
         assert!(rendered(&output).contains("Skipping idle action."));
     }
 
@@ -628,10 +631,11 @@ mod tests {
     fn failed_fallback_does_not_set_marker() {
         let temp_dir = TestDir::new("screen-off-fallback-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new()
-            .with_current_input(Ok("com.webos.app.hdmi2".to_string()))
-            .with_turn_screen_off(Err(command_failed("turn_screen_off", 1, "blank failed\n")))
-            .with_power_off(Err(command_failed("power_off", 1, "power failed\n")));
+        let mock = MockBscpylgtv::new("screen-off-fallback-failure-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("turn_screen_off", 1, "blank failed\n");
+        mock.queue_error("power_off", 1, "power failed\n");
+        let client = client_for_mock(&mock);
 
         let mut output = Vec::new();
         run_screen_off_with(
@@ -643,10 +647,7 @@ mod tests {
         .expect("screen-off should still return ok");
 
         assert!(!marker.exists());
-        assert_eq!(
-            client.calls(),
-            vec!["get_input", "turn_screen_off", "power_off"]
-        );
+        assert_call_commands(&mock, &["get_input", "turn_screen_off", "power_off"]);
         assert!(rendered(&output).contains("Fallback power_off failed."));
     }
 
@@ -654,7 +655,8 @@ mod tests {
     fn screen_on_skips_when_marker_is_missing() {
         let temp_dir = TestDir::new("screen-on-no-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new();
+        let mock = MockBscpylgtv::new("screen-on-no-marker-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -670,7 +672,7 @@ mod tests {
         )
         .expect("missing marker should skip");
 
-        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert_call_commands(&mock, &[]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
         assert!(rendered(&output).contains("State file not found."));
@@ -681,7 +683,8 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-stale-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new();
+        let mock = MockBscpylgtv::new("screen-on-stale-marker-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -698,6 +701,7 @@ mod tests {
         .expect("stale marker should skip");
 
         assert!(!marker.exists());
+        assert_call_commands(&mock, &[]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
         assert!(rendered(&output).contains("State file is stale (>12h old)."));
@@ -708,7 +712,9 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-unblank");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new().with_turn_screen_on(Ok(command_output("awake\n")));
+        let mock = MockBscpylgtv::new("screen-on-unblank-tv");
+        mock.set_screen_on(false);
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -725,7 +731,7 @@ mod tests {
         .expect("turn_screen_on should succeed");
 
         assert!(!marker.exists());
-        assert_eq!(client.calls(), vec!["turn_screen_on"]);
+        assert_call_commands(&mock, &["turn_screen_on"]);
         assert!(wol.calls().is_empty());
         assert!(rendered(&output).contains("Screen unblank succeeded."));
     }
@@ -735,13 +741,8 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-already-active");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new()
-            .with_turn_screen_on(Err(command_failed(
-                "turn_screen_on",
-                1,
-                "errorCode': '-102'\n",
-            )))
-            .with_set_input(Ok(command_output("restored\n")));
+        let mock = MockBscpylgtv::new("screen-on-already-active-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -758,7 +759,7 @@ mod tests {
         .expect("already-active path should succeed");
 
         assert!(!marker.exists());
-        assert_eq!(client.calls(), vec!["turn_screen_on", "set_input"]);
+        assert_call_commands(&mock, &["turn_screen_on", "set_input"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
         let rendered = rendered(&output);
@@ -771,12 +772,10 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-wake-retry-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new()
-            .with_turn_screen_on(Err(command_failed("turn_screen_on", 1, "offline\n")))
-            .with_set_input_results([
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Ok(command_output("restored\n")),
-            ]);
+        let mock = MockBscpylgtv::new("screen-on-wake-retry-success-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        mock.queue_error("set_input", 1, "not ready\n");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -793,10 +792,7 @@ mod tests {
         .expect("wake retry should succeed");
 
         assert!(!marker.exists());
-        assert_eq!(
-            client.calls(),
-            vec!["turn_screen_on", "set_input", "set_input"]
-        );
+        assert_call_commands(&mock, &["turn_screen_on", "set_input", "set_input"]);
         assert_eq!(wol.calls().len(), 2);
         assert_eq!(
             sleeper.durations(),
@@ -813,16 +809,12 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-wake-retry-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new()
-            .with_turn_screen_on(Err(command_failed("turn_screen_on", 1, "offline\n")))
-            .with_set_input_results([
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Err(command_failed("set_input", 1, "not ready\n")),
-                Err(command_failed("set_input", 1, "not ready\n")),
-            ]);
+        let mock = MockBscpylgtv::new("screen-on-wake-retry-failure-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        for _ in 0..6 {
+            mock.queue_error("set_input", 1, "not ready\n");
+        }
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -839,7 +831,7 @@ mod tests {
         .expect_err("exhausted retries should fail");
 
         assert!(marker.exists());
-        assert_eq!(client.calls().len(), 7);
+        assert_eq!(mock.calls().len(), 7);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
@@ -850,7 +842,8 @@ mod tests {
     fn startup_wake_mode_skips_without_system_marker() {
         let temp_dir = TestDir::new("startup-wake-skip");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new();
+        let mock = MockBscpylgtv::new("startup-wake-skip-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -868,7 +861,7 @@ mod tests {
 
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
-        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert_call_commands(&mock, &[]);
         assert!(rendered(&output).contains("TV was not on our input. Skipping."));
     }
 
@@ -876,7 +869,8 @@ mod tests {
     fn startup_auto_mode_treats_missing_marker_as_boot() {
         let temp_dir = TestDir::new("startup-auto-boot");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let mock = MockBscpylgtv::new("startup-auto-boot-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -895,7 +889,7 @@ mod tests {
         assert!(!marker.exists());
         assert_eq!(wol.calls().len(), 1);
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
-        assert_eq!(client.calls(), vec!["set_input"]);
+        assert_call_commands(&mock, &["set_input"]);
         let rendered = rendered(&output);
         assert!(rendered.contains("Cold boot: Turning TV on and switching to HDMI_4."));
         assert!(rendered.contains("TV turned on and set to HDMI_4."));
@@ -906,7 +900,8 @@ mod tests {
         let temp_dir = TestDir::new("startup-auto-wake");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let mock = MockBscpylgtv::new("startup-auto-wake-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -924,7 +919,7 @@ mod tests {
 
         assert!(!marker.exists());
         assert_eq!(wol.calls().len(), 1);
-        assert_eq!(client.calls(), vec!["set_input"]);
+        assert_call_commands(&mock, &["set_input"]);
         assert!(rendered(&output).contains("Wake from sleep: LG Buddy turned TV off. Restoring."));
     }
 
@@ -933,7 +928,8 @@ mod tests {
         let temp_dir = TestDir::new("startup-boot-clears-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create stale system marker");
-        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let mock = MockBscpylgtv::new("startup-boot-clears-marker-tv");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -950,7 +946,7 @@ mod tests {
         .expect("boot mode should succeed");
 
         assert!(!marker.exists());
-        assert_eq!(client.calls(), vec!["set_input"]);
+        assert_call_commands(&mock, &["set_input"]);
         assert!(rendered(&output).contains("Cold boot: Turning TV on and switching to HDMI_3."));
     }
 
@@ -958,10 +954,9 @@ mod tests {
     fn startup_retries_until_set_input_succeeds() {
         let temp_dir = TestDir::new("startup-retry-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let client = FakeTvClient::new().with_set_input_results([
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Ok(command_output("restored\n")),
-        ]);
+        let mock = MockBscpylgtv::new("startup-retry-success-tv");
+        mock.queue_error("set_input", 1, "not ready\n");
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -977,7 +972,7 @@ mod tests {
         )
         .expect("startup retry should succeed");
 
-        assert_eq!(client.calls(), vec!["set_input", "set_input"]);
+        assert_call_commands(&mock, &["set_input", "set_input"]);
         assert_eq!(wol.calls().len(), 2);
         assert_eq!(
             sleeper.durations(),
@@ -993,14 +988,11 @@ mod tests {
         let temp_dir = TestDir::new("startup-retry-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let client = FakeTvClient::new().with_set_input_results([
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Err(command_failed("set_input", 1, "not ready\n")),
-            Err(command_failed("set_input", 1, "not ready\n")),
-        ]);
+        let mock = MockBscpylgtv::new("startup-retry-failure-tv");
+        for _ in 0..6 {
+            mock.queue_error("set_input", 1, "not ready\n");
+        }
+        let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
 
@@ -1017,7 +1009,7 @@ mod tests {
         .expect_err("startup should fail after exhausting retries");
 
         assert!(!marker.exists());
-        assert_eq!(client.calls().len(), 6);
+        assert_eq!(mock.calls().len(), 6);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
@@ -1026,7 +1018,8 @@ mod tests {
 
     #[test]
     fn shutdown_ignores_reboot() {
-        let client = FakeTvClient::new();
+        let mock = MockBscpylgtv::new("shutdown-ignores-reboot-tv");
+        let client = client_for_mock(&mock);
         let detector = FakeRebootDetector::pending();
 
         let mut output = Vec::new();
@@ -1038,15 +1031,15 @@ mod tests {
         )
         .expect("reboot should be ignored");
 
-        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert_call_commands(&mock, &[]);
         assert!(rendered(&output).contains("Reboot; ignoring"));
     }
 
     #[test]
     fn shutdown_powers_off_when_configured_input_is_active() {
-        let client = FakeTvClient::new()
-            .with_current_input(Ok("com.webos.app.hdmi3".to_string()))
-            .with_power_off(Ok(command_output("powered off\n")));
+        let mock = MockBscpylgtv::new("shutdown-match-tv");
+        mock.set_input("HDMI_3");
+        let client = client_for_mock(&mock);
         let detector = FakeRebootDetector::clear();
 
         let mut output = Vec::new();
@@ -1058,13 +1051,15 @@ mod tests {
         )
         .expect("matching input should power off");
 
-        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert_call_commands(&mock, &["get_input", "power_off"]);
         assert!(rendered(&output).contains("TV is on HDMI_3. Turning off for shutdown."));
     }
 
     #[test]
     fn shutdown_skips_when_tv_is_on_different_input() {
-        let client = FakeTvClient::new().with_current_input(Ok("com.webos.app.hdmi1".to_string()));
+        let mock = MockBscpylgtv::new("shutdown-skip-tv");
+        mock.set_input("HDMI_1");
+        let client = client_for_mock(&mock);
         let detector = FakeRebootDetector::clear();
 
         let mut output = Vec::new();
@@ -1076,15 +1071,15 @@ mod tests {
         )
         .expect("nonmatching input should skip");
 
-        assert_eq!(client.calls(), vec!["get_input"]);
+        assert_call_commands(&mock, &["get_input"]);
         assert!(rendered(&output).contains("TV is on HDMI_1 (not HDMI_4). Skipping."));
     }
 
     #[test]
     fn shutdown_falls_back_to_power_off_when_input_query_fails() {
-        let client = FakeTvClient::new()
-            .with_current_input(Err(command_failed("get_input", 1, "offline\n")))
-            .with_power_off(Ok(command_output("powered off\n")));
+        let mock = MockBscpylgtv::new("shutdown-fallback-tv");
+        mock.queue_error("get_input", 1, "offline\n");
+        let client = client_for_mock(&mock);
         let detector = FakeRebootDetector::clear();
 
         let mut output = Vec::new();
@@ -1096,15 +1091,16 @@ mod tests {
         )
         .expect("query failure should still power off");
 
-        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert_call_commands(&mock, &["get_input", "power_off"]);
         assert!(rendered(&output).contains("Could not query TV input. Proceeding with power_off."));
     }
 
     #[test]
     fn shutdown_logs_power_off_failure_but_does_not_error() {
-        let client = FakeTvClient::new()
-            .with_current_input(Ok("com.webos.app.hdmi2".to_string()))
-            .with_power_off(Err(command_failed("power_off", 1, "already off\n")));
+        let mock = MockBscpylgtv::new("shutdown-power-off-failure-tv");
+        mock.set_input("HDMI_2");
+        mock.queue_error("power_off", 1, "already off\n");
+        let client = client_for_mock(&mock);
         let detector = FakeRebootDetector::clear();
 
         let mut output = Vec::new();
@@ -1116,7 +1112,7 @@ mod tests {
         )
         .expect("power_off failure should not abort shutdown");
 
-        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert_call_commands(&mock, &["get_input", "power_off"]);
         assert!(rendered(&output).contains("power_off failed, continuing shutdown."));
     }
 
@@ -1132,121 +1128,25 @@ mod tests {
         }
     }
 
-    fn command_output(stdout: &str) -> CommandOutput {
-        CommandOutput::new(stdout.to_string(), String::new())
-    }
-
-    fn command_failed(command: &'static str, status: i32, stderr: &str) -> TvError {
-        TvError::CommandFailed {
-            command,
-            status: Some(status),
-            output: CommandOutput::new(String::new(), stderr.to_string()),
-        }
-    }
-
     fn rendered(output: &[u8]) -> String {
         String::from_utf8(output.to_vec()).expect("utf8 output")
     }
 
-    struct FakeTvClient {
-        current_input: RefCell<VecDeque<Result<String, TvError>>>,
-        set_input: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
-        turn_screen_off: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
-        turn_screen_on: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
-        power_off: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
-        calls: RefCell<Vec<&'static str>>,
+    fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
+        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
     }
 
-    impl FakeTvClient {
-        fn new() -> Self {
-            Self {
-                current_input: RefCell::new(VecDeque::new()),
-                set_input: RefCell::new(VecDeque::new()),
-                turn_screen_off: RefCell::new(VecDeque::new()),
-                turn_screen_on: RefCell::new(VecDeque::new()),
-                power_off: RefCell::new(VecDeque::new()),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn with_current_input(self, value: Result<String, TvError>) -> Self {
-            self.current_input.borrow_mut().push_back(value);
-            self
-        }
-
-        fn with_set_input(self, value: Result<CommandOutput, TvError>) -> Self {
-            self.set_input.borrow_mut().push_back(value);
-            self
-        }
-
-        fn with_set_input_results<I>(self, values: I) -> Self
-        where
-            I: IntoIterator<Item = Result<CommandOutput, TvError>>,
-        {
-            self.set_input.borrow_mut().extend(values);
-            self
-        }
-
-        fn with_turn_screen_off(self, value: Result<CommandOutput, TvError>) -> Self {
-            self.turn_screen_off.borrow_mut().push_back(value);
-            self
-        }
-
-        fn with_turn_screen_on(self, value: Result<CommandOutput, TvError>) -> Self {
-            self.turn_screen_on.borrow_mut().push_back(value);
-            self
-        }
-
-        fn with_power_off(self, value: Result<CommandOutput, TvError>) -> Self {
-            self.power_off.borrow_mut().push_back(value);
-            self
-        }
-
-        fn calls(&self) -> Vec<&'static str> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl TvClient for FakeTvClient {
-        fn get_input(&self, _tv_ip: Ipv4Addr) -> Result<String, TvError> {
-            self.calls.borrow_mut().push("get_input");
-            self.current_input
-                .borrow_mut()
-                .pop_front()
-                .expect("configured get_input response")
-        }
-
-        fn set_input(&self, _tv_ip: Ipv4Addr, _input: HdmiInput) -> Result<CommandOutput, TvError> {
-            self.calls.borrow_mut().push("set_input");
-            self.set_input
-                .borrow_mut()
-                .pop_front()
-                .expect("configured set_input response")
-        }
-
-        fn power_off(&self, _tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-            self.calls.borrow_mut().push("power_off");
-            self.power_off
-                .borrow_mut()
-                .pop_front()
-                .expect("configured power_off response")
-        }
-
-        fn turn_screen_off(&self, _tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-            self.calls.borrow_mut().push("turn_screen_off");
-            self.turn_screen_off
-                .borrow_mut()
-                .pop_front()
-                .expect("configured turn_screen_off response")
-        }
-
-        fn turn_screen_on(&self, _tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
-            self.calls.borrow_mut().push("turn_screen_on");
-            self.turn_screen_on
-                .borrow_mut()
-                .pop_front()
-                .expect("configured turn_screen_on response")
-        }
+    fn assert_call_commands(mock: &MockBscpylgtv, expected: &[&str]) {
+        let actual = mock
+            .calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect::<Vec<_>>();
+        let expected = expected
+            .iter()
+            .map(|command| command.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[derive(Default)]

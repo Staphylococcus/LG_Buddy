@@ -363,6 +363,10 @@ fn last_non_empty_line(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    mod support {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
+    }
+
     use super::{
         BscpylgtvCommandClient, CommandOutput, CurrentInput, TvClient, TvDevice, TvError,
         DEFAULT_BSCPYLGTV_COMMAND_PATH,
@@ -370,12 +374,9 @@ mod tests {
     use crate::config::{HdmiInput, MacAddress};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
-    use std::fs;
     use std::net::Ipv4Addr;
-    use std::path::{Path, PathBuf};
-    use std::process;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::path::Path;
+    use support::MockBscpylgtv;
 
     #[test]
     fn default_client_uses_expected_command_path() {
@@ -395,39 +396,34 @@ mod tests {
 
     #[test]
     fn get_input_uses_last_non_empty_stdout_line() {
-        let temp_dir = TestDir::new("tv-get-input");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(
-            &script_path,
-            &log_path,
-            r#"
-printf '\n'
-printf 'ignored\n'
-printf 'com.webos.app.hdmi2\n'
-"#,
-        );
+        let mock = MockBscpylgtv::new("tv-get-input");
+        mock.queue_success("get_input", "\nignored\ncom.webos.app.hdmi2\n");
 
-        let client = client_for_script(&script_path);
+        let client = client_for_mock(&mock);
         let input = client
             .get_input(ip("192.168.1.42"))
             .expect("get_input should succeed");
 
         assert_eq!(input, "com.webos.app.hdmi2");
         assert_eq!(
-            fs::read_to_string(&log_path).expect("read invocation log"),
-            "192.168.1.42\nget_input\n"
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "192.168.1.42".to_string(),
+                "get_input".to_string(),
+                Vec::<String>::new(),
+            )]
         );
     }
 
     #[test]
     fn get_input_rejects_empty_output() {
-        let temp_dir = TestDir::new("tv-get-input-empty");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(&script_path, &log_path, "");
+        let mock = MockBscpylgtv::new("tv-get-input-empty");
+        mock.queue_success("get_input", "");
 
-        let client = client_for_script(&script_path);
+        let client = client_for_mock(&mock);
         let err = client
             .get_input(ip("192.168.1.42"))
             .expect_err("empty output should fail");
@@ -445,30 +441,31 @@ printf 'com.webos.app.hdmi2\n'
 
     #[test]
     fn set_input_passes_expected_arguments() {
-        let temp_dir = TestDir::new("tv-set-input");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(&script_path, &log_path, "printf 'ok\\n'\n");
-
-        let client = client_for_script(&script_path);
+        let mock = MockBscpylgtv::new("tv-set-input");
+        let client = client_for_mock(&mock);
         client
             .set_input(ip("10.0.0.5"), HdmiInput::Hdmi3)
             .expect("set_input should succeed");
 
         assert_eq!(
-            fs::read_to_string(&log_path).expect("read invocation log"),
-            "10.0.0.5\nset_input\nHDMI_3\n"
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.5".to_string(),
+                "set_input".to_string(),
+                vec!["HDMI_3".to_string()],
+            )]
         );
     }
 
     #[test]
     fn tv_device_maps_hdmi_inputs_to_typed_values() {
-        let temp_dir = TestDir::new("tv-device-current-hdmi");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(&script_path, &log_path, "printf 'com.webos.app.hdmi4\\n'\n");
+        let mock = MockBscpylgtv::new("tv-device-current-hdmi");
+        mock.set_input("HDMI_4");
 
-        let client = client_for_script(&script_path);
+        let client = client_for_mock(&mock);
         let tv = TvDevice::new(&client, ip("10.0.0.7"));
         let current = tv.input().current().expect("current input should parse");
 
@@ -477,16 +474,10 @@ printf 'com.webos.app.hdmi2\n'
 
     #[test]
     fn tv_device_preserves_non_hdmi_inputs() {
-        let temp_dir = TestDir::new("tv-device-current-other");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(
-            &script_path,
-            &log_path,
-            "printf 'com.webos.app.youtube\\n'\n",
-        );
+        let mock = MockBscpylgtv::new("tv-device-current-other");
+        mock.queue_success("get_input", "com.webos.app.youtube\n");
 
-        let client = client_for_script(&script_path);
+        let client = client_for_mock(&mock);
         let tv = TvDevice::new(&client, ip("10.0.0.9"));
         let current = tv.input().current().expect("current input should parse");
 
@@ -498,18 +489,21 @@ printf 'com.webos.app.hdmi2\n'
 
     #[test]
     fn tv_screen_blank_uses_domain_facade() {
-        let temp_dir = TestDir::new("tv-device-screen-blank");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(&script_path, &log_path, "printf 'ok\\n'\n");
-
-        let client = client_for_script(&script_path);
+        let mock = MockBscpylgtv::new("tv-device-screen-blank");
+        let client = client_for_mock(&mock);
         let tv = TvDevice::new(&client, ip("10.0.0.11"));
         tv.screen().blank().expect("screen blank should succeed");
 
         assert_eq!(
-            fs::read_to_string(&log_path).expect("read invocation log"),
-            "10.0.0.11\nturn_screen_off\n"
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.11".to_string(),
+                "turn_screen_off".to_string(),
+                Vec::<String>::new(),
+            )]
         );
     }
 
@@ -529,16 +523,9 @@ printf 'com.webos.app.hdmi2\n'
 
     #[test]
     fn command_failures_preserve_status_and_output() {
-        let temp_dir = TestDir::new("tv-command-failure");
-        let log_path = temp_dir.path().join("invocation.log");
-        let script_path = temp_dir.path().join("stub.sh");
-        write_stub(
-            &script_path,
-            &log_path,
-            "printf 'failure stdout\\n'\nprintf 'failure stderr\\n' >&2\nexit 7\n",
-        );
-
-        let client = client_for_script(&script_path);
+        let mock = MockBscpylgtv::new("tv-command-failure");
+        mock.queue_error("turn_screen_on", 7, "failure stderr\n");
+        let client = client_for_mock(&mock);
         let err = client
             .turn_screen_on(ip("10.0.0.8"))
             .expect_err("turn_screen_on should fail");
@@ -551,25 +538,11 @@ printf 'com.webos.app.hdmi2\n'
             } => {
                 assert_eq!(command, "turn_screen_on");
                 assert_eq!(status, Some(7));
-                assert_eq!(output.stdout(), "failure stdout\n");
+                assert_eq!(output.stdout(), "");
                 assert_eq!(output.stderr(), "failure stderr\n");
             }
             other => panic!("expected command failure, got {other:?}"),
         }
-    }
-
-    fn write_stub(script_path: &Path, log_path: &Path, body: &str) {
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n{}",
-            shell_quote(log_path),
-            body
-        );
-        fs::write(script_path, script).expect("write stub script");
-    }
-
-    fn shell_quote(path: &Path) -> String {
-        let rendered = path.to_string_lossy().replace('\'', "'\"'\"'");
-        format!("'{rendered}'")
     }
 
     fn ip(value: &str) -> Ipv4Addr {
@@ -580,8 +553,8 @@ printf 'com.webos.app.hdmi2\n'
         value.parse().expect("parse mac address")
     }
 
-    fn client_for_script(script_path: &Path) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args("/bin/sh", [script_path.to_string_lossy().into_owned()])
+    fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
+        BscpylgtvCommandClient::with_args(mock.command_path(), mock.command_args())
     }
 
     #[derive(Default)]
@@ -599,39 +572,6 @@ printf 'com.webos.app.hdmi2\n'
         fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
             self.calls.borrow_mut().push(mac.clone());
             Ok(())
-        }
-    }
-
-    struct TestDir {
-        path: PathBuf,
-    }
-
-    impl TestDir {
-        fn new(label: &str) -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-            let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time after unix epoch")
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "lg-buddy-{label}-{}-{timestamp}-{unique}",
-                process::id()
-            ));
-
-            fs::create_dir_all(&path).expect("create test temp dir");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
         }
     }
 }
