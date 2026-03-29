@@ -130,9 +130,11 @@ impl MockBscpylgtv {
     }
 
     pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
+        let python_path = shell_quote(&python3_path());
         let script_path = shell_quote(&Self::script_path());
         let state_path = shell_quote(&self.state_path);
-        let body = format!("#!/bin/sh\nexec python3 {script_path} --state {state_path} \"$@\"\n");
+        let body =
+            format!("#!/bin/sh\nexec {python_path} {script_path} --state {state_path} \"$@\"\n");
 
         ExecutableScript::new(label, "mock-bscpylgtvcommand", &body)
     }
@@ -184,6 +186,95 @@ impl MockBscpylgtv {
 }
 
 #[allow(dead_code)]
+pub struct MockSwayidle {
+    _temp_dir: TestDir,
+    state_path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl MockSwayidle {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let state_path = temp_dir.path().join("state.json");
+        let mock = Self {
+            _temp_dir: temp_dir,
+            state_path,
+        };
+        mock.save_state(json!({
+            "help_mode": "systemd",
+            "invocations": [],
+        }));
+        mock
+    }
+
+    pub fn command_path(&self) -> &'static str {
+        "python3"
+    }
+
+    pub fn command_args(&self) -> Vec<String> {
+        vec![
+            Self::script_path().to_string_lossy().into_owned(),
+            "--state".to_string(),
+            self.state_path.to_string_lossy().into_owned(),
+        ]
+    }
+
+    pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
+        let python_path = shell_quote(&python3_path());
+        let script_path = shell_quote(&Self::script_path());
+        let state_path = shell_quote(&self.state_path);
+        let body =
+            format!("#!/bin/sh\nexec {python_path} {script_path} --state {state_path} \"$@\"\n");
+
+        ExecutableScript::new(label, "swayidle", &body)
+    }
+
+    pub fn disable_systemd_hooks_in_help(&self) {
+        self.patch_state(json!({ "help_mode": "minimal" }));
+    }
+
+    pub fn invocations(&self) -> Vec<MockSwayidleInvocation> {
+        self.load_state()
+            .get("invocations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(MockSwayidleInvocation::from_value)
+            .collect()
+    }
+
+    fn script_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("mock_swayidle.py")
+    }
+
+    fn patch_state(&self, patch: Value) {
+        let mut state = self.load_state();
+        let state_object = state.as_object_mut().expect("mock state object");
+        let patch_object = patch.as_object().expect("state patch object");
+        for (key, value) in patch_object {
+            state_object.insert(key.clone(), value.clone());
+        }
+        self.save_state(state);
+    }
+
+    fn load_state(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(&self.state_path).expect("read mock state"))
+            .expect("parse mock state")
+    }
+
+    fn save_state(&self, state: Value) {
+        fs::write(
+            &self.state_path,
+            serde_json::to_string_pretty(&state).expect("serialize mock state"),
+        )
+        .expect("write mock state");
+    }
+}
+
+#[allow(dead_code)]
 pub struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     original_values: Vec<(OsString, Option<OsString>)>,
@@ -193,7 +284,9 @@ pub struct TestEnv {
 impl TestEnv {
     pub fn new() -> Self {
         Self {
-            _guard: env_lock().lock().expect("acquire test env lock"),
+            _guard: env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
             original_values: Vec::new(),
         }
     }
@@ -432,6 +525,143 @@ pub struct MockStateSnapshot {
     pub input: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct MockSwayidleInvocation {
+    pub argv: Vec<String>,
+    pub wait: bool,
+    pub debug: bool,
+    pub config_path: Option<String>,
+    pub seat: Option<String>,
+    pub events: Vec<MockSwayidleEvent>,
+}
+
+impl MockSwayidleInvocation {
+    fn from_value(value: &Value) -> Self {
+        let object = value.as_object().expect("mock swayidle invocation object");
+        Self {
+            argv: object
+                .get("argv")
+                .and_then(Value::as_array)
+                .expect("invocation argv array")
+                .iter()
+                .map(|value| value.as_str().expect("argv string").to_string())
+                .collect(),
+            wait: object
+                .get("wait")
+                .and_then(Value::as_bool)
+                .expect("invocation wait bool"),
+            debug: object
+                .get("debug")
+                .and_then(Value::as_bool)
+                .expect("invocation debug bool"),
+            config_path: object
+                .get("config_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            seat: object
+                .get("seat")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            events: object
+                .get("events")
+                .and_then(Value::as_array)
+                .expect("invocation events array")
+                .iter()
+                .map(MockSwayidleEvent::from_value)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MockSwayidleEvent {
+    Timeout {
+        timeout: u64,
+        command: String,
+        resume: Option<String>,
+    },
+    BeforeSleep {
+        command: String,
+    },
+    AfterResume {
+        command: String,
+    },
+    Lock {
+        command: String,
+    },
+    Unlock {
+        command: String,
+    },
+    Idlehint {
+        timeout: u64,
+    },
+}
+
+impl MockSwayidleEvent {
+    fn from_value(value: &Value) -> Self {
+        let object = value.as_object().expect("mock swayidle event object");
+        let kind = object
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("event kind string");
+
+        match kind {
+            "timeout" => Self::Timeout {
+                timeout: object
+                    .get("timeout")
+                    .and_then(Value::as_u64)
+                    .expect("timeout value"),
+                command: object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("timeout command")
+                    .to_string(),
+                resume: object
+                    .get("resume")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            },
+            "before-sleep" => Self::BeforeSleep {
+                command: object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("before-sleep command")
+                    .to_string(),
+            },
+            "after-resume" => Self::AfterResume {
+                command: object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("after-resume command")
+                    .to_string(),
+            },
+            "lock" => Self::Lock {
+                command: object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("lock command")
+                    .to_string(),
+            },
+            "unlock" => Self::Unlock {
+                command: object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("unlock command")
+                    .to_string(),
+            },
+            "idlehint" => Self::Idlehint {
+                timeout: object
+                    .get("timeout")
+                    .and_then(Value::as_u64)
+                    .expect("idlehint timeout"),
+            },
+            other => panic!("unsupported mock swayidle event kind `{other}`"),
+        }
+    }
+}
+
 struct TestDir {
     path: PathBuf,
 }
@@ -468,6 +698,25 @@ impl Drop for TestDir {
 fn env_lock() -> &'static Mutex<()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn python3_path() -> PathBuf {
+    find_command_in_path("python3")
+        .or_else(|| find_command_in_path("python"))
+        .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
+fn find_command_in_path(command: &str) -> Option<PathBuf> {
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        let path = PathBuf::from(command);
+        return path.is_file().then_some(path);
+    }
+
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file().then_some(candidate)
+    })
 }
 
 fn shell_quote(path: &Path) -> String {

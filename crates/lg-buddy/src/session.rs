@@ -8,11 +8,26 @@ pub enum SessionEvent {
     Idle,
     Active,
     WakeRequested,
+    BeforeSleep,
+    AfterResume,
+    Lock,
+    Unlock,
     UserActivity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleTimeoutSource {
+    DesktopEnvironment,
+    LgBuddyConfigured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionBackendCapabilities {
+    pub idle_timeout_source: IdleTimeoutSource,
+    pub wake_requested: bool,
+    pub before_sleep: bool,
+    pub after_resume: bool,
+    pub lock_unlock: bool,
     pub early_user_activity: bool,
 }
 

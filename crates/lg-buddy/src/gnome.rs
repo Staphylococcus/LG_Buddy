@@ -3,7 +3,8 @@ use std::process::Command;
 use crate::backend::{BackendProbe, SystemBackendProbe};
 use crate::config::ScreenBackend;
 use crate::session::{
-    SessionBackend, SessionBackendCapabilities, SessionBackendError, SessionEvent,
+    IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
+    SessionEvent,
 };
 
 const GNOME_DBUS_NAME: &str = "org.gnome.ScreenSaver";
@@ -108,6 +109,11 @@ impl<P: GnomeProbe> SessionBackend for GnomeBackend<P> {
         }
 
         Ok(SessionBackendCapabilities {
+            idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
+            wake_requested: true,
+            before_sleep: false,
+            after_resume: false,
+            lock_unlock: false,
             early_user_activity: status.idle_monitor_available,
         })
     }
@@ -143,7 +149,8 @@ mod tests {
     use super::{map_monitor_line, GnomeBackend, GnomeBackendStatus, GnomeProbe};
     use crate::config::ScreenBackend;
     use crate::session::{
-        SessionBackend, SessionBackendCapabilities, SessionBackendError, SessionEvent,
+        IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
+        SessionEvent,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -206,6 +213,11 @@ mod tests {
         assert_eq!(
             backend.capabilities().expect("backend should be available"),
             SessionBackendCapabilities {
+                idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
+                wake_requested: true,
+                before_sleep: false,
+                after_resume: false,
+                lock_unlock: false,
                 early_user_activity: true,
             }
         );
@@ -230,6 +242,11 @@ mod tests {
         assert_eq!(
             backend.capabilities().expect("backend should be available"),
             SessionBackendCapabilities {
+                idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
+                wake_requested: true,
+                before_sleep: false,
+                after_resume: false,
+                lock_unlock: false,
                 early_user_activity: false,
             }
         );

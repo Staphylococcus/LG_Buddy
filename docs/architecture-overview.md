@@ -34,7 +34,7 @@ main.rs
            -> tv.rs
            -> wol.rs
            -> backend.rs
-           -> session.rs / gnome.rs
+           -> session.rs / gnome.rs / swayidle.rs
 ```
 
 The intended split is:
@@ -70,6 +70,10 @@ The intended split is:
 - `gnome.rs`
   - GNOME-specific capability probing and event mapping
   - currently an interface skeleton, not the full event loop
+- `swayidle.rs`
+  - `swayidle`-specific capability probing and hook-to-event mapping
+  - keeps `swayidle` as an external-tool backend rather than reimplementing
+    idle management
 
 ## Command Model
 
@@ -245,17 +249,32 @@ Desktop backends should only answer questions like:
 - which session signals are available?
 - how should backend-specific signals map into runtime events?
 
-`session.rs` defines the backend-neutral model:
+`session.rs` defines the backend-neutral semantic contract:
 
-- `Idle`
-- `Active`
-- `WakeRequested`
-- `UserActivity`
+- canonical session events
+  - `Idle`
+  - `Active`
+  - `WakeRequested`
+  - `UserActivity`
+  - `BeforeSleep`
+  - `AfterResume`
+  - `Lock`
+  - `Unlock`
+- backend capability flags
+- idle-timeout ownership semantics
+
+The detailed target model is documented in
+`docs/session-backend-model.md`.
 
 `gnome.rs` is the first native backend slice. It currently provides:
 
 - capability probing
 - mapping from GNOME D-Bus monitor lines into `SessionEvent`
+
+`swayidle.rs` is the first delegated-tool backend slice. It currently provides:
+
+- capability probing
+- mapping from `swayidle` hooks into `SessionEvent`
 
 The full GNOME session monitor/event loop has not been migrated yet.
 

@@ -4,6 +4,7 @@ pub mod config;
 pub mod gnome;
 pub mod session;
 pub mod state;
+pub mod swayidle;
 pub mod tv;
 pub mod wol;
 
