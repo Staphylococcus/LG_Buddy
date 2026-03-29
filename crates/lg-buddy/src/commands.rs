@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::env;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -23,6 +26,47 @@ struct ThreadSleeper;
 impl Sleeper for ThreadSleeper {
     fn sleep(&self, duration: Duration) {
         thread::sleep(duration);
+    }
+}
+
+trait RebootDetector {
+    fn is_reboot_pending(&self) -> io::Result<bool>;
+}
+
+struct SystemctlRebootDetector {
+    command_path: PathBuf,
+}
+
+impl Default for SystemctlRebootDetector {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl SystemctlRebootDetector {
+    fn from_env() -> Self {
+        Self {
+            command_path: env::var_os("LG_BUDDY_SYSTEMCTL")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("systemctl")),
+        }
+    }
+}
+
+impl RebootDetector for SystemctlRebootDetector {
+    fn is_reboot_pending(&self) -> io::Result<bool> {
+        let output = ProcessCommand::new(&self.command_path)
+            .arg("list-jobs")
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .any(|line| line.contains("reboot.target") && line.contains("start")))
     }
 }
 
@@ -53,6 +97,15 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
         &sleeper,
         mode,
     )
+}
+
+pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let tv_client = BscpylgtvCommandClient::from_env();
+    let reboot_detector = SystemctlRebootDetector::default();
+
+    run_shutdown_with(writer, &config, &tv_client, &reboot_detector)
 }
 
 pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -187,6 +240,56 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     Err(RunError::Policy(format!(
         "startup set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
     )))
+}
+
+fn run_shutdown_with<W: Write, C: TvClient, R: RebootDetector>(
+    writer: &mut W,
+    config: &Config,
+    tv_client: &C,
+    reboot_detector: &R,
+) -> Result<(), RunError> {
+    match reboot_detector.is_reboot_pending() {
+        Ok(true) => {
+            writeln!(writer, "LG Buddy Shutdown: Reboot; ignoring")?;
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            writeln!(
+                writer,
+                "LG Buddy Shutdown: Could not determine reboot state. Continuing shutdown. {err}"
+            )?;
+        }
+    }
+
+    let tv = TvDevice::new(tv_client, config.tv_ip);
+
+    match tv.input().current() {
+        Ok(current_input) if current_input.is_hdmi(config.input) => {
+            writeln!(
+                writer,
+                "LG Buddy Shutdown: TV is on {}. Turning off for shutdown.",
+                config.input.as_str()
+            )?;
+            log_shutdown_power_off_failure(writer, tv.power().off())?;
+        }
+        Ok(current_input) => {
+            writeln!(
+                writer,
+                "LG Buddy Shutdown: TV is on {current_input} (not {}). Skipping.",
+                config.input.as_str()
+            )?;
+        }
+        Err(_) => {
+            writeln!(
+                writer,
+                "LG Buddy Shutdown: Could not query TV input. Proceeding with power_off."
+            )?;
+            log_shutdown_power_off_failure(writer, tv.power().off())?;
+        }
+    }
+
+    Ok(())
 }
 
 fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
@@ -366,6 +469,20 @@ fn handle_known_input<W: Write, C: TvClient>(
     Ok(())
 }
 
+fn log_shutdown_power_off_failure<W: Write>(
+    writer: &mut W,
+    result: Result<crate::tv::CommandOutput, crate::tv::TvError>,
+) -> Result<(), RunError> {
+    if let Err(err) = result {
+        writeln!(
+            writer,
+            "LG Buddy Shutdown: power_off failed, continuing shutdown. {err}"
+        )?;
+    }
+
+    Ok(())
+}
+
 fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     writer: &mut W,
     prefix: &str,
@@ -393,7 +510,10 @@ fn startup_retry_delay(attempt: u32) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_screen_off_with, run_screen_on_with, run_startup_with, Sleeper};
+    use super::{
+        run_screen_off_with, run_screen_on_with, run_shutdown_with, run_startup_with,
+        RebootDetector, Sleeper,
+    };
     use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::{CommandOutput, TvClient, TvError};
@@ -402,6 +522,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
+    use std::io;
     use std::net::Ipv4Addr;
     use std::path::{Path, PathBuf};
     use std::process;
@@ -903,6 +1024,102 @@ mod tests {
         assert!(rendered(&output).contains("set_input failed after 6 attempts"));
     }
 
+    #[test]
+    fn shutdown_ignores_reboot() {
+        let client = FakeTvClient::new();
+        let detector = FakeRebootDetector::pending();
+
+        let mut output = Vec::new();
+        run_shutdown_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &client,
+            &detector,
+        )
+        .expect("reboot should be ignored");
+
+        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert!(rendered(&output).contains("Reboot; ignoring"));
+    }
+
+    #[test]
+    fn shutdown_powers_off_when_configured_input_is_active() {
+        let client = FakeTvClient::new()
+            .with_current_input(Ok("com.webos.app.hdmi3".to_string()))
+            .with_power_off(Ok(command_output("powered off\n")));
+        let detector = FakeRebootDetector::clear();
+
+        let mut output = Vec::new();
+        run_shutdown_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi3),
+            &client,
+            &detector,
+        )
+        .expect("matching input should power off");
+
+        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert!(rendered(&output).contains("TV is on HDMI_3. Turning off for shutdown."));
+    }
+
+    #[test]
+    fn shutdown_skips_when_tv_is_on_different_input() {
+        let client = FakeTvClient::new().with_current_input(Ok("com.webos.app.hdmi1".to_string()));
+        let detector = FakeRebootDetector::clear();
+
+        let mut output = Vec::new();
+        run_shutdown_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi4),
+            &client,
+            &detector,
+        )
+        .expect("nonmatching input should skip");
+
+        assert_eq!(client.calls(), vec!["get_input"]);
+        assert!(rendered(&output).contains("TV is on HDMI_1 (not HDMI_4). Skipping."));
+    }
+
+    #[test]
+    fn shutdown_falls_back_to_power_off_when_input_query_fails() {
+        let client = FakeTvClient::new()
+            .with_current_input(Err(command_failed("get_input", 1, "offline\n")))
+            .with_power_off(Ok(command_output("powered off\n")));
+        let detector = FakeRebootDetector::clear();
+
+        let mut output = Vec::new();
+        run_shutdown_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &client,
+            &detector,
+        )
+        .expect("query failure should still power off");
+
+        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert!(rendered(&output).contains("Could not query TV input. Proceeding with power_off."));
+    }
+
+    #[test]
+    fn shutdown_logs_power_off_failure_but_does_not_error() {
+        let client = FakeTvClient::new()
+            .with_current_input(Ok("com.webos.app.hdmi2".to_string()))
+            .with_power_off(Err(command_failed("power_off", 1, "already off\n")));
+        let detector = FakeRebootDetector::clear();
+
+        let mut output = Vec::new();
+        run_shutdown_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &client,
+            &detector,
+        )
+        .expect("power_off failure should not abort shutdown");
+
+        assert_eq!(client.calls(), vec!["get_input", "power_off"]);
+        assert!(rendered(&output).contains("power_off failed, continuing shutdown."));
+    }
+
     fn sample_config(input: HdmiInput) -> Config {
         Config {
             tv_ip: "192.168.1.42".parse::<Ipv4Addr>().expect("parse ipv4"),
@@ -1064,6 +1281,29 @@ mod tests {
     impl Sleeper for RecordingSleeper {
         fn sleep(&self, duration: Duration) {
             self.durations.borrow_mut().push(duration);
+        }
+    }
+
+    struct FakeRebootDetector {
+        pending: io::Result<bool>,
+    }
+
+    impl FakeRebootDetector {
+        fn clear() -> Self {
+            Self { pending: Ok(false) }
+        }
+
+        fn pending() -> Self {
+            Self { pending: Ok(true) }
+        }
+    }
+
+    impl RebootDetector for FakeRebootDetector {
+        fn is_reboot_pending(&self) -> io::Result<bool> {
+            match &self.pending {
+                Ok(value) => Ok(*value),
+                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
+            }
         }
     }
 

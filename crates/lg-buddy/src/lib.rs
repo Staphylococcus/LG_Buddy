@@ -9,7 +9,7 @@ use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
 };
-use crate::commands::{run_screen_off, run_screen_on};
+use crate::commands::{run_screen_off, run_screen_on, run_shutdown};
 use crate::config::{ConfigError, ConfigPathError};
 use crate::state::StateDirError;
 use std::fmt;
@@ -146,7 +146,7 @@ impl Command {
     pub fn placeholder_message(self) -> &'static str {
         match self {
             Self::Startup(_) => "TODO: implemented via command handler",
-            Self::Shutdown => "TODO: implement shutdown command",
+            Self::Shutdown => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
@@ -165,7 +165,7 @@ Usage:
 
 Commands:
   startup [mode]  Start or restore the TV output
-  shutdown        Placeholder shutdown command
+  shutdown        Power off the TV when LG Buddy owns the active input
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
   detect-backend  Detect the active screen backend
@@ -235,13 +235,10 @@ where
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
+        Command::Shutdown => run_shutdown(writer),
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
-        _ => {
-            writeln!(writer, "{}", command.placeholder_message())?;
-            Ok(())
-        }
     }
 }
 
@@ -255,7 +252,7 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, run_command, usage, Command, ParseError, ParseOutcome, StartupMode};
+    use super::{parse_args, usage, Command, ParseError, ParseOutcome, StartupMode};
 
     #[test]
     fn no_args_prints_help() {
@@ -347,11 +344,11 @@ mod tests {
     }
 
     #[test]
-    fn run_command_prints_placeholder_message() {
-        let mut output = Vec::new();
-        run_command(Command::Shutdown, &mut output).expect("write placeholder message");
+    fn usage_mentions_startup_modes() {
+        let help = usage("lg-buddy");
 
-        let rendered = String::from_utf8(output).expect("utf8 output");
-        assert_eq!(rendered, "TODO: implement shutdown command\n");
+        for mode in ["auto", "boot", "wake"] {
+            assert!(help.contains(mode), "missing startup mode `{mode}`");
+        }
     }
 }
