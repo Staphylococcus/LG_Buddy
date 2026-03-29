@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod commands;
 pub mod config;
+pub mod gnome;
+pub mod session;
 pub mod state;
 pub mod tv;
 pub mod wol;
