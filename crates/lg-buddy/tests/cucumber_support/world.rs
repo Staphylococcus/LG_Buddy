@@ -1,5 +1,6 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, MockGdbus, RuntimeStateLayout, TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockGdbus, MockSwayidle, RuntimeStateLayout, TestConfigFile,
+    TestEnv,
 };
 use cucumber::World;
 use std::fmt;
@@ -13,6 +14,7 @@ pub struct LgBuddyWorld {
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
     gdbus: Option<MockGdbus>,
+    swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
     command_result: Option<CommandExecution>,
 }
@@ -31,6 +33,7 @@ impl fmt::Debug for LgBuddyWorld {
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
             .field("gdbus", &self.gdbus.is_some())
+            .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
             .field("command_result", &self.command_result)
             .finish()
@@ -124,9 +127,40 @@ impl LgBuddyWorld {
         );
     }
 
+    pub fn gnome_idle_monitor_reports_recent_user_activity(&mut self) {
+        let gdbus = self.ensure_mock_gdbus();
+        gdbus.set_idle_monitor_available(true);
+        gdbus.queue_idle_monitor_idletime(1500);
+        gdbus.queue_idle_monitor_idletime(0);
+    }
+
+    pub fn gnome_monitor_stays_open_briefly(&mut self) {
+        self.ensure_mock_gdbus().set_monitor_sleep_secs(1.0);
+    }
+
     pub fn install_swayidle_stub(&mut self) {
-        let script = ExecutableScript::new("cucumber-swayidle", "swayidle", "#!/bin/sh\nexit 0\n");
-        self.prepend_path_script(script);
+        if self.swayidle.is_none() {
+            let swayidle = MockSwayidle::new("cucumber-swayidle");
+            let wrapper = swayidle.command_wrapper("cucumber-swayidle-wrapper");
+            self.prepend_path_script(wrapper);
+            self.swayidle = Some(swayidle);
+        }
+    }
+
+    pub fn swayidle_emits_timeout(&mut self) {
+        self.install_swayidle_stub();
+        self.swayidle
+            .as_ref()
+            .expect("mock swayidle configured")
+            .queue_timeout_emission();
+    }
+
+    pub fn swayidle_emits_resume(&mut self) {
+        self.install_swayidle_stub();
+        self.swayidle
+            .as_ref()
+            .expect("mock swayidle configured")
+            .queue_resume_emission();
     }
 
     pub fn install_systemctl_stub(&mut self, reboot_pending: bool) {

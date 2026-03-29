@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -28,7 +29,9 @@ DEFAULT_STATE = {
     "screen_saver_available": True,
     "idle_monitor_available": True,
     "idle_monitor_idletime": 1500,
+    "idle_monitor_idletime_plan": [],
     "monitor_lines": [],
+    "monitor_sleep_secs": 0.0,
     "invocations": [],
 }
 
@@ -54,6 +57,7 @@ def load_state(path: Path) -> dict[str, object]:
 
     state = DEFAULT_STATE.copy()
     state.update(data)
+    state.setdefault("idle_monitor_idletime_plan", [])
     state.setdefault("monitor_lines", [])
     state.setdefault("invocations", [])
     return state
@@ -97,8 +101,10 @@ def handle_call(state: dict[str, object], argv: list[str]) -> int:
     if method == "org.freedesktop.DBus.NameHasOwner" and argv[-1] == "org.gnome.Shell":
         if bool(state.get("shell_available", True)):
             sys.stdout.write("(true,)\n")
+            sys.stdout.flush()
         else:
             sys.stdout.write("(false,)\n")
+            sys.stdout.flush()
         return 0
 
     if (
@@ -111,6 +117,7 @@ def handle_call(state: dict[str, object], argv: list[str]) -> int:
                 "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: org.gnome.ScreenSaver is unavailable"
             )
         sys.stdout.write("(false,)\n")
+        sys.stdout.flush()
         return 0
 
     if (
@@ -122,8 +129,16 @@ def handle_call(state: dict[str, object], argv: list[str]) -> int:
             return print_dbus_error(
                 "Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: org.gnome.Mutter.IdleMonitor is unavailable"
             )
-        idletime = int(state.get("idle_monitor_idletime", 1500))
+        idletime_plan = state.get("idle_monitor_idletime_plan", [])
+        if not isinstance(idletime_plan, list):
+            raise TypeError("state idle_monitor_idletime_plan must be a list")
+
+        if idletime_plan:
+            idletime = int(idletime_plan.pop(0))
+        else:
+            idletime = int(state.get("idle_monitor_idletime", 1500))
         sys.stdout.write(f"(uint64 {idletime},)\n")
+        sys.stdout.flush()
         return 0
 
     return print_dbus_error(f"unsupported mock gdbus call: {' '.join(argv)}")
@@ -154,6 +169,11 @@ def handle_monitor(state: dict[str, object], argv: list[str]) -> int:
 
     for line in monitor_lines:
         sys.stdout.write(f"{line}\n")
+        sys.stdout.flush()
+
+    monitor_sleep_secs = float(state.get("monitor_sleep_secs", 0.0))
+    if monitor_sleep_secs > 0:
+        time.sleep(monitor_sleep_secs)
 
     return 0
 

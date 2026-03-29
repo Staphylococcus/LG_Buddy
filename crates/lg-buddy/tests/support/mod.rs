@@ -202,6 +202,7 @@ impl MockSwayidle {
         };
         mock.save_state(json!({
             "help_mode": "systemd",
+            "emissions": [],
             "invocations": [],
         }));
         mock
@@ -233,6 +234,22 @@ impl MockSwayidle {
         self.patch_state(json!({ "help_mode": "minimal" }));
     }
 
+    pub fn queue_timeout_emission(&self) {
+        self.queue_emission("timeout");
+    }
+
+    pub fn queue_resume_emission(&self) {
+        self.queue_emission("resume");
+    }
+
+    pub fn queue_before_sleep_emission(&self) {
+        self.queue_emission("before-sleep");
+    }
+
+    pub fn queue_after_resume_emission(&self) {
+        self.queue_emission("after-resume");
+    }
+
     pub fn invocations(&self) -> Vec<MockSwayidleInvocation> {
         self.load_state()
             .get("invocations")
@@ -248,6 +265,20 @@ impl MockSwayidle {
             .join("../..")
             .join("tools")
             .join("mock_swayidle.py")
+    }
+
+    fn queue_emission(&self, emission: &str) {
+        let mut state = self.load_state();
+        let emissions = state
+            .as_object_mut()
+            .expect("mock swayidle state object")
+            .entry("emissions")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        emissions
+            .as_array_mut()
+            .expect("emissions array")
+            .push(Value::String(emission.to_string()));
+        self.save_state(state);
     }
 
     fn patch_state(&self, patch: Value) {
@@ -294,7 +325,9 @@ impl MockGdbus {
             "screen_saver_available": true,
             "idle_monitor_available": true,
             "idle_monitor_idletime": 1500,
+            "idle_monitor_idletime_plan": [],
             "monitor_lines": [],
+            "monitor_sleep_secs": 0.0,
             "invocations": [],
         }));
         mock
@@ -336,6 +369,23 @@ impl MockGdbus {
 
     pub fn set_idle_monitor_idletime(&self, value: u64) {
         self.patch_state(json!({ "idle_monitor_idletime": value }));
+    }
+
+    pub fn queue_idle_monitor_idletime(&self, value: u64) {
+        let mut state = self.load_state();
+        let plan = state
+            .as_object_mut()
+            .expect("mock gdbus state object")
+            .entry("idle_monitor_idletime_plan")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        plan.as_array_mut()
+            .expect("idle monitor idletime plan array")
+            .push(Value::from(value));
+        self.save_state(state);
+    }
+
+    pub fn set_monitor_sleep_secs(&self, value: f64) {
+        self.patch_state(json!({ "monitor_sleep_secs": value }));
     }
 
     pub fn push_monitor_line(&self, line: &str) {

@@ -2,6 +2,10 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
@@ -11,11 +15,16 @@ use crate::commands::{run_screen_off, run_screen_on};
 use crate::config::ScreenBackend;
 use crate::gnome::{map_monitor_line, GnomeBackend, SystemGnomeProbe};
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
+use crate::state::{ScreenOwnershipMarker, StateDirError, StateScope};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
 const GNOME_DBUS_NAME: &str = "org.gnome.ScreenSaver";
 const GNOME_DBUS_PATH: &str = "/org/gnome/ScreenSaver";
+const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
+const GNOME_IDLE_MONITOR_PATH: &str = "/org/gnome/Mutter/IdleMonitor/Core";
+const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
+const GNOME_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub trait SessionActionExecutor {
     fn screen_off(&mut self) -> Result<String, RunError>;
@@ -38,6 +47,7 @@ impl SessionActionExecutor for RuntimeActionExecutor {
 #[derive(Debug)]
 pub enum SessionRunnerError {
     Io(String),
+    StateDir(StateDirError),
     BackendUnavailable(SessionBackendError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
@@ -56,6 +66,7 @@ impl fmt::Display for SessionRunnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(message) => write!(f, "{message}"),
+            Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendUnavailable(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
@@ -79,6 +90,7 @@ impl fmt::Display for SessionRunnerError {
 impl Error for SessionRunnerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::StateDir(err) => Some(err),
             Self::BackendUnavailable(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
@@ -149,6 +161,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     run_monitor_with_executor(writer, RuntimeActionExecutor).map_err(|err| match err {
+        SessionRunnerError::StateDir(err) => RunError::StateDir(err),
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
         other => RunError::Policy(other.to_string()),
@@ -190,46 +203,56 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
-    if capabilities.early_user_activity {
-        writeln!(
-            writer,
-            "LG Buddy Monitor: Mutter idle-monitor support detected; early user activity handling is not wired yet."
-        )?;
-    }
-
-    let mut child = ProcessCommand::new("gdbus")
-        .args([
-            "monitor",
-            "--session",
-            "--dest",
-            GNOME_DBUS_NAME,
-            "--object-path",
-            GNOME_DBUS_PATH,
-        ])
-        .stdout(Stdio::piped())
-        .spawn()?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
-            message: "gdbus monitor did not expose stdout".to_string(),
-        })?;
-
-    process_gnome_monitor_output(BufReader::new(stdout), writer, dispatcher)?;
-
-    let status = child.wait()?;
-    if status.success() {
-        Ok(())
+    let marker = if capabilities.early_user_activity {
+        Some(
+            ScreenOwnershipMarker::from_env(StateScope::Session)
+                .map_err(SessionRunnerError::StateDir)?,
+        )
     } else {
-        Err(SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
-            message: format!("gdbus monitor exited with status {status}"),
-        })
+        None
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    let monitor_handle = spawn_gnome_monitor_thread(sender.clone());
+    let mut activity_watcher = None;
+    let mut monitor_result = Ok(());
+
+    while let Ok(message) = receiver.recv() {
+        match message {
+            RunnerMessage::SessionEvent(SessionEvent::Idle) => {
+                dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
+                if let Some(marker) = marker.as_ref() {
+                    start_gnome_activity_watcher(
+                        &mut activity_watcher,
+                        sender.clone(),
+                        marker.clone(),
+                    );
+                }
+            }
+            RunnerMessage::SessionEvent(
+                event @ (SessionEvent::Active
+                | SessionEvent::WakeRequested
+                | SessionEvent::UserActivity),
+            ) => {
+                stop_gnome_activity_watcher(&mut activity_watcher);
+                dispatcher.dispatch_event(writer, event)?;
+            }
+            RunnerMessage::SessionEvent(event) => {
+                dispatcher.dispatch_event(writer, event)?;
+            }
+            RunnerMessage::MonitorExited(result) => {
+                stop_gnome_activity_watcher(&mut activity_watcher);
+                monitor_result = result;
+                break;
+            }
+        }
     }
+
+    let _ = monitor_handle.join();
+    monitor_result
 }
 
+#[cfg(test)]
 fn process_gnome_monitor_output<R: BufRead, W: Write, E: SessionActionExecutor>(
     reader: R,
     writer: &mut W,
@@ -239,6 +262,22 @@ fn process_gnome_monitor_output<R: BufRead, W: Write, E: SessionActionExecutor>(
         let line = line?;
         if let Some(event) = map_monitor_line(&line) {
             dispatcher.dispatch_event(writer, event)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn forward_gnome_monitor_output<R: BufRead>(
+    reader: R,
+    sender: &mpsc::Sender<RunnerMessage>,
+) -> Result<(), SessionRunnerError> {
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(event) = map_monitor_line(&line) {
+            if sender.send(RunnerMessage::SessionEvent(event)).is_err() {
+                break;
+            }
         }
     }
 
@@ -266,6 +305,172 @@ fn wait_for_gnome_shell() -> Result<(), SessionRunnerError> {
     }
 }
 
+fn spawn_gnome_monitor_thread(sender: mpsc::Sender<RunnerMessage>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let result = run_gnome_monitor_process(&sender);
+        let _ = sender.send(RunnerMessage::MonitorExited(result));
+    })
+}
+
+fn run_gnome_monitor_process(
+    sender: &mpsc::Sender<RunnerMessage>,
+) -> Result<(), SessionRunnerError> {
+    let mut child = ProcessCommand::new("gdbus")
+        .args([
+            "monitor",
+            "--session",
+            "--dest",
+            GNOME_DBUS_NAME,
+            "--object-path",
+            GNOME_DBUS_PATH,
+        ])
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| SessionRunnerError::Failed {
+            backend: ScreenBackend::Gnome,
+            message: "gdbus monitor did not expose stdout".to_string(),
+        })?;
+
+    forward_gnome_monitor_output(BufReader::new(stdout), sender)?;
+
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SessionRunnerError::Failed {
+            backend: ScreenBackend::Gnome,
+            message: format!("gdbus monitor exited with status {status}"),
+        })
+    }
+}
+
+enum RunnerMessage {
+    SessionEvent(SessionEvent),
+    MonitorExited(Result<(), SessionRunnerError>),
+}
+
+trait ActivityMarker {
+    fn exists(&self) -> bool;
+}
+
+impl ActivityMarker for ScreenOwnershipMarker {
+    fn exists(&self) -> bool {
+        ScreenOwnershipMarker::exists(self)
+    }
+}
+
+trait IdleMonitorProbe {
+    fn current_idletime_ms(&self) -> Option<u64>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SystemGnomeIdleMonitorProbe;
+
+impl IdleMonitorProbe for SystemGnomeIdleMonitorProbe {
+    fn current_idletime_ms(&self) -> Option<u64> {
+        let output = ProcessCommand::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                GNOME_IDLE_MONITOR_NAME,
+                "--object-path",
+                GNOME_IDLE_MONITOR_PATH,
+                "--method",
+                "org.gnome.Mutter.IdleMonitor.GetIdletime",
+            ])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        parse_gnome_idletime_output(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+struct GnomeActivityWatcher {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn start_gnome_activity_watcher(
+    watcher: &mut Option<GnomeActivityWatcher>,
+    sender: mpsc::Sender<RunnerMessage>,
+    marker: ScreenOwnershipMarker,
+) {
+    stop_gnome_activity_watcher(watcher);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_signal = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let probe = SystemGnomeIdleMonitorProbe;
+        if watch_for_early_user_activity(
+            &marker,
+            &probe,
+            &stop_signal,
+            GNOME_ACTIVE_THRESHOLD_MS,
+            GNOME_ACTIVE_POLL_INTERVAL,
+            thread::sleep,
+        ) {
+            let _ = sender.send(RunnerMessage::SessionEvent(SessionEvent::UserActivity));
+        }
+    });
+
+    *watcher = Some(GnomeActivityWatcher { stop, handle });
+}
+
+fn stop_gnome_activity_watcher(watcher: &mut Option<GnomeActivityWatcher>) {
+    if let Some(watcher) = watcher.take() {
+        watcher.stop.store(true, Ordering::SeqCst);
+        let _ = watcher.handle.join();
+    }
+}
+
+fn watch_for_early_user_activity<M, P, S>(
+    marker: &M,
+    probe: &P,
+    stop: &AtomicBool,
+    threshold_ms: u64,
+    poll_interval: Duration,
+    sleep: S,
+) -> bool
+where
+    M: ActivityMarker,
+    P: IdleMonitorProbe,
+    S: Fn(Duration),
+{
+    while marker.exists() && !stop.load(Ordering::SeqCst) {
+        if let Some(idletime_ms) = probe.current_idletime_ms() {
+            if idletime_ms < threshold_ms {
+                return true;
+            }
+        }
+
+        if stop.load(Ordering::SeqCst) || !marker.exists() {
+            break;
+        }
+
+        sleep(poll_interval);
+    }
+
+    false
+}
+
+fn parse_gnome_idletime_output(output: &str) -> Option<u64> {
+    output
+        .trim()
+        .strip_prefix("(uint64 ")?
+        .strip_suffix(",)")?
+        .parse::<u64>()
+        .ok()
+}
+
 fn run_action<F>(action: F) -> Result<String, RunError>
 where
     F: FnOnce(&mut Vec<u8>) -> Result<(), RunError>,
@@ -290,10 +495,16 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{process_gnome_monitor_output, SessionActionExecutor, SessionEventDispatcher};
+    use super::{
+        parse_gnome_idletime_output, process_gnome_monitor_output, watch_for_early_user_activity,
+        ActivityMarker, IdleMonitorProbe, SessionActionExecutor, SessionEventDispatcher,
+    };
     use crate::session::SessionEvent;
     use crate::RunError;
+    use std::cell::RefCell;
     use std::io::Cursor;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
 
     #[derive(Debug, Default)]
     struct FakeActionExecutor {
@@ -312,6 +523,32 @@ mod tests {
         fn screen_on(&mut self) -> Result<String, RunError> {
             self.screen_on_calls += 1;
             Ok(self.screen_on_output.clone())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FakeMarker {
+        exists: bool,
+    }
+
+    impl ActivityMarker for FakeMarker {
+        fn exists(&self) -> bool {
+            self.exists
+        }
+    }
+
+    struct FakeIdleMonitorProbe {
+        idletimes: RefCell<Vec<Option<u64>>>,
+    }
+
+    impl IdleMonitorProbe for FakeIdleMonitorProbe {
+        fn current_idletime_ms(&self) -> Option<u64> {
+            let mut idletimes = self.idletimes.borrow_mut();
+            if idletimes.is_empty() {
+                None
+            } else {
+                idletimes.remove(0)
+            }
         }
     }
 
@@ -412,5 +649,51 @@ unrelated\n";
         assert!(output.contains("Session became idle."));
         assert!(output.contains("wake-requested"));
         assert!(output.contains("active"));
+    }
+
+    #[test]
+    fn parses_gnome_idle_monitor_output() {
+        assert_eq!(parse_gnome_idletime_output("(uint64 777,)\n"), Some(777));
+        assert_eq!(parse_gnome_idletime_output("unexpected"), None);
+    }
+
+    #[test]
+    fn early_activity_watch_reports_recent_input_when_marker_exists() {
+        let marker = FakeMarker { exists: true };
+        let probe = FakeIdleMonitorProbe {
+            idletimes: RefCell::new(vec![Some(1500), Some(0)]),
+        };
+        let stop = AtomicBool::new(false);
+
+        let detected = watch_for_early_user_activity(
+            &marker,
+            &probe,
+            &stop,
+            1000,
+            Duration::from_millis(1),
+            |_| {},
+        );
+
+        assert!(detected);
+    }
+
+    #[test]
+    fn early_activity_watch_stops_when_marker_is_missing() {
+        let marker = FakeMarker { exists: false };
+        let probe = FakeIdleMonitorProbe {
+            idletimes: RefCell::new(vec![Some(0)]),
+        };
+        let stop = AtomicBool::new(false);
+
+        let detected = watch_for_early_user_activity(
+            &marker,
+            &probe,
+            &stop,
+            1000,
+            Duration::from_millis(1),
+            |_| {},
+        );
+
+        assert!(!detected);
     }
 }

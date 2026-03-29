@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 
 DEFAULT_STATE = {
     "help_mode": "systemd",
+    "emissions": [],
     "invocations": [],
 }
 
@@ -42,6 +44,7 @@ def load_state(path: Path) -> dict[str, object]:
 
     state = DEFAULT_STATE.copy()
     state.update(data)
+    state.setdefault("emissions", [])
     state.setdefault("invocations", [])
     return state
 
@@ -148,6 +151,34 @@ def parse_invocation(argv: list[str]) -> dict[str, object]:
     }
 
 
+def emit_command(command: str) -> None:
+    subprocess.run(["/bin/sh", "-c", command], check=False)
+
+
+def emit_planned_events(state: dict[str, object], invocation: dict[str, object]) -> None:
+    emissions = state.get("emissions", [])
+    if not isinstance(emissions, list):
+        raise TypeError("state emissions must be a list")
+
+    timeout_events = [event for event in invocation["events"] if event["kind"] == "timeout"]
+
+    for emission in emissions:
+        if emission == "timeout":
+            for event in timeout_events:
+                emit_command(str(event["command"]))
+        elif emission == "resume":
+            for event in timeout_events:
+                resume = event.get("resume")
+                if resume:
+                    emit_command(str(resume))
+        elif emission in {"before-sleep", "after-resume", "lock", "unlock"}:
+            for event in invocation["events"]:
+                if event["kind"] == emission:
+                    emit_command(str(event["command"]))
+
+    state["emissions"] = []
+
+
 def main(argv: list[str]) -> int:
     state_path, args = parse_global_args(argv)
     state = load_state(state_path)
@@ -176,6 +207,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     record_invocation(state, invocation)
+    emit_planned_events(state, invocation)
     save_state(state_path, state)
     return 0
 

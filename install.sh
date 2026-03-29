@@ -18,6 +18,7 @@ MISSING_PKGS=()
 SCREEN_MONITOR_AVAILABLE=0
 SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
 SCREEN_MONITOR_RUNTIME_BACKEND=""
+SYSTEM_CONFIG_OVERRIDE_TMP=""
 
 check_dep() {
     local label="$1"
@@ -35,6 +36,28 @@ check_dep "python3-venv"    "python3-venv"  "python3 -c 'import venv'"
 check_dep "python3-pip"     "python3-pip"   "python3 -m pip --version"
 check_dep "wakeonlan / wol" "wakeonlan"     "command -v wakeonlan || command -v wol"
 check_dep "zenity"          "zenity"        "command -v zenity"
+
+write_config_override() {
+    local override_file="$1"
+    local config_path="$2"
+    local escaped_config_path=""
+
+    escaped_config_path="${config_path//\\/\\\\}"
+    escaped_config_path="${escaped_config_path//\"/\\\"}"
+
+    cat >"$override_file" <<EOF
+[Service]
+Environment="LG_BUDDY_CONFIG=$escaped_config_path"
+EOF
+}
+
+cleanup() {
+    if [ -n "$SYSTEM_CONFIG_OVERRIDE_TMP" ]; then
+        rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+    fi
+}
+
+trap cleanup EXIT
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo ""
@@ -147,8 +170,6 @@ echo "Done."
 echo "Copying scripts to system directories and making executable..."
 sudo install -d /usr/lib/lg-buddy
 sudo install -m 755 ./bin/LG_Buddy_Common /usr/lib/lg-buddy/common.sh
-printf '%s\n' "$CONFIG_FILE" | sudo tee /usr/lib/lg-buddy/config-path >/dev/null
-sudo chmod 644 /usr/lib/lg-buddy/config-path
 
 sudo cp ./bin/LG_Buddy_Startup /usr/bin/
 sudo cp ./bin/LG_Buddy_Shutdown /usr/bin/
@@ -185,6 +206,16 @@ sudo cp ./systemd/LG_Buddy.service /etc/systemd/system/
 sudo cp ./systemd/LG_Buddy_wake.service /etc/systemd/system/
 sudo cp ./systemd/LG_Buddy_sleep.service /etc/systemd/system/
 sudo cp ./systemd/lg_buddy.conf /etc/tmpfiles.d/
+sudo install -d /etc/systemd/system/LG_Buddy.service.d
+sudo install -d /etc/systemd/system/LG_Buddy_wake.service.d
+sudo install -d /etc/systemd/system/LG_Buddy_sleep.service.d
+SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
+write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
+sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy.service.d/config.conf
+sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy_wake.service.d/config.conf
+sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy_sleep.service.d/config.conf
+rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+SYSTEM_CONFIG_OVERRIDE_TMP=""
 
 sudo systemctl daemon-reload
 sudo systemctl enable LG_Buddy.service
@@ -196,6 +227,8 @@ echo "Done."
 echo "Installing screen monitor user service..."
 mkdir -p ~/.config/systemd/user/
 cp ./systemd/LG_Buddy_screen.service ~/.config/systemd/user/
+mkdir -p ~/.config/systemd/user/LG_Buddy_screen.service.d
+write_config_override ~/.config/systemd/user/LG_Buddy_screen.service.d/config.conf "$CONFIG_FILE"
 systemctl --user daemon-reload
 
 if [ "$SCREEN_MONITOR_AVAILABLE" -eq 1 ]; then

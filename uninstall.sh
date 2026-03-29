@@ -29,6 +29,12 @@ systemctl --user stop LG_Buddy_screen.service
 sudo rm -f /etc/systemd/system/LG_Buddy.service
 sudo rm -f /etc/systemd/system/LG_Buddy_wake.service
 sudo rm -f /etc/systemd/system/LG_Buddy_sleep.service
+sudo rm -f /etc/systemd/system/LG_Buddy.service.d/config.conf
+sudo rm -f /etc/systemd/system/LG_Buddy_wake.service.d/config.conf
+sudo rm -f /etc/systemd/system/LG_Buddy_sleep.service.d/config.conf
+sudo rmdir /etc/systemd/system/LG_Buddy.service.d 2>/dev/null || true
+sudo rmdir /etc/systemd/system/LG_Buddy_wake.service.d 2>/dev/null || true
+sudo rmdir /etc/systemd/system/LG_Buddy_sleep.service.d 2>/dev/null || true
 rm -f ~/.config/systemd/user/LG_Buddy_screen.service
 rm -rf ~/.config/systemd/user/LG_Buddy_screen.service.d
 sudo systemctl daemon-reload

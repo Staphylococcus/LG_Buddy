@@ -66,9 +66,29 @@ fn gnome_requests_screen_wake(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_wake_requested();
 }
 
+#[given("GNOME idle monitor would soon report recent user activity")]
+fn gnome_idle_monitor_reports_recent_user_activity(world: &mut LgBuddyWorld) {
+    world.gnome_idle_monitor_reports_recent_user_activity();
+}
+
+#[given("GNOME monitor stays open briefly for background polling")]
+fn gnome_monitor_stays_open_briefly(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_stays_open_briefly();
+}
+
 #[given("swayidle is installed")]
 fn swayidle_installed(world: &mut LgBuddyWorld) {
     world.install_swayidle_stub();
+}
+
+#[given("swayidle will emit an idle timeout")]
+fn swayidle_will_emit_timeout(world: &mut LgBuddyWorld) {
+    world.swayidle_emits_timeout();
+}
+
+#[given("swayidle will emit a resume event")]
+fn swayidle_will_emit_resume(world: &mut LgBuddyWorld) {
+    world.swayidle_emits_resume();
 }
 
 #[given(regex = r#"the backend override is "([^"]+)""#)]
