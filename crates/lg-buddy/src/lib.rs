@@ -12,7 +12,7 @@ use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
 };
-use crate::commands::{run_screen_off, run_screen_on, run_shutdown};
+use crate::commands::{run_screen_off, run_screen_on, run_shutdown, run_sleep, run_sleep_pre};
 use crate::config::{ConfigError, ConfigPathError};
 use crate::session::runner::run_monitor;
 use crate::state::StateDirError;
@@ -23,6 +23,8 @@ use std::io::{self, Write};
 pub enum Command {
     Startup(StartupMode),
     Shutdown,
+    SleepPre,
+    Sleep,
     ScreenOff,
     ScreenOn,
     Monitor,
@@ -142,6 +144,8 @@ impl Command {
         match self {
             Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
+            Self::SleepPre => "sleep-pre",
+            Self::Sleep => "sleep",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
             Self::Monitor => "monitor",
@@ -153,6 +157,8 @@ impl Command {
         match self {
             Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implemented via command handler",
+            Self::SleepPre => "TODO: implemented via command handler",
+            Self::Sleep => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
             Self::Monitor => "TODO: implemented via command handler",
@@ -173,6 +179,8 @@ Usage:
 Commands:
   startup [mode]  Start or restore the TV output
   shutdown        Power off the TV when LG Buddy owns the active input
+  sleep-pre       Handle the pre-sleep TV power-off hook
+  sleep           Handle the NetworkManager pre-down sleep hook
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
   monitor         Run the user-session monitor loop
@@ -223,6 +231,8 @@ where
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
         "shutdown" => Command::Shutdown,
+        "sleep-pre" => Command::SleepPre,
+        "sleep" => Command::Sleep,
         "screen-off" => Command::ScreenOff,
         "screen-on" => Command::ScreenOn,
         "monitor" => Command::Monitor,
@@ -245,6 +255,8 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     match command {
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
+        Command::SleepPre => run_sleep_pre(writer),
+        Command::Sleep => run_sleep(writer),
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
@@ -293,6 +305,14 @@ mod tests {
         assert_eq!(
             parse_args(["shutdown"]),
             Ok(ParseOutcome::Command(Command::Shutdown))
+        );
+        assert_eq!(
+            parse_args(["sleep-pre"]),
+            Ok(ParseOutcome::Command(Command::SleepPre))
+        );
+        assert_eq!(
+            parse_args(["sleep"]),
+            Ok(ParseOutcome::Command(Command::Sleep))
         );
         assert_eq!(
             parse_args(["screen-off"]),
@@ -346,6 +366,8 @@ mod tests {
         for command in [
             "startup",
             "shutdown",
+            "sleep-pre",
+            "sleep",
             "screen-off",
             "screen-on",
             "monitor",

@@ -107,6 +107,11 @@ impl LgBuddyWorld {
             .set("LG_BUDDY_STARTUP_RETRY_DELAY_SECS", "0");
     }
 
+    pub fn disable_sleep_delays(&mut self) {
+        self.ensure_env()
+            .set("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", "0");
+    }
+
     pub fn install_gnome_shell_stub(&mut self) {
         self.ensure_mock_gdbus().set_shell_available(true);
     }
@@ -172,6 +177,18 @@ impl LgBuddyWorld {
         let body = format!("#!/bin/sh\ncat <<'EOF'\n{stdout}EOF\n");
         let script = ExecutableScript::new("cucumber-systemctl", "mock-systemctl", &body);
         self.ensure_env().set("LG_BUDDY_SYSTEMCTL", script.path());
+        self.path_scripts.push(script);
+    }
+
+    pub fn install_journalctl_stub(&mut self, sleep_requested: bool) {
+        let stdout = if sleep_requested {
+            "manager: sleep: sleep requested\n"
+        } else {
+            "manager: unrelated state transition\n"
+        };
+        let body = format!("#!/bin/sh\ncat <<'EOF'\n{stdout}EOF\n");
+        let script = ExecutableScript::new("cucumber-journalctl", "mock-journalctl", &body);
+        self.ensure_env().set("LG_BUDDY_JOURNALCTL", script.path());
         self.path_scripts.push(script);
     }
 

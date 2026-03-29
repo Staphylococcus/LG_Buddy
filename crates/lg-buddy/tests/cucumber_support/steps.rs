@@ -41,6 +41,19 @@ fn tv_failure(world: &mut LgBuddyWorld, command: String, status: u64, stderr: St
     world.tv_mut().queue_error(&command, status as i64, &stderr);
 }
 
+#[given(regex = r#"the TV will fail "([^"]+)" (\d+) times with status (\d+) and stderr "([^"]+)""#)]
+fn tv_failure_repeated(
+    world: &mut LgBuddyWorld,
+    command: String,
+    times: u64,
+    status: u64,
+    stderr: String,
+) {
+    for _ in 0..times {
+        world.tv_mut().queue_error(&command, status as i64, &stderr);
+    }
+}
+
 #[given("the executable PATH is isolated")]
 fn executable_path_isolated(world: &mut LgBuddyWorld) {
     world.isolate_path();
@@ -101,6 +114,11 @@ fn startup_delays_disabled(world: &mut LgBuddyWorld) {
     world.disable_startup_delays();
 }
 
+#[given("sleep retry delays are disabled")]
+fn sleep_retry_delays_disabled(world: &mut LgBuddyWorld) {
+    world.disable_sleep_delays();
+}
+
 #[given("reboot detection reports no pending reboot")]
 fn reboot_not_pending(world: &mut LgBuddyWorld) {
     world.install_systemctl_stub(false);
@@ -109,6 +127,16 @@ fn reboot_not_pending(world: &mut LgBuddyWorld) {
 #[given("reboot detection reports a pending reboot")]
 fn reboot_pending(world: &mut LgBuddyWorld) {
     world.install_systemctl_stub(true);
+}
+
+#[given("journalctl reports a pending NetworkManager sleep request")]
+fn journalctl_reports_sleep_requested(world: &mut LgBuddyWorld) {
+    world.install_journalctl_stub(true);
+}
+
+#[given("journalctl does not report a pending NetworkManager sleep request")]
+fn journalctl_reports_no_sleep_requested(world: &mut LgBuddyWorld) {
+    world.install_journalctl_stub(false);
 }
 
 #[when(regex = r#"I run the command "([^"]+)""#)]
