@@ -17,11 +17,37 @@ use std::io::{self, Write};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    Startup,
+    Startup(StartupMode),
     Shutdown,
     ScreenOff,
     ScreenOn,
     DetectBackend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupMode {
+    Auto,
+    Boot,
+    Wake,
+}
+
+impl StartupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Boot => "boot",
+            Self::Wake => "wake",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "boot" => Some(Self::Boot),
+            "wake" => Some(Self::Wake),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +59,7 @@ pub enum ParseOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnknownCommand(String),
+    UnknownStartupMode(String),
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -44,6 +71,9 @@ impl fmt::Display for ParseError {
         match self {
             Self::UnknownCommand(command) => {
                 write!(f, "unknown command `{command}`")
+            }
+            Self::UnknownStartupMode(mode) => {
+                write!(f, "unknown startup mode `{mode}`")
             }
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
@@ -105,7 +135,7 @@ impl From<io::Error> for RunError {
 impl Command {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Startup => "startup",
+            Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
@@ -115,7 +145,7 @@ impl Command {
 
     pub fn placeholder_message(self) -> &'static str {
         match self {
-            Self::Startup => "TODO: implement startup command",
+            Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implement shutdown command",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
@@ -134,11 +164,16 @@ Usage:
   {program} --help
 
 Commands:
-  startup         Placeholder startup command
+  startup [mode]  Start or restore the TV output
   shutdown        Placeholder shutdown command
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
   detect-backend  Detect the active screen backend
+
+Startup modes:
+  auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
+  boot            Always treat startup as a cold boot
+  wake            Only restore when LG Buddy owns the system marker
 "
     )
 }
@@ -159,7 +194,26 @@ where
     }
 
     let command = match first {
-        "startup" => Command::Startup,
+        "startup" => {
+            let startup_mode = match args.next() {
+                Some(mode) => {
+                    let mode = mode.as_ref();
+                    StartupMode::parse(mode)
+                        .ok_or_else(|| ParseError::UnknownStartupMode(mode.to_string()))?
+                }
+                None => StartupMode::Auto,
+            };
+
+            let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
+            if !extra_args.is_empty() {
+                return Err(ParseError::UnexpectedArguments {
+                    command: Command::Startup(startup_mode),
+                    arguments: extra_args,
+                });
+            }
+
+            return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
+        }
         "shutdown" => Command::Shutdown,
         "screen-off" => Command::ScreenOff,
         "screen-on" => Command::ScreenOn,
@@ -180,6 +234,7 @@ where
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
+        Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
@@ -200,7 +255,7 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, run_command, usage, Command, ParseError, ParseOutcome};
+    use super::{parse_args, run_command, usage, Command, ParseError, ParseOutcome, StartupMode};
 
     #[test]
     fn no_args_prints_help() {
@@ -218,7 +273,15 @@ mod tests {
     fn supported_commands_parse() {
         assert_eq!(
             parse_args(["startup"]),
-            Ok(ParseOutcome::Command(Command::Startup))
+            Ok(ParseOutcome::Command(Command::Startup(StartupMode::Auto)))
+        );
+        assert_eq!(
+            parse_args(["startup", "boot"]),
+            Ok(ParseOutcome::Command(Command::Startup(StartupMode::Boot)))
+        );
+        assert_eq!(
+            parse_args(["startup", "wake"]),
+            Ok(ParseOutcome::Command(Command::Startup(StartupMode::Wake)))
         );
         assert_eq!(
             parse_args(["shutdown"]),
@@ -249,11 +312,19 @@ mod tests {
     #[test]
     fn extra_arguments_are_rejected() {
         assert_eq!(
-            parse_args(["startup", "boot"]),
+            parse_args(["startup", "boot", "extra"]),
             Err(ParseError::UnexpectedArguments {
-                command: Command::Startup,
-                arguments: vec!["boot".to_string()],
+                command: Command::Startup(StartupMode::Boot),
+                arguments: vec!["extra".to_string()],
             })
+        );
+    }
+
+    #[test]
+    fn invalid_startup_mode_is_rejected() {
+        assert_eq!(
+            parse_args(["startup", "resume"]),
+            Err(ParseError::UnknownStartupMode("resume".to_string()))
         );
     }
 
@@ -278,9 +349,9 @@ mod tests {
     #[test]
     fn run_command_prints_placeholder_message() {
         let mut output = Vec::new();
-        run_command(Command::Startup, &mut output).expect("write placeholder message");
+        run_command(Command::Shutdown, &mut output).expect("write placeholder message");
 
         let rendered = String::from_utf8(output).expect("utf8 output");
-        assert_eq!(rendered, "TODO: implement startup command\n");
+        assert_eq!(rendered, "TODO: implement shutdown command\n");
     }
 }

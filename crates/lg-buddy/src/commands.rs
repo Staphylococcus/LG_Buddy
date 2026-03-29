@@ -6,11 +6,13 @@ use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::tv::{BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
-use crate::RunError;
+use crate::{RunError, StartupMode};
 
 const SCREEN_ON_STALE_MARKER_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
 const SCREEN_ON_WAKE_ATTEMPTS: u32 = 6;
+const STARTUP_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
+const STARTUP_WAKE_ATTEMPTS: u32 = 6;
 
 trait Sleeper {
     fn sleep(&self, duration: Duration);
@@ -32,6 +34,25 @@ pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = BscpylgtvCommandClient::from_env();
 
     run_screen_off_with(writer, &config, &marker, &tv_client)
+}
+
+pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
+    let tv_client = BscpylgtvCommandClient::from_env();
+    let wol_sender = UdpWakeOnLanSender::default();
+    let sleeper = ThreadSleeper;
+
+    run_startup_with(
+        writer,
+        &config,
+        &marker,
+        &tv_client,
+        &wol_sender,
+        &sleeper,
+        mode,
+    )
 }
 
 pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -86,6 +107,86 @@ pub fn run_screen_off_with<W: Write>(
             Ok(())
         }
     }
+}
+
+fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
+    writer: &mut W,
+    config: &Config,
+    marker: &ScreenOwnershipMarker,
+    tv_client: &C,
+    wol_sender: &S,
+    sleeper: &Sl,
+    mode: StartupMode,
+) -> Result<(), RunError> {
+    let tv = TvDevice::new(tv_client, config.tv_ip);
+
+    match mode {
+        StartupMode::Wake if !marker.exists() => {
+            writeln!(
+                writer,
+                "LG Buddy Startup: Wake from sleep: TV was not on our input. Skipping."
+            )?;
+            return Ok(());
+        }
+        StartupMode::Wake => {
+            writeln!(
+                writer,
+                "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
+            )?;
+        }
+        StartupMode::Boot => {
+            writeln!(
+                writer,
+                "LG Buddy Startup: Cold boot: Turning TV on and switching to {}.",
+                config.input.as_str()
+            )?;
+        }
+        StartupMode::Auto if marker.exists() => {
+            writeln!(
+                writer,
+                "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
+            )?;
+        }
+        StartupMode::Auto => {
+            writeln!(
+                writer,
+                "LG Buddy Startup: Cold boot: Turning TV on and switching to {}.",
+                config.input.as_str()
+            )?;
+        }
+    }
+
+    marker.clear()?;
+    send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
+    sleeper.sleep(STARTUP_INITIAL_WAKE_DELAY);
+
+    for attempt in 1..=STARTUP_WAKE_ATTEMPTS {
+        if tv.input().set(config.input).is_ok() {
+            writeln!(
+                writer,
+                "LG Buddy Startup: TV turned on and set to {}.",
+                config.input.as_str()
+            )?;
+            return Ok(());
+        }
+
+        let retry_delay = startup_retry_delay(attempt);
+        writeln!(
+            writer,
+            "LG Buddy Startup: Attempt {attempt} failed, retrying in {}s...",
+            retry_delay.as_secs()
+        )?;
+        send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
+        sleeper.sleep(retry_delay);
+    }
+
+    writeln!(
+        writer,
+        "LG Buddy Startup: set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
+    )?;
+    Err(RunError::Policy(format!(
+        "startup set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
+    )))
 }
 
 fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
@@ -161,7 +262,13 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
         writer,
         "LG Buddy Screen On: Sending initial Wake-on-LAN packet..."
     )?;
-    send_wake_packet(writer, &tv, wol_sender, &config.tv_mac)?;
+    send_wake_packet(
+        writer,
+        "LG Buddy Screen On",
+        &tv,
+        wol_sender,
+        &config.tv_mac,
+    )?;
     sleeper.sleep(SCREEN_ON_INITIAL_WAKE_DELAY);
 
     for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
@@ -186,7 +293,13 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
             "LG Buddy Screen On: Wake attempt {attempt} failed. Resending WoL and retrying in {}s...",
             retry_delay.as_secs()
         )?;
-        send_wake_packet(writer, &tv, wol_sender, &config.tv_mac)?;
+        send_wake_packet(
+            writer,
+            "LG Buddy Screen On",
+            &tv,
+            wol_sender,
+            &config.tv_mac,
+        )?;
         sleeper.sleep(retry_delay);
     }
 
@@ -255,6 +368,7 @@ fn handle_known_input<W: Write, C: TvClient>(
 
 fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     writer: &mut W,
+    prefix: &str,
     tv: &TvDevice<'_, C>,
     wol_sender: &S,
     tv_mac: &crate::config::MacAddress,
@@ -262,7 +376,7 @@ fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     if let Err(err) = tv.power().wake(wol_sender, tv_mac) {
         writeln!(
             writer,
-            "LG Buddy Screen On: Wake-on-LAN send failed. Continuing anyway. {err}"
+            "{prefix}: Wake-on-LAN send failed. Continuing anyway. {err}"
         )?;
     }
 
@@ -273,13 +387,18 @@ fn screen_on_retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(u64::from((attempt * 2).min(30)))
 }
 
+fn startup_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(u64::from((attempt * 2).min(30)))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{run_screen_off_with, run_screen_on_with, Sleeper};
+    use super::{run_screen_off_with, run_screen_on_with, run_startup_with, Sleeper};
     use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::{CommandOutput, TvClient, TvError};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
+    use crate::StartupMode;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
@@ -604,6 +723,184 @@ mod tests {
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
         assert!(rendered(&output).contains("Wake failed after 6 attempts."));
+    }
+
+    #[test]
+    fn startup_wake_mode_skips_without_system_marker() {
+        let temp_dir = TestDir::new("startup-wake-skip");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let client = FakeTvClient::new();
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Wake,
+        )
+        .expect("wake mode without marker should skip");
+
+        assert!(wol.calls().is_empty());
+        assert!(sleeper.durations().is_empty());
+        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert!(rendered(&output).contains("TV was not on our input. Skipping."));
+    }
+
+    #[test]
+    fn startup_auto_mode_treats_missing_marker_as_boot() {
+        let temp_dir = TestDir::new("startup-auto-boot");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi4),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Auto,
+        )
+        .expect("auto boot should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(wol.calls().len(), 1);
+        assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
+        assert_eq!(client.calls(), vec!["set_input"]);
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Cold boot: Turning TV on and switching to HDMI_4."));
+        assert!(rendered.contains("TV turned on and set to HDMI_4."));
+    }
+
+    #[test]
+    fn startup_auto_mode_restores_when_system_marker_exists() {
+        let temp_dir = TestDir::new("startup-auto-wake");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi1),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Auto,
+        )
+        .expect("auto wake should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(wol.calls().len(), 1);
+        assert_eq!(client.calls(), vec!["set_input"]);
+        assert!(rendered(&output).contains("Wake from sleep: LG Buddy turned TV off. Restoring."));
+    }
+
+    #[test]
+    fn startup_boot_mode_clears_existing_marker_before_restore() {
+        let temp_dir = TestDir::new("startup-boot-clears-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create stale system marker");
+        let client = FakeTvClient::new().with_set_input(Ok(command_output("restored\n")));
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi3),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Boot,
+        )
+        .expect("boot mode should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(client.calls(), vec!["set_input"]);
+        assert!(rendered(&output).contains("Cold boot: Turning TV on and switching to HDMI_3."));
+    }
+
+    #[test]
+    fn startup_retries_until_set_input_succeeds() {
+        let temp_dir = TestDir::new("startup-retry-success");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let client = FakeTvClient::new().with_set_input_results([
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Ok(command_output("restored\n")),
+        ]);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Boot,
+        )
+        .expect("startup retry should succeed");
+
+        assert_eq!(client.calls(), vec!["set_input", "set_input"]);
+        assert_eq!(wol.calls().len(), 2);
+        assert_eq!(
+            sleeper.durations(),
+            vec![Duration::from_secs(6), Duration::from_secs(2)]
+        );
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Attempt 1 failed, retrying in 2s..."));
+        assert!(rendered.contains("TV turned on and set to HDMI_2."));
+    }
+
+    #[test]
+    fn startup_returns_error_after_exhausting_retries_and_leaves_marker_cleared() {
+        let temp_dir = TestDir::new("startup-retry-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new().with_set_input_results([
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Err(command_failed("set_input", 1, "not ready\n")),
+            Err(command_failed("set_input", 1, "not ready\n")),
+        ]);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        let err = run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi1),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            StartupMode::Auto,
+        )
+        .expect_err("startup should fail after exhausting retries");
+
+        assert!(!marker.exists());
+        assert_eq!(client.calls().len(), 6);
+        assert_eq!(wol.calls().len(), 7);
+        assert_eq!(sleeper.durations().len(), 7);
+        assert!(matches!(err, crate::RunError::Policy(_)));
+        assert!(rendered(&output).contains("set_input failed after 6 attempts"));
     }
 
     fn sample_config(input: HdmiInput) -> Config {
