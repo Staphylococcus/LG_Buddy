@@ -118,6 +118,7 @@ pub trait TvClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BscpylgtvCommandClient {
     command_path: PathBuf,
+    command_args: Vec<String>,
 }
 
 impl Default for BscpylgtvCommandClient {
@@ -130,11 +131,27 @@ impl BscpylgtvCommandClient {
     pub fn new(command_path: impl Into<PathBuf>) -> Self {
         Self {
             command_path: command_path.into(),
+            command_args: Vec::new(),
+        }
+    }
+
+    pub fn with_args<I, S>(command_path: impl Into<PathBuf>, command_args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            command_path: command_path.into(),
+            command_args: command_args.into_iter().map(Into::into).collect(),
         }
     }
 
     pub fn command_path(&self) -> &Path {
         &self.command_path
+    }
+
+    pub fn command_args(&self) -> &[String] {
+        &self.command_args
     }
 
     fn run_command(
@@ -144,6 +161,7 @@ impl BscpylgtvCommandClient {
         extra_args: &[&str],
     ) -> Result<CommandOutput, TvError> {
         let output = Command::new(&self.command_path)
+            .args(&self.command_args)
             .arg(tv_ip.to_string())
             .arg(operation)
             .args(extra_args)
@@ -225,6 +243,7 @@ mod tests {
             client.command_path(),
             Path::new(DEFAULT_BSCPYLGTV_COMMAND_PATH)
         );
+        assert!(client.command_args().is_empty());
     }
 
     #[test]
@@ -248,7 +267,7 @@ printf 'com.webos.app.hdmi2\n'
 "#,
         );
 
-        let client = BscpylgtvCommandClient::new(&script_path);
+        let client = client_for_script(&script_path);
         let input = client
             .get_input(ip("192.168.1.42"))
             .expect("get_input should succeed");
@@ -267,7 +286,7 @@ printf 'com.webos.app.hdmi2\n'
         let script_path = temp_dir.path().join("stub.sh");
         write_stub(&script_path, &log_path, "");
 
-        let client = BscpylgtvCommandClient::new(&script_path);
+        let client = client_for_script(&script_path);
         let err = client
             .get_input(ip("192.168.1.42"))
             .expect_err("empty output should fail");
@@ -290,7 +309,7 @@ printf 'com.webos.app.hdmi2\n'
         let script_path = temp_dir.path().join("stub.sh");
         write_stub(&script_path, &log_path, "printf 'ok\\n'\n");
 
-        let client = BscpylgtvCommandClient::new(&script_path);
+        let client = client_for_script(&script_path);
         client
             .set_input(ip("10.0.0.5"), HdmiInput::Hdmi3)
             .expect("set_input should succeed");
@@ -312,7 +331,7 @@ printf 'com.webos.app.hdmi2\n'
             "printf 'failure stdout\\n'\nprintf 'failure stderr\\n' >&2\nexit 7\n",
         );
 
-        let client = BscpylgtvCommandClient::new(&script_path);
+        let client = client_for_script(&script_path);
         let err = client
             .turn_screen_on(ip("10.0.0.8"))
             .expect_err("turn_screen_on should fail");
@@ -339,7 +358,6 @@ printf 'com.webos.app.hdmi2\n'
             body
         );
         fs::write(script_path, script).expect("write stub script");
-        set_executable(script_path);
     }
 
     fn shell_quote(path: &Path) -> String {
@@ -351,16 +369,9 @@ printf 'com.webos.app.hdmi2\n'
         value.parse().expect("parse IPv4 address")
     }
 
-    #[cfg(unix)]
-    fn set_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let permissions = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(path, permissions).expect("set executable permissions");
+    fn client_for_script(script_path: &Path) -> BscpylgtvCommandClient {
+        BscpylgtvCommandClient::with_args("/bin/sh", [script_path.to_string_lossy().into_owned()])
     }
-
-    #[cfg(not(unix))]
-    fn set_executable(_path: &Path) {}
 
     struct TestDir {
         path: PathBuf,

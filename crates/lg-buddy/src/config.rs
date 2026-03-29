@@ -38,7 +38,7 @@ impl fmt::Display for ConfigPathError {
 
 impl Error for ConfigPathError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenBackend {
     Auto,
     Gnome,

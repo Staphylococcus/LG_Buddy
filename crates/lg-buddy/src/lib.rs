@@ -1,8 +1,13 @@
+pub mod backend;
 pub mod config;
 pub mod state;
 pub mod tv;
 pub mod wol;
 
+use crate::backend::{
+    configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
+    BackendSelectionError,
+};
 use std::fmt;
 use std::io::{self, Write};
 
@@ -48,6 +53,39 @@ impl fmt::Display for ParseError {
     }
 }
 
+#[derive(Debug)]
+pub enum RunError {
+    Io(io::Error),
+    BackendSelection(BackendSelectionError),
+    BackendDetection(BackendDetectionError),
+}
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "{err}"),
+            Self::BackendSelection(err) => write!(f, "{err}"),
+            Self::BackendDetection(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::BackendSelection(err) => Some(err),
+            Self::BackendDetection(err) => Some(err),
+        }
+    }
+}
+
+impl From<io::Error> for RunError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
 impl Command {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -84,7 +122,7 @@ Commands:
   shutdown        Placeholder shutdown command
   screen-off      Placeholder screen-off command
   screen-on       Placeholder screen-on command
-  detect-backend  Placeholder detect-backend command
+  detect-backend  Detect the active screen backend
 "
     )
 }
@@ -124,8 +162,22 @@ where
     Ok(ParseOutcome::Command(command))
 }
 
-pub fn run_command<W: Write>(command: Command, writer: &mut W) -> io::Result<()> {
-    writeln!(writer, "{}", command.placeholder_message())
+pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
+    match command {
+        Command::DetectBackend => run_detect_backend(writer),
+        _ => {
+            writeln!(writer, "{}", command.placeholder_message())?;
+            Ok(())
+        }
+    }
+}
+
+fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let configured = configured_backend_from_env_or_config().map_err(RunError::BackendSelection)?;
+    let backend = detect_backend_from_system(configured).map_err(RunError::BackendDetection)?;
+
+    writeln!(writer, "{}", backend.as_str())?;
+    Ok(())
 }
 
 #[cfg(test)]

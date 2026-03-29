@@ -1,5 +1,4 @@
 use std::env;
-use std::io;
 use std::process::ExitCode;
 
 use lg_buddy::{parse_args, run_command, usage, ParseOutcome};
@@ -12,10 +11,10 @@ fn main() -> ExitCode {
             print!("{}", usage(&program));
             ExitCode::SUCCESS
         }
-        Ok(ParseOutcome::Command(command)) => match run_command(command, &mut io::stdout()) {
+        Ok(ParseOutcome::Command(command)) => match run_command(command, &mut std::io::stdout()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("LG Buddy: failed to write output: {err}");
+                eprintln!("LG Buddy: {err}");
                 ExitCode::from(1)
             }
         },
