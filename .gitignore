@@ -17,3 +17,6 @@ secrets.json
 *.secret
 id_rsa
 id_ed25519
+
+# Rust build output
+target/

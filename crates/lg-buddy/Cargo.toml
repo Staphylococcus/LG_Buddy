@@ -1,0 +1,12 @@
+[package]
+name = "lg-buddy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lg-buddy"
+path = "src/main.rs"
