@@ -275,6 +275,113 @@ impl MockSwayidle {
 }
 
 #[allow(dead_code)]
+pub struct MockGdbus {
+    _temp_dir: TestDir,
+    state_path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl MockGdbus {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let state_path = temp_dir.path().join("state.json");
+        let mock = Self {
+            _temp_dir: temp_dir,
+            state_path,
+        };
+        mock.save_state(json!({
+            "shell_available": true,
+            "screen_saver_available": true,
+            "idle_monitor_available": true,
+            "idle_monitor_idletime": 1500,
+            "monitor_lines": [],
+            "invocations": [],
+        }));
+        mock
+    }
+
+    pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
+        let python_path = shell_quote(&python3_path());
+        let script_path = shell_quote(&Self::script_path());
+        let state_path = shell_quote(&self.state_path);
+        let body =
+            format!("#!/bin/sh\nexec {python_path} {script_path} --state {state_path} \"$@\"\n");
+
+        ExecutableScript::new(label, "gdbus", &body)
+    }
+
+    pub fn set_shell_available(&self, value: bool) {
+        self.patch_state(json!({ "shell_available": value }));
+    }
+
+    pub fn set_screen_saver_available(&self, value: bool) {
+        self.patch_state(json!({ "screen_saver_available": value }));
+    }
+
+    pub fn set_idle_monitor_available(&self, value: bool) {
+        self.patch_state(json!({ "idle_monitor_available": value }));
+    }
+
+    pub fn set_idle_monitor_idletime(&self, value: u64) {
+        self.patch_state(json!({ "idle_monitor_idletime": value }));
+    }
+
+    pub fn push_monitor_line(&self, line: &str) {
+        let mut state = self.load_state();
+        let monitor_lines = state
+            .as_object_mut()
+            .expect("mock gdbus state object")
+            .entry("monitor_lines")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        monitor_lines
+            .as_array_mut()
+            .expect("monitor lines array")
+            .push(Value::String(line.to_string()));
+        self.save_state(state);
+    }
+
+    pub fn invocations(&self) -> Vec<MockGdbusInvocation> {
+        self.load_state()
+            .get("invocations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(MockGdbusInvocation::from_value)
+            .collect()
+    }
+
+    fn script_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("mock_gdbus.py")
+    }
+
+    fn patch_state(&self, patch: Value) {
+        let mut state = self.load_state();
+        let state_object = state.as_object_mut().expect("mock state object");
+        let patch_object = patch.as_object().expect("state patch object");
+        for (key, value) in patch_object {
+            state_object.insert(key.clone(), value.clone());
+        }
+        self.save_state(state);
+    }
+
+    fn load_state(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(&self.state_path).expect("read mock state"))
+            .expect("parse mock state")
+    }
+
+    fn save_state(&self, state: Value) {
+        fs::write(
+            &self.state_path,
+            serde_json::to_string_pretty(&state).expect("serialize mock state"),
+        )
+        .expect("write mock state");
+    }
+}
+
+#[allow(dead_code)]
 pub struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     original_values: Vec<(OsString, Option<OsString>)>,
@@ -576,6 +683,27 @@ impl MockSwayidleInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
+pub struct MockGdbusInvocation {
+    pub argv: Vec<String>,
+}
+
+impl MockGdbusInvocation {
+    fn from_value(value: &Value) -> Self {
+        let object = value.as_object().expect("mock gdbus invocation object");
+        Self {
+            argv: object
+                .get("argv")
+                .and_then(Value::as_array)
+                .expect("invocation argv array")
+                .iter()
+                .map(|value| value.as_str().expect("argv string").to_string())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MockSwayidleEvent {
     Timeout {
         timeout: u64,
@@ -701,9 +829,16 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 fn python3_path() -> PathBuf {
-    find_command_in_path("python3")
-        .or_else(|| find_command_in_path("python"))
-        .unwrap_or_else(|| PathBuf::from("python3"))
+    static PYTHON3_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+    PYTHON3_PATH
+        .get_or_init(|| {
+            find_command_in_path("python3")
+                .or_else(|| find_command_in_path("python"))
+                .or_else(find_python3_in_standard_locations)
+                .unwrap_or_else(|| PathBuf::from("python3"))
+        })
+        .clone()
 }
 
 fn find_command_in_path(command: &str) -> Option<PathBuf> {
@@ -717,6 +852,20 @@ fn find_command_in_path(command: &str) -> Option<PathBuf> {
         let candidate = dir.join(command);
         candidate.is_file().then_some(candidate)
     })
+}
+
+fn find_python3_in_standard_locations() -> Option<PathBuf> {
+    [
+        "/usr/bin/python3",
+        "/usr/local/bin/python3",
+        "/bin/python3",
+        "/usr/bin/python",
+        "/usr/local/bin/python",
+        "/bin/python",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|candidate| candidate.is_file())
 }
 
 fn shell_quote(path: &Path) -> String {

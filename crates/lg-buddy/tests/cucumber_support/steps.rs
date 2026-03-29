@@ -51,6 +51,21 @@ fn gnome_shell_available(world: &mut LgBuddyWorld) {
     world.install_gnome_shell_stub();
 }
 
+#[given("GNOME reports the session idle")]
+fn gnome_reports_idle(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_emit_idle();
+}
+
+#[given("GNOME reports the session active")]
+fn gnome_reports_active(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_emit_active();
+}
+
+#[given("GNOME requests screen wake")]
+fn gnome_requests_screen_wake(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_emit_wake_requested();
+}
+
 #[given("swayidle is installed")]
 fn swayidle_installed(world: &mut LgBuddyWorld) {
     world.install_swayidle_stub();
@@ -138,6 +153,16 @@ fn tv_is_powered_off(world: &mut LgBuddyWorld) {
 #[then("the TV is powered on")]
 fn tv_is_powered_on(world: &mut LgBuddyWorld) {
     assert!(world.tv().state_snapshot().power_on);
+}
+
+#[then("the TV screen is blanked")]
+fn tv_screen_is_blanked(world: &mut LgBuddyWorld) {
+    assert!(!world.tv().state_snapshot().screen_on);
+}
+
+#[then("the TV screen is visible")]
+fn tv_screen_is_visible(world: &mut LgBuddyWorld) {
+    assert!(world.tv().state_snapshot().screen_on);
 }
 
 #[then(regex = r#"the TV client received "([^"]+)""#)]

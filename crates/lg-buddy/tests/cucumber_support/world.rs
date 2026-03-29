@@ -1,5 +1,5 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, RuntimeStateLayout, TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockGdbus, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
 use cucumber::World;
 use std::fmt;
@@ -12,6 +12,7 @@ pub struct LgBuddyWorld {
     config: Option<TestConfigFile>,
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
+    gdbus: Option<MockGdbus>,
     path_scripts: Vec<ExecutableScript>,
     command_result: Option<CommandExecution>,
 }
@@ -29,6 +30,7 @@ impl fmt::Debug for LgBuddyWorld {
             .field("config", &self.config.is_some())
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
+            .field("gdbus", &self.gdbus.is_some())
             .field("path_scripts", &self.path_scripts.len())
             .field("command_result", &self.command_result)
             .finish()
@@ -103,25 +105,23 @@ impl LgBuddyWorld {
     }
 
     pub fn install_gnome_shell_stub(&mut self) {
-        let script = ExecutableScript::new(
-            "cucumber-gdbus",
-            "gdbus",
-            r#"#!/bin/sh
-case "$1" in
-  call)
-    printf '(true,)\n'
-    exit 0
-    ;;
-  wait)
-    exit 0
-    ;;
-  *)
-    exit 1
-    ;;
-esac
-"#,
+        self.ensure_mock_gdbus().set_shell_available(true);
+    }
+
+    pub fn gnome_monitor_emit_idle(&mut self) {
+        self.ensure_mock_gdbus()
+            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");
+    }
+
+    pub fn gnome_monitor_emit_active(&mut self) {
+        self.ensure_mock_gdbus()
+            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (false,)");
+    }
+
+    pub fn gnome_monitor_emit_wake_requested(&mut self) {
+        self.ensure_mock_gdbus().push_monitor_line(
+            "signal time=1.0 sender=:1.2 -> destination=(null destination) serial=2 path=/org/gnome/ScreenSaver; interface=org.gnome.ScreenSaver; member=WakeUpScreen",
         );
-        self.prepend_path_script(script);
     }
 
     pub fn install_swayidle_stub(&mut self) {
@@ -176,5 +176,16 @@ esac
 
     fn ensure_env(&mut self) -> &mut TestEnv {
         self.env.get_or_insert_with(TestEnv::new)
+    }
+
+    fn ensure_mock_gdbus(&mut self) -> &mut MockGdbus {
+        if self.gdbus.is_none() {
+            let gdbus = MockGdbus::new("cucumber-gdbus");
+            let wrapper = gdbus.command_wrapper("cucumber-gdbus-wrapper");
+            self.prepend_path_script(wrapper);
+            self.gdbus = Some(gdbus);
+        }
+
+        self.gdbus.as_mut().expect("mock gdbus configured")
     }
 }
