@@ -9,11 +9,14 @@ use std::{collections::HashMap, io};
 
 const CONFIG_DIR_NAME: &str = "lg-buddy";
 const CONFIG_FILE_NAME: &str = "config.env";
+const INSTALL_CONFIG_POINTER_FILE: &str = "/usr/lib/lg-buddy/config-path";
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigPathSources<'a> {
     pub explicit_config: Option<&'a Path>,
+    pub install_pointer_config: Option<&'a Path>,
+    pub sudo_user_home: Option<&'a Path>,
     pub xdg_config_home: Option<&'a Path>,
     pub home: Option<&'a Path>,
 }
@@ -215,6 +218,17 @@ pub fn resolve_config_path(sources: ConfigPathSources<'_>) -> Result<PathBuf, Co
         return Ok(path.to_path_buf());
     }
 
+    if let Some(path) = sources.install_pointer_config {
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(path) = sources.sudo_user_home {
+        return Ok(path
+            .join(".config")
+            .join(CONFIG_DIR_NAME)
+            .join(CONFIG_FILE_NAME));
+    }
+
     if let Some(path) = sources.xdg_config_home {
         return Ok(path.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME));
     }
@@ -231,14 +245,58 @@ pub fn resolve_config_path(sources: ConfigPathSources<'_>) -> Result<PathBuf, Co
 
 pub fn resolve_config_path_from_env() -> Result<PathBuf, ConfigPathError> {
     let explicit_config = env::var_os("LG_BUDDY_CONFIG").map(PathBuf::from);
+    let install_pointer_config = load_install_pointer_config();
+    let sudo_user_home = resolve_sudo_user_home();
     let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     let home = env::var_os("HOME").map(PathBuf::from);
 
     resolve_config_path(ConfigPathSources {
         explicit_config: explicit_config.as_deref(),
+        install_pointer_config: install_pointer_config.as_deref(),
+        sudo_user_home: sudo_user_home.as_deref(),
         xdg_config_home: xdg_config_home.as_deref(),
         home: home.as_deref(),
     })
+}
+
+fn load_install_pointer_config() -> Option<PathBuf> {
+    let contents = fs::read_to_string(INSTALL_CONFIG_POINTER_FILE).ok()?;
+    let path = contents.lines().next()?.trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn resolve_sudo_user_home() -> Option<PathBuf> {
+    let sudo_user = env::var_os("SUDO_USER")?;
+    let sudo_user = sudo_user.to_string_lossy();
+    if sudo_user.is_empty() || sudo_user == "root" {
+        return None;
+    }
+
+    let passwd = fs::read_to_string("/etc/passwd").ok()?;
+    parse_home_from_passwd_entries(&passwd, &sudo_user)
+}
+
+fn parse_home_from_passwd_entries(contents: &str, user: &str) -> Option<PathBuf> {
+    for line in contents.lines() {
+        let mut fields = line.split(':');
+        let username = fields.next()?;
+        if username != user {
+            continue;
+        }
+
+        let home = fields.nth(4)?;
+        if home.is_empty() {
+            return None;
+        }
+
+        return Some(PathBuf::from(home));
+    }
+
+    None
 }
 
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
@@ -341,8 +399,8 @@ fn parse_entries(contents: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_config, resolve_config_path, Config, ConfigError, ConfigPathError, ConfigPathSources,
-        HdmiInput, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+        parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
+        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -350,6 +408,8 @@ mod tests {
     fn explicit_config_override_wins() {
         let resolved = resolve_config_path(ConfigPathSources {
             explicit_config: Some(Path::new("/tmp/custom.env")),
+            install_pointer_config: Some(Path::new("/tmp/pointer.env")),
+            sudo_user_home: Some(Path::new("/tmp/sudo-home")),
             xdg_config_home: Some(Path::new("/tmp/xdg")),
             home: Some(Path::new("/tmp/home")),
         });
@@ -361,6 +421,8 @@ mod tests {
     fn xdg_config_home_is_used_when_override_is_missing() {
         let resolved = resolve_config_path(ConfigPathSources {
             explicit_config: None,
+            install_pointer_config: None,
+            sudo_user_home: None,
             xdg_config_home: Some(Path::new("/tmp/xdg")),
             home: Some(Path::new("/tmp/home")),
         });
@@ -372,6 +434,8 @@ mod tests {
     fn home_is_used_when_xdg_is_missing() {
         let resolved = resolve_config_path(ConfigPathSources {
             explicit_config: None,
+            install_pointer_config: None,
+            sudo_user_home: None,
             xdg_config_home: None,
             home: Some(Path::new("/tmp/home")),
         });
@@ -384,6 +448,46 @@ mod tests {
         let resolved = resolve_config_path(ConfigPathSources::default());
 
         assert_eq!(resolved, Err(ConfigPathError::NotConfigured));
+    }
+
+    #[test]
+    fn install_pointer_config_is_used_before_user_env_paths() {
+        let resolved = resolve_config_path(ConfigPathSources {
+            explicit_config: None,
+            install_pointer_config: Some(Path::new("/tmp/pointer.env")),
+            sudo_user_home: Some(Path::new("/tmp/sudo-home")),
+            xdg_config_home: Some(Path::new("/tmp/xdg")),
+            home: Some(Path::new("/tmp/home")),
+        });
+
+        assert_eq!(resolved, Ok("/tmp/pointer.env".into()));
+    }
+
+    #[test]
+    fn sudo_user_home_is_used_before_current_home() {
+        let resolved = resolve_config_path(ConfigPathSources {
+            explicit_config: None,
+            install_pointer_config: None,
+            sudo_user_home: Some(Path::new("/home/installing-user")),
+            xdg_config_home: Some(Path::new("/tmp/xdg")),
+            home: Some(Path::new("/root")),
+        });
+
+        assert_eq!(
+            resolved,
+            Ok("/home/installing-user/.config/lg-buddy/config.env".into())
+        );
+    }
+
+    #[test]
+    fn passwd_home_lookup_returns_matching_user_home() {
+        let passwd = "\
+root:x:0:0:root:/root:/bin/bash\n\
+vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
+
+        let home = parse_home_from_passwd_entries(passwd, "vas");
+
+        assert_eq!(home, Some("/home/vas".into()));
     }
 
     #[test]

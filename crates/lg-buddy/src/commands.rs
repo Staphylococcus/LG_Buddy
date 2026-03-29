@@ -518,9 +518,7 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper, N: N
         writer,
         "LG Buddy Startup: set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
     )?;
-    Err(RunError::Policy(format!(
-        "startup set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
-    )))
+    Ok(())
 }
 
 fn run_brightness_with<
@@ -1557,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_returns_error_after_exhausting_retries_and_leaves_marker_cleared() {
+    fn startup_logs_failure_after_exhausting_retries_and_leaves_marker_cleared() {
         let temp_dir = TestDir::new("startup-retry-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
@@ -1577,21 +1575,20 @@ mod tests {
         };
 
         let mut output = Vec::new();
-        let err = run_startup_with(
+        run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi1),
             &marker,
             deps,
             StartupMode::Auto,
         )
-        .expect_err("startup should fail after exhausting retries");
+        .expect("startup should still succeed after exhausting retries");
 
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
         assert_eq!(mock.calls().len(), 6);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
-        assert!(matches!(err, crate::RunError::Policy(_)));
         assert!(rendered(&output).contains("set_input failed after 6 attempts"));
     }
 

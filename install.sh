@@ -20,6 +20,7 @@ SCREEN_MONITOR_AVAILABLE=0
 SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
 SCREEN_MONITOR_RUNTIME_BACKEND=""
 SYSTEM_CONFIG_OVERRIDE_TMP=""
+CONFIG_POINTER_TMP=""
 NM_SLEEP_HOOK_TMP=""
 
 check_dep() {
@@ -80,9 +81,20 @@ exec /usr/bin/lg-buddy sleep
 EOF
 }
 
+write_config_pointer() {
+    local pointer_file="$1"
+    local config_path="$2"
+
+    printf '%s\n' "$config_path" >"$pointer_file"
+}
+
 cleanup() {
     if [ -n "$SYSTEM_CONFIG_OVERRIDE_TMP" ]; then
         rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+    fi
+
+    if [ -n "$CONFIG_POINTER_TMP" ]; then
+        rm -f "$CONFIG_POINTER_TMP"
     fi
 
     if [ -n "$NM_SLEEP_HOOK_TMP" ]; then
@@ -225,6 +237,12 @@ sudo rm -f /usr/lib/lg-buddy/common.sh
 sudo rm -f /usr/lib/lg-buddy/config-path
 sudo rmdir /usr/lib/lg-buddy 2>/dev/null || true
 sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
+sudo install -d /usr/lib/lg-buddy
+CONFIG_POINTER_TMP="$(mktemp)"
+write_config_pointer "$CONFIG_POINTER_TMP" "$CONFIG_FILE"
+sudo install -m 644 "$CONFIG_POINTER_TMP" /usr/lib/lg-buddy/config-path
+rm -f "$CONFIG_POINTER_TMP"
+CONFIG_POINTER_TMP=""
 sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
 echo "Installing brightness control desktop entry..."
 sudo mkdir -p /usr/share/applications

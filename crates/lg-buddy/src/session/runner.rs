@@ -128,11 +128,13 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
         match event {
             SessionEvent::Idle => {
                 writeln!(writer, "LG Buddy Monitor: Session became idle.")?;
-                let output = self
-                    .executor
-                    .screen_off()
-                    .map_err(SessionRunnerError::Action)?;
-                write_command_output(writer, &output)?;
+                match self.executor.screen_off() {
+                    Ok(output) => write_command_output(writer, &output)?,
+                    Err(err) => writeln!(
+                        writer,
+                        "LG Buddy Monitor: screen-off action failed. {err}"
+                    )?,
+                }
             }
             SessionEvent::Active | SessionEvent::WakeRequested | SessionEvent::UserActivity => {
                 writeln!(
@@ -140,11 +142,13 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     "LG Buddy Monitor: Session event `{}` requests screen restore.",
                     event.as_str()
                 )?;
-                let output = self
-                    .executor
-                    .screen_on()
-                    .map_err(SessionRunnerError::Action)?;
-                write_command_output(writer, &output)?;
+                match self.executor.screen_on() {
+                    Ok(output) => write_command_output(writer, &output)?,
+                    Err(err) => writeln!(
+                        writer,
+                        "LG Buddy Monitor: screen restore action failed. {err}"
+                    )?,
+                }
             }
             SessionEvent::BeforeSleep
             | SessionEvent::AfterResume
@@ -565,16 +569,24 @@ mod tests {
         screen_on_calls: usize,
         screen_off_output: String,
         screen_on_output: String,
+        screen_off_error: Option<String>,
+        screen_on_error: Option<String>,
     }
 
     impl SessionActionExecutor for FakeActionExecutor {
         fn screen_off(&mut self) -> Result<String, RunError> {
             self.screen_off_calls += 1;
+            if let Some(message) = &self.screen_off_error {
+                return Err(RunError::Policy(message.clone()));
+            }
             Ok(self.screen_off_output.clone())
         }
 
         fn screen_on(&mut self) -> Result<String, RunError> {
             self.screen_on_calls += 1;
+            if let Some(message) = &self.screen_on_error {
+                return Err(RunError::Policy(message.clone()));
+            }
             Ok(self.screen_on_output.clone())
         }
     }
@@ -676,6 +688,45 @@ mod tests {
         assert!(output.contains("unlock"));
         assert_eq!(dispatcher.executor.screen_off_calls, 0);
         assert_eq!(dispatcher.executor.screen_on_calls, 0);
+    }
+
+    #[test]
+    fn screen_restore_failures_are_logged_without_stopping_dispatch() {
+        let executor = FakeActionExecutor {
+            screen_on_error: Some("tv is still waking".to_string()),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut output = Vec::new();
+
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::Active)
+            .expect("dispatch active event");
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::WakeRequested)
+            .expect("dispatch wake-requested event");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("screen restore action failed. tv is still waking"));
+        assert_eq!(dispatcher.executor.screen_on_calls, 2);
+    }
+
+    #[test]
+    fn screen_off_failures_are_logged_without_stopping_dispatch() {
+        let executor = FakeActionExecutor {
+            screen_off_error: Some("tv did not respond".to_string()),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut output = Vec::new();
+
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::Idle)
+            .expect("dispatch idle event");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("screen-off action failed. tv did not respond"));
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
     }
 
     #[test]
