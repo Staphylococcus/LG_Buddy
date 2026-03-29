@@ -129,19 +129,17 @@ The config file currently contains:
 
 | File | Purpose |
 |------|---------|
-| `bin/LG_Buddy_Startup` | Turn TV on at boot/wake |
-| `bin/LG_Buddy_Shutdown` | Turn TV off at shutdown |
-| `bin/LG_Buddy_sleep` | Turn TV off on suspend |
-| `bin/LG_Buddy_Common` | Shared config and helper functions |
-| `bin/LG_Buddy_Screen_Monitor` | Multi-backend idle monitor (GNOME or swayidle) |
-| `bin/LG_Buddy_Screen_Off` | Blank the TV panel on screen idle |
-| `bin/LG_Buddy_Screen_On` | Unblank the TV panel on resume |
-| `bin/LG_Buddy_Brightness` | Interactive brightness control |
+| `crates/lg-buddy/src/commands.rs` | Runtime commands for startup, shutdown, sleep, brightness, and screen control |
+| `crates/lg-buddy/src/session/runner.rs` | User-session monitor loop for GNOME and swayidle |
+| `crates/lg-buddy/src/tv.rs` | TV transport boundary and device-facing facade |
+| `bin/LG_Buddy_Common` | Shared shell config helper used by setup and uninstall scripts |
 | `configure.sh` | Interactive configuration tool |
 | `install.sh` | Automated installer |
+| `uninstall.sh` | Uninstaller |
 | `LG_Buddy_Brightness.desktop` | OLED Brightness Control app |
-| `systemd/LG_Buddy.service` | Shutdown systemd service |
-| `systemd/LG_Buddy_wake.service` | Startup systemd service |
+| `systemd/LG_Buddy.service` | Boot startup and shutdown systemd service |
+| `systemd/LG_Buddy_wake.service` | Wake restore systemd service |
+| `systemd/LG_Buddy_sleep.service` | Pre-sleep power-off systemd service |
 | `systemd/LG_Buddy_screen.service` | Screen monitor user service |
 
 ## Author

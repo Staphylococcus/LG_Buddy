@@ -1,6 +1,6 @@
 # LG Buddy Session Backend Model
 
-This document defines the target model for desktop session backends.
+This document defines the current desktop session backend model.
 
 The goal is to unify providers semantically, not mechanically.
 
@@ -57,7 +57,7 @@ These are the semantic events the runtime should reason about.
 
 Backends should advertise what they can actually do.
 
-The target Rust shape is:
+The current Rust shape is:
 
 ```rust
 enum IdleTimeoutSource {
@@ -106,8 +106,7 @@ Those delays are runtime policy, not session-backend idle policy.
 
 ## Provider Map
 
-This is the target mapping for the currently known backends, with the current Rust
-implementation status called out explicitly.
+This is the current mapping for the known backends, with implementation status called out explicitly.
 
 | Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -118,7 +117,7 @@ implementation status called out explicitly.
 
 ### GNOME
 
-Current target mapping:
+Current mapping:
 
 | Provider surface | Canonical meaning | Current Rust Status |
 | --- | --- | --- |
@@ -135,7 +134,7 @@ Notes:
 
 ### `swayidle`
 
-Current target mapping:
+Current mapping:
 
 | Provider surface | Canonical meaning | Current Rust Status |
 | --- | --- | --- |
@@ -154,7 +153,7 @@ Notes:
 
 ## Module Ownership
 
-The intended code split is:
+The code split is:
 
 - `crates/lg-buddy/src/session.rs`
   - canonical events

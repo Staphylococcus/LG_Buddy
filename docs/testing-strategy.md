@@ -181,7 +181,7 @@ Examples:
 
 - GNOME capability probing
 - GNOME monitor-line parsing
-- later GNOME event-stream integration
+- GNOME monitor event-stream integration
 
 ### Shell, systemd, and install flow
 
@@ -193,27 +193,25 @@ Secondary concern:
 
 - module interoperability
 
-These should not dominate the current Rust test suite, but they still matter because they are part of the real user path until migration is complete.
+These should not dominate the Rust test suite, but they still matter because installation and service wiring remain part of the real user path.
 
 ## Current Practical Gaps
 
 The most important remaining gaps are:
 
-- GNOME runtime/backend interoperability beyond simple capability checks and line parsing
-- a `gdbus` contract mock
-- a small number of user-needs acceptance scenarios
 - documented hardware smoke checks
 - host-level validation for installer and service wiring
+- broader validation of the remaining shell setup surface
+- any future coverage needed for richer `swayidle` hooks beyond `timeout` and `resume`
 
 ## Near-Term Priorities
 
 The next testing work should be:
 
-1. keep strengthening module-behavior tests in the Rust runtime where logic is still moving
-2. add a `gdbus` contract mock before building the GNOME runner
-3. add a very small cucumber acceptance layer for `screen-off`, `screen-on`, and `detect-backend`
-4. document a repeatable hardware smoke checklist
-5. decide how much of the remaining shell/systemd path deserves automated validation during migration
+1. keep strengthening module-behavior tests where runtime logic is still moving
+2. document a repeatable hardware smoke checklist
+3. decide how much of the installer and service wiring deserves automated host validation
+4. add targeted coverage only if new backend or setup behavior is introduced
 
 ## Default Developer Loop
 

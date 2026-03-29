@@ -1,23 +1,24 @@
 # LG Buddy Architecture Overview
 
-This document describes the current architecture on the `rust-poc` branch.
+This document describes the current LG Buddy architecture.
 
-It is not a product roadmap. It is a map of what exists today, how the main pieces fit together, and where the remaining migration boundary still sits.
+It is not a product roadmap. It is a map of what exists today and how the main pieces fit together.
 
 ## Repository Shape
 
-The repository currently contains two runtime worlds:
+The repository now has one runtime implementation and one setup surface:
 
-- legacy shell entrypoints and install flow
-  - `bin/`
-  - `install.sh`
-  - `uninstall.sh`
-  - `systemd/`
-- new Rust runtime workspace
+- Rust runtime workspace
   - `Cargo.toml`
   - `crates/lg-buddy/`
+- shell-based setup surface
+  - `configure.sh`
+  - `install.sh`
+  - `uninstall.sh`
+  - `bin/LG_Buddy_Common`
+  - `systemd/`
 
-The Rust runtime is the new application core. The shell layer still exists as the current integration and packaging surface.
+The Rust runtime owns operational behavior. The remaining shell layer exists for configuration, installation, and removal.
 
 ## High-Level Runtime Shape
 
@@ -83,14 +84,14 @@ flowchart LR
     MAIN --> RUNNER
     RUNNER --> BACKEND
     BACKEND --> GADAPTER
-    BACKEND -. planned .-> SADAPTER
+    BACKEND --> SADAPTER
 
     GNOME --> GDBUS
     GDBUS --> GADAPTER
     GADAPTER -->|"SessionEvent"| SESSIONMODEL
 
-    SWAY -. delegated hooks / IPC pending .-> SADAPTER
-    SADAPTER -. SessionEvent .-> SESSIONMODEL
+    SWAY -->|"timeout / resume hooks"| SADAPTER
+    SADAPTER -->|"SessionEvent"| SESSIONMODEL
     SESSIONMODEL --> RUNNER
 
     RUNNER -->|"Idle / Active /<br/>WakeRequested / UserActivity"| COMMANDS
@@ -346,21 +347,20 @@ Desktop backends should only answer questions like:
 - backend capability flags
 - idle-timeout ownership semantics
 
-The detailed target model is documented in
-`docs/session-backend-model.md`.
+The detailed session model is documented in `docs/session-backend-model.md`.
 
-`gnome.rs` is the first native backend slice. It currently provides:
+`gnome.rs` is the native GNOME adapter. It currently provides:
 
 - capability probing
 - mapping from GNOME D-Bus monitor lines into `SessionEvent`
-- the GNOME event source used by the first Rust `monitor` runner slice
+- the GNOME event source used by `lg-buddy monitor`
 
-`swayidle.rs` is the first delegated-tool backend slice. It currently provides:
+`swayidle.rs` is the delegated-tool adapter. It currently provides:
 
 - capability probing
 - mapping from `swayidle` hooks into `SessionEvent`
 
-The current monitor migration state is asymmetric:
+The session subsystem is intentionally asymmetric where the providers are asymmetric:
 
 - GNOME monitor behavior is implemented for idle, active, wake-request, and
   Mutter-based early activity restore
@@ -392,7 +392,7 @@ Important environment overrides:
 
 These exist mainly so the runtime can be tested without mutating real system paths or depending on globally installed commands.
 
-## Testing Strategy
+## Testing Shape
 
 The test strategy has three layers:
 
@@ -410,9 +410,9 @@ Relevant test assets:
 
 That mock preserves the real command/response shapes we have already observed from the installed TV client, so command-policy tests exercise the same subprocess boundary the runtime uses in production.
 
-## Current Migration Boundary
+## Current Boundary
 
-The Rust runtime now covers the core policy slices that were scoped for the POC:
+The Rust runtime currently owns:
 
 - config loading
 - state handling
@@ -421,20 +421,22 @@ The Rust runtime now covers the core policy slices that were scoped for the POC:
 - backend detection
 - startup
 - shutdown
+- system sleep hooks
 - screen-off
 - screen-on
+- brightness control
 - `monitor` command with GNOME and `swayidle` parity paths
 
-What is not migrated yet:
+The shell layer still owns:
 
-- installer and uninstaller logic
-- systemd unit migration
+- interactive configuration
+- installation
+- uninstallation
+
+What is still not implemented:
+
 - `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
 - additional desktop backends
 - native WebOS transport
 
-So the current architecture should be read as:
-
-- Rust owns the new runtime core
-- shell still owns installation and current system integration glue
-- the next major architectural step is completing delegated session-backend execution, not another rewrite of the command layer
+So the current architecture should be read as a Rust-owned runtime with a thin shell setup surface.

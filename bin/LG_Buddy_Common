@@ -99,40 +99,6 @@ lg_buddy_load_config() {
     return 0
 }
 
-lg_buddy_expected_app() {
-    local input_name="${1:-$input}"
-
-    echo "com.webos.app.$(echo "$input_name" | tr '[:upper:]' '[:lower:]' | tr -d '_')"
-}
-
-lg_buddy_send_wol() {
-    local mac="$1"
-
-    if command -v wakeonlan >/dev/null 2>&1; then
-        wakeonlan "$mac"
-    elif command -v wol >/dev/null 2>&1; then
-        wol "$mac"
-    else
-        echo "Neither 'wakeonlan' nor 'wol' command found. Cannot send Wake-on-LAN."
-        return 1
-    fi
-}
-
-lg_buddy_get_current_input() {
-    local client="$1"
-    local tv_address="$2"
-    local output=""
-    local rc=0
-
-    output="$("$client" "$tv_address" get_input 2>/dev/null)"
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        return $rc
-    fi
-
-    printf '%s\n' "$output" | awk 'NF { last = $0 } END { if (last) print last }'
-}
-
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
         --user-config-path)
