@@ -211,7 +211,7 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
 
     marker.clear()?;
     send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
-    sleeper.sleep(STARTUP_INITIAL_WAKE_DELAY);
+    sleeper.sleep(startup_initial_wake_delay());
 
     for attempt in 1..=STARTUP_WAKE_ATTEMPTS {
         if tv.input().set(config.input).is_ok() {
@@ -372,7 +372,7 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
         wol_sender,
         &config.tv_mac,
     )?;
-    sleeper.sleep(SCREEN_ON_INITIAL_WAKE_DELAY);
+    sleeper.sleep(screen_on_initial_wake_delay());
 
     for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
         writeln!(
@@ -500,12 +500,40 @@ fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
     Ok(())
 }
 
+fn duration_override_secs(env_key: &str, default: Duration) -> Duration {
+    env::var(env_key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
+fn screen_on_initial_wake_delay() -> Duration {
+    duration_override_secs(
+        "LG_BUDDY_SCREEN_ON_INITIAL_WAKE_DELAY_SECS",
+        SCREEN_ON_INITIAL_WAKE_DELAY,
+    )
+}
+
+fn startup_initial_wake_delay() -> Duration {
+    duration_override_secs(
+        "LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS",
+        STARTUP_INITIAL_WAKE_DELAY,
+    )
+}
+
 fn screen_on_retry_delay(attempt: u32) -> Duration {
-    Duration::from_secs(u64::from((attempt * 2).min(30)))
+    duration_override_secs(
+        "LG_BUDDY_SCREEN_ON_RETRY_DELAY_SECS",
+        Duration::from_secs(u64::from((attempt * 2).min(30))),
+    )
 }
 
 fn startup_retry_delay(attempt: u32) -> Duration {
-    Duration::from_secs(u64::from((attempt * 2).min(30)))
+    duration_override_secs(
+        "LG_BUDDY_STARTUP_RETRY_DELAY_SECS",
+        Duration::from_secs(u64::from((attempt * 2).min(30))),
+    )
 }
 
 #[cfg(test)]
