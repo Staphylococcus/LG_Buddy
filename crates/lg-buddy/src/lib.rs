@@ -1,6 +1,7 @@
 pub mod config;
 pub mod state;
 pub mod tv;
+pub mod wol;
 
 use std::fmt;
 use std::io::{self, Write};
