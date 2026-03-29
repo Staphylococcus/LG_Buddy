@@ -1,8 +1,11 @@
 use serde_json::{json, Map, Value};
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
@@ -126,6 +129,14 @@ impl MockBscpylgtv {
         }
     }
 
+    pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
+        let script_path = shell_quote(&Self::script_path());
+        let state_path = shell_quote(&self.state_path);
+        let body = format!("#!/bin/sh\nexec python3 {script_path} --state {state_path} \"$@\"\n");
+
+        ExecutableScript::new(label, "mock-bscpylgtvcommand", &body)
+    }
+
     fn script_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -169,6 +180,215 @@ impl MockBscpylgtv {
             serde_json::to_string_pretty(&state).expect("serialize mock state"),
         )
         .expect("write mock state");
+    }
+}
+
+#[allow(dead_code)]
+pub struct TestEnv {
+    _guard: MutexGuard<'static, ()>,
+    original_values: Vec<(OsString, Option<OsString>)>,
+}
+
+#[allow(dead_code)]
+impl TestEnv {
+    pub fn new() -> Self {
+        Self {
+            _guard: env_lock().lock().expect("acquire test env lock"),
+            original_values: Vec::new(),
+        }
+    }
+
+    pub fn set<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        let key = key.as_ref().to_os_string();
+        self.remember_original_value(&key);
+        env::set_var(&key, value.as_ref());
+    }
+
+    pub fn remove<K>(&mut self, key: K)
+    where
+        K: AsRef<OsStr>,
+    {
+        let key = key.as_ref().to_os_string();
+        self.remember_original_value(&key);
+        env::remove_var(&key);
+    }
+
+    fn remember_original_value(&mut self, key: &OsStr) {
+        if self.original_values.iter().any(|(saved, _)| saved == key) {
+            return;
+        }
+
+        self.original_values
+            .push((key.to_os_string(), env::var_os(key)));
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.original_values.iter().rev() {
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct TestConfigFile {
+    _temp_dir: TestDir,
+    path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl TestConfigFile {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let path = temp_dir.path().join("config.env");
+        Self {
+            _temp_dir: temp_dir,
+            path,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn write_contents(&self, contents: &str) {
+        fs::write(&self.path, contents).expect("write temp config");
+    }
+
+    pub fn write_sample(&self, input: &str) {
+        self.write_contents(&sample_config_contents(input));
+    }
+}
+
+#[allow(dead_code)]
+pub fn sample_config_contents(input: &str) -> String {
+    format!(
+        "tv_ip=192.168.1.42\n\
+tv_mac=aa:bb:cc:dd:ee:ff\n\
+input={input}\n\
+screen_backend=auto\n\
+screen_idle_timeout=300\n"
+    )
+}
+
+#[allow(dead_code)]
+pub struct RuntimeStateLayout {
+    _temp_dir: TestDir,
+    root: PathBuf,
+}
+
+#[allow(dead_code)]
+impl RuntimeStateLayout {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let root = temp_dir.path().to_path_buf();
+        Self {
+            _temp_dir: temp_dir,
+            root,
+        }
+    }
+
+    pub fn session_dir(&self) -> PathBuf {
+        self.root.join("session")
+    }
+
+    pub fn system_dir(&self) -> PathBuf {
+        self.root.join("system")
+    }
+
+    pub fn session_marker_path(&self) -> PathBuf {
+        self.session_dir().join("screen_off_by_us")
+    }
+
+    pub fn system_marker_path(&self) -> PathBuf {
+        self.system_dir().join("screen_off_by_us")
+    }
+
+    pub fn create_session_marker(&self) {
+        self.create_marker(&self.session_marker_path());
+    }
+
+    pub fn create_system_marker(&self) {
+        self.create_marker(&self.system_marker_path());
+    }
+
+    pub fn assert_session_marker_exists(&self) {
+        assert!(
+            self.session_marker_path().is_file(),
+            "expected session marker at {}",
+            self.session_marker_path().display()
+        );
+    }
+
+    pub fn assert_session_marker_absent(&self) {
+        assert!(
+            !self.session_marker_path().exists(),
+            "did not expect session marker at {}",
+            self.session_marker_path().display()
+        );
+    }
+
+    pub fn assert_system_marker_exists(&self) {
+        assert!(
+            self.system_marker_path().is_file(),
+            "expected system marker at {}",
+            self.system_marker_path().display()
+        );
+    }
+
+    pub fn assert_system_marker_absent(&self) {
+        assert!(
+            !self.system_marker_path().exists(),
+            "did not expect system marker at {}",
+            self.system_marker_path().display()
+        );
+    }
+
+    fn create_marker(&self, path: &Path) {
+        let parent = path.parent().expect("marker parent");
+        fs::create_dir_all(parent).expect("create marker parent");
+        fs::write(path, []).expect("write marker");
+    }
+}
+
+#[allow(dead_code)]
+pub struct ExecutableScript {
+    _temp_dir: TestDir,
+    path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl ExecutableScript {
+    pub fn new(label: &str, file_name: &str, body: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let path = temp_dir.path().join(file_name);
+        fs::write(&path, body).expect("write executable script");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("set script permissions");
+        }
+
+        Self {
+            _temp_dir: temp_dir,
+            path,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -243,4 +463,14 @@ impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn shell_quote(path: &Path) -> String {
+    let rendered = path.to_string_lossy().replace('\'', "'\"'\"'");
+    format!("'{rendered}'")
 }
