@@ -14,6 +14,7 @@ use crate::backend::{
 };
 use crate::commands::{run_screen_off, run_screen_on, run_shutdown};
 use crate::config::{ConfigError, ConfigPathError};
+use crate::session::runner::run_monitor;
 use crate::state::StateDirError;
 use std::fmt;
 use std::io::{self, Write};
@@ -24,6 +25,7 @@ pub enum Command {
     Shutdown,
     ScreenOff,
     ScreenOn,
+    Monitor,
     DetectBackend,
 }
 
@@ -142,6 +144,7 @@ impl Command {
             Self::Shutdown => "shutdown",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
+            Self::Monitor => "monitor",
             Self::DetectBackend => "detect-backend",
         }
     }
@@ -152,6 +155,7 @@ impl Command {
             Self::Shutdown => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
+            Self::Monitor => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
         }
     }
@@ -171,6 +175,7 @@ Commands:
   shutdown        Power off the TV when LG Buddy owns the active input
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
+  monitor         Run the user-session monitor loop
   detect-backend  Detect the active screen backend
 
 Startup modes:
@@ -220,6 +225,7 @@ where
         "shutdown" => Command::Shutdown,
         "screen-off" => Command::ScreenOff,
         "screen-on" => Command::ScreenOn,
+        "monitor" => Command::Monitor,
         "detect-backend" => Command::DetectBackend,
         other => return Err(ParseError::UnknownCommand(other.to_string())),
     };
@@ -242,6 +248,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
+        Command::Monitor => run_monitor(writer),
     }
 }
 
@@ -296,6 +303,10 @@ mod tests {
             Ok(ParseOutcome::Command(Command::ScreenOn))
         );
         assert_eq!(
+            parse_args(["monitor"]),
+            Ok(ParseOutcome::Command(Command::Monitor))
+        );
+        assert_eq!(
             parse_args(["detect-backend"]),
             Ok(ParseOutcome::Command(Command::DetectBackend))
         );
@@ -337,6 +348,7 @@ mod tests {
             "shutdown",
             "screen-off",
             "screen-on",
+            "monitor",
             "detect-backend",
         ] {
             assert!(

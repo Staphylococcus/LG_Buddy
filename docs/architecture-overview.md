@@ -37,6 +37,72 @@ main.rs
            -> session.rs / gnome.rs / swayidle.rs
 ```
 
+## System Diagram
+
+The current runtime can be visualized as one event path from the desktop
+session into the Rust monitor, and then one control path from policy code into
+the TV transport boundary.
+
+```mermaid
+flowchart LR
+    subgraph Desktop["Desktop Session / External Tools"]
+        GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
+        GDBUS["gdbus<br/>wait / call / monitor"]
+        SWAY["swayidle<br/>idle hooks"]
+    end
+
+    subgraph Rust["Rust Runtime"]
+        MAIN["main.rs / lib.rs<br/>CLI + command dispatch"]
+        COMMANDS["commands.rs<br/>screen-off / screen-on policy"]
+        CONFIG["config.rs<br/>config.env parsing"]
+        STATE["state.rs<br/>runtime markers"]
+
+        subgraph SessionSubsystem["Session Integration Subsystem"]
+            BACKEND["backend.rs<br/>backend selection"]
+            SESSIONMODEL["session.rs<br/>shared session model"]
+            RUNNER["session::runner<br/>monitor command"]
+
+            subgraph DEAdapters["Desktop Environment Adapters"]
+                GADAPTER["gnome.rs<br/>GNOME probe + line mapping"]
+                SADAPTER["swayidle.rs<br/>hook mapping + capability probe"]
+            end
+        end
+
+        subgraph ExternalInterfaces["External Interfaces"]
+            TV["tv.rs<br/>TvDevice / TvClient"]
+            WOL["wol.rs<br/>Wake-on-LAN"]
+        end
+    end
+
+    subgraph TVBoundary["TV Control Boundary"]
+        BSCPY["bscpylgtvcommand"]
+        LGTV["LG TV"]
+    end
+
+    MAIN --> BACKEND
+    MAIN --> RUNNER
+    RUNNER --> BACKEND
+    BACKEND --> GADAPTER
+    BACKEND -. planned .-> SADAPTER
+
+    GNOME --> GDBUS
+    GDBUS --> GADAPTER
+    GADAPTER -->|"SessionEvent"| SESSIONMODEL
+
+    SWAY -. delegated hooks / IPC pending .-> SADAPTER
+    SADAPTER -. SessionEvent .-> SESSIONMODEL
+    SESSIONMODEL --> RUNNER
+
+    RUNNER -->|"Idle / Active /<br/>WakeRequested / UserActivity"| COMMANDS
+    COMMANDS --> CONFIG
+    COMMANDS --> STATE
+    COMMANDS --> TV
+    COMMANDS --> WOL
+
+    TV --> BSCPY --> LGTV
+    WOL -->|"magic packet"| LGTV
+```
+
 The intended split is:
 
 - `lib.rs`
@@ -67,13 +133,28 @@ The intended split is:
 - `session.rs`
   - backend-neutral session event model
   - capability surface for desktop backends
+- `session/runner.rs`
+  - backend-neutral monitor runner
+  - dispatches semantic session events into the existing screen policy commands
 - `gnome.rs`
   - GNOME-specific capability probing and event mapping
-  - currently an interface skeleton, not the full event loop
+  - first real backend runner path via `gdbus`
+  - capability probing plus monitor-line mapping
 - `swayidle.rs`
   - `swayidle`-specific capability probing and hook-to-event mapping
   - keeps `swayidle` as an external-tool backend rather than reimplementing
     idle management
+
+The session-facing pieces should be read as one subsystem:
+
+- `backend.rs`
+  - selects the active session backend
+- `session.rs`
+  - defines the homogenized session contract
+- `session/runner.rs`
+  - consumes normalized session events and dispatches runtime policy
+- `gnome.rs` and `swayidle.rs`
+  - adapt backend-specific surfaces into that shared session contract
 
 ## Command Model
 
@@ -83,9 +164,11 @@ The binary currently supports these commands:
 - `shutdown`
 - `screen-off`
 - `screen-on`
+- `monitor`
 - `detect-backend`
 
-`lib.rs` parses the command line into a typed command enum and dispatches into `commands.rs`.
+`lib.rs` parses the command line into a typed command enum and dispatches into
+the runtime command handlers in `commands.rs` and `session/runner.rs`.
 
 This keeps CLI parsing separate from operational behavior.
 
@@ -270,13 +353,18 @@ The detailed target model is documented in
 
 - capability probing
 - mapping from GNOME D-Bus monitor lines into `SessionEvent`
+- the GNOME event source used by the first Rust `monitor` runner slice
 
 `swayidle.rs` is the first delegated-tool backend slice. It currently provides:
 
 - capability probing
 - mapping from `swayidle` hooks into `SessionEvent`
 
-The full GNOME session monitor/event loop has not been migrated yet.
+The current monitor migration state is asymmetric:
+
+- GNOME has a first real Rust runner slice
+- Mutter-based early activity polling is still pending
+- delegated `swayidle` process execution and hook IPC are still pending
 
 `swayidle` remains an external-tool backend by design. The current architecture does not aim to reimplement idle management tools that already solve the right problem.
 
@@ -332,13 +420,14 @@ The Rust runtime now covers the core policy slices that were scoped for the POC:
 - shutdown
 - screen-off
 - screen-on
-- GNOME backend skeleton
+- first `monitor` command and GNOME runner slice
 
 What is not migrated yet:
 
 - installer and uninstaller logic
 - systemd unit migration
-- full GNOME monitor/event-loop implementation
+- Mutter early-activity polling
+- delegated `swayidle` monitor execution and hook IPC
 - additional desktop backends
 - native WebOS transport
 
@@ -346,4 +435,4 @@ So the current architecture should be read as:
 
 - Rust owns the new runtime core
 - shell still owns installation and current system integration glue
-- the next major architectural step is session-backend execution, not another rewrite of the command layer
+- the next major architectural step is completing delegated session-backend execution, not another rewrite of the command layer

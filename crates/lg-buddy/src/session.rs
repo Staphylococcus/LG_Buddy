@@ -1,3 +1,5 @@
+pub mod runner;
+
 use std::error::Error;
 use std::fmt;
 
@@ -13,6 +15,21 @@ pub enum SessionEvent {
     Lock,
     Unlock,
     UserActivity,
+}
+
+impl SessionEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::WakeRequested => "wake-requested",
+            Self::BeforeSleep => "before-sleep",
+            Self::AfterResume => "after-resume",
+            Self::Lock => "lock",
+            Self::Unlock => "unlock",
+            Self::UserActivity => "user-activity",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
