@@ -9,7 +9,7 @@ use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
 };
-use crate::commands::run_screen_off;
+use crate::commands::{run_screen_off, run_screen_on};
 use crate::config::{ConfigError, ConfigPathError};
 use crate::state::StateDirError;
 use std::fmt;
@@ -60,6 +60,7 @@ impl fmt::Display for ParseError {
 #[derive(Debug)]
 pub enum RunError {
     Io(io::Error),
+    Policy(String),
     ConfigPath(ConfigPathError),
     Config(ConfigError),
     StateDir(StateDirError),
@@ -71,6 +72,7 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(err) => write!(f, "{err}"),
+            Self::Policy(err) => write!(f, "{err}"),
             Self::ConfigPath(err) => write!(f, "{err}"),
             Self::Config(err) => write!(f, "{err}"),
             Self::StateDir(err) => write!(f, "{err}"),
@@ -84,6 +86,7 @@ impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
+            Self::Policy(_) => None,
             Self::ConfigPath(err) => Some(err),
             Self::Config(err) => Some(err),
             Self::StateDir(err) => Some(err),
@@ -115,7 +118,7 @@ impl Command {
             Self::Startup => "TODO: implement startup command",
             Self::Shutdown => "TODO: implement shutdown command",
             Self::ScreenOff => "TODO: implemented via command handler",
-            Self::ScreenOn => "TODO: implement screen-on command",
+            Self::ScreenOn => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
         }
     }
@@ -134,7 +137,7 @@ Commands:
   startup         Placeholder startup command
   shutdown        Placeholder shutdown command
   screen-off      Blank the configured TV output if active
-  screen-on       Placeholder screen-on command
+  screen-on       Restore the TV output after an LG Buddy screen-off
   detect-backend  Detect the active screen backend
 "
     )
@@ -179,6 +182,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     match command {
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
+        Command::ScreenOn => run_screen_on(writer),
         _ => {
             writeln!(writer, "{}", command.placeholder_message())?;
             Ok(())

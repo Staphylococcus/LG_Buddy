@@ -109,6 +109,18 @@ impl Error for TvError {
     }
 }
 
+impl TvError {
+    pub fn indicates_active_screen_state(&self) -> bool {
+        match self {
+            Self::CommandFailed { output, .. } | Self::InvalidOutput { output, .. } => {
+                output.stderr().contains("errorCode': '-102'")
+                    || output.stdout().contains("errorCode': '-102'")
+            }
+            Self::Io { .. } => false,
+        }
+    }
+}
+
 pub trait TvClient {
     fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError>;
     fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError>;

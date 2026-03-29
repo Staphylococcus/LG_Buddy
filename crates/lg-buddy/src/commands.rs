@@ -1,9 +1,28 @@
 use std::io::Write;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::tv::{BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice};
+use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::RunError;
+
+const SCREEN_ON_STALE_MARKER_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
+const SCREEN_ON_WAKE_ATTEMPTS: u32 = 6;
+
+trait Sleeper {
+    fn sleep(&self, duration: Duration);
+}
+
+struct ThreadSleeper;
+
+impl Sleeper for ThreadSleeper {
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
 
 pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
@@ -13,6 +32,26 @@ pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = BscpylgtvCommandClient::from_env();
 
     run_screen_off_with(writer, &config, &marker, &tv_client)
+}
+
+pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let marker =
+        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
+    let tv_client = BscpylgtvCommandClient::from_env();
+    let wol_sender = UdpWakeOnLanSender::default();
+    let sleeper = ThreadSleeper;
+
+    run_screen_on_with(
+        writer,
+        &config,
+        &marker,
+        &tv_client,
+        &wol_sender,
+        &sleeper,
+        SystemTime::now(),
+    )
 }
 
 pub fn run_screen_off_with<W: Write>(
@@ -47,6 +86,117 @@ pub fn run_screen_off_with<W: Write>(
             Ok(())
         }
     }
+}
+
+fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
+    writer: &mut W,
+    config: &Config,
+    marker: &ScreenOwnershipMarker,
+    tv_client: &C,
+    wol_sender: &S,
+    sleeper: &Sl,
+    now: SystemTime,
+) -> Result<(), RunError> {
+    if !marker.exists() {
+        writeln!(
+            writer,
+            "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
+        )?;
+        return Ok(());
+    }
+
+    if marker
+        .is_stale(SCREEN_ON_STALE_MARKER_MAX_AGE, now)
+        .map_err(RunError::Io)?
+    {
+        writeln!(
+            writer,
+            "LG Buddy Screen On: State file is stale (>12h old). Removing and skipping wake."
+        )?;
+        marker.clear()?;
+        return Ok(());
+    }
+
+    let tv = TvDevice::new(tv_client, config.tv_ip);
+
+    writeln!(
+        writer,
+        "LG Buddy Screen On: Turning TV on (screen wake) using input {}...",
+        config.input.as_str()
+    )?;
+    writeln!(writer, "LG Buddy Screen On: Attempting screen unblank...")?;
+
+    match tv.screen().unblank() {
+        Ok(_) => {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: Screen unblank succeeded. Clearing wake state."
+            )?;
+            marker.clear()?;
+            return Ok(());
+        }
+        Err(err) if err.indicates_active_screen_state() => {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: TV reported an active screen state. Trying immediate input restore before full wake."
+            )?;
+
+            if tv.input().set(config.input).is_ok() {
+                writeln!(
+                    writer,
+                    "LG Buddy Screen On: Immediate input restore succeeded. Clearing wake state."
+                )?;
+                marker.clear()?;
+                return Ok(());
+            }
+        }
+        Err(_) => {}
+    }
+
+    writeln!(
+        writer,
+        "LG Buddy Screen On: Screen unblank failed. Falling back to full wake."
+    )?;
+    writeln!(
+        writer,
+        "LG Buddy Screen On: Sending initial Wake-on-LAN packet..."
+    )?;
+    send_wake_packet(writer, &tv, wol_sender, &config.tv_mac)?;
+    sleeper.sleep(SCREEN_ON_INITIAL_WAKE_DELAY);
+
+    for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
+        writeln!(
+            writer,
+            "LG Buddy Screen On: Wake attempt {attempt}: setting input to {}...",
+            config.input.as_str()
+        )?;
+
+        if tv.input().set(config.input).is_ok() {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: Wake attempt {attempt} succeeded. Clearing wake state."
+            )?;
+            marker.clear()?;
+            return Ok(());
+        }
+
+        let retry_delay = screen_on_retry_delay(attempt);
+        writeln!(
+            writer,
+            "LG Buddy Screen On: Wake attempt {attempt} failed. Resending WoL and retrying in {}s...",
+            retry_delay.as_secs()
+        )?;
+        send_wake_packet(writer, &tv, wol_sender, &config.tv_mac)?;
+        sleeper.sleep(retry_delay);
+    }
+
+    writeln!(
+        writer,
+        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. Leaving state file in place for another resume event."
+    )?;
+    Err(RunError::Policy(format!(
+        "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
+    )))
 }
 
 fn handle_known_input<W: Write, C: TvClient>(
@@ -103,19 +253,41 @@ fn handle_known_input<W: Write, C: TvClient>(
     Ok(())
 }
 
+fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
+    writer: &mut W,
+    tv: &TvDevice<'_, C>,
+    wol_sender: &S,
+    tv_mac: &crate::config::MacAddress,
+) -> Result<(), RunError> {
+    if let Err(err) = tv.power().wake(wol_sender, tv_mac) {
+        writeln!(
+            writer,
+            "LG Buddy Screen On: Wake-on-LAN send failed. Continuing anyway. {err}"
+        )?;
+    }
+
+    Ok(())
+}
+
+fn screen_on_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(u64::from((attempt * 2).min(30)))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::run_screen_off_with;
+    use super::{run_screen_off_with, run_screen_on_with, Sleeper};
     use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::{CommandOutput, TvClient, TvError};
+    use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::fs;
     use std::net::Ipv4Addr;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn matching_input_blanks_screen_and_sets_marker() {
@@ -238,6 +410,202 @@ mod tests {
         assert!(rendered(&output).contains("Fallback power_off failed."));
     }
 
+    #[test]
+    fn screen_on_skips_when_marker_is_missing() {
+        let temp_dir = TestDir::new("screen-on-no-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let client = FakeTvClient::new();
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now(),
+        )
+        .expect("missing marker should skip");
+
+        assert_eq!(client.calls(), Vec::<&'static str>::new());
+        assert!(wol.calls().is_empty());
+        assert!(sleeper.durations().is_empty());
+        assert!(rendered(&output).contains("State file not found."));
+    }
+
+    #[test]
+    fn screen_on_removes_stale_marker_and_skips() {
+        let temp_dir = TestDir::new("screen-on-stale-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new();
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now() + Duration::from_secs((12 * 60 * 60) + 1),
+        )
+        .expect("stale marker should skip");
+
+        assert!(!marker.exists());
+        assert!(wol.calls().is_empty());
+        assert!(sleeper.durations().is_empty());
+        assert!(rendered(&output).contains("State file is stale (>12h old)."));
+    }
+
+    #[test]
+    fn screen_on_unblanks_and_clears_marker() {
+        let temp_dir = TestDir::new("screen-on-unblank");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new().with_turn_screen_on(Ok(command_output("awake\n")));
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi1),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now(),
+        )
+        .expect("turn_screen_on should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(client.calls(), vec!["turn_screen_on"]);
+        assert!(wol.calls().is_empty());
+        assert!(rendered(&output).contains("Screen unblank succeeded."));
+    }
+
+    #[test]
+    fn screen_on_restores_input_when_screen_is_already_active() {
+        let temp_dir = TestDir::new("screen-on-already-active");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new()
+            .with_turn_screen_on(Err(command_failed(
+                "turn_screen_on",
+                1,
+                "errorCode': '-102'\n",
+            )))
+            .with_set_input(Ok(command_output("restored\n")));
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi3),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now(),
+        )
+        .expect("already-active path should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(client.calls(), vec!["turn_screen_on", "set_input"]);
+        assert!(wol.calls().is_empty());
+        assert!(sleeper.durations().is_empty());
+        let rendered = rendered(&output);
+        assert!(rendered.contains("TV reported an active screen state."));
+        assert!(rendered.contains("Immediate input restore succeeded."));
+    }
+
+    #[test]
+    fn screen_on_falls_back_to_wake_and_retries_until_success() {
+        let temp_dir = TestDir::new("screen-on-wake-retry-success");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new()
+            .with_turn_screen_on(Err(command_failed("turn_screen_on", 1, "offline\n")))
+            .with_set_input_results([
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Ok(command_output("restored\n")),
+            ]);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi4),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now(),
+        )
+        .expect("wake retry should succeed");
+
+        assert!(!marker.exists());
+        assert_eq!(
+            client.calls(),
+            vec!["turn_screen_on", "set_input", "set_input"]
+        );
+        assert_eq!(wol.calls().len(), 2);
+        assert_eq!(
+            sleeper.durations(),
+            vec![Duration::from_secs(6), Duration::from_secs(2)]
+        );
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Sending initial Wake-on-LAN packet"));
+        assert!(rendered.contains("Wake attempt 1 failed."));
+        assert!(rendered.contains("Wake attempt 2 succeeded."));
+    }
+
+    #[test]
+    fn screen_on_returns_error_and_preserves_marker_after_exhausting_retries() {
+        let temp_dir = TestDir::new("screen-on-wake-retry-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create marker");
+        let client = FakeTvClient::new()
+            .with_turn_screen_on(Err(command_failed("turn_screen_on", 1, "offline\n")))
+            .with_set_input_results([
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Err(command_failed("set_input", 1, "not ready\n")),
+                Err(command_failed("set_input", 1, "not ready\n")),
+            ]);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        let err = run_screen_on_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            SystemTime::now(),
+        )
+        .expect_err("exhausted retries should fail");
+
+        assert!(marker.exists());
+        assert_eq!(client.calls().len(), 7);
+        assert_eq!(wol.calls().len(), 7);
+        assert_eq!(sleeper.durations().len(), 7);
+        assert!(matches!(err, crate::RunError::Policy(_)));
+        assert!(rendered(&output).contains("Wake failed after 6 attempts."));
+    }
+
     fn sample_config(input: HdmiInput) -> Config {
         Config {
             tv_ip: "192.168.1.42".parse::<Ipv4Addr>().expect("parse ipv4"),
@@ -267,46 +635,56 @@ mod tests {
     }
 
     struct FakeTvClient {
-        current_input: RefCell<Option<Result<String, TvError>>>,
-        turn_screen_off: RefCell<Option<Result<CommandOutput, TvError>>>,
-        power_off: RefCell<Option<Result<CommandOutput, TvError>>>,
+        current_input: RefCell<VecDeque<Result<String, TvError>>>,
+        set_input: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
+        turn_screen_off: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
+        turn_screen_on: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
+        power_off: RefCell<VecDeque<Result<CommandOutput, TvError>>>,
         calls: RefCell<Vec<&'static str>>,
     }
 
     impl FakeTvClient {
         fn new() -> Self {
             Self {
-                current_input: RefCell::new(Some(Err(command_failed(
-                    "get_input",
-                    1,
-                    "unconfigured\n",
-                )))),
-                turn_screen_off: RefCell::new(Some(Err(command_failed(
-                    "turn_screen_off",
-                    1,
-                    "unconfigured\n",
-                )))),
-                power_off: RefCell::new(Some(Err(command_failed(
-                    "power_off",
-                    1,
-                    "unconfigured\n",
-                )))),
+                current_input: RefCell::new(VecDeque::new()),
+                set_input: RefCell::new(VecDeque::new()),
+                turn_screen_off: RefCell::new(VecDeque::new()),
+                turn_screen_on: RefCell::new(VecDeque::new()),
+                power_off: RefCell::new(VecDeque::new()),
                 calls: RefCell::new(Vec::new()),
             }
         }
 
         fn with_current_input(self, value: Result<String, TvError>) -> Self {
-            *self.current_input.borrow_mut() = Some(value);
+            self.current_input.borrow_mut().push_back(value);
+            self
+        }
+
+        fn with_set_input(self, value: Result<CommandOutput, TvError>) -> Self {
+            self.set_input.borrow_mut().push_back(value);
+            self
+        }
+
+        fn with_set_input_results<I>(self, values: I) -> Self
+        where
+            I: IntoIterator<Item = Result<CommandOutput, TvError>>,
+        {
+            self.set_input.borrow_mut().extend(values);
             self
         }
 
         fn with_turn_screen_off(self, value: Result<CommandOutput, TvError>) -> Self {
-            *self.turn_screen_off.borrow_mut() = Some(value);
+            self.turn_screen_off.borrow_mut().push_back(value);
+            self
+        }
+
+        fn with_turn_screen_on(self, value: Result<CommandOutput, TvError>) -> Self {
+            self.turn_screen_on.borrow_mut().push_back(value);
             self
         }
 
         fn with_power_off(self, value: Result<CommandOutput, TvError>) -> Self {
-            *self.power_off.borrow_mut() = Some(value);
+            self.power_off.borrow_mut().push_back(value);
             self
         }
 
@@ -320,20 +698,23 @@ mod tests {
             self.calls.borrow_mut().push("get_input");
             self.current_input
                 .borrow_mut()
-                .take()
+                .pop_front()
                 .expect("configured get_input response")
         }
 
         fn set_input(&self, _tv_ip: Ipv4Addr, _input: HdmiInput) -> Result<CommandOutput, TvError> {
             self.calls.borrow_mut().push("set_input");
-            Err(command_failed("set_input", 1, "unused\n"))
+            self.set_input
+                .borrow_mut()
+                .pop_front()
+                .expect("configured set_input response")
         }
 
         fn power_off(&self, _tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
             self.calls.borrow_mut().push("power_off");
             self.power_off
                 .borrow_mut()
-                .take()
+                .pop_front()
                 .expect("configured power_off response")
         }
 
@@ -341,13 +722,51 @@ mod tests {
             self.calls.borrow_mut().push("turn_screen_off");
             self.turn_screen_off
                 .borrow_mut()
-                .take()
+                .pop_front()
                 .expect("configured turn_screen_off response")
         }
 
         fn turn_screen_on(&self, _tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
             self.calls.borrow_mut().push("turn_screen_on");
-            Err(command_failed("turn_screen_on", 1, "unused\n"))
+            self.turn_screen_on
+                .borrow_mut()
+                .pop_front()
+                .expect("configured turn_screen_on response")
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingWakeOnLanSender {
+        calls: RefCell<Vec<MacAddress>>,
+    }
+
+    impl RecordingWakeOnLanSender {
+        fn calls(&self) -> Vec<MacAddress> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl WakeOnLanSender for RecordingWakeOnLanSender {
+        fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
+            self.calls.borrow_mut().push(mac.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSleeper {
+        durations: RefCell<Vec<Duration>>,
+    }
+
+    impl RecordingSleeper {
+        fn durations(&self) -> Vec<Duration> {
+            self.durations.borrow().clone()
+        }
+    }
+
+    impl Sleeper for RecordingSleeper {
+        fn sleep(&self, duration: Duration) {
+            self.durations.borrow_mut().push(duration);
         }
     }
 
