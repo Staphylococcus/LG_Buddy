@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -12,7 +13,9 @@ use crate::backend::{
     BackendSelectionError,
 };
 use crate::commands::{run_screen_off, run_screen_on};
-use crate::config::ScreenBackend;
+use crate::config::{
+    load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+};
 use crate::gnome::{map_monitor_line, GnomeBackend, SystemGnomeProbe};
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
 use crate::state::{ScreenOwnershipMarker, StateDirError, StateScope};
@@ -180,10 +183,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
 
     match backend {
         ScreenBackend::Gnome => run_gnome_monitor(writer, &mut dispatcher),
-        ScreenBackend::Swayidle => Err(SessionRunnerError::UnsupportedBackend {
-            backend,
-            reason: "delegated swayidle monitor support and hook IPC are still pending",
-        }),
+        ScreenBackend::Swayidle => run_swayidle_monitor(writer),
         ScreenBackend::Auto => Err(SessionRunnerError::Failed {
             backend,
             message: "auto backend should be resolved before starting the runner".to_string(),
@@ -252,6 +252,38 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
     monitor_result
 }
 
+fn run_swayidle_monitor<W: Write>(writer: &mut W) -> Result<(), SessionRunnerError> {
+    let idle_timeout_secs = resolve_idle_timeout_secs();
+    let current_exe = std::env::current_exe()?;
+    let screen_off_command = format!("{} screen-off", shell_quote(&current_exe));
+    let screen_on_command = format!("{} screen-on", shell_quote(&current_exe));
+
+    writeln!(
+        writer,
+        "LG Buddy Monitor: Using swayidle backend (timeout: {idle_timeout_secs}s)."
+    )?;
+
+    let status = ProcessCommand::new("swayidle")
+        .args([
+            "-w",
+            "timeout",
+            &idle_timeout_secs.to_string(),
+            &screen_off_command,
+            "resume",
+            &screen_on_command,
+        ])
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(SessionRunnerError::Failed {
+            backend: ScreenBackend::Swayidle,
+            message: format!("swayidle exited with status {status}"),
+        })
+    }
+}
+
 #[cfg(test)]
 fn process_gnome_monitor_output<R: BufRead, W: Write, E: SessionActionExecutor>(
     reader: R,
@@ -303,6 +335,19 @@ fn wait_for_gnome_shell() -> Result<(), SessionRunnerError> {
             message: "timed out waiting for GNOME Shell on the session bus".to_string(),
         })
     }
+}
+
+fn resolve_idle_timeout_secs() -> u64 {
+    std::env::var("LG_BUDDY_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            let path = resolve_config_path_from_env().ok()?;
+            load_config(&path)
+                .ok()
+                .map(|config| config.screen_idle_timeout)
+        })
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT)
 }
 
 fn spawn_gnome_monitor_thread(sender: mpsc::Sender<RunnerMessage>) -> JoinHandle<()> {
@@ -471,6 +516,12 @@ fn parse_gnome_idletime_output(output: &str) -> Option<u64> {
         .ok()
 }
 
+fn shell_quote(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    let escaped = rendered.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
+}
+
 fn run_action<F>(action: F) -> Result<String, RunError>
 where
     F: FnOnce(&mut Vec<u8>) -> Result<(), RunError>,
@@ -496,13 +547,15 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_gnome_idletime_output, process_gnome_monitor_output, watch_for_early_user_activity,
-        ActivityMarker, IdleMonitorProbe, SessionActionExecutor, SessionEventDispatcher,
+        parse_gnome_idletime_output, process_gnome_monitor_output, shell_quote,
+        watch_for_early_user_activity, ActivityMarker, IdleMonitorProbe, SessionActionExecutor,
+        SessionEventDispatcher,
     };
     use crate::session::SessionEvent;
     use crate::RunError;
     use std::cell::RefCell;
     use std::io::Cursor;
+    use std::path::Path;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
@@ -695,5 +748,14 @@ unrelated\n";
         );
 
         assert!(!detected);
+    }
+
+    #[test]
+    fn shell_quote_wraps_path_for_posix_shell() {
+        assert_eq!(shell_quote(Path::new("/tmp/lg buddy")), "'/tmp/lg buddy'");
+        assert_eq!(
+            shell_quote(Path::new("/tmp/that'one")),
+            "'/tmp/that'\"'\"'one'"
+        );
     }
 }
