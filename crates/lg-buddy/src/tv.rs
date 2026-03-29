@@ -1,3 +1,4 @@
+use std::env;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -5,7 +6,8 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::HdmiInput;
+use crate::config::{HdmiInput, MacAddress};
+use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
 
@@ -116,6 +118,123 @@ pub trait TvClient {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentInput {
+    Hdmi(HdmiInput),
+    Other(String),
+}
+
+impl CurrentInput {
+    pub fn from_raw(value: String) -> Self {
+        match HdmiInput::from_app_id(&value) {
+            Some(input) => Self::Hdmi(input),
+            None => Self::Other(value),
+        }
+    }
+
+    pub fn is_hdmi(&self, input: HdmiInput) -> bool {
+        matches!(self, Self::Hdmi(current) if *current == input)
+    }
+}
+
+impl fmt::Display for CurrentInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hdmi(input) => write!(f, "{}", input.as_str()),
+            Self::Other(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvDevice<'a, C> {
+    client: &'a C,
+    tv_ip: Ipv4Addr,
+}
+
+impl<'a, C> TvDevice<'a, C> {
+    pub fn new(client: &'a C, tv_ip: Ipv4Addr) -> Self {
+        Self { client, tv_ip }
+    }
+}
+
+impl<'a, C: TvClient> TvDevice<'a, C> {
+    pub fn input(&self) -> TvInput<'a, C> {
+        TvInput {
+            client: self.client,
+            tv_ip: self.tv_ip,
+        }
+    }
+
+    pub fn screen(&self) -> TvScreen<'a, C> {
+        TvScreen {
+            client: self.client,
+            tv_ip: self.tv_ip,
+        }
+    }
+
+    pub fn power(&self) -> TvPower<'a, C> {
+        TvPower {
+            client: self.client,
+            tv_ip: self.tv_ip,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvInput<'a, C> {
+    client: &'a C,
+    tv_ip: Ipv4Addr,
+}
+
+impl<'a, C: TvClient> TvInput<'a, C> {
+    pub fn current(&self) -> Result<CurrentInput, TvError> {
+        self.client
+            .get_input(self.tv_ip)
+            .map(CurrentInput::from_raw)
+    }
+
+    pub fn set(&self, input: HdmiInput) -> Result<CommandOutput, TvError> {
+        self.client.set_input(self.tv_ip, input)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvScreen<'a, C> {
+    client: &'a C,
+    tv_ip: Ipv4Addr,
+}
+
+impl<'a, C: TvClient> TvScreen<'a, C> {
+    pub fn blank(&self) -> Result<CommandOutput, TvError> {
+        self.client.turn_screen_off(self.tv_ip)
+    }
+
+    pub fn unblank(&self) -> Result<CommandOutput, TvError> {
+        self.client.turn_screen_on(self.tv_ip)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvPower<'a, C> {
+    client: &'a C,
+    tv_ip: Ipv4Addr,
+}
+
+impl<'a, C: TvClient> TvPower<'a, C> {
+    pub fn wake<W: WakeOnLanSender>(
+        &self,
+        sender: &W,
+        tv_mac: &MacAddress,
+    ) -> Result<(), WakeOnLanError> {
+        sender.send_magic_packet(tv_mac)
+    }
+
+    pub fn off(&self) -> Result<CommandOutput, TvError> {
+        self.client.power_off(self.tv_ip)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BscpylgtvCommandClient {
     command_path: PathBuf,
     command_args: Vec<String>,
@@ -143,6 +262,13 @@ impl BscpylgtvCommandClient {
         Self {
             command_path: command_path.into(),
             command_args: command_args.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        match env::var_os("LG_BUDDY_BSCPYLGTV_COMMAND") {
+            Some(path) => Self::new(PathBuf::from(path)),
+            None => Self::default(),
         }
     }
 
@@ -226,9 +352,12 @@ fn last_non_empty_line(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BscpylgtvCommandClient, CommandOutput, TvClient, TvError, DEFAULT_BSCPYLGTV_COMMAND_PATH,
+        BscpylgtvCommandClient, CommandOutput, CurrentInput, TvClient, TvDevice, TvError,
+        DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
-    use crate::config::HdmiInput;
+    use crate::config::{HdmiInput, MacAddress};
+    use crate::wol::{WakeOnLanError, WakeOnLanSender};
+    use std::cell::RefCell;
     use std::fs;
     use std::net::Ipv4Addr;
     use std::path::{Path, PathBuf};
@@ -321,6 +450,72 @@ printf 'com.webos.app.hdmi2\n'
     }
 
     #[test]
+    fn tv_device_maps_hdmi_inputs_to_typed_values() {
+        let temp_dir = TestDir::new("tv-device-current-hdmi");
+        let log_path = temp_dir.path().join("invocation.log");
+        let script_path = temp_dir.path().join("stub.sh");
+        write_stub(&script_path, &log_path, "printf 'com.webos.app.hdmi4\\n'\n");
+
+        let client = client_for_script(&script_path);
+        let tv = TvDevice::new(&client, ip("10.0.0.7"));
+        let current = tv.input().current().expect("current input should parse");
+
+        assert_eq!(current, CurrentInput::Hdmi(HdmiInput::Hdmi4));
+    }
+
+    #[test]
+    fn tv_device_preserves_non_hdmi_inputs() {
+        let temp_dir = TestDir::new("tv-device-current-other");
+        let log_path = temp_dir.path().join("invocation.log");
+        let script_path = temp_dir.path().join("stub.sh");
+        write_stub(
+            &script_path,
+            &log_path,
+            "printf 'com.webos.app.youtube\\n'\n",
+        );
+
+        let client = client_for_script(&script_path);
+        let tv = TvDevice::new(&client, ip("10.0.0.9"));
+        let current = tv.input().current().expect("current input should parse");
+
+        assert_eq!(
+            current,
+            CurrentInput::Other("com.webos.app.youtube".to_string())
+        );
+    }
+
+    #[test]
+    fn tv_screen_blank_uses_domain_facade() {
+        let temp_dir = TestDir::new("tv-device-screen-blank");
+        let log_path = temp_dir.path().join("invocation.log");
+        let script_path = temp_dir.path().join("stub.sh");
+        write_stub(&script_path, &log_path, "printf 'ok\\n'\n");
+
+        let client = client_for_script(&script_path);
+        let tv = TvDevice::new(&client, ip("10.0.0.11"));
+        tv.screen().blank().expect("screen blank should succeed");
+
+        assert_eq!(
+            fs::read_to_string(&log_path).expect("read invocation log"),
+            "10.0.0.11\nturn_screen_off\n"
+        );
+    }
+
+    #[test]
+    fn tv_power_wake_uses_wake_on_lan_sender() {
+        let client = BscpylgtvCommandClient::default();
+        let tv = TvDevice::new(&client, ip("10.0.0.15"));
+        let sender = RecordingWakeOnLanSender::default();
+        let mac = parse_mac("01:23:45:67:89:ab");
+
+        tv.power()
+            .wake(&sender, &mac)
+            .expect("wake on lan should succeed");
+
+        assert_eq!(sender.calls(), vec![mac]);
+    }
+
+    #[test]
     fn command_failures_preserve_status_and_output() {
         let temp_dir = TestDir::new("tv-command-failure");
         let log_path = temp_dir.path().join("invocation.log");
@@ -369,8 +564,30 @@ printf 'com.webos.app.hdmi2\n'
         value.parse().expect("parse IPv4 address")
     }
 
+    fn parse_mac(value: &str) -> MacAddress {
+        value.parse().expect("parse mac address")
+    }
+
     fn client_for_script(script_path: &Path) -> BscpylgtvCommandClient {
         BscpylgtvCommandClient::with_args("/bin/sh", [script_path.to_string_lossy().into_owned()])
+    }
+
+    #[derive(Default)]
+    struct RecordingWakeOnLanSender {
+        calls: RefCell<Vec<MacAddress>>,
+    }
+
+    impl RecordingWakeOnLanSender {
+        fn calls(&self) -> Vec<MacAddress> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl WakeOnLanSender for RecordingWakeOnLanSender {
+        fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
+            self.calls.borrow_mut().push(mac.clone());
+            Ok(())
+        }
     }
 
     struct TestDir {

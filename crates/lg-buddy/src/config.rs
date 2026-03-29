@@ -85,6 +85,25 @@ impl HdmiInput {
             Self::Hdmi4 => "HDMI_4",
         }
     }
+
+    pub fn expected_app_id(&self) -> &'static str {
+        match self {
+            Self::Hdmi1 => "com.webos.app.hdmi1",
+            Self::Hdmi2 => "com.webos.app.hdmi2",
+            Self::Hdmi3 => "com.webos.app.hdmi3",
+            Self::Hdmi4 => "com.webos.app.hdmi4",
+        }
+    }
+
+    pub fn from_app_id(value: &str) -> Option<Self> {
+        match value {
+            "com.webos.app.hdmi1" => Some(Self::Hdmi1),
+            "com.webos.app.hdmi2" => Some(Self::Hdmi2),
+            "com.webos.app.hdmi3" => Some(Self::Hdmi3),
+            "com.webos.app.hdmi4" => Some(Self::Hdmi4),
+            _ => None,
+        }
+    }
 }
 
 impl FromStr for HdmiInput {
@@ -386,6 +405,18 @@ mod tests {
         assert_eq!(config.input, HdmiInput::Hdmi2);
         assert_eq!(config.screen_backend, ScreenBackend::Gnome);
         assert_eq!(config.screen_idle_timeout, 450);
+    }
+
+    #[test]
+    fn hdmi_input_round_trips_through_app_id() {
+        for input in [
+            HdmiInput::Hdmi1,
+            HdmiInput::Hdmi2,
+            HdmiInput::Hdmi3,
+            HdmiInput::Hdmi4,
+        ] {
+            assert_eq!(HdmiInput::from_app_id(input.expected_app_id()), Some(input));
+        }
     }
 
     #[test]

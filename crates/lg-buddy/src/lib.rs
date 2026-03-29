@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod commands;
 pub mod config;
 pub mod state;
 pub mod tv;
@@ -8,6 +9,9 @@ use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
 };
+use crate::commands::run_screen_off;
+use crate::config::{ConfigError, ConfigPathError};
+use crate::state::StateDirError;
 use std::fmt;
 use std::io::{self, Write};
 
@@ -56,6 +60,9 @@ impl fmt::Display for ParseError {
 #[derive(Debug)]
 pub enum RunError {
     Io(io::Error),
+    ConfigPath(ConfigPathError),
+    Config(ConfigError),
+    StateDir(StateDirError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
 }
@@ -64,6 +71,9 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(err) => write!(f, "{err}"),
+            Self::ConfigPath(err) => write!(f, "{err}"),
+            Self::Config(err) => write!(f, "{err}"),
+            Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
         }
@@ -74,6 +84,9 @@ impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
+            Self::ConfigPath(err) => Some(err),
+            Self::Config(err) => Some(err),
+            Self::StateDir(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
         }
@@ -101,7 +114,7 @@ impl Command {
         match self {
             Self::Startup => "TODO: implement startup command",
             Self::Shutdown => "TODO: implement shutdown command",
-            Self::ScreenOff => "TODO: implement screen-off command",
+            Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implement screen-on command",
             Self::DetectBackend => "TODO: implement detect-backend command",
         }
@@ -120,7 +133,7 @@ Usage:
 Commands:
   startup         Placeholder startup command
   shutdown        Placeholder shutdown command
-  screen-off      Placeholder screen-off command
+  screen-off      Blank the configured TV output if active
   screen-on       Placeholder screen-on command
   detect-backend  Detect the active screen backend
 "
@@ -165,6 +178,7 @@ where
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
         Command::DetectBackend => run_detect_backend(writer),
+        Command::ScreenOff => run_screen_off(writer),
         _ => {
             writeln!(writer, "{}", command.placeholder_message())?;
             Ok(())
@@ -260,9 +274,9 @@ mod tests {
     #[test]
     fn run_command_prints_placeholder_message() {
         let mut output = Vec::new();
-        run_command(Command::ScreenOff, &mut output).expect("write placeholder message");
+        run_command(Command::Startup, &mut output).expect("write placeholder message");
 
         let rendered = String::from_utf8(output).expect("utf8 output");
-        assert_eq!(rendered, "TODO: implement screen-off command\n");
+        assert_eq!(rendered, "TODO: implement startup command\n");
     }
 }
