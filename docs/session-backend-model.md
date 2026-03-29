@@ -106,12 +106,13 @@ Those delays are runtime policy, not session-backend idle policy.
 
 ## Provider Map
 
-This is the target mapping for the currently known backends.
+This is the target mapping for the currently known backends, with the current Rust
+implementation status called out explicitly.
 
-| Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GNOME | Yes | Yes | Yes | Yes, when Mutter idle monitor is available | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `DesktopEnvironment` |
-| `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` |
+| Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| GNOME | Yes | Yes | Yes | Yes, when Mutter idle monitor is available | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `DesktopEnvironment` | Implemented for `Idle`, `Active`, `WakeRequested`, and Mutter-backed `UserActivity` |
+| `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` | Implemented for delegated `timeout -> Idle` and `resume -> Active`; `before-sleep`, `after-resume`, `lock`, and `unlock` are modeled but not executed |
 
 ## Provider-Specific Mapping
 
@@ -119,12 +120,12 @@ This is the target mapping for the currently known backends.
 
 Current target mapping:
 
-| Provider surface | Canonical meaning |
-| --- | --- |
-| `org.gnome.ScreenSaver.ActiveChanged (true,)` | `Idle` |
-| `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` |
-| `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` |
-| Mutter idle monitor activity detection | `UserActivity` |
+| Provider surface | Canonical meaning | Current Rust Status |
+| --- | --- | --- |
+| `org.gnome.ScreenSaver.ActiveChanged (true,)` | `Idle` | Implemented |
+| `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
+| `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
+| Mutter idle monitor activity detection | `UserActivity` | Implemented |
 
 Notes:
 
@@ -136,14 +137,14 @@ Notes:
 
 Current target mapping:
 
-| Provider surface | Canonical meaning |
-| --- | --- |
-| `timeout <n> <cmd>` | `Idle` |
-| `resume <cmd>` | `Active` |
-| `before-sleep <cmd>` | `BeforeSleep` |
-| `after-resume <cmd>` | `AfterResume` |
-| `lock <cmd>` | `Lock` |
-| `unlock <cmd>` | `Unlock` |
+| Provider surface | Canonical meaning | Current Rust Status |
+| --- | --- | --- |
+| `timeout <n> <cmd>` | `Idle` | Implemented |
+| `resume <cmd>` | `Active` | Implemented |
+| `before-sleep <cmd>` | `BeforeSleep` | Not implemented |
+| `after-resume <cmd>` | `AfterResume` | Not implemented |
+| `lock <cmd>` | `Lock` | Not implemented |
+| `unlock <cmd>` | `Unlock` | Not implemented |
 
 Notes:
 

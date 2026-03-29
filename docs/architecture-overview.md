@@ -362,9 +362,12 @@ The detailed target model is documented in
 
 The current monitor migration state is asymmetric:
 
-- GNOME has a first real Rust runner slice
-- Mutter-based early activity polling is still pending
-- delegated `swayidle` process execution and hook IPC are still pending
+- GNOME monitor behavior is implemented for idle, active, wake-request, and
+  Mutter-based early activity restore
+- delegated `swayidle` monitor execution is implemented for `timeout` and
+  `resume` parity with the shell monitor
+- `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,
+  `lock`, and `unlock` are not wired into runtime behavior yet
 
 `swayidle` remains an external-tool backend by design. The current architecture does not aim to reimplement idle management tools that already solve the right problem.
 
@@ -420,14 +423,13 @@ The Rust runtime now covers the core policy slices that were scoped for the POC:
 - shutdown
 - screen-off
 - screen-on
-- first `monitor` command and GNOME runner slice
+- `monitor` command with GNOME and `swayidle` parity paths
 
 What is not migrated yet:
 
 - installer and uninstaller logic
 - systemd unit migration
-- Mutter early-activity polling
-- delegated `swayidle` monitor execution and hook IPC
+- `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
 - additional desktop backends
 - native WebOS transport
 

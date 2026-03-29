@@ -148,7 +148,16 @@ This directly replaces the current shell-side early activity watcher.
 
 LG Buddy should not reimplement idle management for wlroots compositors.
 
-Instead, the Rust runner should:
+The current implementation takes the smallest shell-parity path:
+
+1. build the desired `swayidle` command line from config
+2. start `swayidle` as a child process
+3. delegate `timeout` directly to `lg-buddy screen-off`
+4. delegate `resume` directly to `lg-buddy screen-on`
+
+This is enough for current parity with the shell monitor.
+
+A richer future shape could instead:
 
 1. build the desired `swayidle` command line from config and capabilities
 2. start `swayidle` as a child process
