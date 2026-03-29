@@ -444,6 +444,83 @@ impl MockGdbus {
 }
 
 #[allow(dead_code)]
+pub struct MockNmOnline {
+    _temp_dir: TestDir,
+    state_path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl MockNmOnline {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let state_path = temp_dir.path().join("state.json");
+        let mock = Self {
+            _temp_dir: temp_dir,
+            state_path,
+        };
+        mock.save_state(json!({
+            "status": 0,
+            "invocations": [],
+        }));
+        mock
+    }
+
+    pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
+        let python_path = shell_quote(&python3_path());
+        let script_path = shell_quote(&Self::script_path());
+        let state_path = shell_quote(&self.state_path);
+        let body =
+            format!("#!/bin/sh\nexec {python_path} {script_path} --state {state_path} \"$@\"\n");
+
+        ExecutableScript::new(label, "mock-nm-online", &body)
+    }
+
+    pub fn set_status(&self, status: i64) {
+        self.patch_state(json!({ "status": status }));
+    }
+
+    pub fn invocations(&self) -> Vec<MockNmOnlineInvocation> {
+        self.load_state()
+            .get("invocations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(MockNmOnlineInvocation::from_value)
+            .collect()
+    }
+
+    fn script_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("tools")
+            .join("mock_nm_online.py")
+    }
+
+    fn patch_state(&self, patch: Value) {
+        let mut state = self.load_state();
+        let state_object = state.as_object_mut().expect("mock state object");
+        let patch_object = patch.as_object().expect("state patch object");
+        for (key, value) in patch_object {
+            state_object.insert(key.clone(), value.clone());
+        }
+        self.save_state(state);
+    }
+
+    fn load_state(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(&self.state_path).expect("read mock state"))
+            .expect("parse mock state")
+    }
+
+    fn save_state(&self, state: Value) {
+        fs::write(
+            &self.state_path,
+            serde_json::to_string_pretty(&state).expect("serialize mock state"),
+        )
+        .expect("write mock state");
+    }
+}
+
+#[allow(dead_code)]
 pub struct TestEnv {
     _guard: MutexGuard<'static, ()>,
     original_values: Vec<(OsString, Option<OsString>)>,
@@ -752,6 +829,27 @@ pub struct MockGdbusInvocation {
 impl MockGdbusInvocation {
     fn from_value(value: &Value) -> Self {
         let object = value.as_object().expect("mock gdbus invocation object");
+        Self {
+            argv: object
+                .get("argv")
+                .and_then(Value::as_array)
+                .expect("invocation argv array")
+                .iter()
+                .map(|value| value.as_str().expect("argv string").to_string())
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct MockNmOnlineInvocation {
+    pub argv: Vec<String>,
+}
+
+impl MockNmOnlineInvocation {
+    fn from_value(value: &Value) -> Self {
+        let object = value.as_object().expect("mock nm-online invocation object");
         Self {
             argv: object
                 .get("argv")

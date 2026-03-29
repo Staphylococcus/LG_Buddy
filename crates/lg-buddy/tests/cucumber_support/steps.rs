@@ -114,6 +114,16 @@ fn startup_delays_disabled(world: &mut LgBuddyWorld) {
     world.disable_startup_delays();
 }
 
+#[given("nm-online succeeds")]
+fn nm_online_succeeds(world: &mut LgBuddyWorld) {
+    world.install_nm_online_stub(0);
+}
+
+#[given(regex = r#"nm-online fails with status (\d+)"#)]
+fn nm_online_fails(world: &mut LgBuddyWorld, status: u64) {
+    world.install_nm_online_stub(status as i64);
+}
+
 #[given("sleep retry delays are disabled")]
 fn sleep_retry_delays_disabled(world: &mut LgBuddyWorld) {
     world.disable_sleep_delays();
@@ -161,6 +171,12 @@ fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
         "stdout was: {}",
         world.command_result().stdout
     );
+}
+
+#[then(regex = r#"nm-online was invoked with "([^"]+)""#)]
+fn nm_online_invoked_with(world: &mut LgBuddyWorld, expected: String) {
+    let argv = expected.split_whitespace().collect::<Vec<_>>();
+    world.assert_nm_online_invoked_with(&argv);
 }
 
 #[then(regex = r#"stdout is "([^"]+)""#)]

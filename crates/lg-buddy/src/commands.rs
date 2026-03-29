@@ -39,12 +39,27 @@ trait SleepRequestDetector {
     fn is_sleep_requested(&self) -> io::Result<bool>;
 }
 
+trait NetworkWaiter {
+    fn wait_for_network(&self) -> io::Result<()>;
+}
+
 struct SystemctlRebootDetector {
     command_path: PathBuf,
 }
 
 struct JournalctlSleepDetector {
     command_path: PathBuf,
+}
+
+struct NmOnlineNetworkWaiter {
+    command_path: PathBuf,
+}
+
+struct StartupDeps<'a, C, S, Sl, N> {
+    tv_client: &'a C,
+    wol_sender: &'a S,
+    sleeper: &'a Sl,
+    network_waiter: &'a N,
 }
 
 impl Default for SystemctlRebootDetector {
@@ -54,6 +69,12 @@ impl Default for SystemctlRebootDetector {
 }
 
 impl Default for JournalctlSleepDetector {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl Default for NmOnlineNetworkWaiter {
     fn default() -> Self {
         Self::from_env()
     }
@@ -75,6 +96,16 @@ impl JournalctlSleepDetector {
             command_path: env::var_os("LG_BUDDY_JOURNALCTL")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("journalctl")),
+        }
+    }
+}
+
+impl NmOnlineNetworkWaiter {
+    fn from_env() -> Self {
+        Self {
+            command_path: env::var_os("LG_BUDDY_NM_ONLINE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("nm-online")),
         }
     }
 }
@@ -108,6 +139,16 @@ impl SleepRequestDetector for JournalctlSleepDetector {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.contains("manager: sleep: sleep requested"))
+    }
+}
+
+impl NetworkWaiter for NmOnlineNetworkWaiter {
+    fn wait_for_network(&self) -> io::Result<()> {
+        let _ = ProcessCommand::new(&self.command_path)
+            .args(["-q", "-t", "60"])
+            .output()?;
+
+        Ok(())
     }
 }
 
@@ -149,16 +190,15 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
     let tv_client = BscpylgtvCommandClient::from_env();
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
+    let network_waiter = NmOnlineNetworkWaiter::default();
+    let deps = StartupDeps {
+        tv_client: &tv_client,
+        wol_sender: &wol_sender,
+        sleeper: &sleeper,
+        network_waiter: &network_waiter,
+    };
 
-    run_startup_with(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        &wol_sender,
-        &sleeper,
-        mode,
-    )
+    run_startup_with(writer, &config, &marker, deps, mode)
 }
 
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -224,16 +264,15 @@ pub fn run_screen_off_with<W: Write>(
     }
 }
 
-fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
+fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper, N: NetworkWaiter>(
     writer: &mut W,
     config: &Config,
     marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    wol_sender: &S,
-    sleeper: &Sl,
+    deps: StartupDeps<'_, C, S, Sl, N>,
     mode: StartupMode,
 ) -> Result<(), RunError> {
-    let tv = TvDevice::new(tv_client, config.tv_ip);
+    let tv = TvDevice::new(deps.tv_client, config.tv_ip);
+    let _ = deps.network_waiter.wait_for_network();
 
     match mode {
         StartupMode::Wake if !marker.exists() => {
@@ -272,8 +311,14 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     }
 
     marker.clear()?;
-    send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
-    sleeper.sleep(startup_initial_wake_delay());
+    send_wake_packet(
+        writer,
+        "LG Buddy Startup",
+        &tv,
+        deps.wol_sender,
+        &config.tv_mac,
+    )?;
+    deps.sleeper.sleep(startup_initial_wake_delay());
 
     for attempt in 1..=STARTUP_WAKE_ATTEMPTS {
         if tv.input().set(config.input).is_ok() {
@@ -291,8 +336,14 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
             "LG Buddy Startup: Attempt {attempt} failed, retrying in {}s...",
             retry_delay.as_secs()
         )?;
-        send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
-        sleeper.sleep(retry_delay);
+        send_wake_packet(
+            writer,
+            "LG Buddy Startup",
+            &tv,
+            deps.wol_sender,
+            &config.tv_mac,
+        )?;
+        deps.sleeper.sleep(retry_delay);
     }
 
     writeln!(
@@ -752,7 +803,8 @@ mod tests {
 
     use super::{
         run_screen_off_with, run_screen_on_with, run_shutdown_with, run_sleep_pre_with,
-        run_sleep_with, run_startup_with, RebootDetector, SleepRequestDetector, Sleeper,
+        run_sleep_with, run_startup_with, NetworkWaiter, RebootDetector, SleepRequestDetector,
+        Sleeper, StartupDeps,
     };
     use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
     use crate::state::ScreenOwnershipMarker;
@@ -1082,21 +1134,27 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Wake,
         )
         .expect("wake mode without marker should skip");
 
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
+        assert_eq!(network.calls(), 1);
         assert_call_commands(&mock, &[]);
         assert!(rendered(&output).contains("TV was not on our input. Skipping."));
     }
@@ -1109,20 +1167,26 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi4),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Auto,
         )
         .expect("auto boot should succeed");
 
         assert!(!marker.exists());
+        assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
         assert_call_commands(&mock, &["set_input"]);
@@ -1140,20 +1204,26 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi1),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Auto,
         )
         .expect("auto wake should succeed");
 
         assert!(!marker.exists());
+        assert_eq!(network.calls(), 1);
         assert_eq!(wol.calls().len(), 1);
         assert_call_commands(&mock, &["set_input"]);
         assert!(rendered(&output).contains("Wake from sleep: LG Buddy turned TV off. Restoring."));
@@ -1168,22 +1238,60 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi3),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Boot,
         )
         .expect("boot mode should succeed");
 
         assert!(!marker.exists());
+        assert_eq!(network.calls(), 1);
         assert_call_commands(&mock, &["set_input"]);
         assert!(rendered(&output).contains("Cold boot: Turning TV on and switching to HDMI_3."));
+    }
+
+    #[test]
+    fn startup_ignores_network_wait_failures() {
+        let temp_dir = TestDir::new("startup-network-wait-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("startup-network-wait-failure-tv");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::failing(io::ErrorKind::TimedOut, "network offline");
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi2),
+            &marker,
+            deps,
+            StartupMode::Boot,
+        )
+        .expect("startup should continue even if network wait fails");
+
+        assert_eq!(network.calls(), 1);
+        assert_eq!(wol.calls().len(), 1);
+        assert_call_commands(&mock, &["set_input"]);
+        assert!(rendered(&output).contains("TV turned on and set to HDMI_2."));
     }
 
     #[test]
@@ -1195,19 +1303,25 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Boot,
         )
         .expect("startup retry should succeed");
 
+        assert_eq!(network.calls(), 1);
         assert_call_commands(&mock, &["set_input", "set_input"]);
         assert_eq!(wol.calls().len(), 2);
         assert_eq!(
@@ -1231,20 +1345,26 @@ mod tests {
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
 
         let mut output = Vec::new();
         let err = run_startup_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi1),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            deps,
             StartupMode::Auto,
         )
         .expect_err("startup should fail after exhausting retries");
 
         assert!(!marker.exists());
+        assert_eq!(network.calls(), 1);
         assert_eq!(mock.calls().len(), 6);
         assert_eq!(wol.calls().len(), 7);
         assert_eq!(sleeper.durations().len(), 7);
@@ -1586,6 +1706,42 @@ mod tests {
     impl Sleeper for RecordingSleeper {
         fn sleep(&self, duration: Duration) {
             self.durations.borrow_mut().push(duration);
+        }
+    }
+
+    struct FakeNetworkWaiter {
+        result: io::Result<()>,
+        calls: RefCell<u32>,
+    }
+
+    impl FakeNetworkWaiter {
+        fn clear() -> Self {
+            Self {
+                result: Ok(()),
+                calls: RefCell::new(0),
+            }
+        }
+
+        fn failing(kind: io::ErrorKind, message: &str) -> Self {
+            Self {
+                result: Err(io::Error::new(kind, message.to_string())),
+                calls: RefCell::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            *self.calls.borrow()
+        }
+    }
+
+    impl NetworkWaiter for FakeNetworkWaiter {
+        fn wait_for_network(&self) -> io::Result<()> {
+            *self.calls.borrow_mut() += 1;
+
+            match &self.result {
+                Ok(()) => Ok(()),
+                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
+            }
         }
     }
 

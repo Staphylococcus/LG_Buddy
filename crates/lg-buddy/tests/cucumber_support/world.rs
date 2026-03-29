@@ -1,6 +1,6 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, MockGdbus, MockSwayidle, RuntimeStateLayout, TestConfigFile,
-    TestEnv,
+    ExecutableScript, MockBscpylgtv, MockGdbus, MockNmOnline, MockSwayidle, RuntimeStateLayout,
+    TestConfigFile, TestEnv,
 };
 use cucumber::World;
 use std::fmt;
@@ -14,6 +14,7 @@ pub struct LgBuddyWorld {
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
     gdbus: Option<MockGdbus>,
+    nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
     command_result: Option<CommandExecution>,
@@ -33,6 +34,7 @@ impl fmt::Debug for LgBuddyWorld {
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
             .field("gdbus", &self.gdbus.is_some())
+            .field("nm_online", &self.nm_online.is_some())
             .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
             .field("command_result", &self.command_result)
@@ -150,6 +152,40 @@ impl LgBuddyWorld {
             self.prepend_path_script(wrapper);
             self.swayidle = Some(swayidle);
         }
+    }
+
+    pub fn install_nm_online_stub(&mut self, status: i64) {
+        if self.nm_online.is_none() {
+            let nm_online = MockNmOnline::new("cucumber-nm-online");
+            let wrapper = nm_online.command_wrapper("cucumber-nm-online-wrapper");
+            self.ensure_env().set("LG_BUDDY_NM_ONLINE", wrapper.path());
+            self.path_scripts.push(wrapper);
+            self.nm_online = Some(nm_online);
+        }
+
+        self.nm_online
+            .as_ref()
+            .expect("mock nm-online configured")
+            .set_status(status);
+    }
+
+    pub fn assert_nm_online_invoked_with(&self, expected_argv: &[&str]) {
+        let expected = expected_argv
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        let invocations = self
+            .nm_online
+            .as_ref()
+            .expect("mock nm-online configured")
+            .invocations();
+        assert!(
+            invocations
+                .iter()
+                .any(|invocation| invocation.argv == expected),
+            "nm-online invocations were: {:?}",
+            invocations
+        );
     }
 
     pub fn swayidle_emits_timeout(&mut self) {
