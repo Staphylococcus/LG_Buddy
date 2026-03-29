@@ -123,7 +123,13 @@ impl TvError {
 
 pub trait TvClient {
     fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError>;
+    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<u8, TvError>;
     fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError>;
+    fn set_oled_brightness(
+        &self,
+        tv_ip: Ipv4Addr,
+        brightness: u8,
+    ) -> Result<CommandOutput, TvError>;
     fn power_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
     fn turn_screen_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
     fn turn_screen_on(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
@@ -184,6 +190,13 @@ impl<'a, C: TvClient> TvDevice<'a, C> {
         }
     }
 
+    pub fn picture(&self) -> TvPicture<'a, C> {
+        TvPicture {
+            client: self.client,
+            tv_ip: self.tv_ip,
+        }
+    }
+
     pub fn power(&self) -> TvPower<'a, C> {
         TvPower {
             client: self.client,
@@ -223,6 +236,22 @@ impl<'a, C: TvClient> TvScreen<'a, C> {
 
     pub fn unblank(&self) -> Result<CommandOutput, TvError> {
         self.client.turn_screen_on(self.tv_ip)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TvPicture<'a, C> {
+    client: &'a C,
+    tv_ip: Ipv4Addr,
+}
+
+impl<'a, C: TvClient> TvPicture<'a, C> {
+    pub fn oled_brightness(&self) -> Result<u8, TvError> {
+        self.client.get_oled_brightness(self.tv_ip)
+    }
+
+    pub fn set_oled_brightness(&self, brightness: u8) -> Result<CommandOutput, TvError> {
+        self.client.set_oled_brightness(self.tv_ip, brightness)
     }
 }
 
@@ -336,8 +365,26 @@ impl TvClient for BscpylgtvCommandClient {
         })
     }
 
+    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<u8, TvError> {
+        let output = self.run_command(tv_ip, "get_picture_settings", &[])?;
+        parse_backlight(output.stdout()).ok_or(TvError::InvalidOutput {
+            command: "get_picture_settings",
+            output,
+            message: "expected a backlight value in stdout",
+        })
+    }
+
     fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError> {
         self.run_command(tv_ip, "set_input", &[input.as_str()])
+    }
+
+    fn set_oled_brightness(
+        &self,
+        tv_ip: Ipv4Addr,
+        brightness: u8,
+    ) -> Result<CommandOutput, TvError> {
+        let backlight = format!("{{\"backlight\": {brightness}}}");
+        self.run_command(tv_ip, "set_settings", &["picture", backlight.as_str()])
     }
 
     fn power_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError> {
@@ -359,6 +406,28 @@ fn last_non_empty_line(output: &str) -> Option<String> {
         .rev()
         .find(|line| !line.trim().is_empty())
         .map(str::to_string)
+}
+
+fn parse_backlight(output: &str) -> Option<u8> {
+    for token in output.split([',', '{', '}', '\n']) {
+        let token = token.trim();
+        if !(token.starts_with("'backlight'") || token.starts_with("\"backlight\"")) {
+            continue;
+        }
+
+        let (_, value) = token.split_once(':')?;
+        let parsed = value
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"')
+            .parse::<u16>()
+            .ok()?;
+        if parsed <= 100 {
+            return Some(parsed as u8);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -461,6 +530,73 @@ mod tests {
     }
 
     #[test]
+    fn set_oled_brightness_passes_expected_arguments() {
+        let mock = MockBscpylgtv::new("tv-set-brightness");
+        let client = client_for_mock(&mock);
+        client
+            .set_oled_brightness(ip("10.0.0.5"), 65)
+            .expect("set_oled_brightness should succeed");
+
+        assert_eq!(
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.5".to_string(),
+                "set_settings".to_string(),
+                vec!["picture".to_string(), "{\"backlight\": 65}".to_string()],
+            )]
+        );
+        assert_eq!(mock.state_snapshot().backlight, 65);
+    }
+
+    #[test]
+    fn get_oled_brightness_reads_backlight_from_picture_settings() {
+        let mock = MockBscpylgtv::new("tv-get-brightness");
+        mock.set_backlight(72);
+        let client = client_for_mock(&mock);
+
+        let brightness = client
+            .get_oled_brightness(ip("10.0.0.5"))
+            .expect("get_oled_brightness should succeed");
+
+        assert_eq!(brightness, 72);
+        assert_eq!(
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.5".to_string(),
+                "get_picture_settings".to_string(),
+                Vec::<String>::new(),
+            )]
+        );
+    }
+
+    #[test]
+    fn get_oled_brightness_rejects_missing_backlight_value() {
+        let mock = MockBscpylgtv::new("tv-get-brightness-invalid");
+        mock.queue_success("get_picture_settings", "{'contrast': 85}\n");
+        let client = client_for_mock(&mock);
+
+        let err = client
+            .get_oled_brightness(ip("10.0.0.5"))
+            .expect_err("missing backlight should fail");
+
+        match err {
+            TvError::InvalidOutput {
+                command, message, ..
+            } => {
+                assert_eq!(command, "get_picture_settings");
+                assert_eq!(message, "expected a backlight value in stdout");
+            }
+            other => panic!("expected invalid output error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn tv_device_maps_hdmi_inputs_to_typed_values() {
         let mock = MockBscpylgtv::new("tv-device-current-hdmi");
         mock.set_input("HDMI_4");
@@ -502,6 +638,54 @@ mod tests {
             vec![(
                 "10.0.0.11".to_string(),
                 "turn_screen_off".to_string(),
+                Vec::<String>::new(),
+            )]
+        );
+    }
+
+    #[test]
+    fn tv_picture_set_oled_brightness_uses_domain_facade() {
+        let mock = MockBscpylgtv::new("tv-device-picture-brightness");
+        let client = client_for_mock(&mock);
+        let tv = TvDevice::new(&client, ip("10.0.0.12"));
+        tv.picture()
+            .set_oled_brightness(40)
+            .expect("brightness set should succeed");
+
+        assert_eq!(
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.12".to_string(),
+                "set_settings".to_string(),
+                vec!["picture".to_string(), "{\"backlight\": 40}".to_string()],
+            )]
+        );
+    }
+
+    #[test]
+    fn tv_picture_reads_oled_brightness_via_domain_facade() {
+        let mock = MockBscpylgtv::new("tv-device-picture-read-brightness");
+        mock.set_backlight(33);
+        let client = client_for_mock(&mock);
+        let tv = TvDevice::new(&client, ip("10.0.0.13"));
+
+        let brightness = tv
+            .picture()
+            .oled_brightness()
+            .expect("brightness read should succeed");
+
+        assert_eq!(brightness, 33);
+        assert_eq!(
+            mock.calls()
+                .into_iter()
+                .map(|call| (call.tv_ip, call.command, call.args))
+                .collect::<Vec<_>>(),
+            vec![(
+                "10.0.0.13".to_string(),
+                "get_picture_settings".to_string(),
                 Vec::<String>::new(),
             )]
         );

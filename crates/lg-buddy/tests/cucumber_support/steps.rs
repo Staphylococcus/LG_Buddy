@@ -16,9 +16,39 @@ fn mock_tv_client(world: &mut LgBuddyWorld) {
     world.create_mock_tv();
 }
 
+#[given("the TV is reachable over ping")]
+fn tv_is_reachable_over_ping(world: &mut LgBuddyWorld) {
+    world.install_ping_stub(true);
+}
+
+#[given("the TV is unreachable over ping")]
+fn tv_is_unreachable_over_ping(world: &mut LgBuddyWorld) {
+    world.install_ping_stub(false);
+}
+
 #[given(regex = r#"the TV is on input (HDMI_[1-4])"#)]
 fn tv_on_input(world: &mut LgBuddyWorld, input: String) {
     world.tv_mut().set_input(&input);
+}
+
+#[given(regex = r#"the TV backlight is (\d+)"#)]
+fn tv_backlight(world: &mut LgBuddyWorld, value: u8) {
+    world.tv_mut().set_backlight(u64::from(value));
+}
+
+#[given(regex = r#"the brightness dialog returns (\d+)"#)]
+fn brightness_dialog_returns(world: &mut LgBuddyWorld, value: u8) {
+    world.install_brightness_ui_stub(Some(value));
+}
+
+#[given("the brightness dialog is cancelled")]
+fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
+    world.install_brightness_ui_stub(None);
+}
+
+#[given("the brightness error dialog is available")]
+fn brightness_error_dialog_is_available(world: &mut LgBuddyWorld) {
+    world.install_brightness_ui_stub(None);
 }
 
 #[given("the TV screen is blanked")]
@@ -164,12 +194,31 @@ fn command_succeeds(world: &mut LgBuddyWorld) {
     );
 }
 
+#[then("the command fails")]
+fn command_fails(world: &mut LgBuddyWorld) {
+    assert!(
+        !world.command_result().success,
+        "command unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        world.command_result().stdout,
+        world.command_result().stderr
+    );
+}
+
 #[then(regex = r#"stdout contains "([^"]+)""#)]
 fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
     assert!(
         world.command_result().stdout.contains(&expected),
         "stdout was: {}",
         world.command_result().stdout
+    );
+}
+
+#[then(regex = r#"stderr contains "([^"]+)""#)]
+fn stderr_contains(world: &mut LgBuddyWorld, expected: String) {
+    assert!(
+        world.command_result().stderr.contains(&expected),
+        "stderr was: {}",
+        world.command_result().stderr
     );
 }
 
@@ -207,6 +256,11 @@ fn system_marker_absent(world: &mut LgBuddyWorld) {
 #[then(regex = r#"the TV input is (HDMI_[1-4])"#)]
 fn tv_input_is(world: &mut LgBuddyWorld, input: String) {
     assert_eq!(world.tv().state_snapshot().input, input);
+}
+
+#[then(regex = r#"the TV brightness is (\d+)"#)]
+fn tv_brightness_is(world: &mut LgBuddyWorld, value: u8) {
+    assert_eq!(world.tv().state_snapshot().backlight, value);
 }
 
 #[then("the TV is powered off")]

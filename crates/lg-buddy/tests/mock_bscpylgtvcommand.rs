@@ -32,6 +32,32 @@ fn mock_set_input_returns_realistic_success_payload() {
 }
 
 #[test]
+fn mock_set_settings_updates_backlight() {
+    let mock = MockBscpylgtv::new("mock-set-settings");
+    let client = mock_client(&mock);
+
+    let output = client
+        .set_oled_brightness(ip("10.0.0.39"), 70)
+        .expect("mock set_oled_brightness should succeed");
+
+    assert_eq!(output.stdout(), "{'returnValue': True}\n");
+    assert_eq!(mock.state_snapshot().backlight, 70);
+}
+
+#[test]
+fn mock_get_picture_settings_includes_backlight() {
+    let mock = MockBscpylgtv::new("mock-get-picture-settings");
+    mock.set_backlight(62);
+    let client = mock_client(&mock);
+
+    let brightness = client
+        .get_oled_brightness(ip("10.0.0.39"))
+        .expect("mock get_oled_brightness should succeed");
+
+    assert_eq!(brightness, 62);
+}
+
+#[test]
 fn mock_turn_screen_on_active_error_matches_real_traceback_shape() {
     let mock = MockBscpylgtv::new("mock-turn-screen-on-active");
     let client = mock_client(&mock);

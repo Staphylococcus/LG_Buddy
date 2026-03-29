@@ -114,6 +114,26 @@ impl LgBuddyWorld {
             .set("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", "0");
     }
 
+    pub fn install_ping_stub(&mut self, reachable: bool) {
+        let status = if reachable { 0 } else { 1 };
+        let body = format!("#!/bin/sh\nexit {status}\n");
+        let script = ExecutableScript::new("cucumber-ping", "mock-ping", &body);
+        self.ensure_env().set("LG_BUDDY_PING", script.path());
+        self.path_scripts.push(script);
+    }
+
+    pub fn install_brightness_ui_stub(&mut self, selection: Option<u8>) {
+        let body = match selection {
+            Some(value) => format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--scale\" ]; then\n  printf '%s\\n' '{value}'\n  exit 0\nfi\nif [ \"$1\" = \"--error\" ]; then\n  exit 0\nfi\nexit 1\n"
+            ),
+            None => "#!/bin/sh\nif [ \"$1\" = \"--scale\" ]; then\n  exit 1\nfi\nif [ \"$1\" = \"--error\" ]; then\n  exit 0\nfi\nexit 1\n".to_string(),
+        };
+        let script = ExecutableScript::new("cucumber-zenity", "mock-zenity", &body);
+        self.ensure_env().set("LG_BUDDY_ZENITY", script.path());
+        self.path_scripts.push(script);
+    }
+
     pub fn install_gnome_shell_stub(&mut self) {
         self.ensure_mock_gdbus().set_shell_available(true);
     }

@@ -22,6 +22,7 @@ DEFAULT_STATE = {
     "power_on": True,
     "screen_on": True,
     "input": "HDMI_3",
+    "backlight": 50,
     "plan": {},
     "calls": [],
 }
@@ -224,6 +225,21 @@ def main() -> int:
         save_state(state_path, state)
         return 0
 
+    if command == "get_picture_settings":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        print(
+            {
+                "contrast": 85,
+                "backlight": int(state["backlight"]),
+                "brightness": 50,
+                "color": 55,
+            }
+        )
+        save_state(state_path, state)
+        return 0
+
     if command == "set_input":
         if not state["power_on"]:
             save_state(state_path, state)
@@ -234,6 +250,36 @@ def main() -> int:
             return 2
         state["input"] = args.command_args[0]
         state["screen_on"] = True
+        save_state(state_path, state)
+        return success()
+
+    if command == "set_settings":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        if len(args.command_args) != 2:
+            print("set_settings requires category and JSON payload", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        if args.command_args[0] != "picture":
+            print("set_settings mock only supports picture category", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+
+        try:
+            payload = json.loads(args.command_args[1])
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSON payload: {exc}", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+
+        backlight = payload.get("backlight")
+        if not isinstance(backlight, int):
+            print("set_settings mock requires integer backlight", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+
+        state["backlight"] = backlight
         save_state(state_path, state)
         return success()
 

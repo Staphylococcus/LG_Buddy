@@ -1,5 +1,9 @@
 #!/bin/bash
 
+if command -v lg-buddy >/dev/null 2>&1; then
+    exec lg-buddy brightness "$@"
+fi
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 if [ -r "$SCRIPT_DIR/LG_Buddy_Common" ]; then
     . "$SCRIPT_DIR/LG_Buddy_Common"

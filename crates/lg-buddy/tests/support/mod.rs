@@ -27,6 +27,7 @@ impl MockBscpylgtv {
             "power_on": true,
             "screen_on": true,
             "input": "HDMI_3",
+            "backlight": 50,
             "plan": {},
             "calls": [],
         }));
@@ -59,6 +60,10 @@ impl MockBscpylgtv {
 
     pub fn set_input(&self, value: &str) {
         self.patch_state(json!({ "input": value }));
+    }
+
+    pub fn set_backlight(&self, value: u64) {
+        self.patch_state(json!({ "backlight": value }));
     }
 
     pub fn queue_success(&self, command: &str, stdout: &str) {
@@ -126,6 +131,10 @@ impl MockBscpylgtv {
                 .and_then(Value::as_str)
                 .expect("mock state input string")
                 .to_string(),
+            backlight: state
+                .get("backlight")
+                .and_then(Value::as_u64)
+                .expect("mock state backlight integer") as u8,
         }
     }
 
@@ -610,7 +619,7 @@ impl TestConfigFile {
 #[allow(dead_code)]
 pub fn sample_config_contents(input: &str) -> String {
     format!(
-        "tv_ip=192.168.1.42\n\
+        "tv_ip=192.0.2.42\n\
 tv_mac=aa:bb:cc:dd:ee:ff\n\
 input={input}\n\
 screen_backend=auto\n\
@@ -769,6 +778,7 @@ pub struct MockStateSnapshot {
     pub power_on: bool,
     pub screen_on: bool,
     pub input: String,
+    pub backlight: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
