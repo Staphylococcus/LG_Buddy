@@ -300,6 +300,18 @@ impl MockGdbus {
         mock
     }
 
+    pub fn command_path(&self) -> &'static str {
+        "python3"
+    }
+
+    pub fn command_args(&self) -> Vec<String> {
+        vec![
+            Self::script_path().to_string_lossy().into_owned(),
+            "--state".to_string(),
+            self.state_path.to_string_lossy().into_owned(),
+        ]
+    }
+
     pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
         let python_path = shell_quote(&python3_path());
         let script_path = shell_quote(&Self::script_path());
