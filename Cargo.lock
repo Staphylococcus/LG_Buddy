@@ -482,6 +482,7 @@ name = "lg-buddy"
 version = "0.1.0"
 dependencies = [
  "cucumber",
+ "libc",
  "serde_json",
  "tokio",
 ]
