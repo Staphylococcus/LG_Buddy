@@ -256,6 +256,7 @@ sudo cp ./systemd/LG_Buddy.service /etc/systemd/system/
 sudo cp ./systemd/LG_Buddy_wake.service /etc/systemd/system/
 sudo cp ./systemd/LG_Buddy_sleep.service /etc/systemd/system/
 sudo cp ./systemd/lg_buddy.conf /etc/tmpfiles.d/
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/lg_buddy.conf
 sudo install -d /etc/systemd/system/LG_Buddy.service.d
 sudo install -d /etc/systemd/system/LG_Buddy_wake.service.d
 sudo install -d /etc/systemd/system/LG_Buddy_sleep.service.d

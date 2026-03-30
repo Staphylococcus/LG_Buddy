@@ -1,8 +1,10 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -125,7 +127,7 @@ impl ScreenOwnershipMarker {
 
     pub fn create(&self) -> io::Result<()> {
         fs::create_dir_all(self.state_dir())?;
-        fs::write(&self.path, [])
+        create_marker_file(&self.path)
     }
 
     pub fn clear(&self) -> io::Result<()> {
@@ -157,6 +159,22 @@ impl ScreenOwnershipMarker {
 }
 
 #[cfg(unix)]
+fn create_marker_file(path: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn create_marker_file(path: &Path) -> io::Result<()> {
+    fs::write(path, [])
+}
+
+#[cfg(unix)]
 fn current_uid() -> Option<u32> {
     unsafe extern "C" {
         fn geteuid() -> u32;
@@ -177,6 +195,8 @@ mod tests {
         SCREEN_OFF_BY_US_MARKER,
     };
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -316,6 +336,26 @@ mod tests {
 
         assert!(stale);
         assert!(!fresh);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_create_rejects_symlink_targets() {
+        let temp_dir = TestDir::new("marker-symlink");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let target = temp_dir.path().join("target");
+        fs::write(&target, b"sentinel").expect("write target");
+        symlink(&target, marker.path()).expect("create symlink marker");
+
+        let err = marker
+            .create()
+            .expect_err("symlink marker should be rejected");
+
+        assert!(matches!(
+            err.raw_os_error(),
+            Some(libc::ELOOP) | Some(libc::EEXIST)
+        ));
+        assert_eq!(fs::read(&target).expect("read target"), b"sentinel");
     }
 
     struct TestDir {
