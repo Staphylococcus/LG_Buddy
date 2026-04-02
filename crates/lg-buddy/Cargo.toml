@@ -1,0 +1,25 @@
+[package]
+name = "lg-buddy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "lg-buddy"
+path = "src/main.rs"
+
+[dev-dependencies]
+cucumber = "0.22.1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[[test]]
+name = "cucumber"
+path = "tests/cucumber.rs"
+harness = false

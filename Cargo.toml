@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/lg-buddy"]
+resolver = "2"

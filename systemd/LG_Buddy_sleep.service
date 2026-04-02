@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/LG_Buddy_sleep_pre
+ExecStart=/usr/bin/lg-buddy sleep-pre
 TimeoutStartSec=30
 
 [Install]

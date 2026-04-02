@@ -18,17 +18,23 @@ CONFIG_DIR="$(dirname "$CONFIG_FILE")"
 echo "Disabling & removing services..."
 echo "(This might turn off your TV)"
 sleep 3
-sudo systemctl disable LG_Buddy.service
-sudo systemctl disable LG_Buddy_wake.service
-sudo systemctl disable LG_Buddy_sleep.service
-systemctl --user disable LG_Buddy_screen.service
-sudo systemctl stop LG_Buddy.service
-sudo systemctl stop LG_Buddy_wake.service
-sudo systemctl stop LG_Buddy_sleep.service
-systemctl --user stop LG_Buddy_screen.service
+sudo systemctl disable LG_Buddy.service 2>/dev/null || true
+sudo systemctl disable LG_Buddy_wake.service 2>/dev/null || true
+sudo systemctl disable LG_Buddy_sleep.service 2>/dev/null || true
+systemctl --user disable LG_Buddy_screen.service 2>/dev/null || true
+sudo systemctl stop LG_Buddy.service 2>/dev/null || true
+sudo systemctl stop LG_Buddy_wake.service 2>/dev/null || true
+sudo systemctl stop LG_Buddy_sleep.service 2>/dev/null || true
+systemctl --user stop LG_Buddy_screen.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/LG_Buddy.service
 sudo rm -f /etc/systemd/system/LG_Buddy_wake.service
 sudo rm -f /etc/systemd/system/LG_Buddy_sleep.service
+sudo rm -f /etc/systemd/system/LG_Buddy.service.d/config.conf
+sudo rm -f /etc/systemd/system/LG_Buddy_wake.service.d/config.conf
+sudo rm -f /etc/systemd/system/LG_Buddy_sleep.service.d/config.conf
+sudo rmdir /etc/systemd/system/LG_Buddy.service.d 2>/dev/null || true
+sudo rmdir /etc/systemd/system/LG_Buddy_wake.service.d 2>/dev/null || true
+sudo rmdir /etc/systemd/system/LG_Buddy_sleep.service.d 2>/dev/null || true
 rm -f ~/.config/systemd/user/LG_Buddy_screen.service
 rm -rf ~/.config/systemd/user/LG_Buddy_screen.service.d
 sudo systemctl daemon-reload
@@ -36,6 +42,7 @@ systemctl --user daemon-reload
 echo "Done."
 
 echo "Removing scripts"
+sudo rm -f /usr/bin/lg-buddy
 sudo rm -f /usr/bin/LG_Buddy_Startup
 sudo rm -f /usr/bin/LG_Buddy_Shutdown
 sudo rm -f /usr/bin/LG_Buddy_Screen_On

@@ -1,0 +1,229 @@
+# LG Buddy Testing Strategy
+
+This document keeps the testing strategy practical.
+
+The repository does not need a large test taxonomy. It needs confidence in three things:
+
+1. modules behave as expected within their own scope
+2. modules interoperate correctly
+3. user needs are actually met
+
+Everything in the strategy should serve one of those three questions.
+
+## 1. Module Behavior
+
+This layer asks:
+
+- does each module do its own job correctly?
+- does it fail clearly when inputs are invalid or dependencies misbehave?
+- can we trust the module in isolation before wiring it into a larger flow?
+
+This is where most tests should live.
+
+### What belongs here
+
+- config parsing and validation
+- path resolution
+- state marker behavior
+- Wake-on-LAN packet construction
+- backend selection rules
+- GNOME line-to-event mapping
+- TV command output parsing
+- command-policy branching and retry logic
+
+### How to test it
+
+- pure unit tests where possible
+- small trait-based fakes for internal collaborators
+- subprocess mocks only when the module’s own responsibility includes an external process boundary
+
+### Current examples
+
+- `crates/lg-buddy/src/config.rs`
+- `crates/lg-buddy/src/state.rs`
+- `crates/lg-buddy/src/backend.rs`
+- `crates/lg-buddy/src/gnome.rs`
+- `crates/lg-buddy/src/wol.rs`
+- `crates/lg-buddy/src/tv.rs`
+- `crates/lg-buddy/src/commands.rs`
+
+### Design rule
+
+If a bug can be explained entirely within one module, the first test that catches it should usually live at this layer.
+
+## 2. Module Interoperability
+
+This layer asks:
+
+- do the modules work together through their real boundaries?
+- do config, env overrides, state directories, subprocesses, and command orchestration behave correctly together?
+- do our mocks match the external contracts we actually depend on?
+
+This is the place for integration tests and contract tests.
+
+### What belongs here
+
+- runtime entrypoints loading a real temporary `config.env`
+- command flows using real env overrides
+- runtime state directories and marker files
+- subprocess contracts to external tools
+- backend detection against mocked command/process boundaries
+- later, GNOME runner behavior against a `gdbus` contract mock
+
+### How to test it
+
+- use the shared Rust harness in `crates/lg-buddy/tests/support/mod.rs`
+- use contract mocks for external dependencies
+- keep the tests black-box enough to validate boundaries, but still fast enough for normal development
+
+### Current examples
+
+- `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
+- `crates/lg-buddy/tests/runtime_entrypoints.rs`
+- `tools/mock_bscpylgtvcommand.py`
+
+### Contract-mock rule
+
+Mock the API surface we consume, not the whole system behind it.
+
+Examples:
+
+- the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
+- a future `gdbus` mock should reproduce only the GNOME and Mutter commands and monitor output LG Buddy actually consumes
+
+If a contract shape is unclear, probe the real dependency and update the mock.
+
+## 3. User Needs
+
+This layer asks:
+
+- does LG Buddy do what the user expects?
+- does the visible behavior match the product promise?
+- do key user scenarios still work end to end?
+
+This is the thinnest layer, but it is the one that keeps the other two honest.
+
+### What belongs here
+
+- readable acceptance scenarios for the main flows
+- hardware smoke checks for visible TV behavior
+- host-level checks for install/service wiring when those are part of the user experience
+
+### How to test it
+
+- use a small number of acceptance scenarios
+- keep them focused on important user outcomes
+- stay mock-backed by default
+- use real hardware only when the actual visible behavior matters
+
+### Cucumber fits here
+
+Cucumber should be treated as a user-needs tool, not as a separate testing philosophy.
+
+It is useful when we want to express scenarios like:
+
+- when the configured HDMI input is active and the user goes idle, LG Buddy blanks the TV and records ownership
+- when LG Buddy owns the session marker and the user returns, LG Buddy restores the screen
+- when GNOME is available, backend detection resolves to `gnome`
+
+It is not the right place for:
+
+- detailed retry/backoff cases
+- low-level parsing
+- most contract-shape validation
+- installer internals
+
+So cucumber sits on top of the first two layers:
+
+- it reuses module-behavior confidence
+- it reuses interoperability harnesses and mocks
+- it expresses user-visible outcomes in readable form
+
+## Applying The Strategy To This Repo
+
+### Rust runtime core
+
+Primary concern:
+
+- module behavior
+
+Secondary concern:
+
+- module interoperability
+
+Examples:
+
+- `config.rs`, `state.rs`, `tv.rs`, `backend.rs`, `commands.rs`
+
+### External tool boundaries
+
+Primary concern:
+
+- module interoperability
+
+Examples:
+
+- `bscpylgtvcommand`
+- future `gdbus`
+- later, possibly `systemctl` and `swayidle`
+
+### Desktop backend work
+
+Primary concern:
+
+- module behavior for parsing and capability logic
+
+Secondary concern:
+
+- module interoperability once a runner exists
+
+Examples:
+
+- GNOME capability probing
+- GNOME monitor-line parsing
+- GNOME monitor event-stream integration
+
+### Shell, systemd, and install flow
+
+Primary concern:
+
+- user needs
+
+Secondary concern:
+
+- module interoperability
+
+These should not dominate the Rust test suite, but they still matter because installation and service wiring remain part of the real user path.
+
+## Current Practical Gaps
+
+The most important remaining gaps are:
+
+- documented hardware smoke checks
+- host-level validation for installer and service wiring
+- broader validation of the remaining shell setup surface
+- any future coverage needed for richer `swayidle` hooks beyond `timeout` and `resume`
+
+## Near-Term Priorities
+
+The next testing work should be:
+
+1. keep strengthening module-behavior tests where runtime logic is still moving
+2. document a repeatable hardware smoke checklist
+3. decide how much of the installer and service wiring deserves automated host validation
+4. add targeted coverage only if new backend or setup behavior is introduced
+
+## Default Developer Loop
+
+The day-to-day loop should stay simple:
+
+1. `cargo fmt --all`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test -p lg-buddy`
+
+That loop covers most of the first two questions:
+
+- do modules behave correctly?
+- do the important runtime boundaries interoperate correctly?
+
+The third question, user needs, should be covered by a small acceptance layer and selected smoke checks, not by trying to force every test into daily local runs.
