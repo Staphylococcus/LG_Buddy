@@ -20,3 +20,6 @@ id_ed25519
 
 # Rust build output
 target/
+
+# Generated release bundles
+dist/

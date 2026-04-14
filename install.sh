@@ -3,25 +3,108 @@
 # Exit on any error
 set -e
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+INSTALL_ROOT="${LG_BUDDY_INSTALL_ROOT:-}"
+INSTALL_ROOT="${INSTALL_ROOT%/}"
+SUDO_CMD="${LG_BUDDY_SUDO_CMD:-sudo}"
+NONINTERACTIVE="${LG_BUDDY_NONINTERACTIVE:-0}"
+SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
+SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
+DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
+RUNTIME_BINARY="$DEFAULT_RUNTIME_BINARY"
+
+usage() {
+    cat <<EOF
+Usage: $0 [--runtime-binary /path/to/lg-buddy]
+
+Install LG Buddy from an existing runtime binary.
+
+Defaults:
+  --runtime-binary defaults to ./lg-buddy next to install.sh
+EOF
+    exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --runtime-binary)
+            RUNTIME_BINARY="${2:-}"
+            [ -n "$RUNTIME_BINARY" ] || usage
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
 if [ "$(id -u)" -eq 0 ]; then
     echo "Error: Do not run this script with sudo. It will prompt for sudo when needed."
     exit 1
 fi
 
 echo "Starting LG Buddy Installation"
+if [ -n "$INSTALL_ROOT" ]; then
+    echo "Install root override: $INSTALL_ROOT"
+fi
 
 # 1. CHECK PREREQUISITES
 echo ""
 echo "Checking prerequisites..."
 
 MISSING_PKGS=()
-MISSING_MANUAL_DEPS=()
 SCREEN_MONITOR_AVAILABLE=0
 SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
 SCREEN_MONITOR_RUNTIME_BACKEND=""
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
 NM_SLEEP_HOOK_TMP=""
+INSTALL_CMD=()
+
+prefix_path() {
+    local path="$1"
+
+    if [ -n "$INSTALL_ROOT" ]; then
+        printf '%s%s\n' "$INSTALL_ROOT" "$path"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+run_privileged() {
+    if [ "$SUDO_CMD" = "none" ]; then
+        "$@"
+    else
+        "$SUDO_CMD" "$@"
+    fi
+}
+
+SYSTEM_BIN_DIR="$(prefix_path "/usr/bin")"
+RUNTIME_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy"
+VENV_DIR="${SYSTEM_BIN_DIR}/LG_Buddy_PIP"
+SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
+CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
+COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
+SYSTEM_SLEEP_HOOK_PATH="$(prefix_path "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook")"
+SYSTEMD_SYSTEM_DIR="$(prefix_path "/etc/systemd/system")"
+SYSTEMD_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service"
+SYSTEMD_WAKE_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service"
+SYSTEMD_SLEEP_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service"
+SYSTEMD_SERVICE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service.d"
+SYSTEMD_WAKE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service.d"
+SYSTEMD_SLEEP_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service.d"
+TMPFILES_CONF_DIR="$(prefix_path "/etc/tmpfiles.d")"
+TMPFILES_CONF_PATH="${TMPFILES_CONF_DIR}/lg_buddy.conf"
+NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
+NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
+APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
+DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
+USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
 
 check_dep() {
     local label="$1"
@@ -35,23 +118,9 @@ check_dep() {
     fi
 }
 
-check_manual_dep() {
-    local label="$1"
-    local check_cmd="$2"
-    local guidance="$3"
-
-    if eval "$check_cmd" &>/dev/null; then
-        echo "  [OK]      $label"
-    else
-        echo "  [MISSING] $label"
-        MISSING_MANUAL_DEPS+=("$guidance")
-    fi
-}
-
 check_dep "python3-venv" "python3-venv" "python3 -c 'import venv'"
 check_dep "python3-pip" "python3-pip" "python3 -m pip --version"
 check_dep "zenity" "zenity" "command -v zenity"
-check_manual_dep "cargo" "command -v cargo" "Install a Rust toolchain so the 'cargo' command is available, then re-run install.sh."
 
 write_config_override() {
     local override_file="$1"
@@ -88,6 +157,22 @@ write_config_pointer() {
     printf '%s\n' "$config_path" >"$pointer_file"
 }
 
+resolve_runtime_binary() {
+    if [ ! -f "$RUNTIME_BINARY" ]; then
+        echo "LG Buddy runtime binary not found at: $RUNTIME_BINARY"
+        echo "Build lg-buddy separately first, or use an official release bundle."
+        exit 1
+    fi
+
+    if [ ! -x "$RUNTIME_BINARY" ]; then
+        echo "LG Buddy runtime binary is not executable: $RUNTIME_BINARY"
+        echo "Run chmod +x on the binary or provide a valid executable path."
+        exit 1
+    fi
+
+    echo "Using lg-buddy runtime binary: $RUNTIME_BINARY"
+}
+
 cleanup() {
     if [ -n "$SYSTEM_CONFIG_OVERRIDE_TMP" ]; then
         rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
@@ -111,22 +196,25 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     # Detect package manager
     if command -v apt &>/dev/null; then
         PM="apt"
-        INSTALL_CMD="sudo apt install -y"
+        INSTALL_CMD=(apt install -y)
     elif command -v dnf &>/dev/null; then
         PM="dnf"
-        INSTALL_CMD="sudo dnf install -y"
+        INSTALL_CMD=(dnf install -y)
     elif command -v pacman &>/dev/null; then
         PM="pacman"
-        INSTALL_CMD="sudo pacman -S --noconfirm"
+        INSTALL_CMD=(pacman -S --noconfirm)
     else
         PM=""
     fi
 
     if [ -n "$PM" ]; then
-        read -p "Install missing packages with $PM now? (y/N) " AUTO_INSTALL
+        AUTO_INSTALL="${LG_BUDDY_AUTO_INSTALL_DEPS:-}"
+        if [ -z "$AUTO_INSTALL" ] && [ "$NONINTERACTIVE" != "1" ]; then
+            read -p "Install missing packages with $PM now? (y/N) " AUTO_INSTALL
+        fi
         case "$AUTO_INSTALL" in
             [Yy]*)
-                $INSTALL_CMD "${MISSING_PKGS[@]}"
+                run_privileged "${INSTALL_CMD[@]}" "${MISSING_PKGS[@]}"
                 ;;
             *)
                 echo "Please install the missing packages manually and re-run install.sh."
@@ -142,31 +230,22 @@ else
     echo "All prerequisites satisfied."
 fi
 
-if [ ${#MISSING_MANUAL_DEPS[@]} -gt 0 ]; then
-    echo ""
-    printf '%s\n' "${MISSING_MANUAL_DEPS[@]}"
-    exit 1
-fi
+# 2. RESOLVE RUST RUNTIME
+resolve_runtime_binary
 
-# 2. CONFIGURE SCRIPTS
+# 3. CONFIGURE SCRIPTS
 echo ""
 echo "Running configuration script..."
 # Make sure configure.sh is executable
-if [ ! -x "./configure.sh" ]; then
-    chmod +x ./configure.sh
+if [ ! -x "$SCRIPT_DIR/configure.sh" ]; then
+    chmod +x "$SCRIPT_DIR/configure.sh"
 fi
-./configure.sh
-CONFIG_FILE="$(bash ./bin/LG_Buddy_Common --user-config-path)"
+"$SCRIPT_DIR/configure.sh"
+CONFIG_FILE="$(bash "$SCRIPT_DIR/bin/LG_Buddy_Common" --user-config-path)"
 SCREEN_MONITOR_CONFIGURED_BACKEND="$(sed -n 's/^screen_backend=//p' "$CONFIG_FILE" | tail -n1)"
 SCREEN_MONITOR_CONFIGURED_BACKEND="${SCREEN_MONITOR_CONFIGURED_BACKEND:-auto}"
 echo "Using configuration file at $CONFIG_FILE"
 echo "Configuration complete."
-
-# 3. BUILD RUST RUNTIME
-echo ""
-echo "Building Rust runtime..."
-cargo build --release -p lg-buddy
-echo "Done."
 
 echo ""
 echo "Checking screen idle/resume backend for configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)..."
@@ -204,7 +283,7 @@ case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
             echo "  [OPTIONAL] swayidle (required for wlroots/COSMIC backend)"
         fi
 
-        SCREEN_MONITOR_RUNTIME_BACKEND="$(./target/release/lg-buddy detect-backend 2>/dev/null || true)"
+        SCREEN_MONITOR_RUNTIME_BACKEND="$("$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
         if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
             echo "  [OK]      current session backend: $SCREEN_MONITOR_RUNTIME_BACKEND"
         else
@@ -214,88 +293,107 @@ case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
 esac
 
 # 4. CREATE VIRTUAL ENVIRONMENT
-echo "Creating Python virtual environment at /usr/bin/LG_Buddy_PIP..."
-sudo python3 -m venv /usr/bin/LG_Buddy_PIP
+echo "Creating Python virtual environment at $VENV_DIR..."
+run_privileged python3 -m venv "$VENV_DIR"
 echo "Done."
 
 # 5. INSTALL BSCPYLGTV
-echo "Installing bscpylgtv into the virtual environment..."
-sudo /usr/bin/LG_Buddy_PIP/bin/pip install bscpylgtv
-echo "Done."
+if [ "$SKIP_PIP_INSTALL" = "1" ]; then
+    echo "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
+else
+    echo "Installing bscpylgtv into the virtual environment..."
+    run_privileged "$VENV_DIR/bin/pip" install bscpylgtv
+    echo "Done."
+fi
 
 # 6. INSTALL RUST RUNTIME AND SUPPORT FILES
 echo "Installing Rust runtime and support files..."
-sudo install -m 755 ./target/release/lg-buddy /usr/bin/lg-buddy
-sudo rm -f /usr/bin/LG_Buddy_Startup
-sudo rm -f /usr/bin/LG_Buddy_Shutdown
-sudo rm -f /usr/bin/LG_Buddy_Screen_On
-sudo rm -f /usr/bin/LG_Buddy_Screen_Off
-sudo rm -f /usr/bin/LG_Buddy_Screen_Monitor
-sudo rm -f /usr/bin/LG_Buddy_sleep_pre
-sudo rm -f /usr/bin/LG_Buddy_Brightness
-sudo rm -f /usr/lib/lg-buddy/common.sh
-sudo rm -f /usr/lib/lg-buddy/config-path
-sudo rmdir /usr/lib/lg-buddy 2>/dev/null || true
-sudo rm -f /usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
-sudo install -d /usr/lib/lg-buddy
+run_privileged install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Off"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Monitor"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_sleep_pre"
+run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Brightness"
+run_privileged rm -f "$COMMON_HELPER_PATH"
+run_privileged rm -f "$CONFIG_POINTER_PATH"
+run_privileged rmdir "$SYSTEM_LIB_DIR" 2>/dev/null || true
+run_privileged rm -f "$SYSTEM_SLEEP_HOOK_PATH"
+run_privileged install -d "$SYSTEM_LIB_DIR"
 CONFIG_POINTER_TMP="$(mktemp)"
 write_config_pointer "$CONFIG_POINTER_TMP" "$CONFIG_FILE"
-sudo install -m 644 "$CONFIG_POINTER_TMP" /usr/lib/lg-buddy/config-path
+run_privileged install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
 rm -f "$CONFIG_POINTER_TMP"
 CONFIG_POINTER_TMP=""
-sudo mkdir -p /etc/NetworkManager/dispatcher.d/pre-down.d
+run_privileged mkdir -p "$NM_PRE_DOWN_DIR"
 echo "Installing brightness control desktop entry..."
-sudo mkdir -p /usr/share/applications
-sudo cp ./LG_Buddy_Brightness.desktop /usr/share/applications/
-cp ./LG_Buddy_Brightness.desktop ~/Desktop/ 2>/dev/null || true
+run_privileged mkdir -p "$APPLICATIONS_DIR"
+run_privileged cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" "$DESKTOP_ENTRY_PATH"
+cp "$SCRIPT_DIR/LG_Buddy_Brightness.desktop" ~/Desktop/ 2>/dev/null || true
 echo "Done."
 
 # 7. SETUP SYSTEMD SERVICES
 echo "Copying and enabling systemd services..."
-sudo cp ./systemd/LG_Buddy.service /etc/systemd/system/
-sudo cp ./systemd/LG_Buddy_wake.service /etc/systemd/system/
-sudo cp ./systemd/LG_Buddy_sleep.service /etc/systemd/system/
-sudo cp ./systemd/lg_buddy.conf /etc/tmpfiles.d/
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/lg_buddy.conf
-sudo install -d /etc/systemd/system/LG_Buddy.service.d
-sudo install -d /etc/systemd/system/LG_Buddy_wake.service.d
-sudo install -d /etc/systemd/system/LG_Buddy_sleep.service.d
+run_privileged install -d "$SYSTEMD_SYSTEM_DIR"
+run_privileged install -d "$TMPFILES_CONF_DIR"
+run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy.service" "$SYSTEMD_SERVICE_PATH"
+run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy_wake.service" "$SYSTEMD_WAKE_SERVICE_PATH"
+run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy_sleep.service" "$SYSTEMD_SLEEP_SERVICE_PATH"
+run_privileged cp "$SCRIPT_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONF_PATH"
+run_privileged install -d "$SYSTEMD_SERVICE_OVERRIDE_DIR"
+run_privileged install -d "$SYSTEMD_WAKE_OVERRIDE_DIR"
+run_privileged install -d "$SYSTEMD_SLEEP_OVERRIDE_DIR"
 SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
 write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
-sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy.service.d/config.conf
-sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy_wake.service.d/config.conf
-sudo install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" /etc/systemd/system/LG_Buddy_sleep.service.d/config.conf
+run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_SERVICE_OVERRIDE_DIR}/config.conf"
+run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_WAKE_OVERRIDE_DIR}/config.conf"
+run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_SLEEP_OVERRIDE_DIR}/config.conf"
 rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 
-sudo systemctl daemon-reload
-sudo systemctl enable LG_Buddy.service
-sudo systemctl enable LG_Buddy_wake.service
-sudo systemctl enable LG_Buddy_sleep.service
+if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+    echo "Skipping systemd tmpfiles and enable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+else
+    run_privileged systemd-tmpfiles --create "$TMPFILES_CONF_PATH"
+    run_privileged systemctl daemon-reload
+    run_privileged systemctl enable LG_Buddy.service
+    run_privileged systemctl enable LG_Buddy_wake.service
+    run_privileged systemctl enable LG_Buddy_sleep.service
+fi
 echo "Done."
 
 # 8. INSTALL SCREEN MONITOR USER SERVICE
 echo "Installing screen monitor user service..."
-mkdir -p ~/.config/systemd/user/
-cp ./systemd/LG_Buddy_screen.service ~/.config/systemd/user/
-mkdir -p ~/.config/systemd/user/LG_Buddy_screen.service.d
-write_config_override ~/.config/systemd/user/LG_Buddy_screen.service.d/config.conf "$CONFIG_FILE"
-systemctl --user daemon-reload
+mkdir -p "$USER_SYSTEMD_DIR"
+cp "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
+mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
+write_config_override "${USER_SCREEN_OVERRIDE_DIR}/config.conf" "$CONFIG_FILE"
+if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
+    systemctl --user daemon-reload
+fi
 
 if [ "$SCREEN_MONITOR_AVAILABLE" -eq 1 ]; then
-    read -p "Enable the screen idle/resume monitor now? [Y/n] " ENABLE_SCREEN_MONITOR
+    ENABLE_SCREEN_MONITOR="${LG_BUDDY_ENABLE_SCREEN_MONITOR:-}"
+    if [ -z "$ENABLE_SCREEN_MONITOR" ] && [ "$NONINTERACTIVE" != "1" ]; then
+        read -p "Enable the screen idle/resume monitor now? [Y/n] " ENABLE_SCREEN_MONITOR
+    fi
     case "$ENABLE_SCREEN_MONITOR" in
-        [Nn]*)
+        [Nn]*|0|false|FALSE|False|no|NO|No)
             echo "Leaving LG_Buddy_screen.service installed but disabled."
             ;;
         *)
-            systemctl --user enable LG_Buddy_screen.service
-            if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
-                systemctl --user restart LG_Buddy_screen.service
-                echo "LG_Buddy_screen.service enabled and started using the $SCREEN_MONITOR_RUNTIME_BACKEND backend."
+            if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+                echo "Skipping user service enable/restart because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
             else
-                echo "LG_Buddy_screen.service enabled."
-                echo "It will start automatically the next time a supported graphical session is available."
+                systemctl --user enable LG_Buddy_screen.service
+                if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
+                    systemctl --user restart LG_Buddy_screen.service
+                    echo "LG_Buddy_screen.service enabled and started using the $SCREEN_MONITOR_RUNTIME_BACKEND backend."
+                else
+                    echo "LG_Buddy_screen.service enabled."
+                    echo "It will start automatically the next time a supported graphical session is available."
+                fi
             fi
             ;;
     esac
@@ -317,19 +415,26 @@ fi
 # 9. INSTALL NETWORKMANAGER SLEEP HOOK
 NM_SLEEP_HOOK_TMP="$(mktemp)"
 write_nm_sleep_hook "$NM_SLEEP_HOOK_TMP" "$CONFIG_FILE"
-sudo install -m 755 "$NM_SLEEP_HOOK_TMP" /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+run_privileged install -m 755 "$NM_SLEEP_HOOK_TMP" "$NM_SLEEP_HOOK_PATH"
 rm -f "$NM_SLEEP_HOOK_TMP"
 NM_SLEEP_HOOK_TMP=""
 
 # 10. ASK TO DISABLE SUSPEND/RESUME FUNCTIONALITY
-echo "Do you want to disable automatic TV power on/off during system sleep/wake? (y/N) "
-read -r REPLY
+REPLY="${LG_BUDDY_DISABLE_SLEEP_WAKE:-}"
+if [ "$NONINTERACTIVE" != "1" ]; then
+    echo "Do you want to disable automatic TV power on/off during system sleep/wake? (y/N) "
+    read -r REPLY
+fi
 case "$REPLY" in
-    [Yy]*)
+    [Yy]*|1|true|TRUE|True|yes|YES|Yes)
         echo "Disabling sleep/wake TV control..."
-        sudo systemctl disable LG_Buddy_wake.service
-        sudo systemctl disable LG_Buddy_sleep.service
-        sudo rm -f /etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+        if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+            echo "Skipping systemctl disable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+        else
+            run_privileged systemctl disable LG_Buddy_wake.service
+            run_privileged systemctl disable LG_Buddy_sleep.service
+        fi
+        run_privileged rm -f "$NM_SLEEP_HOOK_PATH"
         echo "Sleep/wake TV control disabled. Startup/shutdown will still work."
         ;;
     *)

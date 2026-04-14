@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run library tests
+        run: cargo test -p lg-buddy --lib
+
+      - name: Run acceptance tests
+        run: cargo test -p lg-buddy --test cucumber
+
+      - name: Run clippy
+        run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
+
+      - name: Validate shell scripts
+        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+
+  bundle-smoke-test:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install smoke-test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y musl-tools zenity
+
+      - name: Build lg-buddy release binary
+        run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
+
+      - name: Create release bundle
+        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version ci-smoke --output-dir dist
+
+      - name: Smoke test release bundle
+        run: ./scripts/test-release-bundle.sh --archive dist/lg-buddy-ci-smoke-x86_64-unknown-linux-musl.tar.gz
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > sha256sums.txt
+
+      - name: Verify checksums
+        run: |
+          cd dist
+          sha256sum -c sha256sums.txt
+
+      - name: Dry-run publish release assets
+        env:
+          GH_RELEASE_DRY_RUN: "1"
+        run: ./scripts/publish-release-assets.sh --dist-dir dist --tag release-ci-smoke
