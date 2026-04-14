@@ -201,12 +201,11 @@ Flow:
 1. Load config.
 2. Resolve the session marker.
 3. Skip if the marker is missing.
-4. Skip and clear if the marker is stale.
-5. Try `turn_screen_on`.
-6. If the TV reports the known active-screen error (`-102`), try immediate input restore.
-7. Otherwise fall back to Wake-on-LAN plus repeated `set_input` attempts.
-8. Clear the marker on success.
-9. Leave the marker in place if wake recovery fails.
+4. Try `turn_screen_on`.
+5. If the TV reports the known active-screen error (`-102`), try immediate input restore.
+6. Otherwise fall back to Wake-on-LAN plus repeated `set_input` attempts.
+7. Clear the marker on success.
+8. Leave the marker in place if wake recovery fails.
 
 ### `startup`
 
