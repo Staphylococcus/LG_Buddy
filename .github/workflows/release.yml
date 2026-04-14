@@ -26,11 +26,8 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Run library tests
-        run: cargo test -p lg-buddy --lib
-
-      - name: Run acceptance tests
-        run: cargo test -p lg-buddy --test cucumber
+      - name: Run Rust test suite
+        run: cargo test -p lg-buddy
 
       - name: Run clippy
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
