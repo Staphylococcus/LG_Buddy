@@ -105,6 +105,20 @@ impl MockBscpylgtv {
         );
     }
 
+    pub fn queue_set_input_wake_success(&self) {
+        self.queue_step(
+            "set_input",
+            json!({
+                "result": "success",
+                "stdout": "{'returnValue': True}\n",
+                "state_update": {
+                    "power_on": true,
+                    "screen_on": true
+                }
+            }),
+        );
+    }
+
     pub fn calls(&self) -> Vec<MockInvocation> {
         self.load_state()
             .get("calls")
