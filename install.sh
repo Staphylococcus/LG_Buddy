@@ -118,7 +118,20 @@ check_dep() {
     fi
 }
 
-check_dep "python3-venv" "python3-venv" "python3 -c 'import venv'"
+check_python3_venv() {
+    local tmp_venv_dir=""
+    tmp_venv_dir="$(mktemp -d)" || return 1
+
+    if python3 -m venv "$tmp_venv_dir" >/dev/null 2>&1; then
+        rm -rf "$tmp_venv_dir"
+        return 0
+    fi
+
+    rm -rf "$tmp_venv_dir"
+    return 1
+}
+
+check_dep "python3-venv" "python3-venv" "check_python3_venv"
 check_dep "python3-pip" "python3-pip" "python3 -m pip --version"
 check_dep "zenity" "zenity" "command -v zenity"
 

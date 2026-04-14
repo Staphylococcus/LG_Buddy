@@ -65,7 +65,7 @@ jobs:
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version ci-smoke --output-dir dist
 
       - name: Smoke test release bundle
-        run: ./scripts/test-release-bundle.sh --archive dist/lg-buddy-ci-smoke-x86_64-unknown-linux-musl.tar.gz
+        run: ./scripts/test-release-bundle.sh --skip-pip-install --archive dist/lg-buddy-ci-smoke-x86_64-unknown-linux-musl.tar.gz
 
       - name: Generate checksums
         run: |

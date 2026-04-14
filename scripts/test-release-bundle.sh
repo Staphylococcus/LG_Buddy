@@ -25,6 +25,25 @@ assert_executable() {
     fi
 }
 
+validate_archive_paths() {
+    local archive="$1"
+    local entry=""
+
+    while IFS= read -r entry; do
+        case "$entry" in
+            /*)
+                echo "Archive contains an absolute path: $entry"
+                exit 1
+                ;;
+        esac
+
+        if printf '%s\n' "$entry" | grep -Eq '(^|/)\.\.(/|$)'; then
+            echo "Archive contains a parent-directory traversal path: $entry"
+            exit 1
+        fi
+    done < <(tar -tzf "$archive")
+}
+
 ARCHIVE=""
 WORK_DIR=""
 SKIP_PIP_INSTALL=0
@@ -76,6 +95,7 @@ XDG_CONFIG_HOME="$HOME_DIR/.config"
 
 mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT" "$HOME_DIR"
 
+validate_archive_paths "$ARCHIVE"
 tar -C "$EXTRACT_DIR" -xzf "$ARCHIVE"
 BUNDLE_DIR="$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 
