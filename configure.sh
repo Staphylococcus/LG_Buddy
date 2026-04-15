@@ -50,6 +50,13 @@ validate_backend() {
     esac
 }
 
+validate_restore_policy() {
+    case "$1" in
+        marker_only|aggressive) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 validate_idle_timeout() {
     [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
 }
@@ -59,6 +66,7 @@ current_tv_mac=""
 current_input="HDMI_1"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
+current_screen_restore_policy="$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY"
 
 if lg_buddy_load_config >/dev/null 2>&1; then
     current_tv_ip="$tv_ip"
@@ -66,6 +74,7 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_input="$input"
     current_screen_backend="$screen_backend"
     current_screen_idle_timeout="$screen_idle_timeout"
+    current_screen_restore_policy="$screen_restore_policy"
     echo "Loaded existing configuration from $LG_BUDDY_CONFIG_FILE"
 fi
 
@@ -75,6 +84,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     input="${LG_BUDDY_INPUT:-$current_input}"
     screen_backend="${LG_BUDDY_SCREEN_BACKEND:-$current_screen_backend}"
     screen_idle_timeout="${LG_BUDDY_SCREEN_IDLE_TIMEOUT:-$current_screen_idle_timeout}"
+    screen_restore_policy="${LG_BUDDY_SCREEN_RESTORE_POLICY:-$current_screen_restore_policy}"
 
     validate_ip "$tv_ip" || {
         echo "LG_BUDDY_TV_IP must be set to a valid IPv4 address in non-interactive mode."
@@ -90,6 +100,10 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     }
     validate_backend "$screen_backend" || {
         echo "LG_BUDDY_SCREEN_BACKEND must be one of auto, gnome, or swayidle."
+        exit 1
+    }
+    validate_restore_policy "$screen_restore_policy" || {
+        echo "LG_BUDDY_SCREEN_RESTORE_POLICY must be one of marker_only or aggressive."
         exit 1
     }
 
@@ -222,6 +236,25 @@ else
             echo "  Please enter a positive number of seconds."
         done
     fi
+
+    echo "Choose the screen restore policy:"
+    echo "  1) marker_only"
+    echo "  2) aggressive"
+
+    case "$current_screen_restore_policy" in
+        marker_only) default_restore_policy_choice="1" ;;
+        aggressive) default_restore_policy_choice="2" ;;
+        *) default_restore_policy_choice="1" ;;
+    esac
+
+    while true; do
+        RESTORE_POLICY_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_restore_policy_choice")"
+        case "$RESTORE_POLICY_CHOICE" in
+            1) screen_restore_policy="marker_only"; break ;;
+            2) screen_restore_policy="aggressive"; break ;;
+            *) echo "  Please enter a number between 1 and 2." ;;
+        esac
+    done
 fi
 
 echo ""
@@ -233,6 +266,7 @@ echo "  Screen Backend:      $screen_backend"
 if [ "$screen_backend" = "swayidle" ]; then
     echo "  Screen Idle Timeout: $screen_idle_timeout"
 fi
+echo "  Screen Restore:      $screen_restore_policy"
 echo "  Config File:         $CONFIG_FILE"
 echo ""
 
@@ -256,6 +290,7 @@ tv_mac=$tv_mac
 input=$input
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout
+screen_restore_policy=$screen_restore_policy
 EOF
 
 chmod 600 "$CONFIG_FILE"
