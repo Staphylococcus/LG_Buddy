@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -625,7 +626,11 @@ impl TestConfigFile {
     }
 
     pub fn append_line(&self, line: &str) {
-        let mut contents = fs::read_to_string(&self.path).unwrap_or_default();
+        let mut contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+            Err(err) => panic!("read temp config: {err}"),
+        };
         if !contents.is_empty() && !contents.ends_with('\n') {
             contents.push('\n');
         }

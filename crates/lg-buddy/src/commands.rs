@@ -828,7 +828,7 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
 
     writeln!(
         writer,
-        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. Leaving state file in place for another resume event."
+        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. LG Buddy will retry on the next restore event."
     )?;
     Err(RunError::Policy(format!(
         "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
