@@ -6,7 +6,7 @@ use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::Duration;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::tv::{BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
@@ -386,14 +386,7 @@ pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
 
-    run_screen_on_with(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        &wol_sender,
-        &sleeper,
-    )
+    run_screen_on_with(writer, &config, &marker, &tv_client, &wol_sender, &sleeper)
 }
 
 pub fn run_screen_off_with<W: Write>(
@@ -734,11 +727,18 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     sleeper: &Sl,
 ) -> Result<(), RunError> {
     if !marker.exists() {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
-        )?;
-        return Ok(());
+        if config.screen_restore_policy == ScreenRestorePolicy::Aggressive {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: State file not found. Aggressive restore policy is enabled, so LG Buddy will attempt wake anyway."
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
+            )?;
+            return Ok(());
+        }
     }
 
     let tv = TvDevice::new(tv_client, config.tv_ip);
@@ -1012,7 +1012,7 @@ mod tests {
         NetworkWaiter, Notifier, ReachabilityChecker, RebootDetector, SleepRequestDetector,
         Sleeper, StartupDeps, BRIGHTNESS_DEFAULT_VALUE,
     };
-    use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
+    use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::BscpylgtvCommandClient;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
@@ -1207,6 +1207,41 @@ mod tests {
     }
 
     #[test]
+    fn screen_on_aggressive_mode_restores_without_marker() {
+        let temp_dir = TestDir::new("screen-on-aggressive-no-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-on-aggressive-no-marker-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        mock.queue_error("set_input", 1, "not ready\n");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config_with_restore_policy(HdmiInput::Hdmi2, ScreenRestorePolicy::Aggressive),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+        )
+        .expect("aggressive mode should restore without a marker");
+
+        assert!(!marker.exists());
+        assert_call_commands(&mock, &["turn_screen_on", "set_input", "set_input"]);
+        assert_eq!(wol.calls().len(), 2);
+        assert_eq!(
+            sleeper.durations(),
+            vec![Duration::from_secs(6), Duration::from_secs(2)]
+        );
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Aggressive restore policy is enabled"));
+        assert!(rendered.contains("Wake attempt 2 succeeded."));
+        assert!(rendered.contains("Clearing wake state."));
+    }
+
+    #[test]
     fn screen_on_restores_even_when_marker_is_old() {
         let temp_dir = TestDir::new("screen-on-old-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
@@ -1232,7 +1267,10 @@ mod tests {
         )
         .expect("old marker should still restore");
 
-        assert!(!marker.exists(), "successful restore should clear the marker");
+        assert!(
+            !marker.exists(),
+            "successful restore should clear the marker"
+        );
         assert_call_commands(&mock, &["turn_screen_on"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
@@ -1364,6 +1402,40 @@ mod tests {
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
         assert!(rendered(&output).contains("Wake failed after 6 attempts."));
+    }
+
+    #[test]
+    fn screen_on_aggressive_mode_returns_error_without_creating_marker_after_exhausting_retries() {
+        let temp_dir = TestDir::new("screen-on-aggressive-wake-retry-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-on-aggressive-wake-retry-failure-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        for _ in 0..6 {
+            mock.queue_error("set_input", 1, "not ready\n");
+        }
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        let err = run_screen_on_with(
+            &mut output,
+            &sample_config_with_restore_policy(HdmiInput::Hdmi2, ScreenRestorePolicy::Aggressive),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+        )
+        .expect_err("aggressive mode should still fail after exhausting retries");
+
+        assert!(!marker.exists());
+        assert_eq!(mock.calls().len(), 7);
+        assert_eq!(wol.calls().len(), 7);
+        assert_eq!(sleeper.durations().len(), 7);
+        assert!(matches!(err, crate::RunError::Policy(_)));
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Aggressive restore policy is enabled"));
+        assert!(rendered.contains("Wake failed after 6 attempts."));
     }
 
     #[test]
@@ -2019,6 +2091,13 @@ mod tests {
     }
 
     fn sample_config(input: HdmiInput) -> Config {
+        sample_config_with_restore_policy(input, ScreenRestorePolicy::MarkerOnly)
+    }
+
+    fn sample_config_with_restore_policy(
+        input: HdmiInput,
+        screen_restore_policy: ScreenRestorePolicy,
+    ) -> Config {
         Config {
             tv_ip: "192.0.2.42".parse::<Ipv4Addr>().expect("parse ipv4"),
             tv_mac: "aa:bb:cc:dd:ee:ff"
@@ -2027,6 +2106,7 @@ mod tests {
             input,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,
+            screen_restore_policy,
         }
     }
 

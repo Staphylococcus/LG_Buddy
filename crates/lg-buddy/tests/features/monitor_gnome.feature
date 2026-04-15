@@ -68,6 +68,28 @@ Feature: GNOME monitor
     And the session marker is absent
     And the TV screen is visible
 
+  Scenario: GNOME wake request can restore without a session marker in aggressive mode
+    Given a temporary LG Buddy config using input HDMI_3
+    And the screen restore policy is "aggressive"
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_3
+    And the TV is powered off
+    And the next input restore attempt powers the TV back on
+    And screen wake delays are disabled
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME requests screen wake
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Aggressive restore policy is enabled"
+    And stdout contains "Wake attempt 1 succeeded."
+    And the TV client received "turn_screen_on"
+    And the TV client received "set_input"
+    And the session marker is absent
+    And the TV is powered on
+    And the TV screen is visible
+
   Scenario: GNOME activity wakes a TV that was manually powered off after LG Buddy blanked it
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated

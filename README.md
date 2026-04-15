@@ -66,6 +66,14 @@ LG Buddy is mostly automatic after installation.
 - To check the screen monitor, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
 
+Advanced session restore behavior can be tuned in `config.env`:
+
+```ini
+screen_restore_policy=marker_only
+```
+
+Set `screen_restore_policy=aggressive` to let user-session wake/activity events restore the TV even when LG Buddy did not create the session marker. This is intentionally more aggressive and can turn the TV on in cases where another device or a manual action powered it off.
+
 ## More Help
 
 - [User guide](docs/user-guide.md)

@@ -67,3 +67,37 @@ fn run_screen_on_loads_config_and_clears_session_marker() {
         .expect("utf8 output")
         .contains("Screen unblank succeeded."));
 }
+
+#[test]
+fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
+    let mock = MockBscpylgtv::new("entrypoint-screen-on-aggressive-tv");
+    mock.set_input("HDMI_3");
+    mock.set_screen_on(false);
+    let wrapper = mock.command_wrapper("entrypoint-screen-on-aggressive-wrapper");
+
+    let config = TestConfigFile::new("entrypoint-screen-on-aggressive-config");
+    config.write_sample("HDMI_3");
+    config.append_line("screen_restore_policy=aggressive");
+
+    let runtime = RuntimeStateLayout::new("entrypoint-screen-on-aggressive-runtime");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
+    env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
+
+    let mut output = Vec::new();
+    run_screen_on(&mut output).expect("screen-on should restore in aggressive mode");
+
+    runtime.assert_session_marker_absent();
+    assert_eq!(
+        mock.calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect::<Vec<_>>(),
+        vec!["turn_screen_on".to_string()]
+    );
+    let output = String::from_utf8(output).expect("utf8 output");
+    assert!(output.contains("Aggressive restore policy is enabled"));
+    assert!(output.contains("Screen unblank succeeded."));
+}

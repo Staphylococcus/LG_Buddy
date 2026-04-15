@@ -6,6 +6,11 @@ fn temporary_config(world: &mut LgBuddyWorld, input: String) {
     world.create_config(&input);
 }
 
+#[given(regex = r#"the screen restore policy is "(marker_only|aggressive)""#)]
+fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
+    world.set_screen_restore_policy(&policy);
+}
+
 #[given("LG Buddy session runtime is isolated")]
 fn isolated_runtime(world: &mut LgBuddyWorld) {
     world.create_runtime();

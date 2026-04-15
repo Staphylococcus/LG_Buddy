@@ -72,6 +72,33 @@ impl FromStr for ScreenBackend {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenRestorePolicy {
+    MarkerOnly,
+    Aggressive,
+}
+
+impl ScreenRestorePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarkerOnly => "marker_only",
+            Self::Aggressive => "aggressive",
+        }
+    }
+}
+
+impl FromStr for ScreenRestorePolicy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "marker_only" => Ok(Self::MarkerOnly),
+            "aggressive" => Ok(Self::Aggressive),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HdmiInput {
     Hdmi1,
     Hdmi2,
@@ -168,6 +195,7 @@ pub struct Config {
     pub input: HdmiInput,
     pub screen_backend: ScreenBackend,
     pub screen_idle_timeout: u64,
+    pub screen_restore_policy: ScreenRestorePolicy,
 }
 
 #[derive(Debug)]
@@ -356,12 +384,18 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_IDLE_TIMEOUT);
 
+    let screen_restore_policy = entries
+        .get("screen_restore_policy")
+        .and_then(|value| value.parse::<ScreenRestorePolicy>().ok())
+        .unwrap_or(ScreenRestorePolicy::MarkerOnly);
+
     Ok(Config {
         tv_ip,
         tv_mac,
         input,
         screen_backend,
         screen_idle_timeout,
+        screen_restore_policy,
     })
 }
 
@@ -397,7 +431,8 @@ fn sanitize_config_value(value: &str) -> String {
 mod tests {
     use super::{
         parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
-        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, ScreenRestorePolicy,
+        DEFAULT_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -497,6 +532,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             input=HDMI_2
             screen_backend=gnome
             screen_idle_timeout=450
+            screen_restore_policy=aggressive
             ",
         )
         .expect("parse valid config");
@@ -506,6 +542,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(config.input, HdmiInput::Hdmi2);
         assert_eq!(config.screen_backend, ScreenBackend::Gnome);
         assert_eq!(config.screen_idle_timeout, 450);
+        assert_eq!(
+            config.screen_restore_policy,
+            ScreenRestorePolicy::Aggressive
+        );
     }
 
     #[test]
@@ -539,6 +579,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
                 input: HdmiInput::Hdmi1,
                 screen_backend: ScreenBackend::Auto,
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,
+                screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
             }
         );
     }
@@ -552,6 +593,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             input=HDMI_3 # main PC
             screen_backend=gnome # use GNOME
             screen_idle_timeout=450 # seconds
+            screen_restore_policy=aggressive # restore on wake without a marker
             ",
         )
         .expect("parse sanitized config");
@@ -561,6 +603,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(config.input, HdmiInput::Hdmi3);
         assert_eq!(config.screen_backend, ScreenBackend::Gnome);
         assert_eq!(config.screen_idle_timeout, 450);
+        assert_eq!(
+            config.screen_restore_policy,
+            ScreenRestorePolicy::Aggressive
+        );
     }
 
     #[test]
@@ -572,12 +618,17 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             input=HDMI_1
             screen_backend=not-a-backend
             screen_idle_timeout=not-a-number
+            screen_restore_policy=not-a-policy
             ",
         )
         .expect("parse config with malformed optional values");
 
         assert_eq!(config.screen_backend, ScreenBackend::Auto);
         assert_eq!(config.screen_idle_timeout, DEFAULT_IDLE_TIMEOUT);
+        assert_eq!(
+            config.screen_restore_policy,
+            ScreenRestorePolicy::MarkerOnly
+        );
     }
 
     #[test]

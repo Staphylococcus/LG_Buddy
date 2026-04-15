@@ -50,6 +50,13 @@ impl LgBuddyWorld {
         self.config = Some(config);
     }
 
+    pub fn set_screen_restore_policy(&self, policy: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_restore_policy={policy}"));
+    }
+
     pub fn create_runtime(&mut self) {
         let runtime = RuntimeStateLayout::new("cucumber-runtime");
         self.ensure_env()
