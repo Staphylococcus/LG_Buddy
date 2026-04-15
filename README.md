@@ -52,7 +52,7 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
-The installer will prompt for your TV IP, MAC address, HDMI input, and idle-monitor backend, then install the required services.
+The installer will prompt for your TV IP, MAC address, HDMI input, idle-monitor backend, and screen restore policy, then install the required services.
 
 On first use, you may need to accept a pairing prompt on the TV:
 
