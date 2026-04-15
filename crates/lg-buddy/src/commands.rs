@@ -1018,14 +1018,49 @@ mod tests {
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::StartupMode;
     use std::cell::RefCell;
+    use std::ffi::CString;
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use support::MockBscpylgtv;
+
+    #[cfg(unix)]
+    fn set_modified_time(path: &Path, modified: SystemTime) {
+        let duration = modified
+            .duration_since(UNIX_EPOCH)
+            .expect("modified time should be after the unix epoch");
+        let path =
+            CString::new(path.as_os_str().as_bytes()).expect("path should not contain nul bytes");
+        let times = [
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+        ];
+
+        let result = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(
+            result,
+            0,
+            "failed to set file timestamps: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn set_modified_time(_path: &Path, _modified: SystemTime) {
+        panic!("set_modified_time is only implemented for unix test targets");
+    }
 
     #[test]
     fn matching_input_blanks_screen_and_sets_marker() {
@@ -1176,6 +1211,10 @@ mod tests {
         let temp_dir = TestDir::new("screen-on-old-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
+        set_modified_time(
+            marker.path(),
+            SystemTime::now() - Duration::from_secs((12 * 60 * 60) + 1),
+        );
         let mock = MockBscpylgtv::new("screen-on-old-marker-tv");
         mock.set_screen_on(false);
         let client = client_for_mock(&mock);

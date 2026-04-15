@@ -112,8 +112,7 @@ impl MockBscpylgtv {
                 "result": "success",
                 "stdout": "{'returnValue': True}\n",
                 "state_update": {
-                    "power_on": true,
-                    "screen_on": true
+                    "power_on": true
                 }
             }),
         );
