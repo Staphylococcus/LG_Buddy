@@ -109,6 +109,13 @@ impl LgBuddyWorld {
             .set("LG_BUDDY_STARTUP_RETRY_DELAY_SECS", "0");
     }
 
+    pub fn disable_screen_wake_delays(&mut self) {
+        self.ensure_env()
+            .set("LG_BUDDY_SCREEN_ON_INITIAL_WAKE_DELAY_SECS", "0");
+        self.ensure_env()
+            .set("LG_BUDDY_SCREEN_ON_RETRY_DELAY_SECS", "0");
+    }
+
     pub fn disable_sleep_delays(&mut self) {
         self.ensure_env()
             .set("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", "0");

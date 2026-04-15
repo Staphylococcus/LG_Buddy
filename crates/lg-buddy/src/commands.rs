@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::state::{ScreenOwnershipMarker, StateScope};
@@ -12,7 +12,6 @@ use crate::tv::{BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::{RunError, StartupMode};
 
-const SCREEN_ON_STALE_MARKER_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
 const SCREEN_ON_WAKE_ATTEMPTS: u32 = 6;
 const STARTUP_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
@@ -394,7 +393,6 @@ pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
         &tv_client,
         &wol_sender,
         &sleeper,
-        SystemTime::now(),
     )
 }
 
@@ -734,25 +732,12 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     tv_client: &C,
     wol_sender: &S,
     sleeper: &Sl,
-    now: SystemTime,
 ) -> Result<(), RunError> {
     if !marker.exists() {
         writeln!(
             writer,
             "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
         )?;
-        return Ok(());
-    }
-
-    if marker
-        .is_stale(SCREEN_ON_STALE_MARKER_MAX_AGE, now)
-        .map_err(RunError::Io)?
-    {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: State file is stale (>12h old). Removing and skipping wake."
-        )?;
-        marker.clear()?;
         return Ok(());
     }
 
@@ -1033,14 +1018,49 @@ mod tests {
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::StartupMode;
     use std::cell::RefCell;
+    use std::ffi::CString;
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use support::MockBscpylgtv;
+
+    #[cfg(unix)]
+    fn set_modified_time(path: &Path, modified: SystemTime) {
+        let duration = modified
+            .duration_since(UNIX_EPOCH)
+            .expect("modified time should be after the unix epoch");
+        let path =
+            CString::new(path.as_os_str().as_bytes()).expect("path should not contain nul bytes");
+        let times = [
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+        ];
+
+        let result = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(
+            result,
+            0,
+            "failed to set file timestamps: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn set_modified_time(_path: &Path, _modified: SystemTime) {
+        panic!("set_modified_time is only implemented for unix test targets");
+    }
 
     #[test]
     fn matching_input_blanks_screen_and_sets_marker() {
@@ -1177,7 +1197,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("missing marker should skip");
 
@@ -1188,11 +1207,16 @@ mod tests {
     }
 
     #[test]
-    fn screen_on_removes_stale_marker_and_skips() {
-        let temp_dir = TestDir::new("screen-on-stale-marker");
+    fn screen_on_restores_even_when_marker_is_old() {
+        let temp_dir = TestDir::new("screen-on-old-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-on-stale-marker-tv");
+        set_modified_time(
+            marker.path(),
+            SystemTime::now() - Duration::from_secs((12 * 60 * 60) + 1),
+        );
+        let mock = MockBscpylgtv::new("screen-on-old-marker-tv");
+        mock.set_screen_on(false);
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
@@ -1205,15 +1229,14 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now() + Duration::from_secs((12 * 60 * 60) + 1),
         )
-        .expect("stale marker should skip");
+        .expect("old marker should still restore");
 
-        assert!(!marker.exists());
-        assert_call_commands(&mock, &[]);
+        assert!(!marker.exists(), "successful restore should clear the marker");
+        assert_call_commands(&mock, &["turn_screen_on"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
-        assert!(rendered(&output).contains("State file is stale (>12h old)."));
+        assert!(rendered(&output).contains("Screen unblank succeeded."));
     }
 
     #[test]
@@ -1235,7 +1258,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("turn_screen_on should succeed");
 
@@ -1263,7 +1285,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("already-active path should succeed");
 
@@ -1296,7 +1317,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("wake retry should succeed");
 
@@ -1335,7 +1355,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect_err("exhausted retries should fail");
 

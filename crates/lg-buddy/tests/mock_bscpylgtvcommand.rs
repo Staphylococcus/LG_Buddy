@@ -32,6 +32,26 @@ fn mock_set_input_returns_realistic_success_payload() {
 }
 
 #[test]
+fn planned_set_input_success_preserves_normal_state_updates() {
+    let mock = MockBscpylgtv::new("mock-planned-set-input");
+    mock.set_power_on(false);
+    mock.set_screen_on(false);
+    mock.set_input("HDMI_1");
+    mock.queue_set_input_wake_success();
+    let client = mock_client(&mock);
+
+    let output = client
+        .set_input(ip("10.0.0.39"), HdmiInput::Hdmi4)
+        .expect("planned set_input should succeed");
+
+    assert_eq!(output.stdout(), "{'returnValue': True}\n");
+    let state = mock.state_snapshot();
+    assert!(state.power_on);
+    assert!(state.screen_on);
+    assert_eq!(state.input, "HDMI_4");
+}
+
+#[test]
 fn mock_set_settings_updates_backlight() {
     let mock = MockBscpylgtv::new("mock-set-settings");
     let client = mock_client(&mock);
