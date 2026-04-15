@@ -624,6 +624,16 @@ impl TestConfigFile {
         fs::write(&self.path, contents).expect("write temp config");
     }
 
+    pub fn append_line(&self, line: &str) {
+        let mut contents = fs::read_to_string(&self.path).unwrap_or_default();
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(line);
+        contents.push('\n');
+        self.write_contents(&contents);
+    }
+
     pub fn write_sample(&self, input: &str) {
         self.write_contents(&sample_config_contents(input));
     }
