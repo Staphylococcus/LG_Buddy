@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -34,6 +35,11 @@ def parse_args() -> argparse.Namespace:
         "--state",
         required=True,
         help="Path to the JSON file that stores mock TV state",
+    )
+    parser.add_argument(
+        "-p",
+        dest="key_file_path",
+        help="Path to the sqlite key file",
     )
     parser.add_argument("tv_ip")
     parser.add_argument("command")
@@ -61,7 +67,13 @@ def save_state(path: Path, state: dict[str, object]) -> None:
         json.dump(state, handle, sort_keys=True)
 
 
-def record_call(state: dict[str, object], tv_ip: str, command: str, command_args: list[str]) -> None:
+def record_call(
+    state: dict[str, object],
+    tv_ip: str,
+    command: str,
+    command_args: list[str],
+    key_file_path: str | None,
+) -> None:
     calls = state.setdefault("calls", [])
     if not isinstance(calls, list):
         raise TypeError("state calls must be a list")
@@ -71,6 +83,8 @@ def record_call(state: dict[str, object], tv_ip: str, command: str, command_args
             "tv_ip": tv_ip,
             "command": command,
             "args": command_args,
+            "key_file_path": key_file_path,
+            "user": os.environ.get("USER"),
         }
     )
 
@@ -221,7 +235,7 @@ def main() -> int:
     state_path = Path(args.state)
     state = load_state(state_path)
     command = args.command
-    record_call(state, args.tv_ip, command, list(args.command_args))
+    record_call(state, args.tv_ip, command, list(args.command_args), args.key_file_path)
 
     planned_step = next_planned_step(state, command)
     if planned_step is not None:

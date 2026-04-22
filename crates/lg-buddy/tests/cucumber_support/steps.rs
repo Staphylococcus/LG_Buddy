@@ -21,6 +21,16 @@ fn mock_tv_client(world: &mut LgBuddyWorld) {
     world.create_mock_tv();
 }
 
+#[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
+fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
+    world.set_auth_key_file_override(&path);
+}
+
+#[given("the inherited user environment is cleared")]
+fn inherited_user_environment_is_cleared(world: &mut LgBuddyWorld) {
+    world.clear_inherited_user_env();
+}
+
 #[given("the TV is reachable over ping")]
 fn tv_is_reachable_over_ping(world: &mut LgBuddyWorld) {
     world.install_ping_stub(true);
@@ -328,4 +338,9 @@ fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
         "calls were: {:?}",
         world.tv().calls()
     );
+}
+
+#[then("the TV helper uses the expected auth context")]
+fn tv_helper_uses_expected_auth_context(world: &mut LgBuddyWorld) {
+    world.assert_tv_calls_match_expected_auth_context();
 }

@@ -3,6 +3,7 @@ use crate::support::{
     TestConfigFile, TestEnv,
 };
 use cucumber::World;
+use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
 use std::fmt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -83,6 +84,10 @@ impl LgBuddyWorld {
         self.tv.as_mut().expect("mock TV configured")
     }
 
+    pub fn config(&self) -> &TestConfigFile {
+        self.config.as_ref().expect("config configured")
+    }
+
     pub fn runtime(&self) -> &RuntimeStateLayout {
         self.runtime.as_ref().expect("runtime layout configured")
     }
@@ -99,6 +104,55 @@ impl LgBuddyWorld {
 
     pub fn create_system_marker(&self) {
         self.runtime().create_system_marker();
+    }
+
+    pub fn set_auth_key_file_override(&mut self, path: &str) {
+        let key_file_path = self
+            .config()
+            .path()
+            .parent()
+            .expect("config parent")
+            .join(path);
+        self.ensure_env()
+            .set("LG_BUDDY_BSCPYLGTV_KEY_FILE", &key_file_path);
+    }
+
+    pub fn clear_inherited_user_env(&mut self) {
+        self.ensure_env().remove("USER");
+        self.ensure_env().remove("LOGNAME");
+    }
+
+    pub fn assert_tv_calls_match_expected_auth_context(&self) {
+        let expected = resolve_bscpylgtv_auth_context_from_env(self.config().path())
+            .expect("resolve expected auth context from test config");
+        let expected_key_file_path = expected
+            .key_file_path()
+            .map(|path| path.to_string_lossy().into_owned());
+        let expected_user = expected.owner_user().map(ToString::to_string);
+        let calls = self.tv().calls();
+
+        assert!(
+            !calls.is_empty(),
+            "expected at least one TV helper invocation"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.key_file_path == expected_key_file_path),
+            "TV helper key paths were: {:?}",
+            calls
+                .iter()
+                .map(|call| call.key_file_path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            calls.iter().all(|call| call.user == expected_user),
+            "TV helper users were: {:?}",
+            calls
+                .iter()
+                .map(|call| call.user.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     pub fn isolate_path(&mut self) {

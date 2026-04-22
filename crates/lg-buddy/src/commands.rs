@@ -1,14 +1,18 @@
 use std::env;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::Duration;
 
 use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
+use crate::auth::resolve_bscpylgtv_auth_context_from_env;
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice};
+use crate::tv::{
+    BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
+};
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::{RunError, StartupMode};
 
@@ -307,7 +311,7 @@ pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker =
         ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
 
     run_screen_off_with(writer, &config, &marker, &tv_client)
 }
@@ -316,7 +320,7 @@ pub fn run_sleep_pre<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let sleeper = ThreadSleeper;
 
     run_sleep_pre_with(writer, &config, &marker, &tv_client, &sleeper)
@@ -326,7 +330,7 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let detector = JournalctlSleepDetector::default();
     let sleeper = ThreadSleeper;
 
@@ -336,7 +340,7 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
 pub fn run_brightness<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let reachability = PingReachabilityChecker::default();
     let ui = ZenityBrightnessUi::default();
     let notifier = NotifySendNotifier::default();
@@ -354,7 +358,7 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
@@ -371,7 +375,7 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let reboot_detector = SystemctlRebootDetector::default();
 
     run_shutdown_with(writer, &config, &tv_client, &reboot_detector)
@@ -382,11 +386,22 @@ pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker =
         ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = BscpylgtvCommandClient::from_env();
+    let tv_client = build_tv_client(&config_path)?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
 
     run_screen_on_with(writer, &config, &marker, &tv_client, &wol_sender, &sleeper)
+}
+
+fn build_tv_client(
+    config_path: &Path,
+) -> Result<BscpylgtvCommandClient<UserScopedBscpylgtvCommandLauncher>, RunError> {
+    let auth_context =
+        resolve_bscpylgtv_auth_context_from_env(config_path).map_err(RunError::AuthContext)?;
+
+    Ok(BscpylgtvCommandClient::from_env()
+        .with_auth_context(auth_context)
+        .with_launcher(UserScopedBscpylgtvCommandLauncher))
 }
 
 pub fn run_screen_off_with<W: Write>(
