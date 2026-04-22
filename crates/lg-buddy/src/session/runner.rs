@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -210,20 +210,27 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
     });
 
     let (sender, receiver) = mpsc::channel();
+    let latest_inactivity = Arc::new(LatestInactivityObservation::default());
     let monitor_handle = spawn_gnome_monitor_thread(sender.clone());
     let mut idle_poller = None;
-    start_gnome_idle_monitor_poller(&mut idle_poller, sender.clone());
+    start_gnome_idle_monitor_poller(
+        &mut idle_poller,
+        sender.clone(),
+        Arc::clone(&latest_inactivity),
+    );
     let mut monitor_result = Ok(());
 
     while let Ok(message) = receiver.recv() {
         match message {
-            RunnerMessage::InactivityObservation(observation) => {
-                handle_gnome_inactivity_observation(
-                    writer,
-                    dispatcher,
-                    &mut inactivity,
-                    observation,
-                )?;
+            RunnerMessage::InactivityObservationReady => {
+                if let Some(observation) = latest_inactivity.take() {
+                    handle_gnome_inactivity_observation(
+                        writer,
+                        dispatcher,
+                        &mut inactivity,
+                        observation,
+                    )?;
+                }
             }
             RunnerMessage::SessionEvent(SessionEvent::Idle) => {
                 handle_gnome_inactivity_observation(
@@ -359,20 +366,30 @@ fn wait_for_gnome_shell() -> Result<(), SessionRunnerError> {
 }
 
 fn resolve_idle_timeout_secs() -> u64 {
-    std::env::var("LG_BUDDY_IDLE_TIMEOUT")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .or_else(|| {
-            let path = resolve_config_path_from_env().ok()?;
-            load_config(&path)
-                .ok()
-                .map(|config| config.screen_idle_timeout)
-        })
-        .unwrap_or(DEFAULT_IDLE_TIMEOUT)
+    normalize_idle_timeout_secs(
+        std::env::var("LG_BUDDY_IDLE_TIMEOUT")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                let path = resolve_config_path_from_env().ok()?;
+                load_config(&path)
+                    .ok()
+                    .map(|config| config.screen_idle_timeout)
+            })
+            .unwrap_or(DEFAULT_IDLE_TIMEOUT),
+    )
 }
 
 fn resolve_idle_timeout_ms() -> u64 {
     resolve_idle_timeout_secs().saturating_mul(1000)
+}
+
+fn normalize_idle_timeout_secs(idle_timeout_secs: u64) -> u64 {
+    if idle_timeout_secs == 0 {
+        DEFAULT_IDLE_TIMEOUT
+    } else {
+        idle_timeout_secs
+    }
 }
 
 fn spawn_gnome_monitor_thread(sender: mpsc::Sender<RunnerMessage>) -> JoinHandle<()> {
@@ -420,8 +437,69 @@ fn run_gnome_monitor_process(
 
 enum RunnerMessage {
     SessionEvent(SessionEvent),
-    InactivityObservation(InactivityObservation),
+    InactivityObservationReady,
     MonitorExited(Result<(), SessionRunnerError>),
+}
+
+#[derive(Debug, Default)]
+struct LatestInactivityObservation {
+    state: Mutex<LatestInactivityObservationState>,
+}
+
+#[derive(Debug, Default)]
+struct LatestInactivityObservationState {
+    observation: Option<InactivityObservation>,
+    notification_in_flight: bool,
+}
+
+impl LatestInactivityObservation {
+    fn publish(
+        &self,
+        sender: &mpsc::Sender<RunnerMessage>,
+        observation: InactivityObservation,
+    ) -> bool {
+        let should_notify = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("latest inactivity observation lock");
+            state.observation = Some(observation);
+            if state.notification_in_flight {
+                false
+            } else {
+                state.notification_in_flight = true;
+                true
+            }
+        };
+
+        if !should_notify {
+            return true;
+        }
+
+        if sender
+            .send(RunnerMessage::InactivityObservationReady)
+            .is_ok()
+        {
+            return true;
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .expect("latest inactivity observation lock");
+        state.notification_in_flight = false;
+        false
+    }
+
+    fn take(&self) -> Option<InactivityObservation> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("latest inactivity observation lock");
+        let observation = state.observation.take();
+        state.notification_in_flight = false;
+        observation
+    }
 }
 
 trait IdleMonitorProbe {
@@ -463,6 +541,7 @@ struct GnomeIdleMonitorPoller {
 fn start_gnome_idle_monitor_poller(
     poller: &mut Option<GnomeIdleMonitorPoller>,
     sender: mpsc::Sender<RunnerMessage>,
+    latest_observation: Arc<LatestInactivityObservation>,
 ) {
     stop_gnome_idle_monitor_poller(poller);
 
@@ -472,11 +551,8 @@ fn start_gnome_idle_monitor_poller(
         let probe = SystemGnomeIdleMonitorProbe;
         while !stop_signal.load(Ordering::SeqCst) {
             if let Some(idletime_ms) = probe.current_idletime_ms() {
-                if sender
-                    .send(RunnerMessage::InactivityObservation(
-                        InactivityObservation::IdleTimeMs(idletime_ms),
-                    ))
-                    .is_err()
+                if !latest_observation
+                    .publish(&sender, InactivityObservation::IdleTimeMs(idletime_ms))
                 {
                     break;
                 }
@@ -570,8 +646,9 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_gnome_inactivity_observation, parse_gnome_idletime_output,
-        process_gnome_monitor_output, shell_quote, SessionActionExecutor, SessionEventDispatcher,
+        handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
+        parse_gnome_idletime_output, process_gnome_monitor_output, shell_quote,
+        LatestInactivityObservation, RunnerMessage, SessionActionExecutor, SessionEventDispatcher,
     };
     use crate::session::inactivity::{
         InactivityEngine, InactivityObservation, InactivityThresholds,
@@ -580,6 +657,7 @@ mod tests {
     use crate::RunError;
     use std::io::Cursor;
     use std::path::Path;
+    use std::sync::mpsc;
 
     #[derive(Debug, Default)]
     struct FakeActionExecutor {
@@ -751,6 +829,60 @@ unrelated\n";
     fn parses_gnome_idle_monitor_output() {
         assert_eq!(parse_gnome_idletime_output("(uint64 777,)\n"), Some(777));
         assert_eq!(parse_gnome_idletime_output("unexpected"), None);
+    }
+
+    #[test]
+    fn zero_idle_timeout_falls_back_to_default() {
+        assert_eq!(
+            normalize_idle_timeout_secs(0),
+            crate::config::DEFAULT_IDLE_TIMEOUT
+        );
+        assert_eq!(normalize_idle_timeout_secs(180), 180);
+    }
+
+    #[test]
+    fn latest_inactivity_observation_coalesces_pending_samples() {
+        let (sender, receiver) = mpsc::channel();
+        let latest = LatestInactivityObservation::default();
+
+        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(1_000)));
+        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(2_000)));
+
+        assert!(matches!(
+            receiver.recv().expect("notification"),
+            RunnerMessage::InactivityObservationReady
+        ));
+        assert_eq!(
+            latest.take(),
+            Some(InactivityObservation::IdleTimeMs(2_000))
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn latest_inactivity_observation_notifies_again_after_take() {
+        let (sender, receiver) = mpsc::channel();
+        let latest = LatestInactivityObservation::default();
+
+        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(1_000)));
+        assert!(matches!(
+            receiver.recv().expect("first notification"),
+            RunnerMessage::InactivityObservationReady
+        ));
+        assert_eq!(
+            latest.take(),
+            Some(InactivityObservation::IdleTimeMs(1_000))
+        );
+
+        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(3_000)));
+        assert!(matches!(
+            receiver.recv().expect("second notification"),
+            RunnerMessage::InactivityObservationReady
+        ));
+        assert_eq!(
+            latest.take(),
+            Some(InactivityObservation::IdleTimeMs(3_000))
+        );
     }
 
     #[test]
