@@ -17,6 +17,9 @@ use crate::config::{
     load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::gnome::{map_monitor_line, GnomeBackend, SystemGnomeProbe};
+use crate::session::inactivity::{
+    InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
+};
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
 use crate::state::{ScreenOwnershipMarker, StateDirError, StateScope};
 use crate::RunError;
@@ -27,7 +30,7 @@ const GNOME_DBUS_PATH: &str = "/org/gnome/ScreenSaver";
 const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
 const GNOME_IDLE_MONITOR_PATH: &str = "/org/gnome/Mutter/IdleMonitor/Core";
 const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
-const GNOME_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub trait SessionActionExecutor {
     fn screen_off(&mut self) -> Result<String, RunError>;
@@ -200,57 +203,84 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 ) -> Result<(), SessionRunnerError> {
     wait_for_gnome_shell()?;
 
-    let capabilities = GnomeBackend::new(SystemGnomeProbe)
+    GnomeBackend::new(SystemGnomeProbe)
         .capabilities()
         .map_err(SessionRunnerError::BackendUnavailable)?;
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
-    let marker = if capabilities.early_user_activity {
-        Some(
-            ScreenOwnershipMarker::from_env(StateScope::Session)
-                .map_err(SessionRunnerError::StateDir)?,
-        )
-    } else {
-        None
-    };
+    let marker = ScreenOwnershipMarker::from_env(StateScope::Session)
+        .map_err(SessionRunnerError::StateDir)?;
+    let mut inactivity = InactivityEngine::new(InactivityThresholds {
+        blank_threshold_ms: resolve_idle_timeout_ms(),
+        active_threshold_ms: GNOME_ACTIVE_THRESHOLD_MS,
+    });
 
     let (sender, receiver) = mpsc::channel();
     let monitor_handle = spawn_gnome_monitor_thread(sender.clone());
-    let mut activity_watcher = None;
+    let mut idle_poller = None;
+    start_gnome_idle_monitor_poller(&mut idle_poller, sender.clone());
     let mut monitor_result = Ok(());
 
     while let Ok(message) = receiver.recv() {
         match message {
-            RunnerMessage::SessionEvent(SessionEvent::Idle) => {
-                dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
-                if let Some(marker) = marker.as_ref() {
-                    start_gnome_activity_watcher(
-                        &mut activity_watcher,
-                        sender.clone(),
-                        marker.clone(),
-                    );
-                }
+            RunnerMessage::InactivityObservation(observation) => {
+                handle_gnome_inactivity_observation(
+                    writer,
+                    dispatcher,
+                    &mut inactivity,
+                    &marker,
+                    observation,
+                )?;
             }
-            RunnerMessage::SessionEvent(
-                event @ (SessionEvent::Active
-                | SessionEvent::WakeRequested
-                | SessionEvent::UserActivity),
-            ) => {
-                stop_gnome_activity_watcher(&mut activity_watcher);
+            RunnerMessage::SessionEvent(SessionEvent::Idle) => {
+                handle_gnome_inactivity_observation(
+                    writer,
+                    dispatcher,
+                    &mut inactivity,
+                    &marker,
+                    InactivityObservation::ProviderIdle,
+                )?;
+            }
+            RunnerMessage::SessionEvent(event @ SessionEvent::Active) => {
+                record_gnome_state_observation(
+                    &mut inactivity,
+                    &marker,
+                    InactivityObservation::ProviderActive,
+                );
                 dispatcher.dispatch_event(writer, event)?;
+                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
+            }
+            RunnerMessage::SessionEvent(event @ SessionEvent::WakeRequested) => {
+                record_gnome_state_observation(
+                    &mut inactivity,
+                    &marker,
+                    InactivityObservation::WakeRequested,
+                );
+                dispatcher.dispatch_event(writer, event)?;
+                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
+            }
+            RunnerMessage::SessionEvent(event @ SessionEvent::UserActivity) => {
+                record_gnome_state_observation(
+                    &mut inactivity,
+                    &marker,
+                    InactivityObservation::UserActivityObserved,
+                );
+                dispatcher.dispatch_event(writer, event)?;
+                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
             }
             RunnerMessage::SessionEvent(event) => {
                 dispatcher.dispatch_event(writer, event)?;
             }
             RunnerMessage::MonitorExited(result) => {
-                stop_gnome_activity_watcher(&mut activity_watcher);
+                stop_gnome_idle_monitor_poller(&mut idle_poller);
                 monitor_result = result;
                 break;
             }
         }
     }
 
+    stop_gnome_idle_monitor_poller(&mut idle_poller);
     let _ = monitor_handle.join();
     monitor_result
 }
@@ -353,6 +383,10 @@ fn resolve_idle_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_IDLE_TIMEOUT)
 }
 
+fn resolve_idle_timeout_ms() -> u64 {
+    resolve_idle_timeout_secs().saturating_mul(1000)
+}
+
 fn spawn_gnome_monitor_thread(sender: mpsc::Sender<RunnerMessage>) -> JoinHandle<()> {
     thread::spawn(move || {
         let result = run_gnome_monitor_process(&sender);
@@ -398,17 +432,8 @@ fn run_gnome_monitor_process(
 
 enum RunnerMessage {
     SessionEvent(SessionEvent),
+    InactivityObservation(InactivityObservation),
     MonitorExited(Result<(), SessionRunnerError>),
-}
-
-trait ActivityMarker {
-    fn exists(&self) -> bool;
-}
-
-impl ActivityMarker for ScreenOwnershipMarker {
-    fn exists(&self) -> bool {
-        ScreenOwnershipMarker::exists(self)
-    }
 }
 
 trait IdleMonitorProbe {
@@ -442,72 +467,87 @@ impl IdleMonitorProbe for SystemGnomeIdleMonitorProbe {
     }
 }
 
-struct GnomeActivityWatcher {
+struct GnomeIdleMonitorPoller {
     stop: Arc<AtomicBool>,
     handle: JoinHandle<()>,
 }
 
-fn start_gnome_activity_watcher(
-    watcher: &mut Option<GnomeActivityWatcher>,
+fn start_gnome_idle_monitor_poller(
+    poller: &mut Option<GnomeIdleMonitorPoller>,
     sender: mpsc::Sender<RunnerMessage>,
-    marker: ScreenOwnershipMarker,
 ) {
-    stop_gnome_activity_watcher(watcher);
+    stop_gnome_idle_monitor_poller(poller);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_signal = Arc::clone(&stop);
     let handle = thread::spawn(move || {
         let probe = SystemGnomeIdleMonitorProbe;
-        if watch_for_early_user_activity(
-            &marker,
-            &probe,
-            &stop_signal,
-            GNOME_ACTIVE_THRESHOLD_MS,
-            GNOME_ACTIVE_POLL_INTERVAL,
-            thread::sleep,
-        ) {
-            let _ = sender.send(RunnerMessage::SessionEvent(SessionEvent::UserActivity));
+        while !stop_signal.load(Ordering::SeqCst) {
+            if let Some(idletime_ms) = probe.current_idletime_ms() {
+                if sender
+                    .send(RunnerMessage::InactivityObservation(
+                        InactivityObservation::IdleTimeMs(idletime_ms),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            if stop_signal.load(Ordering::SeqCst) {
+                break;
+            }
+
+            thread::sleep(GNOME_IDLE_POLL_INTERVAL);
         }
     });
 
-    *watcher = Some(GnomeActivityWatcher { stop, handle });
+    *poller = Some(GnomeIdleMonitorPoller { stop, handle });
 }
 
-fn stop_gnome_activity_watcher(watcher: &mut Option<GnomeActivityWatcher>) {
-    if let Some(watcher) = watcher.take() {
-        watcher.stop.store(true, Ordering::SeqCst);
-        let _ = watcher.handle.join();
+fn stop_gnome_idle_monitor_poller(poller: &mut Option<GnomeIdleMonitorPoller>) {
+    if let Some(poller) = poller.take() {
+        poller.stop.store(true, Ordering::SeqCst);
+        let _ = poller.handle.join();
     }
 }
 
-fn watch_for_early_user_activity<M, P, S>(
-    marker: &M,
-    probe: &P,
-    stop: &AtomicBool,
-    threshold_ms: u64,
-    poll_interval: Duration,
-    sleep: S,
-) -> bool
-where
-    M: ActivityMarker,
-    P: IdleMonitorProbe,
-    S: Fn(Duration),
-{
-    while marker.exists() && !stop.load(Ordering::SeqCst) {
-        if let Some(idletime_ms) = probe.current_idletime_ms() {
-            if idletime_ms < threshold_ms {
-                return true;
-            }
+fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
+    writer: &mut W,
+    dispatcher: &mut SessionEventDispatcher<E>,
+    inactivity: &mut InactivityEngine,
+    marker: &ScreenOwnershipMarker,
+    observation: InactivityObservation,
+) -> Result<(), SessionRunnerError> {
+    match inactivity.observe(observation) {
+        InactivityDecision::BlankNow => {
+            dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
+            sync_inactivity_engine_with_marker(inactivity, marker);
         }
-
-        if stop.load(Ordering::SeqCst) || !marker.exists() {
-            break;
+        InactivityDecision::RestoreNow => {
+            dispatcher.dispatch_event(writer, SessionEvent::UserActivity)?;
+            sync_inactivity_engine_with_marker(inactivity, marker);
         }
-
-        sleep(poll_interval);
+        InactivityDecision::NoOp => {}
     }
 
-    false
+    Ok(())
+}
+
+fn record_gnome_state_observation(
+    inactivity: &mut InactivityEngine,
+    marker: &ScreenOwnershipMarker,
+    observation: InactivityObservation,
+) {
+    let _ = inactivity.observe(observation);
+    sync_inactivity_engine_with_marker(inactivity, marker);
+}
+
+fn sync_inactivity_engine_with_marker(
+    inactivity: &mut InactivityEngine,
+    marker: &ScreenOwnershipMarker,
+) {
+    inactivity.set_blanked_by_lg_buddy(marker.exists());
 }
 
 fn parse_gnome_idletime_output(output: &str) -> Option<u64> {
@@ -550,17 +590,19 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_gnome_idletime_output, process_gnome_monitor_output, shell_quote,
-        watch_for_early_user_activity, ActivityMarker, IdleMonitorProbe, SessionActionExecutor,
-        SessionEventDispatcher,
+        handle_gnome_inactivity_observation, parse_gnome_idletime_output,
+        process_gnome_monitor_output, shell_quote, SessionActionExecutor, SessionEventDispatcher,
+    };
+    use crate::session::inactivity::{
+        InactivityEngine, InactivityObservation, InactivityThresholds,
     };
     use crate::session::SessionEvent;
+    use crate::state::ScreenOwnershipMarker;
     use crate::RunError;
-    use std::cell::RefCell;
+    use std::fs;
     use std::io::Cursor;
     use std::path::Path;
-    use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug, Default)]
     struct FakeActionExecutor {
@@ -587,32 +629,6 @@ mod tests {
                 return Err(RunError::Policy(message.clone()));
             }
             Ok(self.screen_on_output.clone())
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct FakeMarker {
-        exists: bool,
-    }
-
-    impl ActivityMarker for FakeMarker {
-        fn exists(&self) -> bool {
-            self.exists
-        }
-    }
-
-    struct FakeIdleMonitorProbe {
-        idletimes: RefCell<Vec<Option<u64>>>,
-    }
-
-    impl IdleMonitorProbe for FakeIdleMonitorProbe {
-        fn current_idletime_ms(&self) -> Option<u64> {
-            let mut idletimes = self.idletimes.borrow_mut();
-            if idletimes.is_empty() {
-                None
-            } else {
-                idletimes.remove(0)
-            }
         }
     }
 
@@ -761,43 +777,59 @@ unrelated\n";
     }
 
     #[test]
-    fn early_activity_watch_reports_recent_input_when_marker_exists() {
-        let marker = FakeMarker { exists: true };
-        let probe = FakeIdleMonitorProbe {
-            idletimes: RefCell::new(vec![Some(1500), Some(0)]),
+    fn idletime_observation_blanks_when_threshold_is_crossed() {
+        let marker = test_marker("runner-inactivity-blank");
+        let executor = FakeActionExecutor {
+            screen_off_output: "screen-off output\n".to_string(),
+            ..FakeActionExecutor::default()
         };
-        let stop = AtomicBool::new(false);
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        let mut output = Vec::new();
 
-        let detected = watch_for_early_user_activity(
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
             &marker,
-            &probe,
-            &stop,
-            1000,
-            Duration::from_millis(1),
-            |_| {},
-        );
-
-        assert!(detected);
+            InactivityObservation::IdleTimeMs(1_000),
+        )
+        .expect("blank from idletime observation");
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Session became idle."));
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
     }
 
     #[test]
-    fn early_activity_watch_stops_when_marker_is_missing() {
-        let marker = FakeMarker { exists: false };
-        let probe = FakeIdleMonitorProbe {
-            idletimes: RefCell::new(vec![Some(0)]),
+    fn idletime_observation_restores_when_marker_exists_and_activity_returns() {
+        let marker = test_marker("runner-inactivity-restore");
+        marker.create().expect("create session marker");
+        let executor = FakeActionExecutor {
+            screen_on_output: "screen-on output\n".to_string(),
+            ..FakeActionExecutor::default()
         };
-        let stop = AtomicBool::new(false);
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        inactivity.set_blanked_by_lg_buddy(true);
+        let mut output = Vec::new();
 
-        let detected = watch_for_early_user_activity(
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
             &marker,
-            &probe,
-            &stop,
-            1000,
-            Duration::from_millis(1),
-            |_| {},
-        );
-
-        assert!(!detected);
+            InactivityObservation::IdleTimeMs(99),
+        )
+        .expect("restore from idletime observation");
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("user-activity"));
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
     }
 
     #[test]
@@ -807,5 +839,16 @@ unrelated\n";
             shell_quote(Path::new("/tmp/that'one")),
             "'/tmp/that'\"'\"'one'"
         );
+    }
+
+    fn test_marker(label: &str) -> ScreenOwnershipMarker {
+        static NEXT_MARKER_ID: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "lg-buddy-{label}-{}-{}",
+            std::process::id(),
+            NEXT_MARKER_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        ScreenOwnershipMarker::new(path)
     }
 }

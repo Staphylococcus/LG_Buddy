@@ -58,6 +58,11 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_restore_policy={policy}"));
     }
 
+    pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
+        self.ensure_env()
+            .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
+    }
+
     pub fn create_runtime(&mut self) {
         let runtime = RuntimeStateLayout::new("cucumber-runtime");
         self.ensure_env()

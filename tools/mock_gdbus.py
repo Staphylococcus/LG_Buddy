@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -65,8 +66,10 @@ def load_state(path: Path) -> dict[str, object]:
 
 def save_state(path: Path, state: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temp_path = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(state, handle, sort_keys=True)
+    temp_path.replace(path)
 
 
 def record_invocation(state: dict[str, object], argv: list[str]) -> None:

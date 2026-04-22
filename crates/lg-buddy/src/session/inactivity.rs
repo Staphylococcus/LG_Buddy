@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InactivityObservation {
     IdleTimeMs(u64),
+    ProviderIdle,
     ProviderActive,
     WakeRequested,
     UserActivityObserved,
@@ -23,6 +24,7 @@ pub struct InactivityThresholds {
 pub struct InactivityEngine {
     thresholds: InactivityThresholds,
     blanked_by_lg_buddy: bool,
+    provider_idle: bool,
 }
 
 impl InactivityEngine {
@@ -30,6 +32,7 @@ impl InactivityEngine {
         Self {
             thresholds,
             blanked_by_lg_buddy: false,
+            provider_idle: false,
         }
     }
 
@@ -41,13 +44,29 @@ impl InactivityEngine {
         self.blanked_by_lg_buddy
     }
 
+    pub fn set_blanked_by_lg_buddy(&mut self, value: bool) {
+        self.blanked_by_lg_buddy = value;
+    }
+
     pub fn observe(&mut self, observation: InactivityObservation) -> InactivityDecision {
         match observation {
+            InactivityObservation::ProviderIdle => {
+                self.provider_idle = true;
+                if self.blanked_by_lg_buddy {
+                    InactivityDecision::NoOp
+                } else {
+                    self.blanked_by_lg_buddy = true;
+                    InactivityDecision::BlankNow
+                }
+            }
             InactivityObservation::IdleTimeMs(idletime_ms) => {
-                if !self.blanked_by_lg_buddy && idletime_ms >= self.thresholds.blank_threshold_ms {
+                if !self.blanked_by_lg_buddy
+                    && (self.provider_idle || idletime_ms >= self.thresholds.blank_threshold_ms)
+                {
                     self.blanked_by_lg_buddy = true;
                     InactivityDecision::BlankNow
                 } else if self.blanked_by_lg_buddy
+                    && !self.provider_idle
                     && idletime_ms < self.thresholds.active_threshold_ms
                 {
                     self.blanked_by_lg_buddy = false;
@@ -56,9 +75,17 @@ impl InactivityEngine {
                     InactivityDecision::NoOp
                 }
             }
-            InactivityObservation::ProviderActive
-            | InactivityObservation::WakeRequested
-            | InactivityObservation::UserActivityObserved => {
+            InactivityObservation::ProviderActive => {
+                self.provider_idle = false;
+                if self.blanked_by_lg_buddy {
+                    self.blanked_by_lg_buddy = false;
+                    InactivityDecision::RestoreNow
+                } else {
+                    InactivityDecision::NoOp
+                }
+            }
+            InactivityObservation::WakeRequested | InactivityObservation::UserActivityObserved => {
+                self.provider_idle = false;
                 if self.blanked_by_lg_buddy {
                     self.blanked_by_lg_buddy = false;
                     InactivityDecision::RestoreNow
@@ -190,6 +217,47 @@ mod tests {
     }
 
     #[test]
+    fn provider_idle_blanks_immediately() {
+        let mut engine = test_engine();
+
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderIdle),
+            InactivityDecision::BlankNow
+        );
+        assert!(engine.blanked_by_lg_buddy());
+    }
+
+    #[test]
+    fn provider_idle_is_a_first_class_blank_source() {
+        let mut engine = test_engine();
+
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderIdle),
+            InactivityDecision::BlankNow
+        );
+        assert!(engine.blanked_by_lg_buddy());
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderIdle),
+            InactivityDecision::NoOp
+        );
+    }
+
+    #[test]
+    fn idletime_drop_does_not_restore_while_provider_still_reports_idle() {
+        let mut engine = test_engine();
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderIdle),
+            InactivityDecision::BlankNow
+        );
+
+        assert_eq!(
+            engine.observe(InactivityObservation::IdleTimeMs(0)),
+            InactivityDecision::NoOp
+        );
+        assert!(engine.blanked_by_lg_buddy());
+    }
+
+    #[test]
     fn restore_signals_are_noops_before_lg_buddy_has_blanked_screen() {
         let mut engine = test_engine();
 
@@ -223,5 +291,15 @@ mod tests {
                 active_threshold_ms: 1_000,
             }
         );
+    }
+
+    #[test]
+    fn blanked_state_can_be_synchronized_externally() {
+        let mut engine = test_engine();
+        engine.set_blanked_by_lg_buddy(true);
+        assert!(engine.blanked_by_lg_buddy());
+
+        engine.set_blanked_by_lg_buddy(false);
+        assert!(!engine.blanked_by_lg_buddy());
     }
 }
