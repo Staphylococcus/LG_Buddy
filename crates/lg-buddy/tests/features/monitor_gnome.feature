@@ -130,6 +130,29 @@ Feature: GNOME monitor
     And the TV is powered on
     And the TV screen is visible
 
+  Scenario: GNOME restore failure does not retry continuously while activity stays active
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the TV will fail "turn_screen_on" with status 1 and stderr "offline"
+    And the TV will fail "set_input" 6 times with status 1 and stderr "not ready"
+    And screen wake delays are disabled
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver monitor lines
+    And GNOME idle monitor will report idletimes "1000, 0, 0, 0"
+    And GNOME monitor stays open for 1.0 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "screen restore action failed"
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "turn_screen_on" exactly 1 times
+    And the TV client received "set_input" exactly 6 times
+    And the session marker exists
+    And the TV screen is blanked
+
   Scenario: GNOME activity wakes a TV that was manually powered off after LG Buddy blanked it
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated

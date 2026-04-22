@@ -21,7 +21,6 @@ use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
-use crate::state::{ScreenOwnershipMarker, StateDirError, StateScope};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
@@ -53,7 +52,6 @@ impl SessionActionExecutor for RuntimeActionExecutor {
 #[derive(Debug)]
 pub enum SessionRunnerError {
     Io(String),
-    StateDir(StateDirError),
     BackendUnavailable(SessionBackendError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
@@ -72,7 +70,6 @@ impl fmt::Display for SessionRunnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(message) => write!(f, "{message}"),
-            Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendUnavailable(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
@@ -96,7 +93,6 @@ impl fmt::Display for SessionRunnerError {
 impl Error for SessionRunnerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::StateDir(err) => Some(err),
             Self::BackendUnavailable(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
@@ -170,7 +166,6 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     run_monitor_with_executor(writer, RuntimeActionExecutor).map_err(|err| match err {
-        SessionRunnerError::StateDir(err) => RunError::StateDir(err),
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
         other => RunError::Policy(other.to_string()),
@@ -209,8 +204,6 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
-    let marker = ScreenOwnershipMarker::from_env(StateScope::Session)
-        .map_err(SessionRunnerError::StateDir)?;
     let mut inactivity = InactivityEngine::new(InactivityThresholds {
         blank_threshold_ms: resolve_idle_timeout_ms(),
         active_threshold_ms: GNOME_ACTIVE_THRESHOLD_MS,
@@ -229,7 +222,6 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     writer,
                     dispatcher,
                     &mut inactivity,
-                    &marker,
                     observation,
                 )?;
             }
@@ -238,36 +230,32 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     writer,
                     dispatcher,
                     &mut inactivity,
-                    &marker,
                     InactivityObservation::ProviderIdle,
                 )?;
             }
-            RunnerMessage::SessionEvent(event @ SessionEvent::Active) => {
-                record_gnome_state_observation(
+            RunnerMessage::SessionEvent(SessionEvent::Active) => {
+                handle_gnome_inactivity_observation(
+                    writer,
+                    dispatcher,
                     &mut inactivity,
-                    &marker,
                     InactivityObservation::ProviderActive,
-                );
-                dispatcher.dispatch_event(writer, event)?;
-                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
+                )?
             }
-            RunnerMessage::SessionEvent(event @ SessionEvent::WakeRequested) => {
-                record_gnome_state_observation(
+            RunnerMessage::SessionEvent(SessionEvent::WakeRequested) => {
+                handle_gnome_inactivity_observation(
+                    writer,
+                    dispatcher,
                     &mut inactivity,
-                    &marker,
                     InactivityObservation::WakeRequested,
-                );
-                dispatcher.dispatch_event(writer, event)?;
-                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
+                )?
             }
-            RunnerMessage::SessionEvent(event @ SessionEvent::UserActivity) => {
-                record_gnome_state_observation(
+            RunnerMessage::SessionEvent(SessionEvent::UserActivity) => {
+                handle_gnome_inactivity_observation(
+                    writer,
+                    dispatcher,
                     &mut inactivity,
-                    &marker,
                     InactivityObservation::UserActivityObserved,
-                );
-                dispatcher.dispatch_event(writer, event)?;
-                sync_inactivity_engine_with_marker(&mut inactivity, &marker);
+                )?
             }
             RunnerMessage::SessionEvent(event) => {
                 dispatcher.dispatch_event(writer, event)?;
@@ -516,38 +504,30 @@ fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     inactivity: &mut InactivityEngine,
-    marker: &ScreenOwnershipMarker,
     observation: InactivityObservation,
 ) -> Result<(), SessionRunnerError> {
-    match inactivity.observe(observation) {
-        InactivityDecision::BlankNow => {
-            dispatcher.dispatch_event(writer, SessionEvent::Idle)?;
-            sync_inactivity_engine_with_marker(inactivity, marker);
+    let decision = inactivity.observe(observation);
+    let event = match (observation, decision) {
+        (_, InactivityDecision::NoOp) => None,
+        (_, InactivityDecision::BlankNow) => Some(SessionEvent::Idle),
+        (InactivityObservation::ProviderActive, InactivityDecision::RestoreNow) => {
+            Some(SessionEvent::Active)
         }
-        InactivityDecision::RestoreNow => {
-            dispatcher.dispatch_event(writer, SessionEvent::UserActivity)?;
-            sync_inactivity_engine_with_marker(inactivity, marker);
+        (InactivityObservation::WakeRequested, InactivityDecision::RestoreNow) => {
+            Some(SessionEvent::WakeRequested)
         }
-        InactivityDecision::NoOp => {}
+        (
+            InactivityObservation::IdleTimeMs(_) | InactivityObservation::UserActivityObserved,
+            InactivityDecision::RestoreNow,
+        ) => Some(SessionEvent::UserActivity),
+        (InactivityObservation::ProviderIdle, InactivityDecision::RestoreNow) => None,
+    };
+
+    if let Some(event) = event {
+        dispatcher.dispatch_event(writer, event)?;
     }
 
     Ok(())
-}
-
-fn record_gnome_state_observation(
-    inactivity: &mut InactivityEngine,
-    marker: &ScreenOwnershipMarker,
-    observation: InactivityObservation,
-) {
-    let _ = inactivity.observe(observation);
-    sync_inactivity_engine_with_marker(inactivity, marker);
-}
-
-fn sync_inactivity_engine_with_marker(
-    inactivity: &mut InactivityEngine,
-    marker: &ScreenOwnershipMarker,
-) {
-    inactivity.set_blanked_by_lg_buddy(marker.exists());
 }
 
 fn parse_gnome_idletime_output(output: &str) -> Option<u64> {
@@ -597,12 +577,9 @@ mod tests {
         InactivityEngine, InactivityObservation, InactivityThresholds,
     };
     use crate::session::SessionEvent;
-    use crate::state::ScreenOwnershipMarker;
     use crate::RunError;
-    use std::fs;
     use std::io::Cursor;
     use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug, Default)]
     struct FakeActionExecutor {
@@ -778,7 +755,6 @@ unrelated\n";
 
     #[test]
     fn idletime_observation_blanks_when_threshold_is_crossed() {
-        let marker = test_marker("runner-inactivity-blank");
         let executor = FakeActionExecutor {
             screen_off_output: "screen-off output\n".to_string(),
             ..FakeActionExecutor::default()
@@ -794,7 +770,6 @@ unrelated\n";
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            &marker,
             InactivityObservation::IdleTimeMs(1_000),
         )
         .expect("blank from idletime observation");
@@ -804,9 +779,7 @@ unrelated\n";
     }
 
     #[test]
-    fn idletime_observation_restores_when_marker_exists_and_activity_returns() {
-        let marker = test_marker("runner-inactivity-restore");
-        marker.create().expect("create session marker");
+    fn idletime_observation_restores_when_activity_returns() {
         let executor = FakeActionExecutor {
             screen_on_output: "screen-on output\n".to_string(),
             ..FakeActionExecutor::default()
@@ -816,19 +789,132 @@ unrelated\n";
             blank_threshold_ms: 1_000,
             active_threshold_ms: 100,
         });
-        inactivity.set_blanked_by_lg_buddy(true);
         let mut output = Vec::new();
 
         handle_gnome_inactivity_observation(
             &mut output,
             &mut dispatcher,
             &mut inactivity,
-            &marker,
+            InactivityObservation::IdleTimeMs(1_000),
+        )
+        .expect("blank from idletime observation");
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
             InactivityObservation::IdleTimeMs(99),
         )
         .expect("restore from idletime observation");
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("user-activity"));
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+    }
+
+    #[test]
+    fn failed_blank_from_idletime_is_not_retried_while_session_stays_idle() {
+        let executor = FakeActionExecutor {
+            screen_off_error: Some("tv did not respond".to_string()),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(1_000),
+        )
+        .expect("initial blank attempt should be logged");
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(1_500),
+        )
+        .expect("repeated idle sample should not retry blank");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("screen-off action failed. tv did not respond"));
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+    }
+
+    #[test]
+    fn failed_restore_from_idletime_is_not_retried_while_session_stays_active() {
+        let executor = FakeActionExecutor {
+            screen_on_error: Some("tv is still waking".to_string()),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(1_000),
+        )
+        .expect("blank should succeed");
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(99),
+        )
+        .expect("initial restore attempt should be logged");
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(0),
+        )
+        .expect("repeated active sample should not retry restore");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("screen restore action failed. tv is still waking"));
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+    }
+
+    #[test]
+    fn provider_active_restores_once_from_unknown_state() {
+        let executor = FakeActionExecutor {
+            screen_on_output: "screen-on output\n".to_string(),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::ProviderActive,
+        )
+        .expect("initial provider active should restore");
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::ProviderActive,
+        )
+        .expect("repeated provider active should not duplicate restore");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("active"));
         assert_eq!(dispatcher.executor.screen_on_calls, 1);
     }
 
@@ -839,16 +925,5 @@ unrelated\n";
             shell_quote(Path::new("/tmp/that'one")),
             "'/tmp/that'\"'\"'one'"
         );
-    }
-
-    fn test_marker(label: &str) -> ScreenOwnershipMarker {
-        static NEXT_MARKER_ID: AtomicU64 = AtomicU64::new(1);
-        let path = std::env::temp_dir().join(format!(
-            "lg-buddy-{label}-{}-{}",
-            std::process::id(),
-            NEXT_MARKER_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        ScreenOwnershipMarker::new(path)
     }
 }

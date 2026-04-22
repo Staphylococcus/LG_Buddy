@@ -21,9 +21,16 @@ pub struct InactivityThresholds {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InactivityPhase {
+    Unknown,
+    Active,
+    Idle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InactivityEngine {
     thresholds: InactivityThresholds,
-    blanked_by_lg_buddy: bool,
+    phase: InactivityPhase,
     provider_idle: bool,
 }
 
@@ -31,7 +38,7 @@ impl InactivityEngine {
     pub fn new(thresholds: InactivityThresholds) -> Self {
         Self {
             thresholds,
-            blanked_by_lg_buddy: false,
+            phase: InactivityPhase::Unknown,
             provider_idle: false,
         }
     }
@@ -40,58 +47,64 @@ impl InactivityEngine {
         self.thresholds
     }
 
-    pub fn blanked_by_lg_buddy(&self) -> bool {
-        self.blanked_by_lg_buddy
+    fn activate_from_signal(&mut self) -> InactivityDecision {
+        if self.phase == InactivityPhase::Active {
+            InactivityDecision::NoOp
+        } else {
+            self.phase = InactivityPhase::Active;
+            InactivityDecision::RestoreNow
+        }
     }
 
-    pub fn set_blanked_by_lg_buddy(&mut self, value: bool) {
-        self.blanked_by_lg_buddy = value;
+    fn observe_idletime(&mut self, idletime_ms: u64) -> InactivityDecision {
+        if self.provider_idle {
+            return InactivityDecision::NoOp;
+        }
+
+        if idletime_ms >= self.thresholds.blank_threshold_ms {
+            match self.phase {
+                InactivityPhase::Unknown | InactivityPhase::Active => {
+                    self.phase = InactivityPhase::Idle;
+                    InactivityDecision::BlankNow
+                }
+                InactivityPhase::Idle => InactivityDecision::NoOp,
+            }
+        } else if idletime_ms < self.thresholds.active_threshold_ms {
+            match self.phase {
+                InactivityPhase::Idle => {
+                    self.phase = InactivityPhase::Active;
+                    InactivityDecision::RestoreNow
+                }
+                InactivityPhase::Unknown => {
+                    self.phase = InactivityPhase::Active;
+                    InactivityDecision::NoOp
+                }
+                InactivityPhase::Active => InactivityDecision::NoOp,
+            }
+        } else {
+            InactivityDecision::NoOp
+        }
     }
 
     pub fn observe(&mut self, observation: InactivityObservation) -> InactivityDecision {
         match observation {
             InactivityObservation::ProviderIdle => {
                 self.provider_idle = true;
-                if self.blanked_by_lg_buddy {
+                if self.phase == InactivityPhase::Idle {
                     InactivityDecision::NoOp
                 } else {
-                    self.blanked_by_lg_buddy = true;
+                    self.phase = InactivityPhase::Idle;
                     InactivityDecision::BlankNow
                 }
             }
-            InactivityObservation::IdleTimeMs(idletime_ms) => {
-                if !self.blanked_by_lg_buddy
-                    && (self.provider_idle || idletime_ms >= self.thresholds.blank_threshold_ms)
-                {
-                    self.blanked_by_lg_buddy = true;
-                    InactivityDecision::BlankNow
-                } else if self.blanked_by_lg_buddy
-                    && !self.provider_idle
-                    && idletime_ms < self.thresholds.active_threshold_ms
-                {
-                    self.blanked_by_lg_buddy = false;
-                    InactivityDecision::RestoreNow
-                } else {
-                    InactivityDecision::NoOp
-                }
-            }
+            InactivityObservation::IdleTimeMs(idletime_ms) => self.observe_idletime(idletime_ms),
             InactivityObservation::ProviderActive => {
                 self.provider_idle = false;
-                if self.blanked_by_lg_buddy {
-                    self.blanked_by_lg_buddy = false;
-                    InactivityDecision::RestoreNow
-                } else {
-                    InactivityDecision::NoOp
-                }
+                self.activate_from_signal()
             }
             InactivityObservation::WakeRequested | InactivityObservation::UserActivityObserved => {
                 self.provider_idle = false;
-                if self.blanked_by_lg_buddy {
-                    self.blanked_by_lg_buddy = false;
-                    InactivityDecision::RestoreNow
-                } else {
-                    InactivityDecision::NoOp
-                }
+                self.activate_from_signal()
             }
         }
     }
@@ -118,13 +131,10 @@ mod tests {
             engine.observe(InactivityObservation::IdleTimeMs(4_999)),
             InactivityDecision::NoOp
         );
-        assert!(!engine.blanked_by_lg_buddy());
-
         assert_eq!(
             engine.observe(InactivityObservation::IdleTimeMs(5_000)),
             InactivityDecision::BlankNow
         );
-        assert!(engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -143,7 +153,6 @@ mod tests {
             engine.observe(InactivityObservation::IdleTimeMs(7_500)),
             InactivityDecision::NoOp
         );
-        assert!(engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -158,13 +167,10 @@ mod tests {
             engine.observe(InactivityObservation::IdleTimeMs(1_500)),
             InactivityDecision::NoOp
         );
-        assert!(engine.blanked_by_lg_buddy());
-
         assert_eq!(
             engine.observe(InactivityObservation::IdleTimeMs(999)),
             InactivityDecision::RestoreNow
         );
-        assert!(!engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -179,7 +185,6 @@ mod tests {
             engine.observe(InactivityObservation::WakeRequested),
             InactivityDecision::RestoreNow
         );
-        assert!(!engine.blanked_by_lg_buddy());
         assert_eq!(
             engine.observe(InactivityObservation::WakeRequested),
             InactivityDecision::NoOp
@@ -198,7 +203,6 @@ mod tests {
             engine.observe(InactivityObservation::ProviderActive),
             InactivityDecision::RestoreNow
         );
-        assert!(!engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -213,7 +217,6 @@ mod tests {
             engine.observe(InactivityObservation::UserActivityObserved),
             InactivityDecision::RestoreNow
         );
-        assert!(!engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -224,7 +227,6 @@ mod tests {
             engine.observe(InactivityObservation::ProviderIdle),
             InactivityDecision::BlankNow
         );
-        assert!(engine.blanked_by_lg_buddy());
     }
 
     #[test]
@@ -235,7 +237,6 @@ mod tests {
             engine.observe(InactivityObservation::ProviderIdle),
             InactivityDecision::BlankNow
         );
-        assert!(engine.blanked_by_lg_buddy());
         assert_eq!(
             engine.observe(InactivityObservation::ProviderIdle),
             InactivityDecision::NoOp
@@ -254,12 +255,15 @@ mod tests {
             engine.observe(InactivityObservation::IdleTimeMs(0)),
             InactivityDecision::NoOp
         );
-        assert!(engine.blanked_by_lg_buddy());
     }
 
     #[test]
-    fn restore_signals_are_noops_before_lg_buddy_has_blanked_screen() {
+    fn restore_signals_are_noops_after_engine_is_already_active() {
         let mut engine = test_engine();
+        assert_eq!(
+            engine.observe(InactivityObservation::IdleTimeMs(250)),
+            InactivityDecision::NoOp
+        );
 
         assert_eq!(
             engine.observe(InactivityObservation::ProviderActive),
@@ -273,11 +277,34 @@ mod tests {
             engine.observe(InactivityObservation::UserActivityObserved),
             InactivityDecision::NoOp
         );
+    }
+
+    #[test]
+    fn low_idletime_seeds_active_state_without_restoring() {
+        let mut engine = test_engine();
+
         assert_eq!(
-            engine.observe(InactivityObservation::IdleTimeMs(250)),
+            engine.observe(InactivityObservation::IdleTimeMs(999)),
             InactivityDecision::NoOp
         );
-        assert!(!engine.blanked_by_lg_buddy());
+        assert_eq!(
+            engine.observe(InactivityObservation::IdleTimeMs(5_000)),
+            InactivityDecision::BlankNow
+        );
+    }
+
+    #[test]
+    fn provider_active_restores_when_engine_starts_unknown() {
+        let mut engine = test_engine();
+
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderActive),
+            InactivityDecision::RestoreNow
+        );
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderActive),
+            InactivityDecision::NoOp
+        );
     }
 
     #[test]
@@ -291,15 +318,5 @@ mod tests {
                 active_threshold_ms: 1_000,
             }
         );
-    }
-
-    #[test]
-    fn blanked_state_can_be_synchronized_externally() {
-        let mut engine = test_engine();
-        engine.set_blanked_by_lg_buddy(true);
-        assert!(engine.blanked_by_lg_buddy());
-
-        engine.set_blanked_by_lg_buddy(false);
-        assert!(!engine.blanked_by_lg_buddy());
     }
 }

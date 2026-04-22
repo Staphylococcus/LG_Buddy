@@ -7,8 +7,8 @@ use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::Duration;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
 use crate::auth::resolve_bscpylgtv_auth_context_from_env;
+use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::tv::{
     BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
@@ -404,6 +404,17 @@ fn build_tv_client(
         .with_launcher(UserScopedBscpylgtvCommandLauncher))
 }
 
+fn restore_is_allowed(policy: ScreenRestorePolicy, marker_exists: bool) -> bool {
+    marker_exists || policy == ScreenRestorePolicy::Aggressive
+}
+
+fn log_markerless_restore_notice<W: Write>(writer: &mut W, prefix: &str) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{prefix}: State file not found. Aggressive restore policy is enabled, so LG Buddy will attempt wake anyway."
+    )
+}
+
 pub fn run_screen_off_with<W: Write>(
     writer: &mut W,
     config: &Config,
@@ -446,10 +457,11 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper, N: N
     mode: StartupMode,
 ) -> Result<(), RunError> {
     let tv = TvDevice::new(deps.tv_client, config.tv_ip);
+    let marker_exists = marker.exists();
     let _ = deps.network_waiter.wait_for_network();
 
     match mode {
-        StartupMode::Wake if !marker.exists() => {
+        StartupMode::Wake if !restore_is_allowed(config.screen_restore_policy, marker_exists) => {
             writeln!(
                 writer,
                 "LG Buddy Startup: Wake from sleep: TV was not on our input. Skipping."
@@ -457,10 +469,18 @@ fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper, N: N
             return Ok(());
         }
         StartupMode::Wake => {
-            writeln!(
-                writer,
-                "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
-            )?;
+            if marker_exists {
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
+                )?;
+            } else {
+                log_markerless_restore_notice(writer, "LG Buddy Startup")?;
+                writeln!(
+                    writer,
+                    "LG Buddy Startup: Wake from sleep: Restoring display state."
+                )?;
+            }
         }
         StartupMode::Boot => {
             writeln!(
@@ -741,19 +761,17 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     wol_sender: &S,
     sleeper: &Sl,
 ) -> Result<(), RunError> {
-    if !marker.exists() {
-        if config.screen_restore_policy == ScreenRestorePolicy::Aggressive {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: State file not found. Aggressive restore policy is enabled, so LG Buddy will attempt wake anyway."
-            )?;
-        } else {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
-            )?;
-            return Ok(());
-        }
+    let marker_exists = marker.exists();
+    if !restore_is_allowed(config.screen_restore_policy, marker_exists) {
+        writeln!(
+            writer,
+            "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
+        )?;
+        return Ok(());
+    }
+
+    if !marker_exists {
+        log_markerless_restore_notice(writer, "LG Buddy Screen On")?;
     }
 
     let tv = TvDevice::new(tv_client, config.tv_ip);
@@ -1484,6 +1502,43 @@ mod tests {
         assert_eq!(network.calls(), 1);
         assert_call_commands(&mock, &[]);
         assert!(rendered(&output).contains("TV was not on our input. Skipping."));
+    }
+
+    #[test]
+    fn startup_wake_mode_restores_without_system_marker_in_aggressive_mode() {
+        let temp_dir = TestDir::new("startup-wake-aggressive-no-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("startup-wake-aggressive-no-marker-tv");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+        let network = FakeNetworkWaiter::clear();
+        let deps = StartupDeps {
+            tv_client: &client,
+            wol_sender: &wol,
+            sleeper: &sleeper,
+            network_waiter: &network,
+        };
+
+        let mut output = Vec::new();
+        run_startup_with(
+            &mut output,
+            &sample_config_with_restore_policy(HdmiInput::Hdmi2, ScreenRestorePolicy::Aggressive),
+            &marker,
+            deps,
+            StartupMode::Wake,
+        )
+        .expect("aggressive wake mode without marker should restore");
+
+        assert!(!marker.exists());
+        assert_eq!(network.calls(), 1);
+        assert_eq!(wol.calls().len(), 1);
+        assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
+        assert_call_commands(&mock, &["set_input"]);
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Aggressive restore policy is enabled"));
+        assert!(rendered.contains("Wake from sleep: Restoring display state."));
+        assert!(rendered.contains("TV turned on and set to HDMI_2."));
     }
 
     #[test]

@@ -6,7 +6,7 @@ fn temporary_config(world: &mut LgBuddyWorld, input: String) {
     world.create_config(&input);
 }
 
-#[given(regex = r#"the screen restore policy is "(marker_only|aggressive)""#)]
+#[given(regex = r#"the screen restore policy is "(marker_only|conservative|aggressive)""#)]
 fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_restore_policy(&policy);
 }
@@ -370,12 +370,7 @@ fn tv_client_received_exactly(world: &mut LgBuddyWorld, command: String, expecte
         .filter(|call| call.command == command)
         .count();
 
-    assert_eq!(
-        actual,
-        expected,
-        "calls were: {:?}",
-        world.tv().calls()
-    );
+    assert_eq!(actual, expected, "calls were: {:?}", world.tv().calls());
 }
 
 #[then(regex = r#"^the TV client did not receive "([^"]+)"$"#)]

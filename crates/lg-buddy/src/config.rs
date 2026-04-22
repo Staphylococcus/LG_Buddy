@@ -91,7 +91,7 @@ impl FromStr for ScreenRestorePolicy {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "marker_only" => Ok(Self::MarkerOnly),
+            "marker_only" | "conservative" => Ok(Self::MarkerOnly),
             "aggressive" => Ok(Self::Aggressive),
             _ => Err(()),
         }
@@ -606,6 +606,24 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert_eq!(
             config.screen_restore_policy,
             ScreenRestorePolicy::Aggressive
+        );
+    }
+
+    #[test]
+    fn parse_accepts_conservative_restore_policy_alias() {
+        let config = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            screen_restore_policy=conservative
+            ",
+        )
+        .expect("parse config with conservative alias");
+
+        assert_eq!(
+            config.screen_restore_policy,
+            ScreenRestorePolicy::MarkerOnly
         );
     }
 
