@@ -52,7 +52,7 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
-The installer will prompt for your TV IP, MAC address, HDMI input, and idle-monitor backend, then install the required services.
+The installer will prompt for your TV IP, MAC address, HDMI input, idle-monitor backend, and screen restore policy, then install the required services.
 
 On first use, you may need to accept a pairing prompt on the TV:
 
@@ -65,6 +65,14 @@ LG Buddy is mostly automatic after installation.
 - To change settings later, run `./configure.sh`
 - To check the screen monitor, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
+
+Advanced session restore behavior can be tuned in `config.env`:
+
+```ini
+screen_restore_policy=marker_only
+```
+
+Set `screen_restore_policy=aggressive` to let user-session wake/activity events restore the TV even when LG Buddy did not create the session marker. This is intentionally more aggressive and can turn the TV on in cases where another device or a manual action powered it off.
 
 ## More Help
 

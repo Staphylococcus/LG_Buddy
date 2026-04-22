@@ -6,6 +6,11 @@ fn temporary_config(world: &mut LgBuddyWorld, input: String) {
     world.create_config(&input);
 }
 
+#[given(regex = r#"the screen restore policy is "(marker_only|aggressive)""#)]
+fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
+    world.set_screen_restore_policy(&policy);
+}
+
 #[given("LG Buddy session runtime is isolated")]
 fn isolated_runtime(world: &mut LgBuddyWorld) {
     world.create_runtime();
@@ -63,6 +68,12 @@ fn brightness_error_dialog_is_available(world: &mut LgBuddyWorld) {
 
 #[given("the TV screen is blanked")]
 fn tv_screen_blanked(world: &mut LgBuddyWorld) {
+    world.tv_mut().set_screen_on(false);
+}
+
+#[given("the TV is powered off")]
+fn tv_powered_off_given(world: &mut LgBuddyWorld) {
+    world.tv_mut().set_power_on(false);
     world.tv_mut().set_screen_on(false);
 }
 
@@ -144,6 +155,11 @@ fn swayidle_will_emit_resume(world: &mut LgBuddyWorld) {
     world.swayidle_emits_resume();
 }
 
+#[given("the next input restore attempt powers the TV back on")]
+fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
+    world.tv_mut().queue_set_input_wake_success();
+}
+
 #[given(regex = r#"the backend override is "([^"]+)""#)]
 fn backend_override(world: &mut LgBuddyWorld, backend: String) {
     world.set_backend_override(&backend);
@@ -152,6 +168,11 @@ fn backend_override(world: &mut LgBuddyWorld, backend: String) {
 #[given("startup delays are disabled")]
 fn startup_delays_disabled(world: &mut LgBuddyWorld) {
     world.disable_startup_delays();
+}
+
+#[given("screen wake delays are disabled")]
+fn screen_wake_delays_disabled(world: &mut LgBuddyWorld) {
+    world.disable_screen_wake_delays();
 }
 
 #[given("nm-online succeeds")]

@@ -130,10 +130,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                 writeln!(writer, "LG Buddy Monitor: Session became idle.")?;
                 match self.executor.screen_off() {
                     Ok(output) => write_command_output(writer, &output)?,
-                    Err(err) => writeln!(
-                        writer,
-                        "LG Buddy Monitor: screen-off action failed. {err}"
-                    )?,
+                    Err(err) => {
+                        writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?
+                    }
                 }
             }
             SessionEvent::Active | SessionEvent::WakeRequested | SessionEvent::UserActivity => {

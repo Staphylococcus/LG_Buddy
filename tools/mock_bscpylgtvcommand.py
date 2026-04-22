@@ -194,16 +194,28 @@ def apply_state_update(state: dict[str, object], update: dict[str, object] | Non
         state.update(update)
 
 
-def execute_planned_step(state: dict[str, object], step: dict[str, object]) -> int:
+def apply_success_defaults(state: dict[str, object], command: str, command_args: list[str]) -> None:
+    if command == "set_input" and len(command_args) == 1:
+        state["input"] = command_args[0]
+        state["screen_on"] = True
+
+
+def execute_planned_step(
+    state: dict[str, object],
+    command: str,
+    command_args: list[str],
+    step: dict[str, object],
+) -> int:
     result = step.get("result")
     state_update = step.get("state_update")
     if state_update is not None and not isinstance(state_update, dict):
         raise TypeError("plan state_update must be a dict")
 
-    apply_state_update(state, state_update)
-
     if result == "success":
+        apply_success_defaults(state, command, command_args)
+        apply_state_update(state, state_update)
         return success_with_stdout(str(step.get("stdout", "")))
+    apply_state_update(state, state_update)
     if result == "error":
         return raw_error(
             int(step.get("status", 1)),
@@ -227,7 +239,7 @@ def main() -> int:
 
     planned_step = next_planned_step(state, command)
     if planned_step is not None:
-        exit_code = execute_planned_step(state, planned_step)
+        exit_code = execute_planned_step(state, command, list(args.command_args), planned_step)
         save_state(state_path, state)
         return exit_code
 

@@ -85,6 +85,18 @@ Current config keys:
 - `input`
 - `screen_backend`
 - `screen_idle_timeout`
+- `screen_restore_policy`
+
+`screen_restore_policy` controls whether `screen-on` requires the session marker:
+
+- `marker_only`: default behavior, only restore when LG Buddy knows it blanked or powered off the TV
+- `aggressive`: attempt restore on session wake/activity even without the marker
+
+Example:
+
+```ini
+screen_restore_policy=aggressive
+```
 
 Installed services receive the resolved config path through `LG_BUDDY_CONFIG`.
 

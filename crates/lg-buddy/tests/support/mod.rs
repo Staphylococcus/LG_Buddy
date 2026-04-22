@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,6 +102,19 @@ impl MockBscpylgtv {
             command,
             json!({
                 "result": "powered_off_error",
+            }),
+        );
+    }
+
+    pub fn queue_set_input_wake_success(&self) {
+        self.queue_step(
+            "set_input",
+            json!({
+                "result": "success",
+                "stdout": "{'returnValue': True}\n",
+                "state_update": {
+                    "power_on": true
+                }
             }),
         );
     }
@@ -609,6 +623,20 @@ impl TestConfigFile {
 
     pub fn write_contents(&self, contents: &str) {
         fs::write(&self.path, contents).expect("write temp config");
+    }
+
+    pub fn append_line(&self, line: &str) {
+        let mut contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+            Err(err) => panic!("read temp config: {err}"),
+        };
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(line);
+        contents.push('\n');
+        self.write_contents(&contents);
     }
 
     pub fn write_sample(&self, input: &str) {

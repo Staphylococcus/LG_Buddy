@@ -5,10 +5,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
+use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
 use crate::auth::resolve_bscpylgtv_auth_context_from_env;
-use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::state::{ScreenOwnershipMarker, StateScope};
 use crate::tv::{
     BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
@@ -16,7 +16,6 @@ use crate::tv::{
 use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
 use crate::{RunError, StartupMode};
 
-const SCREEN_ON_STALE_MARKER_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
 const SCREEN_ON_WAKE_ATTEMPTS: u32 = 6;
 const STARTUP_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
@@ -391,15 +390,7 @@ pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
 
-    run_screen_on_with(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        &wol_sender,
-        &sleeper,
-        SystemTime::now(),
-    )
+    run_screen_on_with(writer, &config, &marker, &tv_client, &wol_sender, &sleeper)
 }
 
 fn build_tv_client(
@@ -749,26 +740,20 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     tv_client: &C,
     wol_sender: &S,
     sleeper: &Sl,
-    now: SystemTime,
 ) -> Result<(), RunError> {
     if !marker.exists() {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
-        )?;
-        return Ok(());
-    }
-
-    if marker
-        .is_stale(SCREEN_ON_STALE_MARKER_MAX_AGE, now)
-        .map_err(RunError::Io)?
-    {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: State file is stale (>12h old). Removing and skipping wake."
-        )?;
-        marker.clear()?;
-        return Ok(());
+        if config.screen_restore_policy == ScreenRestorePolicy::Aggressive {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: State file not found. Aggressive restore policy is enabled, so LG Buddy will attempt wake anyway."
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
+            )?;
+            return Ok(());
+        }
     }
 
     let tv = TvDevice::new(tv_client, config.tv_ip);
@@ -858,7 +843,7 @@ fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
 
     writeln!(
         writer,
-        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. Leaving state file in place for another resume event."
+        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. LG Buddy will retry on the next restore event."
     )?;
     Err(RunError::Policy(format!(
         "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
@@ -1042,20 +1027,55 @@ mod tests {
         NetworkWaiter, Notifier, ReachabilityChecker, RebootDetector, SleepRequestDetector,
         Sleeper, StartupDeps, BRIGHTNESS_DEFAULT_VALUE,
     };
-    use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend};
+    use crate::config::{Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::BscpylgtvCommandClient;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::StartupMode;
     use std::cell::RefCell;
+    use std::ffi::CString;
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use support::MockBscpylgtv;
+
+    #[cfg(unix)]
+    fn set_modified_time(path: &Path, modified: SystemTime) {
+        let duration = modified
+            .duration_since(UNIX_EPOCH)
+            .expect("modified time should be after the unix epoch");
+        let path =
+            CString::new(path.as_os_str().as_bytes()).expect("path should not contain nul bytes");
+        let times = [
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+            libc::timespec {
+                tv_sec: duration.as_secs() as libc::time_t,
+                tv_nsec: duration.subsec_nanos() as libc::c_long,
+            },
+        ];
+
+        let result = unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(
+            result,
+            0,
+            "failed to set file timestamps: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn set_modified_time(_path: &Path, _modified: SystemTime) {
+        panic!("set_modified_time is only implemented for unix test targets");
+    }
 
     #[test]
     fn matching_input_blanks_screen_and_sets_marker() {
@@ -1192,7 +1212,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("missing marker should skip");
 
@@ -1203,11 +1222,51 @@ mod tests {
     }
 
     #[test]
-    fn screen_on_removes_stale_marker_and_skips() {
-        let temp_dir = TestDir::new("screen-on-stale-marker");
+    fn screen_on_aggressive_mode_restores_without_marker() {
+        let temp_dir = TestDir::new("screen-on-aggressive-no-marker");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-on-aggressive-no-marker-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        mock.queue_error("set_input", 1, "not ready\n");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        run_screen_on_with(
+            &mut output,
+            &sample_config_with_restore_policy(HdmiInput::Hdmi2, ScreenRestorePolicy::Aggressive),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+        )
+        .expect("aggressive mode should restore without a marker");
+
+        assert!(!marker.exists());
+        assert_call_commands(&mock, &["turn_screen_on", "set_input", "set_input"]);
+        assert_eq!(wol.calls().len(), 2);
+        assert_eq!(
+            sleeper.durations(),
+            vec![Duration::from_secs(6), Duration::from_secs(2)]
+        );
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Aggressive restore policy is enabled"));
+        assert!(rendered.contains("Wake attempt 2 succeeded."));
+        assert!(rendered.contains("Clearing wake state."));
+    }
+
+    #[test]
+    fn screen_on_restores_even_when_marker_is_old() {
+        let temp_dir = TestDir::new("screen-on-old-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-on-stale-marker-tv");
+        set_modified_time(
+            marker.path(),
+            SystemTime::now() - Duration::from_secs((12 * 60 * 60) + 1),
+        );
+        let mock = MockBscpylgtv::new("screen-on-old-marker-tv");
+        mock.set_screen_on(false);
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
@@ -1220,15 +1279,17 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now() + Duration::from_secs((12 * 60 * 60) + 1),
         )
-        .expect("stale marker should skip");
+        .expect("old marker should still restore");
 
-        assert!(!marker.exists());
-        assert_call_commands(&mock, &[]);
+        assert!(
+            !marker.exists(),
+            "successful restore should clear the marker"
+        );
+        assert_call_commands(&mock, &["turn_screen_on"]);
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
-        assert!(rendered(&output).contains("State file is stale (>12h old)."));
+        assert!(rendered(&output).contains("Screen unblank succeeded."));
     }
 
     #[test]
@@ -1250,7 +1311,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("turn_screen_on should succeed");
 
@@ -1278,7 +1338,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("already-active path should succeed");
 
@@ -1311,7 +1370,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect("wake retry should succeed");
 
@@ -1350,7 +1408,6 @@ mod tests {
             &client,
             &wol,
             &sleeper,
-            SystemTime::now(),
         )
         .expect_err("exhausted retries should fail");
 
@@ -1360,6 +1417,40 @@ mod tests {
         assert_eq!(sleeper.durations().len(), 7);
         assert!(matches!(err, crate::RunError::Policy(_)));
         assert!(rendered(&output).contains("Wake failed after 6 attempts."));
+    }
+
+    #[test]
+    fn screen_on_aggressive_mode_returns_error_without_creating_marker_after_exhausting_retries() {
+        let temp_dir = TestDir::new("screen-on-aggressive-wake-retry-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        let mock = MockBscpylgtv::new("screen-on-aggressive-wake-retry-failure-tv");
+        mock.queue_error("turn_screen_on", 1, "offline\n");
+        for _ in 0..6 {
+            mock.queue_error("set_input", 1, "not ready\n");
+        }
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+
+        let mut output = Vec::new();
+        let err = run_screen_on_with(
+            &mut output,
+            &sample_config_with_restore_policy(HdmiInput::Hdmi2, ScreenRestorePolicy::Aggressive),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+        )
+        .expect_err("aggressive mode should still fail after exhausting retries");
+
+        assert!(!marker.exists());
+        assert_eq!(mock.calls().len(), 7);
+        assert_eq!(wol.calls().len(), 7);
+        assert_eq!(sleeper.durations().len(), 7);
+        assert!(matches!(err, crate::RunError::Policy(_)));
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Aggressive restore policy is enabled"));
+        assert!(rendered.contains("Wake failed after 6 attempts."));
     }
 
     #[test]
@@ -2015,6 +2106,13 @@ mod tests {
     }
 
     fn sample_config(input: HdmiInput) -> Config {
+        sample_config_with_restore_policy(input, ScreenRestorePolicy::MarkerOnly)
+    }
+
+    fn sample_config_with_restore_policy(
+        input: HdmiInput,
+        screen_restore_policy: ScreenRestorePolicy,
+    ) -> Config {
         Config {
             tv_ip: "192.0.2.42".parse::<Ipv4Addr>().expect("parse ipv4"),
             tv_mac: "aa:bb:cc:dd:ee:ff"
@@ -2023,6 +2121,7 @@ mod tests {
             input,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,
+            screen_restore_policy,
         }
     }
 

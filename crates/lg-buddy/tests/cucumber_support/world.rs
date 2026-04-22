@@ -51,6 +51,13 @@ impl LgBuddyWorld {
         self.config = Some(config);
     }
 
+    pub fn set_screen_restore_policy(&self, policy: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_restore_policy={policy}"));
+    }
+
     pub fn create_runtime(&mut self) {
         let runtime = RuntimeStateLayout::new("cucumber-runtime");
         self.ensure_env()
@@ -161,6 +168,13 @@ impl LgBuddyWorld {
             .set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
         self.ensure_env()
             .set("LG_BUDDY_STARTUP_RETRY_DELAY_SECS", "0");
+    }
+
+    pub fn disable_screen_wake_delays(&mut self) {
+        self.ensure_env()
+            .set("LG_BUDDY_SCREEN_ON_INITIAL_WAKE_DELAY_SECS", "0");
+        self.ensure_env()
+            .set("LG_BUDDY_SCREEN_ON_RETRY_DELAY_SECS", "0");
     }
 
     pub fn disable_sleep_delays(&mut self) {
