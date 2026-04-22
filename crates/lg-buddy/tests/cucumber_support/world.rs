@@ -206,6 +206,10 @@ impl LgBuddyWorld {
         self.ensure_mock_gdbus().set_shell_available(true);
     }
 
+    pub fn set_gnome_idle_monitor_available(&mut self, value: bool) {
+        self.ensure_mock_gdbus().set_idle_monitor_available(value);
+    }
+
     pub fn gnome_monitor_emit_idle(&mut self) {
         self.ensure_mock_gdbus()
             .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");

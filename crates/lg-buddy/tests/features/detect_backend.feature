@@ -26,3 +26,12 @@ Feature: Detect backend
     When I run the command "detect-backend"
     Then the command succeeds
     And stdout is "gnome"
+
+  Scenario: Missing GNOME idle monitor is reported explicitly when no fallback exists
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME idle monitor is unavailable
+    When I run the command "detect-backend"
+    Then the command fails
+    And stderr contains "org.gnome.Mutter.IdleMonitor"

@@ -115,6 +115,11 @@ fn gnome_shell_available(world: &mut LgBuddyWorld) {
     world.install_gnome_shell_stub();
 }
 
+#[given("GNOME idle monitor is unavailable")]
+fn gnome_idle_monitor_unavailable(world: &mut LgBuddyWorld) {
+    world.set_gnome_idle_monitor_available(false);
+}
+
 #[given("GNOME reports the session idle")]
 fn gnome_reports_idle(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_idle();

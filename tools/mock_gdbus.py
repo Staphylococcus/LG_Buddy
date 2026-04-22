@@ -98,13 +98,18 @@ def handle_call(state: dict[str, object], argv: list[str]) -> int:
     object_path = option_value(argv, "--object-path")
     method = option_value(argv, "--method")
 
-    if method == "org.freedesktop.DBus.NameHasOwner" and argv[-1] == "org.gnome.Shell":
-        if bool(state.get("shell_available", True)):
+    if method == "org.freedesktop.DBus.NameHasOwner":
+        name = argv[-1]
+        availability = {
+            "org.gnome.Shell": bool(state.get("shell_available", True)),
+            GNOME_SCREEN_SAVER_NAME: bool(state.get("screen_saver_available", True)),
+            GNOME_IDLE_MONITOR_NAME: bool(state.get("idle_monitor_available", True)),
+        }.get(name, False)
+        if availability:
             sys.stdout.write("(true,)\n")
-            sys.stdout.flush()
         else:
             sys.stdout.write("(false,)\n")
-            sys.stdout.flush()
+        sys.stdout.flush()
         return 0
 
     if (

@@ -8,9 +8,7 @@ use crate::session::{
 };
 
 const GNOME_DBUS_NAME: &str = "org.gnome.ScreenSaver";
-const GNOME_DBUS_PATH: &str = "/org/gnome/ScreenSaver";
 const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
-const GNOME_IDLE_MONITOR_PATH: &str = "/org/gnome/Mutter/IdleMonitor/Core";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GnomeBackendStatus {
@@ -21,7 +19,7 @@ pub struct GnomeBackendStatus {
 
 impl GnomeBackendStatus {
     pub fn can_start(&self) -> bool {
-        self.shell_available && self.screen_saver_available
+        self.shell_available && self.screen_saver_available && self.idle_monitor_available
     }
 }
 
@@ -41,29 +39,11 @@ impl GnomeProbe for SystemGnomeProbe {
     }
 
     fn screen_saver_available(&self) -> bool {
-        gdbus_method_available([
-            "call",
-            "--session",
-            "--dest",
-            GNOME_DBUS_NAME,
-            "--object-path",
-            GNOME_DBUS_PATH,
-            "--method",
-            "org.gnome.ScreenSaver.GetActive",
-        ])
+        dbus_name_has_owner(GNOME_DBUS_NAME)
     }
 
     fn idle_monitor_available(&self) -> bool {
-        gdbus_method_available([
-            "call",
-            "--session",
-            "--dest",
-            GNOME_IDLE_MONITOR_NAME,
-            "--object-path",
-            GNOME_IDLE_MONITOR_PATH,
-            "--method",
-            "org.gnome.Mutter.IdleMonitor.GetIdletime",
-        ])
+        dbus_name_has_owner(GNOME_IDLE_MONITOR_NAME)
     }
 }
 
@@ -104,17 +84,17 @@ impl<P: GnomeProbe> SessionBackend for GnomeBackend<P> {
         if !status.can_start() {
             return Err(SessionBackendError::Unavailable {
                 backend: ScreenBackend::Gnome,
-                reason: "GNOME Shell and org.gnome.ScreenSaver are required",
+                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
             });
         }
 
         Ok(SessionBackendCapabilities {
-            idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
+            idle_timeout_source: IdleTimeoutSource::LgBuddyConfigured,
             wake_requested: true,
             before_sleep: false,
             after_resume: false,
             lock_unlock: false,
-            early_user_activity: status.idle_monitor_available,
+            early_user_activity: true,
         })
     }
 }
@@ -137,11 +117,23 @@ pub fn map_monitor_line(line: &str) -> Option<SessionEvent> {
     }
 }
 
-fn gdbus_method_available<const N: usize>(args: [&str; N]) -> bool {
+fn dbus_name_has_owner(name: &str) -> bool {
     Command::new("gdbus")
-        .args(args)
-        .status()
-        .is_ok_and(|status| status.success())
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.DBus",
+            "--object-path",
+            "/org/freedesktop/DBus",
+            "--method",
+            "org.freedesktop.DBus.NameHasOwner",
+            name,
+        ])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("(true,)")
+        })
 }
 
 #[cfg(test)]
@@ -213,7 +205,7 @@ mod tests {
         assert_eq!(
             backend.capabilities().expect("backend should be available"),
             SessionBackendCapabilities {
-                idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
+                idle_timeout_source: IdleTimeoutSource::LgBuddyConfigured,
                 wake_requested: true,
                 before_sleep: false,
                 after_resume: false,
@@ -232,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn gnome_backend_can_start_without_idle_monitor_but_disables_early_activity() {
+    fn gnome_backend_requires_idle_monitor() {
         let backend = GnomeBackend::new(FakeProbe {
             shell_available: true,
             screen_saver_available: true,
@@ -240,20 +232,16 @@ mod tests {
         });
 
         assert_eq!(
-            backend.capabilities().expect("backend should be available"),
-            SessionBackendCapabilities {
-                idle_timeout_source: IdleTimeoutSource::DesktopEnvironment,
-                wake_requested: true,
-                before_sleep: false,
-                after_resume: false,
-                lock_unlock: false,
-                early_user_activity: false,
-            }
+            backend.capabilities(),
+            Err(SessionBackendError::Unavailable {
+                backend: ScreenBackend::Gnome,
+                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+            })
         );
     }
 
     #[test]
-    fn gnome_backend_requires_shell_and_screen_saver() {
+    fn gnome_backend_requires_full_service_surface() {
         let backend = GnomeBackend::new(FakeProbe {
             shell_available: false,
             screen_saver_available: true,
@@ -264,7 +252,7 @@ mod tests {
             backend.capabilities(),
             Err(SessionBackendError::Unavailable {
                 backend: ScreenBackend::Gnome,
-                reason: "GNOME Shell and org.gnome.ScreenSaver are required",
+                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
             })
         );
     }
