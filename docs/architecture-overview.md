@@ -35,7 +35,7 @@ main.rs
            -> tv.rs
            -> wol.rs
            -> backend.rs
-           -> session.rs / gnome.rs / swayidle.rs
+           -> session.rs / session/inactivity.rs / gnome.rs / swayidle.rs
 ```
 
 ## System Diagram
@@ -134,8 +134,12 @@ The intended split is:
 - `session.rs`
   - backend-neutral session event model
   - capability surface for desktop backends
+- `session/inactivity.rs`
+  - synthesizes idle and active transitions from provider signals and configured thresholds
+  - keeps blank and restore decisions edge-triggered instead of poll-triggered
 - `session/runner.rs`
   - backend-neutral monitor runner
+  - combines backend observations with the inactivity engine
   - dispatches semantic session events into the existing screen policy commands
 - `gnome.rs`
   - GNOME-specific capability probing and event mapping
@@ -152,8 +156,10 @@ The session-facing pieces should be read as one subsystem:
   - selects the active session backend
 - `session.rs`
   - defines the homogenized session contract
+- `session/inactivity.rs`
+  - owns session-phase synthesis from GNOME observations and configured thresholds
 - `session/runner.rs`
-  - consumes normalized session events and dispatches runtime policy
+  - consumes normalized session events and idletime observations and dispatches runtime policy
 - `gnome.rs` and `swayidle.rs`
   - adapt backend-specific surfaces into that shared session contract
 
@@ -200,7 +206,9 @@ Flow:
 
 1. Load config.
 2. Resolve the session marker.
-3. Skip if the marker is missing.
+3. Apply `screen_restore_policy`:
+   - `conservative`: skip if the marker is missing
+   - `aggressive`: continue even without the marker
 4. Try `turn_screen_on`.
 5. If the TV reports the known active-screen error (`-102`), try immediate input restore.
 6. Otherwise fall back to Wake-on-LAN plus repeated `set_input` attempts.
@@ -215,9 +223,9 @@ Flow:
 
 1. Load config.
 2. Resolve the system-scope marker.
-3. Decide behavior from `StartupMode`:
+3. Decide behavior from `StartupMode` and `screen_restore_policy`:
    - `boot`: always restore
-   - `wake`: only restore if LG Buddy owns the marker
+   - `wake`: restore only when policy allows it
    - `auto`: treat marker presence as wake, otherwise boot
 4. Clear the marker before attempting restore.
 5. Send Wake-on-LAN.
@@ -303,6 +311,9 @@ That marker answers one question:
 
 - did LG Buddy blank or power off the TV as part of its own policy?
 
+It does not answer whether restore should always be blocked.
+In `aggressive` mode, restore may proceed even when the marker is absent.
+
 There are two scopes:
 
 - `System`
@@ -352,7 +363,7 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 - capability probing
 - mapping from GNOME D-Bus monitor lines into `SessionEvent`
-- the GNOME event source used by `lg-buddy monitor`
+- the GNOME event and idletime sources used by `lg-buddy monitor`
 
 `swayidle.rs` is the delegated-tool adapter. It currently provides:
 
@@ -361,8 +372,8 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 The session subsystem is intentionally asymmetric where the providers are asymmetric:
 
-- GNOME monitor behavior is implemented for idle, active, wake-request, and
-  Mutter-based early activity restore
+- GNOME monitor behavior combines ScreenSaver idle/active and wake signals with
+  Mutter idletime observations, then passes them through the inactivity engine
 - delegated `swayidle` monitor execution is implemented for `timeout` and
   `resume` parity with the shell monitor
 - `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,

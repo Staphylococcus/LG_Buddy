@@ -89,7 +89,7 @@ Mock the API surface we consume, not the whole system behind it.
 Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
-- a future `gdbus` mock should reproduce only the GNOME and Mutter commands and monitor output LG Buddy actually consumes
+- the `gdbus` mock should reproduce only the GNOME and Mutter commands and monitor output LG Buddy actually consumes
 
 If a contract shape is unclear, probe the real dependency and update the mock.
 
@@ -123,7 +123,8 @@ Cucumber should be treated as a user-needs tool, not as a separate testing philo
 It is useful when we want to express scenarios like:
 
 - when the configured HDMI input is active and the user goes idle, LG Buddy blanks the TV and records ownership
-- when LG Buddy owns the session marker and the user returns, LG Buddy restores the screen
+- when the user returns after LG Buddy blanked the TV, LG Buddy restores the screen
+- when aggressive restore policy is enabled, wake/activity can restore even without a marker
 - when GNOME is available, backend detection resolves to `gnome`
 
 It is not the right place for:
@@ -164,7 +165,7 @@ Primary concern:
 Examples:
 
 - `bscpylgtvcommand`
-- future `gdbus`
+- `gdbus`
 - later, possibly `systemctl` and `swayidle`
 
 ### Desktop backend work
@@ -175,13 +176,13 @@ Primary concern:
 
 Secondary concern:
 
-- module interoperability once a runner exists
+- module interoperability in the runner path
 
 Examples:
 
 - GNOME capability probing
 - GNOME monitor-line parsing
-- GNOME monitor event-stream integration
+- GNOME monitor and idletime integration
 
 ### Shell, systemd, and install flow
 

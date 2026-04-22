@@ -98,8 +98,8 @@ LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
 
 `screen_restore_policy` controls how aggressively LG Buddy reclaims the display on wake and user activity:
 
-- `conservative`: default behavior, only restore when LG Buddy knows it blanked or powered off the TV
-- `aggressive`: attempt restore on session wake/activity even without the marker
+- `conservative`: default behavior, only restore when an LG Buddy marker says it previously blanked or powered off the TV
+- `aggressive`: attempt restore on session wake/activity and system wake even without a marker
 
 `marker_only` is still accepted as a legacy alias for `conservative`.
 

@@ -24,6 +24,12 @@ Backend-specific:
 - `gdbus` for the GNOME monitor backend
 - `swayidle` for the `swayidle` backend
 
+The GNOME backend also requires a compatible GNOME session with:
+
+- GNOME Shell
+- `org.gnome.ScreenSaver`
+- `org.gnome.Mutter.IdleMonitor`
+
 Typical package installs:
 
 **Debian/Ubuntu/Pop!_OS**
@@ -52,7 +58,7 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
-The installer will prompt for your TV IP, MAC address, HDMI input, idle-monitor backend, and screen restore policy, then install the required services.
+The installer will prompt for your TV IP, MAC address, HDMI input, idle-monitor backend, idle timeout, and screen restore policy, then install the required services.
 
 On first use, you may need to accept a pairing prompt on the TV:
 
@@ -69,10 +75,15 @@ LG Buddy is mostly automatic after installation.
 Advanced session restore behavior can be tuned in `config.env`:
 
 ```ini
-screen_restore_policy=marker_only
+screen_idle_timeout=300
+screen_restore_policy=conservative
 ```
 
-Set `screen_restore_policy=aggressive` to let user-session wake/activity events restore the TV even when LG Buddy did not create the session marker. This is intentionally more aggressive and can turn the TV on in cases where another device or a manual action powered it off.
+`screen_restore_policy=conservative` is the default. LG Buddy only restores when a matching LG Buddy marker says it previously blanked or powered off the TV.
+
+Set `screen_restore_policy=aggressive` to let session wake/activity and system wake restore the TV even when no LG Buddy marker exists. This is intentionally more aggressive and can turn the TV on in cases where another device or a manual action powered it off.
+
+`marker_only` is still accepted as a legacy alias for `conservative`.
 
 ## More Help
 
