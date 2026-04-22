@@ -29,7 +29,7 @@ jobs:
         run: cargo test -p lg-buddy
 
       - name: Verify root-scoped TV helper launcher
-        run: sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" cargo test -p lg-buddy --lib tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root -- --exact
+        run: sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" cargo test -p lg-buddy --lib tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root -- --exact
 
       - name: Run clippy
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
