@@ -265,11 +265,19 @@ echo "Checking screen idle/resume backend for configured mode ($SCREEN_MONITOR_C
 case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
     gnome)
         if command -v gdbus &>/dev/null; then
-            echo "  [OK]      gdbus (GNOME backend)"
+            echo "  [OK]      gdbus command (required for GNOME backend)"
             SCREEN_MONITOR_AVAILABLE=1
-            SCREEN_MONITOR_RUNTIME_BACKEND="gnome"
+            SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=gnome "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
+            if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "gnome" ]; then
+                echo "  [OK]      current session satisfies the GNOME backend contract"
+            else
+                SCREEN_MONITOR_RUNTIME_BACKEND=""
+                echo "  [INFO]    current session did not verify the full GNOME backend contract"
+                echo "            GNOME requires GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
+                echo "            The user service will start automatically in a compatible GNOME session."
+            fi
         else
-            echo "  [MISSING] gdbus (required for GNOME backend)"
+            echo "  [MISSING] gdbus command (required for GNOME backend)"
         fi
         ;;
     swayidle)
@@ -414,7 +422,8 @@ else
     echo "No supported screen idle backend detected for the configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)."
     case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
         gnome)
-            echo "Install gdbus, then enable LG_Buddy_screen.service later."
+            echo "Install gdbus and use a GNOME session with GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
+            echo "Then enable LG_Buddy_screen.service later."
             ;;
         swayidle)
             echo "Install swayidle, then enable LG_Buddy_screen.service later."

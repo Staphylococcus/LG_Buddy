@@ -249,7 +249,7 @@ Selection order:
 
 Detection behavior:
 
-- `auto` prefers GNOME when `gdbus` is available and GNOME Shell is present
+- `auto` prefers GNOME when `gdbus` is available and the current session satisfies the full GNOME contract
 - otherwise falls back to `swayidle` if installed
 - forced backends validate required commands
 
