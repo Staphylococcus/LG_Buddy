@@ -1,11 +1,14 @@
 use std::env;
 use std::error::Error;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::auth::{BscpylgtvAuthContext, SystemUser};
 use crate::config::{HdmiInput, MacAddress};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
@@ -276,22 +279,146 @@ impl<'a, C: TvClient> TvPower<'a, C> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BscpylgtvCommandClient {
-    command_path: PathBuf,
-    command_args: Vec<String>,
+pub struct BscpylgtvInvocation {
+    program: PathBuf,
+    args: Vec<String>,
+    launch_identity: Option<SystemUser>,
 }
 
-impl Default for BscpylgtvCommandClient {
+impl BscpylgtvInvocation {
+    pub fn new(
+        program: impl Into<PathBuf>,
+        args: Vec<String>,
+        launch_identity: Option<SystemUser>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            launch_identity,
+        }
+    }
+
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    pub fn launch_identity(&self) -> Option<&SystemUser> {
+        self.launch_identity.as_ref()
+    }
+
+    pub fn launch_user(&self) -> Option<&str> {
+        self.launch_identity().map(SystemUser::username)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BscpylgtvLaunchResult {
+    status: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl BscpylgtvLaunchResult {
+    pub fn new(status: Option<i32>, stdout: String, stderr: String) -> Self {
+        Self {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
+    pub fn status(&self) -> Option<i32> {
+        self.status
+    }
+
+    pub fn stdout(&self) -> &str {
+        &self.stdout
+    }
+
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.status == Some(0)
+    }
+}
+
+pub trait BscpylgtvCommandLauncher {
+    fn run(&self, invocation: &BscpylgtvInvocation) -> io::Result<BscpylgtvLaunchResult>;
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DirectBscpylgtvCommandLauncher;
+
+impl BscpylgtvCommandLauncher for DirectBscpylgtvCommandLauncher {
+    fn run(&self, invocation: &BscpylgtvInvocation) -> io::Result<BscpylgtvLaunchResult> {
+        if let Some(user) = invocation.launch_user() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("direct launcher cannot run `bscpylgtvcommand` as user `{user}`"),
+            ));
+        }
+
+        let output = Command::new(invocation.program())
+            .args(invocation.args())
+            .output()?;
+
+        Ok(BscpylgtvLaunchResult::new(
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UserScopedBscpylgtvCommandLauncher;
+
+impl BscpylgtvCommandLauncher for UserScopedBscpylgtvCommandLauncher {
+    fn run(&self, invocation: &BscpylgtvInvocation) -> io::Result<BscpylgtvLaunchResult> {
+        let mut command = Command::new(invocation.program());
+        command.args(invocation.args());
+
+        if let Some(identity) = invocation.launch_identity() {
+            configure_command_for_identity(&mut command, identity)?;
+        }
+
+        let output = command.output()?;
+
+        Ok(BscpylgtvLaunchResult::new(
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct BscpylgtvCommandClient<L = DirectBscpylgtvCommandLauncher> {
+    command_path: PathBuf,
+    command_args: Vec<String>,
+    auth_context: BscpylgtvAuthContext,
+    launcher: L,
+}
+
+impl Default for BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
     fn default() -> Self {
         Self::new(DEFAULT_BSCPYLGTV_COMMAND_PATH)
     }
 }
 
-impl BscpylgtvCommandClient {
+impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
     pub fn new(command_path: impl Into<PathBuf>) -> Self {
         Self {
             command_path: command_path.into(),
             command_args: Vec::new(),
+            auth_context: BscpylgtvAuthContext::default(),
+            launcher: DirectBscpylgtvCommandLauncher,
         }
     }
 
@@ -303,6 +430,8 @@ impl BscpylgtvCommandClient {
         Self {
             command_path: command_path.into(),
             command_args: command_args.into_iter().map(Into::into).collect(),
+            auth_context: BscpylgtvAuthContext::default(),
+            launcher: DirectBscpylgtvCommandLauncher,
         }
     }
 
@@ -311,6 +440,22 @@ impl BscpylgtvCommandClient {
             Some(path) => Self::new(PathBuf::from(path)),
             None => Self::default(),
         }
+    }
+}
+
+impl<L> BscpylgtvCommandClient<L> {
+    pub fn with_launcher<T>(self, launcher: T) -> BscpylgtvCommandClient<T> {
+        BscpylgtvCommandClient {
+            command_path: self.command_path,
+            command_args: self.command_args,
+            auth_context: self.auth_context,
+            launcher,
+        }
+    }
+
+    pub fn with_auth_context(mut self, auth_context: BscpylgtvAuthContext) -> Self {
+        self.auth_context = auth_context;
+        self
     }
 
     pub fn command_path(&self) -> &Path {
@@ -321,41 +466,159 @@ impl BscpylgtvCommandClient {
         &self.command_args
     }
 
+    pub fn auth_context(&self) -> &BscpylgtvAuthContext {
+        &self.auth_context
+    }
+
+    fn build_invocation(
+        &self,
+        tv_ip: Ipv4Addr,
+        operation: &'static str,
+        extra_args: &[&str],
+    ) -> BscpylgtvInvocation {
+        let mut args = self.command_args.clone();
+
+        if let Some(key_file_path) = self.auth_context.key_file_path() {
+            args.push("-p".to_string());
+            args.push(key_file_path.to_string_lossy().into_owned());
+        }
+
+        args.push(tv_ip.to_string());
+        args.push(operation.to_string());
+        args.extend(extra_args.iter().map(|arg| arg.to_string()));
+
+        BscpylgtvInvocation::new(
+            self.command_path.clone(),
+            args,
+            self.auth_context.owner().cloned(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UserScopedLaunchPlan {
+    UseCurrentIdentity,
+    DropPrivileges {
+        username: String,
+        uid: u32,
+        gid: u32,
+    },
+}
+
+fn build_user_scoped_launch_plan(
+    current_uid: u32,
+    identity: &SystemUser,
+) -> io::Result<UserScopedLaunchPlan> {
+    if current_uid == identity.uid() {
+        return Ok(UserScopedLaunchPlan::UseCurrentIdentity);
+    }
+
+    if current_uid == 0 {
+        return Ok(UserScopedLaunchPlan::DropPrivileges {
+            username: identity.username().to_string(),
+            uid: identity.uid(),
+            gid: identity.gid(),
+        });
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "cannot run `bscpylgtvcommand` as user `{}` from uid `{current_uid}`",
+            identity.username()
+        ),
+    ))
+}
+
+fn configure_command_for_identity(command: &mut Command, identity: &SystemUser) -> io::Result<()> {
+    command.env("HOME", identity.home());
+    command.env("USER", identity.username());
+    command.env("LOGNAME", identity.username());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        match build_user_scoped_launch_plan(current_euid(), identity)? {
+            UserScopedLaunchPlan::UseCurrentIdentity => return Ok(()),
+            UserScopedLaunchPlan::DropPrivileges { username, uid, gid } => {
+                let username = CString::new(username).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "cannot switch to user `{}` because the username contains a NUL byte",
+                            identity.username()
+                        ),
+                    )
+                })?;
+
+                // Configure the child process to run with the owner's primary uid/gid and groups.
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::initgroups(username.as_ptr(), gid) != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        if libc::setgid(gid) != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        if libc::setuid(uid) != 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = identity;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "TV helper user scoping is only supported on Unix platforms",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+impl<L: BscpylgtvCommandLauncher> BscpylgtvCommandClient<L> {
     fn run_command(
         &self,
         tv_ip: Ipv4Addr,
         operation: &'static str,
         extra_args: &[&str],
     ) -> Result<CommandOutput, TvError> {
-        let output = Command::new(&self.command_path)
-            .args(&self.command_args)
-            .arg(tv_ip.to_string())
-            .arg(operation)
-            .args(extra_args)
-            .output()
+        let invocation = self.build_invocation(tv_ip, operation, extra_args);
+        let output = self
+            .launcher
+            .run(&invocation)
             .map_err(|source| TvError::Io {
                 command: operation,
                 source,
             })?;
 
-        let rendered = CommandOutput::new(
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        );
+        let rendered = CommandOutput::new(output.stdout().to_string(), output.stderr().to_string());
 
-        if output.status.success() {
+        if output.is_success() {
             Ok(rendered)
         } else {
             Err(TvError::CommandFailed {
                 command: operation,
-                status: output.status.code(),
+                status: output.status(),
                 output: rendered,
             })
         }
     }
 }
 
-impl TvClient for BscpylgtvCommandClient {
+impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
     fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError> {
         let output = self.run_command(tv_ip, "get_input", &[])?;
         last_non_empty_line(output.stdout()).ok_or(TvError::InvalidOutput {
@@ -437,15 +700,20 @@ mod tests {
     }
 
     use super::{
-        BscpylgtvCommandClient, CommandOutput, CurrentInput, TvClient, TvDevice, TvError,
-        DEFAULT_BSCPYLGTV_COMMAND_PATH,
+        build_user_scoped_launch_plan, current_euid, BscpylgtvCommandClient,
+        BscpylgtvCommandLauncher, BscpylgtvInvocation, BscpylgtvLaunchResult, CommandOutput,
+        CurrentInput, TvClient, TvDevice, TvError, UserScopedBscpylgtvCommandLauncher,
+        UserScopedLaunchPlan, DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
+    use crate::auth::{BscpylgtvAuthContext, SystemUser};
     use crate::config::{HdmiInput, MacAddress};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
+    use std::io;
     use std::net::Ipv4Addr;
     use std::path::Path;
-    use support::MockBscpylgtv;
+    use std::rc::Rc;
+    use support::{ExecutableScript, MockBscpylgtv};
 
     #[test]
     fn default_client_uses_expected_command_path() {
@@ -455,6 +723,7 @@ mod tests {
             Path::new(DEFAULT_BSCPYLGTV_COMMAND_PATH)
         );
         assert!(client.command_args().is_empty());
+        assert_eq!(client.auth_context(), &BscpylgtvAuthContext::default());
     }
 
     #[test]
@@ -729,6 +998,257 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invocation_places_key_file_override_before_tv_ip() {
+        let auth_context =
+            BscpylgtvAuthContext::new().with_key_file_path("/tmp/lg-buddy/.aiopylgtv.sqlite");
+        let client = BscpylgtvCommandClient::with_args("/usr/bin/mock-bscpylgtv", ["--verbose"])
+            .with_auth_context(auth_context);
+
+        let invocation = client.build_invocation(
+            ip("192.168.1.42"),
+            "set_input",
+            &[HdmiInput::Hdmi2.as_str()],
+        );
+
+        assert_eq!(invocation.program(), Path::new("/usr/bin/mock-bscpylgtv"));
+        assert_eq!(
+            invocation.args(),
+            &[
+                "--verbose".to_string(),
+                "-p".to_string(),
+                "/tmp/lg-buddy/.aiopylgtv.sqlite".to_string(),
+                "192.168.1.42".to_string(),
+                "set_input".to_string(),
+                "HDMI_2".to_string(),
+            ]
+        );
+        assert_eq!(invocation.launch_user(), None);
+    }
+
+    #[test]
+    fn custom_launcher_receives_owner_user_and_key_file_path() {
+        let launcher = RecordingLauncher::default();
+        let auth_context = BscpylgtvAuthContext::new()
+            .with_owner(SystemUser::new("vas", 1000, 1000, "/home/vas"))
+            .with_key_file_path("/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite");
+        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv")
+            .with_auth_context(auth_context)
+            .with_launcher(launcher.clone());
+
+        client
+            .turn_screen_on(ip("10.0.0.8"))
+            .expect("custom launcher should succeed");
+
+        assert_eq!(
+            launcher.calls(),
+            vec![BscpylgtvInvocation::new(
+                "/usr/bin/mock-bscpylgtv",
+                vec![
+                    "-p".to_string(),
+                    "/home/vas/.local/state/lg-buddy/.aiopylgtv.sqlite".to_string(),
+                    "10.0.0.8".to_string(),
+                    "turn_screen_on".to_string(),
+                ],
+                Some(SystemUser::new("vas", 1000, 1000, "/home/vas")),
+            )]
+        );
+    }
+
+    #[test]
+    fn direct_launcher_rejects_user_switch_requests_without_an_explicit_launcher() {
+        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv").with_auth_context(
+            BscpylgtvAuthContext::new().with_owner(SystemUser::new("vas", 1000, 1000, "/home/vas")),
+        );
+        let err = client
+            .turn_screen_on(ip("10.0.0.8"))
+            .expect_err("direct launcher should reject owner-user requests");
+
+        match err {
+            TvError::Io { command, source } => {
+                assert_eq!(command, "turn_screen_on");
+                assert_eq!(source.kind(), io::ErrorKind::Unsupported);
+                assert!(
+                    source
+                        .to_string()
+                        .contains("cannot run `bscpylgtvcommand` as user `vas`"),
+                    "io error was: {source}"
+                );
+            }
+            other => panic!("expected io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_scoped_launch_plan_uses_current_identity_when_uid_matches() {
+        let identity = SystemUser::new("vas", 1000, 1000, "/home/vas");
+
+        let plan =
+            build_user_scoped_launch_plan(1000, &identity).expect("matching uid should pass");
+
+        assert_eq!(plan, UserScopedLaunchPlan::UseCurrentIdentity);
+    }
+
+    #[test]
+    fn user_scoped_launch_plan_requires_privilege_drop_from_root_for_different_uid() {
+        let identity = SystemUser::new("vas", 1000, 1000, "/home/vas");
+
+        let plan =
+            build_user_scoped_launch_plan(0, &identity).expect("root should be able to drop uid");
+
+        assert_eq!(
+            plan,
+            UserScopedLaunchPlan::DropPrivileges {
+                username: "vas".to_string(),
+                uid: 1000,
+                gid: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn user_scoped_launch_plan_rejects_cross_user_request_from_non_root() {
+        let identity = SystemUser::new("vas", 1000, 1000, "/home/vas");
+        let err = build_user_scoped_launch_plan(1001, &identity)
+            .expect_err("non-root cross-user launch should fail");
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string()
+                .contains("cannot run `bscpylgtvcommand` as user `vas` from uid `1001`"),
+            "io error was: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_scoped_launcher_sets_identity_environment_when_uid_already_matches() {
+        let script = ExecutableScript::new(
+            "tv-user-scoped-launcher-env",
+            "print-env",
+            "#!/bin/sh\nprintf 'USER=%s\\n' \"$USER\"\nprintf 'LOGNAME=%s\\n' \"$LOGNAME\"\nprintf 'HOME=%s\\n' \"$HOME\"\nid -u\n",
+        );
+        let current_uid = current_euid();
+        let current_gid = unsafe { libc::getegid() };
+        let identity = SystemUser::new(
+            "lg-buddy-owner",
+            current_uid,
+            current_gid,
+            "/tmp/lg-buddy-owner-home",
+        );
+        let invocation =
+            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity));
+
+        let result = UserScopedBscpylgtvCommandLauncher
+            .run(&invocation)
+            .expect("same-uid launcher invocation should succeed");
+
+        assert!(result.is_success(), "result was: {:?}", result);
+        assert_eq!(
+            result.stdout().lines().collect::<Vec<_>>(),
+            vec![
+                "USER=lg-buddy-owner",
+                "LOGNAME=lg-buddy-owner",
+                "HOME=/tmp/lg-buddy-owner-home",
+                current_uid.to_string().as_str(),
+            ]
+        );
+        assert_eq!(result.stderr(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_scoped_launcher_rejects_cross_user_request_without_root() {
+        let script = ExecutableScript::new(
+            "tv-user-scoped-launcher-denied",
+            "should-not-run",
+            "#!/bin/sh\nprintf 'unexpected\\n'\n",
+        );
+        let current_uid = current_euid();
+        let current_gid = unsafe { libc::getegid() };
+        let identity = SystemUser::new(
+            "other-user",
+            current_uid.saturating_add(1),
+            current_gid,
+            "/tmp/other-user-home",
+        );
+        let invocation =
+            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity));
+        let err = UserScopedBscpylgtvCommandLauncher
+            .run(&invocation)
+            .expect_err("non-root cross-user launch should fail before exec");
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string()
+                .contains("cannot run `bscpylgtvcommand` as user `other-user`"),
+            "io error was: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root() {
+        if current_euid() != 0 {
+            return;
+        }
+
+        let sudo_user = match std::env::var("SUDO_USER") {
+            Ok(user) if !user.is_empty() && user != "root" => user,
+            _ => return,
+        };
+        let identity =
+            lookup_system_user_from_passwd(&sudo_user).expect("resolve sudo user from /etc/passwd");
+        let script = ExecutableScript::new(
+            "tv-user-scoped-launcher-root-drop",
+            "print-identity",
+            "#!/bin/sh\nprintf 'USER=%s\\n' \"$USER\"\nprintf 'LOGNAME=%s\\n' \"$LOGNAME\"\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'UID=%s\\n' \"$(id -u)\"\nprintf 'GID=%s\\n' \"$(id -g)\"\nprintf 'GROUPS=%s\\n' \"$(id -G)\"\n",
+        );
+        let invocation =
+            BscpylgtvInvocation::new(script.path(), Vec::<String>::new(), Some(identity.clone()));
+
+        let result = UserScopedBscpylgtvCommandLauncher
+            .run(&invocation)
+            .expect("root should be able to drop privileges to the sudo user");
+
+        assert!(result.is_success(), "result was: {:?}", result);
+        let lines = result
+            .stdout()
+            .lines()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.get(0), Some(&format!("USER={}", identity.username())));
+        assert_eq!(
+            lines.get(1),
+            Some(&format!("LOGNAME={}", identity.username()))
+        );
+        assert_eq!(
+            lines.get(2),
+            Some(&format!("HOME={}", identity.home().display()))
+        );
+        assert_eq!(lines.get(3), Some(&format!("UID={}", identity.uid())));
+        assert_eq!(lines.get(4), Some(&format!("GID={}", identity.gid())));
+        let groups_line = lines
+            .get(5)
+            .and_then(|line| line.strip_prefix("GROUPS="))
+            .expect("groups line");
+        let group_ids = groups_line.split_whitespace().collect::<Vec<_>>();
+        assert!(
+            group_ids
+                .iter()
+                .any(|group_id| *group_id == identity.gid().to_string()),
+            "expected gid {} in groups {group_ids:?}",
+            identity.gid()
+        );
+        if identity.gid() != 0 {
+            assert!(
+                group_ids.iter().all(|group_id| *group_id != "0"),
+                "expected root group to be absent after initgroups, got {group_ids:?}"
+            );
+        }
+        assert_eq!(result.stderr(), "");
+    }
+
     fn ip(value: &str) -> Ipv4Addr {
         value.parse().expect("parse IPv4 address")
     }
@@ -757,5 +1277,47 @@ mod tests {
             self.calls.borrow_mut().push(mac.clone());
             Ok(())
         }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct RecordingLauncher {
+        calls: Rc<RefCell<Vec<BscpylgtvInvocation>>>,
+    }
+
+    impl RecordingLauncher {
+        fn calls(&self) -> Vec<BscpylgtvInvocation> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl BscpylgtvCommandLauncher for RecordingLauncher {
+        fn run(&self, invocation: &BscpylgtvInvocation) -> io::Result<BscpylgtvLaunchResult> {
+            self.calls.borrow_mut().push(invocation.clone());
+            Ok(BscpylgtvLaunchResult::new(
+                Some(0),
+                "{'returnValue': True}\n".to_string(),
+                String::new(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    fn lookup_system_user_from_passwd(username: &str) -> Option<SystemUser> {
+        std::fs::read_to_string("/etc/passwd")
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split(':');
+                let entry_username = fields.next()?;
+                let _password = fields.next()?;
+                let uid = fields.next()?.parse::<u32>().ok()?;
+                let gid = fields.next()?.parse::<u32>().ok()?;
+                let _gecos = fields.next()?;
+                let home = fields.next()?;
+                let _shell = fields.next()?;
+
+                (entry_username == username)
+                    .then(|| SystemUser::new(entry_username, uid, gid, home))
+            })
     }
 }

@@ -745,6 +745,8 @@ pub struct MockInvocation {
     pub tv_ip: String,
     pub command: String,
     pub args: Vec<String>,
+    pub key_file_path: Option<String>,
+    pub user: Option<String>,
 }
 
 impl MockInvocation {
@@ -768,6 +770,14 @@ impl MockInvocation {
                 .iter()
                 .map(|value| value.as_str().expect("invocation arg string").to_string())
                 .collect(),
+            key_file_path: object
+                .get("key_file_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            user: object
+                .get("user")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
         }
     }
 }
