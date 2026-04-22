@@ -185,12 +185,12 @@ fn resolve_config_owner_from_passwd(
             })?;
         let uid = metadata.uid();
 
-        return parse_user_from_passwd_entries_by_uid(passwd_contents, uid).ok_or_else(|| {
+        parse_user_from_passwd_entries_by_uid(passwd_contents, uid).ok_or_else(|| {
             AuthContextError::ConfigOwnerNotFound {
                 path: config_path.to_path_buf(),
                 uid,
             }
-        });
+        })
     }
 
     #[cfg(not(unix))]

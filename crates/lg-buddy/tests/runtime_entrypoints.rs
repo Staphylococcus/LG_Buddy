@@ -27,7 +27,6 @@ fn run_screen_off_loads_config_and_uses_session_runtime_override() {
         calls
             .iter()
             .cloned()
-            .into_iter()
             .map(|call| call.command)
             .collect::<Vec<_>>(),
         vec!["get_input".to_string(), "turn_screen_off".to_string()]
