@@ -121,8 +121,8 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME reports the session idle
-    And GNOME idle monitor would soon report recent user activity
-    And GNOME monitor stays open briefly for background polling
+    And GNOME idle monitor will report idletimes "1500, 0"
+    And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_off"

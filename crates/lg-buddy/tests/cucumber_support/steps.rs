@@ -130,14 +130,38 @@ fn gnome_requests_screen_wake(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_wake_requested();
 }
 
-#[given("GNOME idle monitor would soon report recent user activity")]
-fn gnome_idle_monitor_reports_recent_user_activity(world: &mut LgBuddyWorld) {
-    world.gnome_idle_monitor_reports_recent_user_activity();
+#[given("GNOME emits no ScreenSaver monitor lines")]
+fn gnome_emits_no_screen_saver_monitor_lines(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_emits_no_screen_saver_signals();
 }
 
-#[given("GNOME monitor stays open briefly for background polling")]
-fn gnome_monitor_stays_open_briefly(world: &mut LgBuddyWorld) {
-    world.gnome_monitor_stays_open_briefly();
+#[given(regex = r#"GNOME idle monitor will report idletimes "([^"]+)""#)]
+fn gnome_idle_monitor_reports_idletimes(world: &mut LgBuddyWorld, values: String) {
+    let parsed = values
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|err| panic!("invalid idletime `{value}`: {err}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        !parsed.is_empty(),
+        "expected at least one GNOME idle-monitor idletime value"
+    );
+
+    world.gnome_idle_monitor_reports_idletimes(&parsed);
+}
+
+#[given(regex = r#"GNOME monitor stays open for ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn gnome_monitor_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid GNOME monitor sleep `{seconds}`: {err}"));
+    world.gnome_monitor_stays_open_for_secs(seconds);
 }
 
 #[given("swayidle is installed")]

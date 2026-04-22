@@ -394,6 +394,11 @@ impl MockGdbus {
         self.patch_state(json!({ "idle_monitor_idletime": value }));
     }
 
+    pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
+        let plan = values.iter().copied().map(Value::from).collect::<Vec<_>>();
+        self.patch_state(json!({ "idle_monitor_idletime_plan": plan }));
+    }
+
     pub fn queue_idle_monitor_idletime(&self, value: u64) {
         let mut state = self.load_state();
         let plan = state
@@ -409,6 +414,10 @@ impl MockGdbus {
 
     pub fn set_monitor_sleep_secs(&self, value: f64) {
         self.patch_state(json!({ "monitor_sleep_secs": value }));
+    }
+
+    pub fn clear_monitor_lines(&self) {
+        self.patch_state(json!({ "monitor_lines": [] }));
     }
 
     pub fn push_monitor_line(&self, line: &str) {
