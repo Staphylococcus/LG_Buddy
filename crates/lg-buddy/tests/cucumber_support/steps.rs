@@ -348,7 +348,7 @@ fn tv_screen_is_visible(world: &mut LgBuddyWorld) {
     assert!(world.tv().state_snapshot().screen_on);
 }
 
-#[then(regex = r#"the TV client received "([^"]+)""#)]
+#[then(regex = r#"^the TV client received "([^"]+)"$"#)]
 fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
     assert!(
         world
@@ -361,7 +361,24 @@ fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
     );
 }
 
-#[then(regex = r#"the TV client did not receive "([^"]+)""#)]
+#[then(regex = r#"^the TV client received "([^"]+)" exactly (\d+) times$"#)]
+fn tv_client_received_exactly(world: &mut LgBuddyWorld, command: String, expected: usize) {
+    let actual = world
+        .tv()
+        .calls()
+        .iter()
+        .filter(|call| call.command == command)
+        .count();
+
+    assert_eq!(
+        actual,
+        expected,
+        "calls were: {:?}",
+        world.tv().calls()
+    );
+}
+
+#[then(regex = r#"^the TV client did not receive "([^"]+)"$"#)]
 fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
     assert!(
         world

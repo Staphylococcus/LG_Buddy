@@ -36,6 +36,24 @@ Feature: GNOME monitor
     And the session marker exists
     And the TV screen is blanked
 
+  Scenario: GNOME inhibited inactivity does not blank repeatedly while idletime stays high
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver monitor lines
+    And GNOME idle monitor will report idletimes "1000, 1500, 2000, 2500"
+    And GNOME monitor stays open for 1.0 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client did not receive "turn_screen_on"
+    And the session marker exists
+    And the TV screen is blanked
+
   Scenario: GNOME inactivity skips TV blanking on a different input
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
@@ -148,7 +166,7 @@ Feature: GNOME monitor
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off"
-    And the TV client received "turn_screen_on"
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "turn_screen_on" exactly 1 times
     And the session marker is absent
     And the TV screen is visible
