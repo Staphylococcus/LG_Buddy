@@ -1,6 +1,6 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, MockGdbus, MockNmOnline, MockSwayidle, RuntimeStateLayout,
-    TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSwayidle,
+    RuntimeStateLayout, TestConfigFile, TestEnv,
 };
 use cucumber::World;
 use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
@@ -14,7 +14,7 @@ pub struct LgBuddyWorld {
     config: Option<TestConfigFile>,
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
-    gdbus: Option<MockGdbus>,
+    session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
@@ -34,7 +34,10 @@ impl fmt::Debug for LgBuddyWorld {
             .field("config", &self.config.is_some())
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
-            .field("gdbus", &self.gdbus.is_some())
+            .field(
+                "session_bus_idle_monitor",
+                &self.session_bus_idle_monitor.is_some(),
+            )
             .field("nm_online", &self.nm_online.is_some())
             .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
@@ -208,41 +211,51 @@ impl LgBuddyWorld {
     }
 
     pub fn install_gnome_shell_stub(&mut self) {
-        self.ensure_mock_gdbus().set_shell_available(true);
+        let bus = self.ensure_mock_session_bus_idle_monitor();
+        bus.set_shell_available(true);
+        bus.set_screen_saver_available(true);
+        bus.set_idle_monitor_available(true);
     }
 
     pub fn set_gnome_idle_monitor_available(&mut self, value: bool) {
-        self.ensure_mock_gdbus().set_idle_monitor_available(value);
+        self.ensure_mock_session_bus_idle_monitor()
+            .set_idle_monitor_available(value);
     }
 
     pub fn gnome_monitor_emit_idle(&mut self) {
-        self.ensure_mock_gdbus()
-            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_idle();
     }
 
     pub fn gnome_monitor_emit_active(&mut self) {
-        self.ensure_mock_gdbus()
-            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (false,)");
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_active();
     }
 
     pub fn gnome_monitor_emit_wake_requested(&mut self) {
-        self.ensure_mock_gdbus().push_monitor_line(
-            "signal time=1.0 sender=:1.2 -> destination=(null destination) serial=2 path=/org/gnome/ScreenSaver; interface=org.gnome.ScreenSaver; member=WakeUpScreen",
-        );
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_wake_requested();
     }
 
     pub fn gnome_monitor_emits_no_screen_saver_signals(&mut self) {
-        self.ensure_mock_gdbus().clear_monitor_lines();
+        self.ensure_mock_session_bus_idle_monitor()
+            .clear_screen_saver_signals();
     }
 
     pub fn gnome_idle_monitor_reports_idletimes(&mut self, values: &[u64]) {
-        let gdbus = self.ensure_mock_gdbus();
-        gdbus.set_idle_monitor_available(true);
-        gdbus.set_idle_monitor_idletime_plan(values);
+        let idle_monitor = self.ensure_mock_session_bus_idle_monitor();
+        idle_monitor.set_idle_monitor_available(true);
+        if let Some(last) = values.last().copied() {
+            idle_monitor.set_idle_monitor_idletime(last);
+        }
+        idle_monitor.set_idle_monitor_idletime_plan(values);
     }
 
     pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {
-        self.ensure_mock_gdbus().set_monitor_sleep_secs(seconds);
+        self.ensure_env().set(
+            "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS",
+            seconds.to_string(),
+        );
     }
 
     pub fn install_swayidle_stub(&mut self) {
@@ -330,6 +343,13 @@ impl LgBuddyWorld {
 
     pub fn run_named_command(&mut self, command_line: &str) {
         let args = command_line.split_whitespace().collect::<Vec<_>>();
+        if args == ["monitor"]
+            && self.session_bus_idle_monitor.is_some()
+            && std::env::var_os("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS").is_none()
+        {
+            self.ensure_env()
+                .set("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "0.2");
+        }
         let output = ProcessCommand::new(env!("CARGO_BIN_EXE_lg-buddy"))
             .args(args)
             .output()
@@ -362,17 +382,31 @@ impl LgBuddyWorld {
     }
 
     fn ensure_env(&mut self) -> &mut TestEnv {
-        self.env.get_or_insert_with(TestEnv::new)
-    }
-
-    fn ensure_mock_gdbus(&mut self) -> &mut MockGdbus {
-        if self.gdbus.is_none() {
-            let gdbus = MockGdbus::new("cucumber-gdbus");
-            let wrapper = gdbus.command_wrapper("cucumber-gdbus-wrapper");
-            self.prepend_path_script(wrapper);
-            self.gdbus = Some(gdbus);
+        if self.env.is_none() {
+            let mut env = TestEnv::new();
+            env.set(
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/tmp/lg-buddy-nonexistent-session-bus",
+            );
+            self.env = Some(env);
         }
 
-        self.gdbus.as_mut().expect("mock gdbus configured")
+        self.env.as_mut().expect("test env configured")
+    }
+
+    fn ensure_mock_session_bus_idle_monitor(&mut self) -> &mut MockSessionBusIdleMonitor {
+        if self.session_bus_idle_monitor.is_none() {
+            let session_bus_idle_monitor =
+                MockSessionBusIdleMonitor::new("cucumber-session-bus-idle-monitor");
+            self.ensure_env().set(
+                "DBUS_SESSION_BUS_ADDRESS",
+                session_bus_idle_monitor.address(),
+            );
+            self.session_bus_idle_monitor = Some(session_bus_idle_monitor);
+        }
+
+        self.session_bus_idle_monitor
+            .as_mut()
+            .expect("mock session-bus idle monitor configured")
     }
 }

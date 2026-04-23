@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod gnome;
 pub mod session;
+pub mod session_bus;
 pub mod state;
 pub mod swayidle;
 pub mod tv;

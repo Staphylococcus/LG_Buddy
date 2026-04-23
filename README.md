@@ -11,6 +11,10 @@ It can:
 
 LG Buddy supports GNOME and `swayidle`-based sessions. Official release bundles include a prebuilt `lg-buddy` binary, so normal installation does not require a Rust toolchain.
 
+If you build `lg-buddy` from source instead of using a release bundle, `cargo`
+now also needs a working C toolchain because the vendored `libdbus` runtime is
+compiled as part of the build.
+
 ## Before You Install
 
 Install prerequisites:
@@ -21,31 +25,39 @@ Install prerequisites:
 
 Backend-specific:
 
-- `gdbus` for the GNOME monitor backend
 - `swayidle` for the `swayidle` backend
 
-The GNOME backend also requires a compatible GNOME session with:
+The GNOME backend requires a compatible GNOME session with:
 
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
 
+At runtime, GNOME support now uses a persistent in-process session-bus client
+for shell detection, ScreenSaver signals, and Mutter idletime polling.
+
 Typical package installs:
 
 **Debian/Ubuntu/Pop!_OS**
 ```bash
-sudo apt install python3-venv python3-pip zenity libglib2.0-bin
+sudo apt install python3-venv python3-pip zenity
 ```
 
 **Fedora**
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity glib2
+sudo dnf install python3 python3-pip python3-virtualenv zenity
 ```
 
 **Arch**
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity glib2
+sudo pacman -S python python-pip python-virtualenv zenity
 ```
+
+For source builds, also install a C toolchain:
+
+- Debian/Ubuntu/Pop!_OS: `build-essential`
+- Fedora: `gcc`
+- Arch: `base-devel`
 
 ## Install
 

@@ -27,7 +27,7 @@ This is where most tests should live.
 - state marker behavior
 - Wake-on-LAN packet construction
 - backend selection rules
-- GNOME line-to-event mapping
+- GNOME signal-to-event mapping
 - TV command output parsing
 - command-policy branching and retry logic
 
@@ -68,7 +68,7 @@ This is the place for integration tests and contract tests.
 - runtime state directories and marker files
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
-- later, GNOME runner behavior against a `gdbus` contract mock
+- GNOME runner behavior against a private session-bus harness
 
 ### How to test it
 
@@ -89,7 +89,7 @@ Mock the API surface we consume, not the whole system behind it.
 Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
-- the `gdbus` mock should reproduce only the GNOME and Mutter commands and monitor output LG Buddy actually consumes
+- GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
 
 If a contract shape is unclear, probe the real dependency and update the mock.
 
@@ -165,7 +165,6 @@ Primary concern:
 Examples:
 
 - `bscpylgtvcommand`
-- `gdbus`
 - later, possibly `systemctl` and `swayidle`
 
 ### Desktop backend work
@@ -181,8 +180,8 @@ Secondary concern:
 Examples:
 
 - GNOME capability probing
-- GNOME monitor-line parsing
-- GNOME monitor and idletime integration
+- GNOME signal mapping
+- GNOME monitor and idletime integration over the session-bus seam
 
 ### Shell, systemd, and install flow
 

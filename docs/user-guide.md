@@ -47,6 +47,9 @@ The GNOME backend requires:
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
 
+The monitor runtime keeps one persistent session-bus connection open for GNOME
+shell detection, ScreenSaver signals, and Mutter idletime polling.
+
 Check the user-session monitor:
 
 ```bash

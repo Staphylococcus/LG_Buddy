@@ -1,13 +1,19 @@
+use dbus::blocking::Connection as DbusConnection;
+use dbus::channel::{MatchingReceiver, Sender as DbusSender};
+use dbus::Message as DbusMessage;
+use dbus_crossroads::Crossroads;
 use serde_json::{json, Map, Value};
+use std::collections::VecDeque;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{self, Command as ProcessCommand};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 pub struct MockBscpylgtv {
@@ -329,150 +335,338 @@ impl MockSwayidle {
 }
 
 #[allow(dead_code)]
-pub struct MockGdbus {
+pub struct MockSessionBusIdleMonitor {
     _temp_dir: TestDir,
-    state_path: PathBuf,
+    address: String,
+    daemon_pid: i32,
+    state: Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    stop: Arc<AtomicBool>,
+    service_thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+struct MockSessionBusIdleMonitorState {
+    shell_available: bool,
+    screen_saver_available: bool,
+    idle_monitor_available: bool,
+    default_idletime: u64,
+    idletime_plan: VecDeque<u64>,
+    screen_saver_signals: VecDeque<MockScreenSaverSignal>,
+    client_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockScreenSaverSignal {
+    ActiveChanged(bool),
+    WakeUpScreen,
 }
 
 #[allow(dead_code)]
-impl MockGdbus {
+impl MockSessionBusIdleMonitor {
     pub fn new(label: &str) -> Self {
         let temp_dir = TestDir::new(label);
-        let state_path = temp_dir.path().join("state.json");
-        let mock = Self {
-            _temp_dir: temp_dir,
-            state_path,
-        };
-        mock.save_state(json!({
-            "shell_available": true,
-            "screen_saver_available": true,
-            "idle_monitor_available": true,
-            "idle_monitor_idletime": 1500,
-            "idle_monitor_idletime_plan": [],
-            "monitor_lines": [],
-            "monitor_sleep_secs": 0.0,
-            "invocations": [],
+        let (address, daemon_pid) = start_private_session_bus();
+        let state = Arc::new(Mutex::new(MockSessionBusIdleMonitorState {
+            default_idletime: 1500,
+            ..MockSessionBusIdleMonitorState::default()
         }));
-        mock
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let service_thread = Some(spawn_mock_idle_monitor_service(
+            address.clone(),
+            Arc::clone(&state),
+            Arc::clone(&stop),
+            ready_tx,
+        ));
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock session-bus idle monitor should become ready");
+
+        Self {
+            _temp_dir: temp_dir,
+            address,
+            daemon_pid,
+            state,
+            stop,
+            service_thread,
+        }
     }
 
-    pub fn command_path(&self) -> &'static str {
-        "python3"
-    }
-
-    pub fn command_args(&self) -> Vec<String> {
-        vec![
-            Self::script_path().to_string_lossy().into_owned(),
-            "--state".to_string(),
-            self.state_path.to_string_lossy().into_owned(),
-        ]
-    }
-
-    pub fn command_wrapper(&self, label: &str) -> ExecutableScript {
-        let python_path = shell_quote(&python3_path());
-        let script_path = shell_quote(&Self::script_path());
-        let state_path = shell_quote(&self.state_path);
-        let body =
-            format!("#!/bin/sh\nexec {python_path} {script_path} --state {state_path} \"$@\"\n");
-
-        ExecutableScript::new(label, "gdbus", &body)
+    pub fn address(&self) -> &str {
+        &self.address
     }
 
     pub fn set_shell_available(&self, value: bool) {
-        self.patch_state(json!({ "shell_available": value }));
+        self.patch_state(|state| state.shell_available = value);
     }
 
     pub fn set_screen_saver_available(&self, value: bool) {
-        self.patch_state(json!({ "screen_saver_available": value }));
+        self.patch_state(|state| state.screen_saver_available = value);
     }
 
     pub fn set_idle_monitor_available(&self, value: bool) {
-        self.patch_state(json!({ "idle_monitor_available": value }));
+        self.patch_state(|state| {
+            state.idle_monitor_available = value;
+            if !value {
+                state.client_ready = false;
+            }
+        });
     }
 
     pub fn set_idle_monitor_idletime(&self, value: u64) {
-        self.patch_state(json!({ "idle_monitor_idletime": value }));
+        self.patch_state(|state| state.default_idletime = value);
     }
 
     pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
-        let plan = values.iter().copied().map(Value::from).collect::<Vec<_>>();
-        self.patch_state(json!({ "idle_monitor_idletime_plan": plan }));
+        self.patch_state(|state| {
+            state.idletime_plan = values.iter().copied().collect();
+        });
     }
 
     pub fn queue_idle_monitor_idletime(&self, value: u64) {
-        let mut state = self.load_state();
-        let plan = state
-            .as_object_mut()
-            .expect("mock gdbus state object")
-            .entry("idle_monitor_idletime_plan")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        plan.as_array_mut()
-            .expect("idle monitor idletime plan array")
-            .push(Value::from(value));
-        self.save_state(state);
+        self.patch_state(|state| {
+            state.idletime_plan.push_back(value);
+        });
     }
 
-    pub fn set_monitor_sleep_secs(&self, value: f64) {
-        self.patch_state(json!({ "monitor_sleep_secs": value }));
+    pub fn emit_screen_saver_idle(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::ActiveChanged(true));
+        });
     }
 
-    pub fn clear_monitor_lines(&self) {
-        self.patch_state(json!({ "monitor_lines": [] }));
+    pub fn emit_screen_saver_active(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::ActiveChanged(false));
+        });
     }
 
-    pub fn push_monitor_line(&self, line: &str) {
-        let mut state = self.load_state();
-        let monitor_lines = state
-            .as_object_mut()
-            .expect("mock gdbus state object")
-            .entry("monitor_lines")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        monitor_lines
-            .as_array_mut()
-            .expect("monitor lines array")
-            .push(Value::String(line.to_string()));
-        self.save_state(state);
+    pub fn emit_screen_saver_wake_requested(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::WakeUpScreen);
+        });
     }
 
-    pub fn invocations(&self) -> Vec<MockGdbusInvocation> {
-        self.load_state()
-            .get("invocations")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(MockGdbusInvocation::from_value)
-            .collect()
+    pub fn clear_screen_saver_signals(&self) {
+        self.patch_state(|state| {
+            state.screen_saver_signals.clear();
+        });
     }
 
-    fn script_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("tools")
-            .join("mock_gdbus.py")
+    fn patch_state<F>(&self, f: F)
+    where
+        F: FnOnce(&mut MockSessionBusIdleMonitorState),
+    {
+        let mut state = self
+            .state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        f(&mut state);
     }
+}
 
-    fn patch_state(&self, patch: Value) {
-        let mut state = self.load_state();
-        let state_object = state.as_object_mut().expect("mock state object");
-        let patch_object = patch.as_object().expect("state patch object");
-        for (key, value) in patch_object {
-            state_object.insert(key.clone(), value.clone());
+impl Drop for MockSessionBusIdleMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(service_thread) = self.service_thread.take() {
+            let _ = service_thread.join();
         }
-        self.save_state(state);
-    }
 
-    fn load_state(&self) -> Value {
-        serde_json::from_str(&fs::read_to_string(&self.state_path).expect("read mock state"))
-            .expect("parse mock state")
+        unsafe {
+            libc::kill(self.daemon_pid, libc::SIGTERM);
+        }
     }
+}
 
-    fn save_state(&self, state: Value) {
-        fs::write(
-            &self.state_path,
-            serde_json::to_string_pretty(&state).expect("serialize mock state"),
+fn start_private_session_bus() -> (String, i32) {
+    let output = ProcessCommand::new(dbus_daemon_path())
+        .args([
+            "--session",
+            "--fork",
+            "--print-address=1",
+            "--print-pid=1",
+            "--nopidfile",
+        ])
+        .output()
+        .expect("spawn private dbus-daemon");
+    assert!(
+        output.status.success(),
+        "dbus-daemon failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("dbus-daemon stdout utf8");
+    let mut lines = stdout.lines();
+    let address = lines
+        .next()
+        .expect("dbus-daemon address line")
+        .trim()
+        .to_string();
+    let daemon_pid = lines
+        .next()
+        .expect("dbus-daemon pid line")
+        .trim()
+        .parse::<i32>()
+        .expect("dbus-daemon pid integer");
+    (address, daemon_pid)
+}
+
+fn spawn_mock_idle_monitor_service(
+    address: String,
+    state: Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    stop: Arc<AtomicBool>,
+    ready: mpsc::Sender<()>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let connection = DbusConnection::new_address(&address)
+            .expect("connect mock idle monitor service to private session bus");
+
+        let mut crossroads = Crossroads::new();
+        let idle_monitor_state = Arc::clone(&state);
+        let iface = crossroads.register("org.gnome.Mutter.IdleMonitor", move |builder| {
+            let state = Arc::clone(&idle_monitor_state);
+            builder.method("GetIdletime", (), ("idletime",), move |_, _, ()| {
+                let mut state = state
+                    .lock()
+                    .expect("mock session-bus idle monitor state lock");
+                state.client_ready = true;
+                let value = state
+                    .idletime_plan
+                    .pop_front()
+                    .unwrap_or(state.default_idletime);
+                Ok((value,))
+            });
+        });
+        crossroads.insert("/org/gnome/Mutter/IdleMonitor/Core", &[iface], ());
+
+        let shared_crossroads = Arc::new(Mutex::new(crossroads));
+        let crossroads_receiver = Arc::clone(&shared_crossroads);
+        connection.start_receive(
+            dbus::message::MatchRule::new_method_call(),
+            Box::new(move |message, conn| {
+                crossroads_receiver
+                    .lock()
+                    .expect("mock idle monitor crossroads lock")
+                    .handle_message(message, conn)
+                    .expect("handle mock idle monitor message");
+                true
+            }),
+        );
+
+        let _ = ready.send(());
+        let mut owned_names = MockOwnedBusNames::default();
+        while !stop.load(Ordering::SeqCst) {
+            let _ = connection.process(Duration::from_millis(50));
+            sync_mock_bus_names(&connection, &state, &mut owned_names);
+            emit_queued_mock_screen_saver_signal(&connection, &state);
+        }
+    })
+}
+
+#[derive(Debug, Default)]
+struct MockOwnedBusNames {
+    shell: bool,
+    screen_saver: bool,
+    idle_monitor: bool,
+}
+
+fn sync_mock_bus_names(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    owned_names: &mut MockOwnedBusNames,
+) {
+    let (want_shell, want_screen_saver, want_idle_monitor) = {
+        let state = state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        (
+            state.shell_available,
+            state.screen_saver_available,
+            state.idle_monitor_available,
         )
-        .expect("write mock state");
+    };
+
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.Shell",
+        want_shell,
+        &mut owned_names.shell,
+    );
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.ScreenSaver",
+        want_screen_saver,
+        &mut owned_names.screen_saver,
+    );
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.Mutter.IdleMonitor",
+        want_idle_monitor,
+        &mut owned_names.idle_monitor,
+    );
+}
+
+fn sync_mock_bus_name(connection: &DbusConnection, name: &str, wanted: bool, owned: &mut bool) {
+    if wanted == *owned {
+        return;
     }
+
+    if wanted {
+        connection
+            .request_name(name, false, true, false)
+            .unwrap_or_else(|err| panic!("request mock bus name `{name}`: {err}"));
+    } else {
+        connection
+            .release_name(name)
+            .unwrap_or_else(|err| panic!("release mock bus name `{name}`: {err}"));
+    }
+
+    *owned = wanted;
+}
+
+fn emit_queued_mock_screen_saver_signal(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+) {
+    let signal = {
+        let mut state = state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        if !state.client_ready || !state.screen_saver_available {
+            return;
+        }
+        state.screen_saver_signals.pop_front()
+    };
+    let Some(signal) = signal else {
+        return;
+    };
+
+    let message = match signal {
+        MockScreenSaverSignal::ActiveChanged(active) => DbusMessage::new_signal(
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver",
+            "ActiveChanged",
+        )
+        .expect("create mock ActiveChanged signal")
+        .append1(active),
+        MockScreenSaverSignal::WakeUpScreen => DbusMessage::new_signal(
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver",
+            "WakeUpScreen",
+        )
+        .expect("create mock WakeUpScreen signal"),
+    };
+
+    let _ = connection.send(message);
 }
 
 #[allow(dead_code)]
@@ -879,27 +1073,6 @@ impl MockSwayidleInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub struct MockGdbusInvocation {
-    pub argv: Vec<String>,
-}
-
-impl MockGdbusInvocation {
-    fn from_value(value: &Value) -> Self {
-        let object = value.as_object().expect("mock gdbus invocation object");
-        Self {
-            argv: object
-                .get("argv")
-                .and_then(Value::as_array)
-                .expect("invocation argv array")
-                .iter()
-                .map(|value| value.as_str().expect("argv string").to_string())
-                .collect(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct MockNmOnlineInvocation {
     pub argv: Vec<String>,
 }
@@ -1058,6 +1231,18 @@ fn python3_path() -> PathBuf {
         .clone()
 }
 
+fn dbus_daemon_path() -> PathBuf {
+    static DBUS_DAEMON_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+    DBUS_DAEMON_PATH
+        .get_or_init(|| {
+            find_command_in_path("dbus-daemon")
+                .or_else(find_dbus_daemon_in_standard_locations)
+                .unwrap_or_else(|| PathBuf::from("dbus-daemon"))
+        })
+        .clone()
+}
+
 fn find_command_in_path(command: &str) -> Option<PathBuf> {
     if command.contains(std::path::MAIN_SEPARATOR) {
         let path = PathBuf::from(command);
@@ -1079,6 +1264,17 @@ fn find_python3_in_standard_locations() -> Option<PathBuf> {
         "/usr/bin/python",
         "/usr/local/bin/python",
         "/bin/python",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|candidate| candidate.is_file())
+}
+
+fn find_dbus_daemon_in_standard_locations() -> Option<PathBuf> {
+    [
+        "/usr/bin/dbus-daemon",
+        "/usr/local/bin/dbus-daemon",
+        "/bin/dbus-daemon",
     ]
     .iter()
     .map(PathBuf::from)

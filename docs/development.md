@@ -5,13 +5,13 @@ This document covers building, local installation, validation, release tooling, 
 ## Build Prerequisites
 
 - a Rust toolchain with `cargo`
+- a working C toolchain
 - `python3-venv`
 - `python3-pip`
 - `zenity`
 
 Backend-specific tools used in development and local testing:
 
-- `gdbus` for the GNOME monitor backend
 - `swayidle` for the `swayidle` monitor backend
 
 For GNOME end-to-end work, the running session also needs the full GNOME contract:
@@ -19,6 +19,14 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
+
+The C toolchain is required because `cargo build` now compiles vendored
+`libdbus` as part of the dependency graph. On common Linux distributions that
+usually means:
+
+- Debian/Ubuntu/Pop!_OS: `build-essential`
+- Fedora: `gcc`
+- Arch: `base-devel`
 
 ## Build
 
@@ -99,6 +107,7 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `crates/lg-buddy/src/commands.rs` | Runtime lifecycle and policy commands |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity synthesis and thresholds |
+| `crates/lg-buddy/src/session_bus.rs` | Generic session-bus transport seam |
 | `crates/lg-buddy/src/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
