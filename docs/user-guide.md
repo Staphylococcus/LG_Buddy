@@ -39,7 +39,13 @@ LG Buddy supports two session backends:
 - `gnome`
 - `swayidle`
 
-`screen_backend=auto` prefers GNOME when GNOME Shell is available, then falls back to `swayidle` if installed.
+`screen_backend=auto` prefers GNOME when the current session satisfies the full GNOME contract, then falls back to `swayidle` if installed.
+
+The GNOME backend requires:
+
+- GNOME Shell
+- `org.gnome.ScreenSaver`
+- `org.gnome.Mutter.IdleMonitor`
 
 Check the user-session monitor:
 
@@ -87,14 +93,20 @@ Current config keys:
 - `screen_idle_timeout`
 - `screen_restore_policy`
 
-`screen_restore_policy` controls whether `screen-on` requires the session marker:
+`screen_idle_timeout` is the inactivity threshold in seconds used by the session monitor.
+LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
 
-- `marker_only`: default behavior, only restore when LG Buddy knows it blanked or powered off the TV
-- `aggressive`: attempt restore on session wake/activity even without the marker
+`screen_restore_policy` controls how aggressively LG Buddy reclaims the display on wake and user activity:
+
+- `conservative`: default behavior, only restore when an LG Buddy marker says it previously blanked or powered off the TV
+- `aggressive`: attempt restore on session wake/activity and system wake even without a marker
+
+`marker_only` is still accepted as a legacy alias for `conservative`.
 
 Example:
 
 ```ini
+screen_idle_timeout=300
 screen_restore_policy=aggressive
 ```
 

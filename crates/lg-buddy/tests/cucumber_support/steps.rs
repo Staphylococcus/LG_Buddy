@@ -6,9 +6,14 @@ fn temporary_config(world: &mut LgBuddyWorld, input: String) {
     world.create_config(&input);
 }
 
-#[given(regex = r#"the screen restore policy is "(marker_only|aggressive)""#)]
+#[given(regex = r#"the screen restore policy is "(marker_only|conservative|aggressive)""#)]
 fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_restore_policy(&policy);
+}
+
+#[given(regex = r#"the idle timeout is (\d+) seconds"#)]
+fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
+    world.set_idle_timeout_secs(seconds);
 }
 
 #[given("LG Buddy session runtime is isolated")]
@@ -115,6 +120,11 @@ fn gnome_shell_available(world: &mut LgBuddyWorld) {
     world.install_gnome_shell_stub();
 }
 
+#[given("GNOME idle monitor is unavailable")]
+fn gnome_idle_monitor_unavailable(world: &mut LgBuddyWorld) {
+    world.set_gnome_idle_monitor_available(false);
+}
+
 #[given("GNOME reports the session idle")]
 fn gnome_reports_idle(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_idle();
@@ -130,14 +140,38 @@ fn gnome_requests_screen_wake(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_wake_requested();
 }
 
-#[given("GNOME idle monitor would soon report recent user activity")]
-fn gnome_idle_monitor_reports_recent_user_activity(world: &mut LgBuddyWorld) {
-    world.gnome_idle_monitor_reports_recent_user_activity();
+#[given("GNOME emits no ScreenSaver monitor lines")]
+fn gnome_emits_no_screen_saver_monitor_lines(world: &mut LgBuddyWorld) {
+    world.gnome_monitor_emits_no_screen_saver_signals();
 }
 
-#[given("GNOME monitor stays open briefly for background polling")]
-fn gnome_monitor_stays_open_briefly(world: &mut LgBuddyWorld) {
-    world.gnome_monitor_stays_open_briefly();
+#[given(regex = r#"GNOME idle monitor will report idletimes "([^"]+)""#)]
+fn gnome_idle_monitor_reports_idletimes(world: &mut LgBuddyWorld, values: String) {
+    let parsed = values
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|err| panic!("invalid idletime `{value}`: {err}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        !parsed.is_empty(),
+        "expected at least one GNOME idle-monitor idletime value"
+    );
+
+    world.gnome_idle_monitor_reports_idletimes(&parsed);
+}
+
+#[given(regex = r#"GNOME monitor stays open for ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn gnome_monitor_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid GNOME monitor sleep `{seconds}`: {err}"));
+    world.gnome_monitor_stays_open_for_secs(seconds);
 }
 
 #[given("swayidle is installed")]
@@ -314,7 +348,7 @@ fn tv_screen_is_visible(world: &mut LgBuddyWorld) {
     assert!(world.tv().state_snapshot().screen_on);
 }
 
-#[then(regex = r#"the TV client received "([^"]+)""#)]
+#[then(regex = r#"^the TV client received "([^"]+)"$"#)]
 fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
     assert!(
         world
@@ -327,7 +361,19 @@ fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
     );
 }
 
-#[then(regex = r#"the TV client did not receive "([^"]+)""#)]
+#[then(regex = r#"^the TV client received "([^"]+)" exactly (\d+) times$"#)]
+fn tv_client_received_exactly(world: &mut LgBuddyWorld, command: String, expected: usize) {
+    let actual = world
+        .tv()
+        .calls()
+        .iter()
+        .filter(|call| call.command == command)
+        .count();
+
+    assert_eq!(actual, expected, "calls were: {:?}", world.tv().calls());
+}
+
+#[then(regex = r#"^the TV client did not receive "([^"]+)"$"#)]
 fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
     assert!(
         world

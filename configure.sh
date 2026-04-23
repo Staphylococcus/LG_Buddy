@@ -52,13 +52,21 @@ validate_backend() {
 
 validate_restore_policy() {
     case "$1" in
-        marker_only|aggressive) return 0 ;;
+        marker_only|conservative|aggressive) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 validate_idle_timeout() {
     [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+normalize_restore_policy() {
+    case "$1" in
+        marker_only|conservative) echo "conservative" ;;
+        aggressive) echo "aggressive" ;;
+        *) echo "$1" ;;
+    esac
 }
 
 current_tv_ip=""
@@ -74,7 +82,7 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_input="$input"
     current_screen_backend="$screen_backend"
     current_screen_idle_timeout="$screen_idle_timeout"
-    current_screen_restore_policy="$screen_restore_policy"
+    current_screen_restore_policy="$(normalize_restore_policy "$screen_restore_policy")"
     echo "Loaded existing configuration from $LG_BUDDY_CONFIG_FILE"
 fi
 
@@ -103,18 +111,14 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
         exit 1
     }
     validate_restore_policy "$screen_restore_policy" || {
-        echo "LG_BUDDY_SCREEN_RESTORE_POLICY must be one of marker_only or aggressive."
+        echo "LG_BUDDY_SCREEN_RESTORE_POLICY must be one of conservative or aggressive (legacy marker_only is also accepted)."
         exit 1
     }
-
-    if [ "$screen_backend" = "swayidle" ]; then
-        validate_idle_timeout "$screen_idle_timeout" || {
-            echo "LG_BUDDY_SCREEN_IDLE_TIMEOUT must be a positive integer for swayidle."
-            exit 1
-        }
-    else
-        screen_idle_timeout="${screen_idle_timeout:-$LG_BUDDY_DEFAULT_IDLE_TIMEOUT}"
-    fi
+    screen_restore_policy="$(normalize_restore_policy "$screen_restore_policy")"
+    validate_idle_timeout "$screen_idle_timeout" || {
+        echo "LG_BUDDY_SCREEN_IDLE_TIMEOUT must be a positive integer."
+        exit 1
+    }
 
     echo "Using non-interactive configuration from environment."
 else
@@ -226,23 +230,20 @@ else
         esac
     done
 
-    screen_idle_timeout="$current_screen_idle_timeout"
-    if [ "$screen_backend" = "swayidle" ]; then
-        while true; do
-            screen_idle_timeout="$(prompt_with_default "Enter swayidle timeout in seconds" "$current_screen_idle_timeout")"
-            if validate_idle_timeout "$screen_idle_timeout"; then
-                break
-            fi
-            echo "  Please enter a positive number of seconds."
-        done
-    fi
+    while true; do
+        screen_idle_timeout="$(prompt_with_default "Enter idle timeout in seconds" "$current_screen_idle_timeout")"
+        if validate_idle_timeout "$screen_idle_timeout"; then
+            break
+        fi
+        echo "  Please enter a positive number of seconds."
+    done
 
-    echo "Choose the screen restore policy:"
-    echo "  1) marker_only"
-    echo "  2) aggressive"
+    echo "Choose how aggressively LG Buddy should restore the display:"
+    echo "  1) conservative  (only restore when LG Buddy knows it blanked or powered off the TV)"
+    echo "  2) aggressive    (restore on wake/activity even without prior LG Buddy ownership)"
 
     case "$current_screen_restore_policy" in
-        marker_only) default_restore_policy_choice="1" ;;
+        conservative|marker_only) default_restore_policy_choice="1" ;;
         aggressive) default_restore_policy_choice="2" ;;
         *) default_restore_policy_choice="1" ;;
     esac
@@ -250,7 +251,7 @@ else
     while true; do
         RESTORE_POLICY_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_restore_policy_choice")"
         case "$RESTORE_POLICY_CHOICE" in
-            1) screen_restore_policy="marker_only"; break ;;
+            1) screen_restore_policy="conservative"; break ;;
             2) screen_restore_policy="aggressive"; break ;;
             *) echo "  Please enter a number between 1 and 2." ;;
         esac
@@ -263,9 +264,7 @@ echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
 echo "  Screen Backend:      $screen_backend"
-if [ "$screen_backend" = "swayidle" ]; then
-    echo "  Screen Idle Timeout: $screen_idle_timeout"
-fi
+echo "  Screen Idle Timeout: $screen_idle_timeout"
 echo "  Screen Restore:      $screen_restore_policy"
 echo "  Config File:         $CONFIG_FILE"
 echo ""

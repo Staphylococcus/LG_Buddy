@@ -58,6 +58,11 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_restore_policy={policy}"));
     }
 
+    pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
+        self.ensure_env()
+            .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
+    }
+
     pub fn create_runtime(&mut self) {
         let runtime = RuntimeStateLayout::new("cucumber-runtime");
         self.ensure_env()
@@ -206,6 +211,10 @@ impl LgBuddyWorld {
         self.ensure_mock_gdbus().set_shell_available(true);
     }
 
+    pub fn set_gnome_idle_monitor_available(&mut self, value: bool) {
+        self.ensure_mock_gdbus().set_idle_monitor_available(value);
+    }
+
     pub fn gnome_monitor_emit_idle(&mut self) {
         self.ensure_mock_gdbus()
             .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");
@@ -222,15 +231,18 @@ impl LgBuddyWorld {
         );
     }
 
-    pub fn gnome_idle_monitor_reports_recent_user_activity(&mut self) {
-        let gdbus = self.ensure_mock_gdbus();
-        gdbus.set_idle_monitor_available(true);
-        gdbus.queue_idle_monitor_idletime(1500);
-        gdbus.queue_idle_monitor_idletime(0);
+    pub fn gnome_monitor_emits_no_screen_saver_signals(&mut self) {
+        self.ensure_mock_gdbus().clear_monitor_lines();
     }
 
-    pub fn gnome_monitor_stays_open_briefly(&mut self) {
-        self.ensure_mock_gdbus().set_monitor_sleep_secs(1.0);
+    pub fn gnome_idle_monitor_reports_idletimes(&mut self, values: &[u64]) {
+        let gdbus = self.ensure_mock_gdbus();
+        gdbus.set_idle_monitor_available(true);
+        gdbus.set_idle_monitor_idletime_plan(values);
+    }
+
+    pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {
+        self.ensure_mock_gdbus().set_monitor_sleep_secs(seconds);
     }
 
     pub fn install_swayidle_stub(&mut self) {

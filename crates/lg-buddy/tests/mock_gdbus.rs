@@ -135,6 +135,61 @@ fn mock_screen_saver_and_idle_monitor_calls_match_expected_shapes() {
 }
 
 #[test]
+fn mock_idle_monitor_consumes_planned_idletimes_before_falling_back_to_default() {
+    let mock = MockGdbus::new("mock-gdbus-idletime-plan");
+    mock.set_idle_monitor_idletime(777);
+    mock.set_idle_monitor_idletime_plan(&[100, 200]);
+
+    let first = run_mock(
+        &mock,
+        [
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+    );
+    assert!(first.status.success());
+    assert_eq!(stdout(&first), "(uint64 100,)\n");
+
+    let second = run_mock(
+        &mock,
+        [
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+    );
+    assert!(second.status.success());
+    assert_eq!(stdout(&second), "(uint64 200,)\n");
+
+    let fallback = run_mock(
+        &mock,
+        [
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+    );
+    assert!(fallback.status.success());
+    assert_eq!(stdout(&fallback), "(uint64 777,)\n");
+}
+
+#[test]
 fn mock_monitor_replays_lines_and_records_invocations() {
     let mock = MockGdbus::new("mock-gdbus-monitor");
     mock.push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");
@@ -170,6 +225,60 @@ fn mock_monitor_replays_lines_and_records_invocations() {
             ],
         }]
     );
+}
+
+#[test]
+fn mock_monitor_can_be_silent_while_idle_monitor_plan_advances_independently() {
+    let mock = MockGdbus::new("mock-gdbus-silent-monitor");
+    mock.clear_monitor_lines();
+    mock.set_idle_monitor_idletime_plan(&[1000, 2000]);
+
+    let monitor = run_mock(
+        &mock,
+        [
+            "monitor",
+            "--session",
+            "--dest",
+            "org.gnome.ScreenSaver",
+            "--object-path",
+            "/org/gnome/ScreenSaver",
+        ],
+    );
+
+    assert!(monitor.status.success());
+    assert_eq!(stdout(&monitor), "");
+
+    let first = run_mock(
+        &mock,
+        [
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+    );
+    assert!(first.status.success());
+    assert_eq!(stdout(&first), "(uint64 1000,)\n");
+
+    let second = run_mock(
+        &mock,
+        [
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.IdleMonitor",
+            "--object-path",
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "--method",
+            "org.gnome.Mutter.IdleMonitor.GetIdletime",
+        ],
+    );
+    assert!(second.status.success());
+    assert_eq!(stdout(&second), "(uint64 2000,)\n");
 }
 
 fn run_mock<const N: usize>(mock: &MockGdbus, args: [&str; N]) -> std::process::Output {

@@ -1,3 +1,4 @@
+pub mod inactivity;
 pub mod runner;
 
 use std::error::Error;

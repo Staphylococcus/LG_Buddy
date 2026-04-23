@@ -1217,7 +1217,10 @@ mod tests {
             .lines()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(lines.first(), Some(&format!("USER={}", identity.username())));
+        assert_eq!(
+            lines.first(),
+            Some(&format!("USER={}", identity.username()))
+        );
         assert_eq!(
             lines.get(1),
             Some(&format!("LOGNAME={}", identity.username()))

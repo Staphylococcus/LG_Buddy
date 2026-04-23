@@ -93,12 +93,12 @@ This needs to be explicit because different providers work differently.
 `DesktopEnvironment`
 - The compositor or desktop already owns idle timing.
 - LG Buddy reacts to the resulting events.
-- Example: GNOME.
+- No current production backend uses this mode.
 
 `LgBuddyConfigured`
 - LG Buddy must supply or manage the timeout value.
 - The backend tool or adapter consumes that LG Buddy-controlled value.
-- Example: `swayidle`.
+- Examples: GNOME and `swayidle`.
 
 This is separate from startup and wake retry delays.
 
@@ -110,7 +110,7 @@ This is the current mapping for the known backends, with implementation status c
 
 | Backend | Idle | Active | WakeRequested | UserActivity | BeforeSleep | AfterResume | Lock/Unlock | Idle Timeout Source | Current Rust Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GNOME | Yes | Yes | Yes | Yes, when Mutter idle monitor is available | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `DesktopEnvironment` | Implemented for `Idle`, `Active`, `WakeRequested`, and Mutter-backed `UserActivity` |
+| GNOME | Yes | Yes | Yes | Yes | No current surface in LG Buddy | No current surface in LG Buddy | No current surface in LG Buddy | `LgBuddyConfigured` | Implemented with LG Buddy-owned timeout policy over ScreenSaver and Mutter observations |
 | `swayidle` | Yes | Yes | No | No direct equivalent | Yes | Yes | Yes, when built with systemd support | `LgBuddyConfigured` | Implemented for delegated `timeout -> Idle` and `resume -> Active`; `before-sleep`, `after-resume`, `lock`, and `unlock` are modeled but not executed |
 
 ## Provider-Specific Mapping
@@ -124,13 +124,13 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (true,)` | `Idle` | Implemented |
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
-| Mutter idle monitor activity detection | `UserActivity` | Implemented |
+| `org.gnome.Mutter.IdleMonitor.GetIdletime` | LG Buddy-owned inactivity thresholding and activity synthesis | Implemented |
 
 Notes:
 
-- GNOME owns idle timing.
-- Mutter support is optional.
-- LG Buddy should treat early activity as a capability, not a guarantee.
+- GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
+- LG Buddy owns the configured timeout value for this backend.
+- ScreenSaver idle/active signals and Mutter idletime are both observation inputs into LG Buddy policy.
 
 ### `swayidle`
 

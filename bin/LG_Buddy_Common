@@ -4,7 +4,7 @@ LG_BUDDY_INSTALL_DIR="/usr/lib/lg-buddy"
 LG_BUDDY_POINTER_FILE="${LG_BUDDY_INSTALL_DIR}/config-path"
 LG_BUDDY_DEFAULT_SCREEN_BACKEND="auto"
 LG_BUDDY_DEFAULT_IDLE_TIMEOUT=300
-LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY="marker_only"
+LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY="conservative"
 
 lg_buddy_user_config_path() {
     if [ -n "${LG_BUDDY_CONFIG:-}" ]; then
@@ -90,7 +90,7 @@ lg_buddy_load_config() {
     input="$(lg_buddy_config_get_valid "input" '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE")"
     screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"
-    screen_restore_policy="$(lg_buddy_config_get_valid "screen_restore_policy" '^(marker_only|aggressive)$' "$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY" "$LG_BUDDY_CONFIG_FILE")"
+    screen_restore_policy="$(lg_buddy_config_get_valid "screen_restore_policy" '^(marker_only|conservative|aggressive)$' "$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY" "$LG_BUDDY_CONFIG_FILE")"
 
     if [ -z "$tv_ip" ] || [ -z "$tv_mac" ] || [ -z "$input" ]; then
         echo "LG Buddy: config file is missing required TV settings."
