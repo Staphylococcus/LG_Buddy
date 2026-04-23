@@ -21,7 +21,7 @@ Install prerequisites:
 
 Backend-specific:
 
-- `gdbus` for the GNOME monitor backend
+- `gdbus` for GNOME startup/probing checks
 - `swayidle` for the `swayidle` backend
 
 The GNOME backend also requires a compatible GNOME session with:
@@ -29,6 +29,10 @@ The GNOME backend also requires a compatible GNOME session with:
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
+
+At runtime, GNOME monitoring now uses a persistent in-process session-bus client
+for ScreenSaver signals and Mutter idletime polling. `gdbus` is still used for
+the remaining shell wait and name-owner probe paths.
 
 Typical package installs:
 

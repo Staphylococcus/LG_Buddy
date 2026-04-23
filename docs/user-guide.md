@@ -47,6 +47,10 @@ The GNOME backend requires:
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
 
+The monitor runtime keeps one persistent session-bus connection open for GNOME
+ScreenSaver signals and Mutter idletime polling. `gdbus` is still required for
+the remaining shell wait and availability-probe paths.
+
 Check the user-session monitor:
 
 ```bash

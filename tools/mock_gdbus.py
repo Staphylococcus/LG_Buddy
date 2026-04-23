@@ -2,16 +2,23 @@
 
 """Stateful contract mock for gdbus.
 
-This mock is intentionally narrow. It only covers the surfaces LG Buddy
-currently uses:
+This mock is intentionally narrow. It primarily covers the remaining subprocess
+surfaces LG Buddy still uses:
 
 - `gdbus call ... NameHasOwner org.gnome.Shell`
 - `gdbus wait ... org.gnome.Shell`
+
+It also retains a few legacy GNOME helper surfaces for focused contract tests:
+
 - `gdbus call ... org.gnome.ScreenSaver.GetActive`
 - `gdbus call ... org.gnome.Mutter.IdleMonitor.GetIdletime`
 - `gdbus monitor ... org.gnome.ScreenSaver`
 
-The goal is to make LG Buddy's current GNOME expectations explicit without
+The live GNOME monitor runtime no longer uses `gdbus monitor` or repeated
+`GetIdletime` subprocess calls. Those paths now run through the in-process
+session-bus client and the private test-bus harness.
+
+The goal here is to make the remaining subprocess contract explicit without
 pretending to be a general D-Bus implementation.
 """
 

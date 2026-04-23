@@ -48,7 +48,7 @@ the TV transport boundary.
 flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
-        GDBUS["gdbus<br/>wait / call / monitor"]
+        GDBUS["gdbus<br/>wait / call"]
         SWAY["swayidle<br/>idle hooks"]
     end
 
@@ -62,9 +62,10 @@ flowchart LR
             BACKEND["backend.rs<br/>backend selection"]
             SESSIONMODEL["session.rs<br/>shared session model"]
             RUNNER["session::runner<br/>monitor command"]
+            BUS["session_bus.rs<br/>generic session-bus transport"]
 
             subgraph DEAdapters["Desktop Environment Adapters"]
-                GADAPTER["gnome.rs<br/>GNOME probe + line mapping"]
+                GADAPTER["gnome.rs<br/>GNOME probe + signal mapping"]
                 SADAPTER["swayidle.rs<br/>hook mapping + capability probe"]
             end
         end
@@ -83,11 +84,14 @@ flowchart LR
     MAIN --> BACKEND
     MAIN --> RUNNER
     RUNNER --> BACKEND
+    RUNNER --> BUS
     BACKEND --> GADAPTER
     BACKEND --> SADAPTER
 
+    GNOME --> BUS
     GNOME --> GDBUS
     GDBUS --> GADAPTER
+    BUS --> GADAPTER
     GADAPTER -->|"SessionEvent"| SESSIONMODEL
 
     SWAY -->|"timeout / resume hooks"| SADAPTER
@@ -137,14 +141,16 @@ The intended split is:
 - `session/inactivity.rs`
   - synthesizes idle and active transitions from provider signals and configured thresholds
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
+- `session_bus.rs`
+  - generic blocking session-bus transport seam
+  - persistent D-Bus client for the GNOME monitor runtime
 - `session/runner.rs`
   - backend-neutral monitor runner
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into the existing screen policy commands
 - `gnome.rs`
   - GNOME-specific capability probing and event mapping
-  - first real backend runner path via `gdbus`
-  - capability probing plus monitor-line mapping
+  - capability probing plus ScreenSaver signal / IdleMonitor method mapping
 - `swayidle.rs`
   - `swayidle`-specific capability probing and hook-to-event mapping
   - keeps `swayidle` as an external-tool backend rather than reimplementing
@@ -257,7 +263,7 @@ Selection order:
 
 Detection behavior:
 
-- `auto` prefers GNOME when `gdbus` is available and the current session satisfies the full GNOME contract
+- `auto` prefers GNOME when the current session satisfies the full GNOME contract and the required probe tools are available
 - otherwise falls back to `swayidle` if installed
 - forced backends validate required commands
 
