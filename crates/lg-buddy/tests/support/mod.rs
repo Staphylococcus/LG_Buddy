@@ -1,5 +1,6 @@
 use dbus::blocking::Connection as DbusConnection;
-use dbus::channel::MatchingReceiver;
+use dbus::channel::{MatchingReceiver, Sender as DbusSender};
+use dbus::Message as DbusMessage;
 use dbus_crossroads::Crossroads;
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
@@ -494,6 +495,14 @@ pub struct MockSessionBusIdleMonitor {
 struct MockSessionBusIdleMonitorState {
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
+    screen_saver_signals: VecDeque<MockScreenSaverSignal>,
+    client_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockScreenSaverSignal {
+    ActiveChanged(bool),
+    WakeUpScreen,
 }
 
 #[allow(dead_code)]
@@ -545,6 +554,36 @@ impl MockSessionBusIdleMonitor {
     pub fn queue_idle_monitor_idletime(&self, value: u64) {
         self.patch_state(|state| {
             state.idletime_plan.push_back(value);
+        });
+    }
+
+    pub fn emit_screen_saver_idle(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::ActiveChanged(true));
+        });
+    }
+
+    pub fn emit_screen_saver_active(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::ActiveChanged(false));
+        });
+    }
+
+    pub fn emit_screen_saver_wake_requested(&self) {
+        self.patch_state(|state| {
+            state
+                .screen_saver_signals
+                .push_back(MockScreenSaverSignal::WakeUpScreen);
+        });
+    }
+
+    pub fn clear_screen_saver_signals(&self) {
+        self.patch_state(|state| {
+            state.screen_saver_signals.clear();
         });
     }
 
@@ -620,14 +659,19 @@ fn spawn_mock_idle_monitor_service(
         connection
             .request_name("org.gnome.Mutter.IdleMonitor", false, true, false)
             .expect("request mock idle monitor bus name");
+        connection
+            .request_name("org.gnome.ScreenSaver", false, true, false)
+            .expect("request mock screen saver bus name");
 
         let mut crossroads = Crossroads::new();
+        let idle_monitor_state = Arc::clone(&state);
         let iface = crossroads.register("org.gnome.Mutter.IdleMonitor", move |builder| {
-            let state = Arc::clone(&state);
+            let state = Arc::clone(&idle_monitor_state);
             builder.method("GetIdletime", (), ("idletime",), move |_, _, ()| {
                 let mut state = state
                     .lock()
                     .expect("mock session-bus idle monitor state lock");
+                state.client_ready = true;
                 let value = state
                     .idletime_plan
                     .pop_front()
@@ -654,8 +698,45 @@ fn spawn_mock_idle_monitor_service(
         let _ = ready.send(());
         while !stop.load(Ordering::SeqCst) {
             let _ = connection.process(Duration::from_millis(50));
+            emit_queued_mock_screen_saver_signal(&connection, &state);
         }
     })
+}
+
+fn emit_queued_mock_screen_saver_signal(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+) {
+    let signal = {
+        let mut state = state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        if !state.client_ready {
+            return;
+        }
+        state.screen_saver_signals.pop_front()
+    };
+    let Some(signal) = signal else {
+        return;
+    };
+
+    let message = match signal {
+        MockScreenSaverSignal::ActiveChanged(active) => DbusMessage::new_signal(
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver",
+            "ActiveChanged",
+        )
+        .expect("create mock ActiveChanged signal")
+        .append1(active),
+        MockScreenSaverSignal::WakeUpScreen => DbusMessage::new_signal(
+            "/org/gnome/ScreenSaver",
+            "org.gnome.ScreenSaver",
+            "WakeUpScreen",
+        )
+        .expect("create mock WakeUpScreen signal"),
+    };
+
+    let _ = connection.send(message);
 }
 
 #[allow(dead_code)]

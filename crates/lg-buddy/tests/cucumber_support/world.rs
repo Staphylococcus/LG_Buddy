@@ -221,23 +221,23 @@ impl LgBuddyWorld {
     }
 
     pub fn gnome_monitor_emit_idle(&mut self) {
-        self.ensure_mock_gdbus()
-            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (true,)");
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_idle();
     }
 
     pub fn gnome_monitor_emit_active(&mut self) {
-        self.ensure_mock_gdbus()
-            .push_monitor_line("signal org.gnome.ScreenSaver.ActiveChanged (false,)");
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_active();
     }
 
     pub fn gnome_monitor_emit_wake_requested(&mut self) {
-        self.ensure_mock_gdbus().push_monitor_line(
-            "signal time=1.0 sender=:1.2 -> destination=(null destination) serial=2 path=/org/gnome/ScreenSaver; interface=org.gnome.ScreenSaver; member=WakeUpScreen",
-        );
+        self.ensure_mock_session_bus_idle_monitor()
+            .emit_screen_saver_wake_requested();
     }
 
     pub fn gnome_monitor_emits_no_screen_saver_signals(&mut self) {
-        self.ensure_mock_gdbus().clear_monitor_lines();
+        self.ensure_mock_session_bus_idle_monitor()
+            .clear_screen_saver_signals();
     }
 
     pub fn gnome_idle_monitor_reports_idletimes(&mut self, values: &[u64]) {
@@ -250,7 +250,10 @@ impl LgBuddyWorld {
     }
 
     pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {
-        self.ensure_mock_gdbus().set_monitor_sleep_secs(seconds);
+        self.ensure_env().set(
+            "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS",
+            seconds.to_string(),
+        );
     }
 
     pub fn install_swayidle_stub(&mut self) {
@@ -340,6 +343,10 @@ impl LgBuddyWorld {
         let args = command_line.split_whitespace().collect::<Vec<_>>();
         if args == ["monitor"] && self.gdbus.is_some() {
             let _ = self.ensure_mock_session_bus_idle_monitor();
+            if std::env::var_os("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS").is_none() {
+                self.ensure_env()
+                    .set("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "0.2");
+            }
         }
         let output = ProcessCommand::new(env!("CARGO_BIN_EXE_lg-buddy"))
             .args(args)

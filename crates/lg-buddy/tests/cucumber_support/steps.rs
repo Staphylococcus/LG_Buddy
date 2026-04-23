@@ -140,8 +140,8 @@ fn gnome_requests_screen_wake(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emit_wake_requested();
 }
 
-#[given("GNOME emits no ScreenSaver monitor lines")]
-fn gnome_emits_no_screen_saver_monitor_lines(world: &mut LgBuddyWorld) {
+#[given("GNOME emits no ScreenSaver signals")]
+fn gnome_emits_no_screen_saver_signals(world: &mut LgBuddyWorld) {
     world.gnome_monitor_emits_no_screen_saver_signals();
 }
 

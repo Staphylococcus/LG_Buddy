@@ -4,7 +4,9 @@ use crate::session::{
     IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
     SessionEvent,
 };
-use crate::session_bus::{BusMethodCall, GdbusSessionBusClient, SessionBusClient, SessionBusError};
+use crate::session_bus::{
+    BusMethodCall, BusSignal, BusValue, GdbusSessionBusClient, SessionBusClient, SessionBusError,
+};
 
 pub const GNOME_SCREEN_SAVER_NAME: &str = "org.gnome.ScreenSaver";
 pub const GNOME_SCREEN_SAVER_PATH: &str = "/org/gnome/ScreenSaver";
@@ -124,6 +126,19 @@ pub fn map_monitor_line(line: &str) -> Option<SessionEvent> {
     }
 }
 
+pub fn map_screen_saver_signal(signal: &BusSignal) -> Option<SessionEvent> {
+    if signal.path != GNOME_SCREEN_SAVER_PATH || signal.interface != GNOME_SCREEN_SAVER_INTERFACE {
+        return None;
+    }
+
+    match (signal.member.as_str(), signal.body.as_slice()) {
+        ("ActiveChanged", [BusValue::Bool(true)]) => Some(SessionEvent::Idle),
+        ("ActiveChanged", [BusValue::Bool(false)]) => Some(SessionEvent::Active),
+        ("WakeUpScreen", []) => Some(SessionEvent::WakeRequested),
+        _ => None,
+    }
+}
+
 pub fn current_idle_monitor_idletime_ms(
     bus: &mut impl SessionBusClient,
 ) -> Result<u64, SessionBusError> {
@@ -152,7 +167,8 @@ fn gnome_backend_status_from_session_bus(
 mod tests {
     use super::{
         current_idle_monitor_idletime_ms, gnome_backend_status_from_session_bus, map_monitor_line,
-        GnomeBackend, GnomeBackendStatus, GnomeProbe, GNOME_REQUIRED_SERVICES_REASON,
+        map_screen_saver_signal, GnomeBackend, GnomeBackendStatus, GnomeProbe,
+        GNOME_REQUIRED_SERVICES_REASON,
     };
     use crate::config::ScreenBackend;
     use crate::session::{
@@ -160,7 +176,8 @@ mod tests {
         SessionEvent,
     };
     use crate::session_bus::{
-        BusMethodCall, BusReply, BusSignal, BusSignalMatch, SessionBusClient, SessionBusError,
+        BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
+        SessionBusError,
     };
     use std::time::Duration;
 
@@ -274,6 +291,44 @@ mod tests {
     #[test]
     fn unknown_monitor_line_is_ignored() {
         assert_eq!(map_monitor_line("unrelated"), None);
+    }
+
+    #[test]
+    fn active_changed_true_signal_maps_to_idle_event() {
+        let signal = BusSignal::new(
+            super::GNOME_SCREEN_SAVER_PATH,
+            super::GNOME_SCREEN_SAVER_INTERFACE,
+            "ActiveChanged",
+        )
+        .with_body(vec![BusValue::Bool(true)]);
+
+        assert_eq!(map_screen_saver_signal(&signal), Some(SessionEvent::Idle));
+    }
+
+    #[test]
+    fn active_changed_false_signal_maps_to_active_event() {
+        let signal = BusSignal::new(
+            super::GNOME_SCREEN_SAVER_PATH,
+            super::GNOME_SCREEN_SAVER_INTERFACE,
+            "ActiveChanged",
+        )
+        .with_body(vec![BusValue::Bool(false)]);
+
+        assert_eq!(map_screen_saver_signal(&signal), Some(SessionEvent::Active));
+    }
+
+    #[test]
+    fn wakeup_signal_maps_to_wake_requested_event_via_bus_signal() {
+        let signal = BusSignal::new(
+            super::GNOME_SCREEN_SAVER_PATH,
+            super::GNOME_SCREEN_SAVER_INTERFACE,
+            "WakeUpScreen",
+        );
+
+        assert_eq!(
+            map_screen_saver_signal(&signal),
+            Some(SessionEvent::WakeRequested)
+        );
     }
 
     #[test]

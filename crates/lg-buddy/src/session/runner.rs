@@ -1,12 +1,11 @@
 use std::error::Error;
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::path::Path;
-use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::Command as ProcessCommand;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
@@ -17,19 +16,21 @@ use crate::config::{
     load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::gnome::{
-    current_idle_monitor_idletime_ms, map_monitor_line, GnomeBackend, SystemGnomeProbe,
-    GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
+    current_idle_monitor_idletime_ms, map_screen_saver_signal, GnomeBackend, SystemGnomeProbe,
+    GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_PATH,
 };
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
-use crate::session_bus::{new_session_bus_client, SessionBusClient, SessionBusError};
+use crate::session_bus::{new_session_bus_client, BusSignalMatch, SessionBusClient};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
 const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
+const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 
 pub trait SessionActionExecutor {
     fn screen_off(&mut self) -> Result<String, RunError>;
@@ -211,13 +212,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
-    let monitor_handle = spawn_gnome_monitor_thread(sender.clone());
-    let mut idle_poller = None;
-    start_gnome_idle_monitor_poller(
-        &mut idle_poller,
-        sender.clone(),
-        Arc::clone(&latest_inactivity),
-    );
+    let monitor_handle = spawn_gnome_monitor_thread(sender.clone(), Arc::clone(&latest_inactivity));
     let mut monitor_result = Ok(());
 
     while let Ok(message) = receiver.recv() {
@@ -268,14 +263,12 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                 dispatcher.dispatch_event(writer, event)?;
             }
             RunnerMessage::MonitorExited(result) => {
-                stop_gnome_idle_monitor_poller(&mut idle_poller);
                 monitor_result = result;
                 break;
             }
         }
     }
 
-    stop_gnome_idle_monitor_poller(&mut idle_poller);
     let _ = monitor_handle.join();
     monitor_result
 }
@@ -310,38 +303,6 @@ fn run_swayidle_monitor<W: Write>(writer: &mut W) -> Result<(), SessionRunnerErr
             message: format!("swayidle exited with status {status}"),
         })
     }
-}
-
-#[cfg(test)]
-fn process_gnome_monitor_output<R: BufRead, W: Write, E: SessionActionExecutor>(
-    reader: R,
-    writer: &mut W,
-    dispatcher: &mut SessionEventDispatcher<E>,
-) -> Result<(), SessionRunnerError> {
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(event) = map_monitor_line(&line) {
-            dispatcher.dispatch_event(writer, event)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn forward_gnome_monitor_output<R: BufRead>(
-    reader: R,
-    sender: &mpsc::Sender<RunnerMessage>,
-) -> Result<(), SessionRunnerError> {
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(event) = map_monitor_line(&line) {
-            if sender.send(RunnerMessage::SessionEvent(event)).is_err() {
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn wait_for_gnome_shell() -> Result<(), SessionRunnerError> {
@@ -392,46 +353,87 @@ fn normalize_idle_timeout_secs(idle_timeout_secs: u64) -> u64 {
     }
 }
 
-fn spawn_gnome_monitor_thread(sender: mpsc::Sender<RunnerMessage>) -> JoinHandle<()> {
+fn resolve_gnome_monitor_test_timeout() -> Option<Duration> {
+    std::env::var(GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| *value > 0.0)
+        .map(Duration::from_secs_f64)
+}
+
+fn spawn_gnome_monitor_thread(
+    sender: mpsc::Sender<RunnerMessage>,
+    latest_observation: Arc<LatestInactivityObservation>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
-        let result = run_gnome_monitor_process(&sender);
+        let result = run_gnome_monitor_process(&sender, &latest_observation);
         let _ = sender.send(RunnerMessage::MonitorExited(result));
     })
 }
 
 fn run_gnome_monitor_process(
     sender: &mpsc::Sender<RunnerMessage>,
+    latest_observation: &LatestInactivityObservation,
 ) -> Result<(), SessionRunnerError> {
-    let mut child = ProcessCommand::new("gdbus")
-        .args([
-            "monitor",
-            "--session",
-            "--dest",
-            GNOME_SCREEN_SAVER_NAME,
-            "--object-path",
-            GNOME_SCREEN_SAVER_PATH,
-        ])
-        .stdout(Stdio::piped())
-        .spawn()?;
+    let mut bus = new_session_bus_client().map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Gnome,
+        message: format!("failed to open GNOME session bus client: {err}"),
+    })?;
+    bus.add_signal_match(BusSignalMatch {
+        sender: None,
+        path: Some(GNOME_SCREEN_SAVER_PATH),
+        interface: Some(GNOME_SCREEN_SAVER_INTERFACE),
+        member: None,
+    })
+    .map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Gnome,
+        message: format!("failed to subscribe to GNOME ScreenSaver signals: {err}"),
+    })?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
-            message: "gdbus monitor did not expose stdout".to_string(),
-        })?;
+    let started = Instant::now();
+    let test_timeout = resolve_gnome_monitor_test_timeout();
+    let mut next_idle_poll = Instant::now();
 
-    forward_gnome_monitor_output(BufReader::new(stdout), sender)?;
+    loop {
+        if let Some(timeout) = test_timeout {
+            if started.elapsed() >= timeout {
+                return Ok(());
+            }
+        }
 
-    let status = child.wait()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
-            message: format!("gdbus monitor exited with status {status}"),
-        })
+        let now = Instant::now();
+        if now >= next_idle_poll {
+            if !poll_gnome_idle_monitor_once(&mut bus, sender, latest_observation) {
+                return Ok(());
+            }
+            next_idle_poll = now + GNOME_IDLE_POLL_INTERVAL;
+        }
+
+        let now = Instant::now();
+        let mut process_timeout = next_idle_poll
+            .saturating_duration_since(now)
+            .min(GNOME_BUS_PROCESS_INTERVAL);
+        if let Some(timeout) = test_timeout {
+            process_timeout = process_timeout.min(timeout.saturating_sub(started.elapsed()));
+        }
+
+        let Some(signal) =
+            bus.process(process_timeout)
+                .map_err(|err| SessionRunnerError::Failed {
+                    backend: ScreenBackend::Gnome,
+                    message: format!("GNOME session bus processing failed: {err}"),
+                })?
+        else {
+            continue;
+        };
+
+        let Some(event) = map_screen_saver_signal(&signal) else {
+            continue;
+        };
+
+        if sender.send(RunnerMessage::SessionEvent(event)).is_err() {
+            return Ok(());
+        }
     }
 }
 
@@ -502,76 +504,12 @@ impl LatestInactivityObservation {
     }
 }
 
-trait IdleMonitorProbe {
-    fn current_idletime_ms(&mut self) -> Option<u64>;
-}
-
-struct SessionBusGnomeIdleMonitorProbe {
-    bus: Box<dyn SessionBusClient + Send>,
-}
-
-impl SessionBusGnomeIdleMonitorProbe {
-    fn new() -> Result<Self, SessionBusError> {
-        Ok(Self {
-            bus: new_session_bus_client()?,
-        })
-    }
-}
-
-impl IdleMonitorProbe for SessionBusGnomeIdleMonitorProbe {
-    fn current_idletime_ms(&mut self) -> Option<u64> {
-        current_idle_monitor_idletime_ms(&mut self.bus).ok()
-    }
-}
-
-struct GnomeIdleMonitorPoller {
-    stop: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
-}
-
-fn start_gnome_idle_monitor_poller(
-    poller: &mut Option<GnomeIdleMonitorPoller>,
-    sender: mpsc::Sender<RunnerMessage>,
-    latest_observation: Arc<LatestInactivityObservation>,
-) {
-    stop_gnome_idle_monitor_poller(poller);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_signal = Arc::clone(&stop);
-    let handle = thread::spawn(move || {
-        let mut probe = match SessionBusGnomeIdleMonitorProbe::new() {
-            Ok(probe) => probe,
-            Err(_) => return,
-        };
-        while !stop_signal.load(Ordering::SeqCst) {
-            if !poll_gnome_idle_monitor_once(&mut probe, &sender, &latest_observation) {
-                break;
-            }
-
-            if stop_signal.load(Ordering::SeqCst) {
-                break;
-            }
-
-            thread::sleep(GNOME_IDLE_POLL_INTERVAL);
-        }
-    });
-
-    *poller = Some(GnomeIdleMonitorPoller { stop, handle });
-}
-
-fn stop_gnome_idle_monitor_poller(poller: &mut Option<GnomeIdleMonitorPoller>) {
-    if let Some(poller) = poller.take() {
-        poller.stop.store(true, Ordering::SeqCst);
-        let _ = poller.handle.join();
-    }
-}
-
 fn poll_gnome_idle_monitor_once(
-    probe: &mut impl IdleMonitorProbe,
+    bus: &mut impl SessionBusClient,
     sender: &mpsc::Sender<RunnerMessage>,
     latest_observation: &LatestInactivityObservation,
 ) -> bool {
-    let Some(idletime_ms) = probe.current_idletime_ms() else {
+    let Ok(idletime_ms) = current_idle_monitor_idletime_ms(bus) else {
         return true;
     };
 
@@ -640,9 +578,8 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 mod tests {
     use super::{
         handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
-        poll_gnome_idle_monitor_once, process_gnome_monitor_output, shell_quote,
-        LatestInactivityObservation, RunnerMessage, SessionActionExecutor,
-        SessionBusGnomeIdleMonitorProbe, SessionEventDispatcher,
+        poll_gnome_idle_monitor_once, shell_quote, LatestInactivityObservation, RunnerMessage,
+        SessionActionExecutor, SessionEventDispatcher,
     };
     use crate::session::inactivity::{
         InactivityEngine, InactivityObservation, InactivityThresholds,
@@ -653,7 +590,6 @@ mod tests {
         SessionBusError,
     };
     use crate::RunError;
-    use std::io::Cursor;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -834,32 +770,6 @@ mod tests {
     }
 
     #[test]
-    fn gnome_monitor_output_dispatches_known_events() {
-        let input = "\
-signal org.gnome.ScreenSaver.ActiveChanged (true,)\n\
-member=WakeUpScreen\n\
-signal org.gnome.ScreenSaver.ActiveChanged (false,)\n\
-unrelated\n";
-        let executor = FakeActionExecutor {
-            screen_off_output: "screen-off output\n".to_string(),
-            screen_on_output: "screen-on output\n".to_string(),
-            ..FakeActionExecutor::default()
-        };
-        let mut dispatcher = SessionEventDispatcher::new(executor);
-        let mut output = Vec::new();
-
-        process_gnome_monitor_output(Cursor::new(input), &mut output, &mut dispatcher)
-            .expect("process gnome monitor lines");
-
-        let output = String::from_utf8(output).expect("utf8");
-        assert_eq!(dispatcher.executor.screen_off_calls, 1);
-        assert_eq!(dispatcher.executor.screen_on_calls, 2);
-        assert!(output.contains("Session became idle."));
-        assert!(output.contains("wake-requested"));
-        assert!(output.contains("active"));
-    }
-
-    #[test]
     fn zero_idle_timeout_falls_back_to_default() {
         assert_eq!(
             normalize_idle_timeout_secs(0),
@@ -917,14 +827,12 @@ unrelated\n";
     fn gnome_idle_monitor_poller_publishes_idletime_from_session_bus() {
         let (sender, receiver) = mpsc::channel();
         let latest = LatestInactivityObservation::default();
-        let mut probe = SessionBusGnomeIdleMonitorProbe {
-            bus: Box::new(FakeSessionBus {
-                method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
-                ..FakeSessionBus::default()
-            }),
+        let mut bus = FakeSessionBus {
+            method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
+            ..FakeSessionBus::default()
         };
 
-        assert!(poll_gnome_idle_monitor_once(&mut probe, &sender, &latest));
+        assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
         assert!(matches!(
             receiver.recv().expect("notification"),
             RunnerMessage::InactivityObservationReady
@@ -939,16 +847,14 @@ unrelated\n";
     fn gnome_idle_monitor_poller_ignores_bus_errors() {
         let (sender, receiver) = mpsc::channel();
         let latest = LatestInactivityObservation::default();
-        let mut probe = SessionBusGnomeIdleMonitorProbe {
-            bus: Box::new(FakeSessionBus {
-                method_replies: vec![Err(SessionBusError::Transport(
-                    "simulated bus failure".to_string(),
-                ))],
-                ..FakeSessionBus::default()
-            }),
+        let mut bus = FakeSessionBus {
+            method_replies: vec![Err(SessionBusError::Transport(
+                "simulated bus failure".to_string(),
+            ))],
+            ..FakeSessionBus::default()
         };
 
-        assert!(poll_gnome_idle_monitor_once(&mut probe, &sender, &latest));
+        assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
         assert!(receiver.try_recv().is_err());
         assert_eq!(latest.take(), None);
     }

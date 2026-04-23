@@ -1,5 +1,6 @@
 use dbus::arg::messageitem::MessageItem as DbusMessageItem;
 use dbus::blocking::{BlockingSender as DbusBlockingSender, Connection as DbusConnection};
+use dbus::message::{MatchRule as DbusMatchRule, MessageType as DbusMessageType};
 use dbus::Message as DbusMessage;
 use std::fmt;
 use std::process::Command;
@@ -180,6 +181,72 @@ impl<'a> BusSignalMatch<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedBusSignalMatch {
+    sender: Option<String>,
+    path: Option<String>,
+    interface: Option<String>,
+    member: Option<String>,
+}
+
+impl<'a> From<BusSignalMatch<'a>> for OwnedBusSignalMatch {
+    fn from(value: BusSignalMatch<'a>) -> Self {
+        Self {
+            sender: value.sender.map(ToOwned::to_owned),
+            path: value.path.map(ToOwned::to_owned),
+            interface: value.interface.map(ToOwned::to_owned),
+            member: value.member.map(ToOwned::to_owned),
+        }
+    }
+}
+
+impl OwnedBusSignalMatch {
+    fn as_match_rule(&self) -> DbusMatchRule<'static> {
+        let mut rule = DbusMatchRule::new().with_type(DbusMessageType::Signal);
+        if let Some(sender) = &self.sender {
+            rule = rule.with_sender(sender.clone());
+        }
+        if let Some(path) = &self.path {
+            rule = rule.with_path(path.clone());
+        }
+        if let Some(interface) = &self.interface {
+            rule = rule.with_interface(interface.clone());
+        }
+        if let Some(member) = &self.member {
+            rule = rule.with_member(member.clone());
+        }
+        rule
+    }
+
+    fn matches(&self, signal: &BusSignal) -> bool {
+        if let Some(sender) = &self.sender {
+            if signal.sender.as_ref() != Some(sender) {
+                return false;
+            }
+        }
+
+        if let Some(path) = &self.path {
+            if &signal.path != path {
+                return false;
+            }
+        }
+
+        if let Some(interface) = &self.interface {
+            if &signal.interface != interface {
+                return false;
+            }
+        }
+
+        if let Some(member) = &self.member {
+            if &signal.member != member {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BusSignal {
     pub sender: Option<String>,
     pub path: String,
@@ -271,6 +338,7 @@ pub fn new_session_bus_client() -> Result<Box<dyn SessionBusClient + Send>, Sess
 pub struct DbusSessionBusClient {
     connection: DbusConnection,
     method_call_timeout: Duration,
+    signal_rules: Vec<OwnedBusSignalMatch>,
 }
 
 impl DbusSessionBusClient {
@@ -279,6 +347,7 @@ impl DbusSessionBusClient {
             connection: DbusConnection::new_session()
                 .map_err(|err| SessionBusError::Transport(err.to_string()))?,
             method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
         })
     }
 }
@@ -322,17 +391,43 @@ impl SessionBusClient for DbusSessionBusClient {
     }
 
     fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
-        let _ = rule;
-        Err(SessionBusError::Transport(
-            "DbusSessionBusClient does not implement signal matches yet".to_string(),
-        ))
+        let rule = OwnedBusSignalMatch::from(rule);
+        self.connection
+            .add_match_no_cb(&rule.as_match_rule().match_str())
+            .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+        self.signal_rules.push(rule);
+        Ok(())
     }
 
     fn process(&mut self, timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
-        self.connection
-            .process(timeout)
-            .map(|_| None)
-            .map_err(|err| SessionBusError::Transport(err.to_string()))
+        let started = Instant::now();
+        loop {
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Ok(None);
+            }
+
+            let remaining = timeout.saturating_sub(elapsed);
+            let Some(message) = self
+                .connection
+                .channel()
+                .blocking_pop_message(remaining)
+                .map_err(|err| SessionBusError::Transport(err.to_string()))?
+            else {
+                return Ok(None);
+            };
+
+            if message.msg_type() != DbusMessageType::Signal {
+                continue;
+            }
+
+            let signal = bus_signal_from_dbus_message(message)?;
+            if self.signal_rules.is_empty()
+                || self.signal_rules.iter().any(|rule| rule.matches(&signal))
+            {
+                return Ok(Some(signal));
+            }
+        }
     }
 }
 
@@ -466,6 +561,35 @@ fn bus_value_from_dbus_message_item(item: DbusMessageItem) -> Result<BusValue, S
             actual: dbus_message_item_kind(&other),
         }),
     }
+}
+
+fn bus_signal_from_dbus_message(message: DbusMessage) -> Result<BusSignal, SessionBusError> {
+    let path = message
+        .path()
+        .ok_or_else(|| SessionBusError::Transport("signal missing object path".to_string()))?
+        .to_string();
+    let interface = message
+        .interface()
+        .ok_or_else(|| SessionBusError::Transport("signal missing interface".to_string()))?
+        .to_string();
+    let member = message
+        .member()
+        .ok_or_else(|| SessionBusError::Transport("signal missing member".to_string()))?
+        .to_string();
+    let sender = message.sender().map(|sender| sender.to_string());
+    let body = message
+        .get_items()
+        .into_iter()
+        .map(bus_value_from_dbus_message_item)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(BusSignal {
+        sender,
+        path,
+        interface,
+        member,
+        body,
+    })
 }
 
 fn dbus_message_item_kind(item: &DbusMessageItem) -> &'static str {

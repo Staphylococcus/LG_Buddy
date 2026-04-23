@@ -25,7 +25,7 @@ Feature: GNOME monitor
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME emits no ScreenSaver monitor lines
+    And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000"
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
@@ -44,7 +44,7 @@ Feature: GNOME monitor
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME emits no ScreenSaver monitor lines
+    And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000, 1500, 2000, 2500"
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
@@ -63,7 +63,7 @@ Feature: GNOME monitor
     And the session marker exists
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME emits no ScreenSaver monitor lines
+    And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000"
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
@@ -141,7 +141,7 @@ Feature: GNOME monitor
     And screen wake delays are disabled
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME emits no ScreenSaver monitor lines
+    And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000, 0, 0, 0"
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
@@ -184,7 +184,7 @@ Feature: GNOME monitor
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
-    And GNOME emits no ScreenSaver monitor lines
+    And GNOME emits no ScreenSaver signals
     And GNOME idle monitor will report idletimes "1000, 0, 0, 0"
     And GNOME monitor stays open for 1.0 seconds
     When I run the command "monitor"
