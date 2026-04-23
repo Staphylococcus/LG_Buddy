@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-dbus = "0.9.11"
+dbus = { version = "0.9.11", features = ["vendored"] }
 libc = "0.2"
 
 [lib]
