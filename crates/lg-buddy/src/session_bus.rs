@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 const SESSION_BUS_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DBUS_METHOD_CALL_TIMEOUT: Duration = Duration::from_secs(1);
-const DBUS_SERVICE_NAME: &str = "org.freedesktop.DBus";
-const DBUS_OBJECT_PATH: &str = "/org/freedesktop/DBus";
+pub const DBUS_SERVICE_NAME: &str = "org.freedesktop.DBus";
+pub const DBUS_OBJECT_PATH: &str = "/org/freedesktop/DBus";
+pub const DBUS_INTERFACE: &str = "org.freedesktop.DBus";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionBusError {
@@ -281,6 +282,59 @@ impl BusSignal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameOwnerChanged {
+    pub name: String,
+    pub old_owner: Option<String>,
+    pub new_owner: Option<String>,
+}
+
+pub fn get_name_owner(
+    bus: &mut impl SessionBusClient,
+    name: &str,
+) -> Result<String, SessionBusError> {
+    bus.call_method(
+        BusMethodCall::new(
+            DBUS_SERVICE_NAME,
+            DBUS_OBJECT_PATH,
+            DBUS_INTERFACE,
+            "GetNameOwner",
+        )
+        .with_body(vec![BusValue::String(name.to_string())]),
+    )?
+    .single_string()
+    .map(str::to_owned)
+}
+
+pub fn parse_name_owner_changed_signal(signal: &BusSignal) -> Option<NameOwnerChanged> {
+    if signal.path != DBUS_OBJECT_PATH
+        || signal.interface != DBUS_INTERFACE
+        || signal.member != "NameOwnerChanged"
+    {
+        return None;
+    }
+
+    let [BusValue::String(name), BusValue::String(old_owner), BusValue::String(new_owner)] =
+        signal.body.as_slice()
+    else {
+        return None;
+    };
+
+    Some(NameOwnerChanged {
+        name: name.clone(),
+        old_owner: normalize_dbus_owner(old_owner),
+        new_owner: normalize_dbus_owner(new_owner),
+    })
+}
+
+fn normalize_dbus_owner(owner: &str) -> Option<String> {
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
 pub trait SessionBusClient {
     fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError>;
     fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError>;
@@ -358,7 +412,7 @@ impl SessionBusClient for DbusSessionBusClient {
             BusMethodCall::new(
                 DBUS_SERVICE_NAME,
                 DBUS_OBJECT_PATH,
-                "org.freedesktop.DBus",
+                DBUS_INTERFACE,
                 "NameHasOwner",
             )
             .with_body(vec![BusValue::String(name.to_string())]),
@@ -445,7 +499,7 @@ impl SessionBusClient for GdbusSessionBusClient {
                 "--object-path",
                 DBUS_OBJECT_PATH,
                 "--method",
-                "org.freedesktop.DBus.NameHasOwner",
+                &format!("{DBUS_INTERFACE}.NameHasOwner"),
                 name,
             ])
             .output()
@@ -650,8 +704,10 @@ fn parse_gdbus_call_reply_output(output: &str) -> Option<BusReply> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_gdbus_call_reply_output, parse_gdbus_name_has_owner_output, BusMethodCall, BusReply,
-        BusSignal, BusSignalMatch, BusValue, SessionBusClient, SessionBusError,
+        get_name_owner, parse_gdbus_call_reply_output, parse_gdbus_name_has_owner_output,
+        parse_name_owner_changed_signal, BusMethodCall, BusReply, BusSignal, BusSignalMatch,
+        BusValue, NameOwnerChanged, SessionBusClient, SessionBusError, DBUS_INTERFACE,
+        DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
@@ -890,6 +946,27 @@ mod tests {
     }
 
     #[test]
+    fn get_name_owner_uses_generic_dbus_endpoint() {
+        let mut bus = FakeSessionBusClient::default();
+        let call = BusMethodCall::new(
+            DBUS_SERVICE_NAME,
+            DBUS_OBJECT_PATH,
+            DBUS_INTERFACE,
+            "GetNameOwner",
+        )
+        .with_body(vec![BusValue::String("org.gnome.ScreenSaver".to_string())]);
+        bus.queue_reply(
+            call.clone(),
+            BusReply::new(vec![BusValue::String(":1.42".to_string())]),
+        );
+
+        assert_eq!(
+            get_name_owner(&mut bus, "org.gnome.ScreenSaver"),
+            Ok(":1.42".to_string())
+        );
+    }
+
+    #[test]
     fn process_returns_only_signals_matching_registered_rules() {
         let mut bus = FakeSessionBusClient::default();
         bus.add_signal_match(BusSignalMatch {
@@ -948,6 +1025,44 @@ mod tests {
 
         assert!(broad_match.matches(&signal));
         assert!(!narrow_mismatch.matches(&signal));
+    }
+
+    #[test]
+    fn parse_name_owner_changed_signal_decodes_unique_owner_updates() {
+        let signal = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_body(vec![
+                BusValue::String("org.gnome.ScreenSaver".to_string()),
+                BusValue::String(":1.10".to_string()),
+                BusValue::String(":1.11".to_string()),
+            ]);
+
+        assert_eq!(
+            parse_name_owner_changed_signal(&signal),
+            Some(NameOwnerChanged {
+                name: "org.gnome.ScreenSaver".to_string(),
+                old_owner: Some(":1.10".to_string()),
+                new_owner: Some(":1.11".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_name_owner_changed_signal_treats_empty_owners_as_missing() {
+        let signal = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_body(vec![
+                BusValue::String("org.gnome.ScreenSaver".to_string()),
+                BusValue::String(":1.10".to_string()),
+                BusValue::String(String::new()),
+            ]);
+
+        assert_eq!(
+            parse_name_owner_changed_signal(&signal),
+            Some(NameOwnerChanged {
+                name: "org.gnome.ScreenSaver".to_string(),
+                old_owner: Some(":1.10".to_string()),
+                new_owner: None,
+            })
+        );
     }
 
     #[test]

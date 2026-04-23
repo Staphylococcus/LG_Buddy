@@ -16,14 +16,18 @@ use crate::config::{
     load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::gnome::{
-    current_idle_monitor_idletime_ms, map_screen_saver_signal, GnomeBackend, SystemGnomeProbe,
-    GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_PATH,
+    current_idle_monitor_idletime_ms, map_screen_saver_signal, resolve_screen_saver_owner,
+    screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
+    GNOME_SCREEN_SAVER_PATH,
 };
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
-use crate::session_bus::{new_session_bus_client, BusSignalMatch, SessionBusClient};
+use crate::session_bus::{
+    new_session_bus_client, BusSignal, BusSignalMatch, SessionBusClient, DBUS_INTERFACE,
+    DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
+};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
@@ -389,6 +393,22 @@ fn run_gnome_monitor_process(
         backend: ScreenBackend::Gnome,
         message: format!("failed to subscribe to GNOME ScreenSaver signals: {err}"),
     })?;
+    bus.add_signal_match(BusSignalMatch {
+        sender: Some(DBUS_SERVICE_NAME),
+        path: Some(DBUS_OBJECT_PATH),
+        interface: Some(DBUS_INTERFACE),
+        member: Some("NameOwnerChanged"),
+    })
+    .map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Gnome,
+        message: format!("failed to subscribe to D-Bus owner changes: {err}"),
+    })?;
+    let mut trusted_screen_saver_signals = TrustedScreenSaverSignals::new(Some(
+        resolve_screen_saver_owner(&mut bus).map_err(|err| SessionRunnerError::Failed {
+            backend: ScreenBackend::Gnome,
+            message: format!("failed to resolve GNOME ScreenSaver owner: {err}"),
+        })?,
+    ));
 
     let started = Instant::now();
     let test_timeout = resolve_gnome_monitor_test_timeout();
@@ -427,7 +447,7 @@ fn run_gnome_monitor_process(
             continue;
         };
 
-        let Some(event) = map_screen_saver_signal(&signal) else {
+        let Some(event) = trusted_screen_saver_signals.observe(&signal) else {
             continue;
         };
 
@@ -452,6 +472,38 @@ struct LatestInactivityObservation {
 struct LatestInactivityObservationState {
     observation: Option<InactivityObservation>,
     notification_in_flight: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedScreenSaverSignals {
+    owner: Option<String>,
+}
+
+impl TrustedScreenSaverSignals {
+    fn new(owner: Option<String>) -> Self {
+        Self { owner }
+    }
+
+    fn observe(&mut self, signal: &BusSignal) -> Option<SessionEvent> {
+        if signal.path == DBUS_OBJECT_PATH
+            && signal.interface == DBUS_INTERFACE
+            && signal.member == "NameOwnerChanged"
+        {
+            if signal.sender.as_deref() != Some(DBUS_SERVICE_NAME) {
+                return None;
+            }
+            if let Some(new_owner) = screen_saver_owner_changed(signal) {
+                self.owner = new_owner;
+            }
+            return None;
+        }
+
+        if signal.sender.as_deref() != self.owner.as_deref() {
+            return None;
+        }
+
+        map_screen_saver_signal(signal)
+    }
 }
 
 impl LatestInactivityObservation {
@@ -579,7 +631,10 @@ mod tests {
     use super::{
         handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
         poll_gnome_idle_monitor_once, shell_quote, LatestInactivityObservation, RunnerMessage,
-        SessionActionExecutor, SessionEventDispatcher,
+        SessionActionExecutor, SessionEventDispatcher, TrustedScreenSaverSignals,
+    };
+    use crate::gnome::{
+        GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
     };
     use crate::session::inactivity::{
         InactivityEngine, InactivityObservation, InactivityThresholds,
@@ -587,7 +642,7 @@ mod tests {
     use crate::session::SessionEvent;
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
-        SessionBusError,
+        SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
     use crate::RunError;
     use std::path::Path;
@@ -857,6 +912,133 @@ mod tests {
         assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
         assert!(receiver.try_recv().is_err());
         assert_eq!(latest.take(), None);
+    }
+
+    #[test]
+    fn trusted_screen_saver_signals_accept_current_owner_events() {
+        let mut trusted = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let signal = BusSignal::new(
+            GNOME_SCREEN_SAVER_PATH,
+            GNOME_SCREEN_SAVER_INTERFACE,
+            "ActiveChanged",
+        )
+        .with_sender(":1.42")
+        .with_body(vec![BusValue::Bool(true)]);
+
+        assert_eq!(trusted.observe(&signal), Some(SessionEvent::Idle));
+    }
+
+    #[test]
+    fn trusted_screen_saver_signals_ignore_spoofed_senders() {
+        let mut trusted = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let signal = BusSignal::new(
+            GNOME_SCREEN_SAVER_PATH,
+            GNOME_SCREEN_SAVER_INTERFACE,
+            "WakeUpScreen",
+        )
+        .with_sender(":1.99");
+
+        assert_eq!(trusted.observe(&signal), None);
+    }
+
+    #[test]
+    fn trusted_screen_saver_signals_update_owner_after_bus_notification() {
+        let mut trusted = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let owner_change = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_sender(DBUS_SERVICE_NAME)
+            .with_body(vec![
+                BusValue::String(GNOME_SCREEN_SAVER_NAME.to_string()),
+                BusValue::String(":1.42".to_string()),
+                BusValue::String(":1.43".to_string()),
+            ]);
+
+        assert_eq!(trusted.observe(&owner_change), None);
+        assert_eq!(
+            trusted.observe(
+                &BusSignal::new(
+                    GNOME_SCREEN_SAVER_PATH,
+                    GNOME_SCREEN_SAVER_INTERFACE,
+                    "ActiveChanged",
+                )
+                .with_sender(":1.42")
+                .with_body(vec![BusValue::Bool(true)])
+            ),
+            None
+        );
+        assert_eq!(
+            trusted.observe(
+                &BusSignal::new(
+                    GNOME_SCREEN_SAVER_PATH,
+                    GNOME_SCREEN_SAVER_INTERFACE,
+                    "ActiveChanged",
+                )
+                .with_sender(":1.43")
+                .with_body(vec![BusValue::Bool(true)])
+            ),
+            Some(SessionEvent::Idle)
+        );
+    }
+
+    #[test]
+    fn trusted_screen_saver_signals_ignore_untrusted_owner_change_senders() {
+        let mut trusted = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let owner_change = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_sender(":1.99")
+            .with_body(vec![
+                BusValue::String(GNOME_SCREEN_SAVER_NAME.to_string()),
+                BusValue::String(":1.42".to_string()),
+                BusValue::String(":1.43".to_string()),
+            ]);
+
+        assert_eq!(trusted.observe(&owner_change), None);
+        assert_eq!(
+            trusted.observe(
+                &BusSignal::new(
+                    GNOME_SCREEN_SAVER_PATH,
+                    GNOME_SCREEN_SAVER_INTERFACE,
+                    "WakeUpScreen",
+                )
+                .with_sender(":1.42")
+            ),
+            Some(SessionEvent::WakeRequested)
+        );
+        assert_eq!(
+            trusted.observe(
+                &BusSignal::new(
+                    GNOME_SCREEN_SAVER_PATH,
+                    GNOME_SCREEN_SAVER_INTERFACE,
+                    "WakeUpScreen",
+                )
+                .with_sender(":1.43")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_screen_saver_signals_ignore_events_after_owner_loss() {
+        let mut trusted = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let owner_change = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_sender(DBUS_SERVICE_NAME)
+            .with_body(vec![
+                BusValue::String(GNOME_SCREEN_SAVER_NAME.to_string()),
+                BusValue::String(":1.42".to_string()),
+                BusValue::String(String::new()),
+            ]);
+
+        assert_eq!(trusted.observe(&owner_change), None);
+        assert_eq!(
+            trusted.observe(
+                &BusSignal::new(
+                    GNOME_SCREEN_SAVER_PATH,
+                    GNOME_SCREEN_SAVER_INTERFACE,
+                    "ActiveChanged",
+                )
+                .with_sender(":1.42")
+                .with_body(vec![BusValue::Bool(false)])
+            ),
+            None
+        );
     }
 
     #[test]
