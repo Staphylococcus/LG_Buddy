@@ -16,18 +16,18 @@ use crate::commands::{run_screen_off, run_screen_on};
 use crate::config::{
     load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
-use crate::gnome::{map_monitor_line, GnomeBackend, SystemGnomeProbe};
+use crate::gnome::{
+    current_idle_monitor_idletime_ms, map_monitor_line, GnomeBackend, SystemGnomeProbe,
+    GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
+};
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
 use crate::session::{SessionBackend, SessionBackendError, SessionEvent};
+use crate::session_bus::{new_session_bus_client, SessionBusClient, SessionBusError};
 use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
-const GNOME_DBUS_NAME: &str = "org.gnome.ScreenSaver";
-const GNOME_DBUS_PATH: &str = "/org/gnome/ScreenSaver";
-const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
-const GNOME_IDLE_MONITOR_PATH: &str = "/org/gnome/Mutter/IdleMonitor/Core";
 const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -407,9 +407,9 @@ fn run_gnome_monitor_process(
             "monitor",
             "--session",
             "--dest",
-            GNOME_DBUS_NAME,
+            GNOME_SCREEN_SAVER_NAME,
             "--object-path",
-            GNOME_DBUS_PATH,
+            GNOME_SCREEN_SAVER_PATH,
         ])
         .stdout(Stdio::piped())
         .spawn()?;
@@ -503,33 +503,24 @@ impl LatestInactivityObservation {
 }
 
 trait IdleMonitorProbe {
-    fn current_idletime_ms(&self) -> Option<u64>;
+    fn current_idletime_ms(&mut self) -> Option<u64>;
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct SystemGnomeIdleMonitorProbe;
+struct SessionBusGnomeIdleMonitorProbe {
+    bus: Box<dyn SessionBusClient + Send>,
+}
 
-impl IdleMonitorProbe for SystemGnomeIdleMonitorProbe {
-    fn current_idletime_ms(&self) -> Option<u64> {
-        let output = ProcessCommand::new("gdbus")
-            .args([
-                "call",
-                "--session",
-                "--dest",
-                GNOME_IDLE_MONITOR_NAME,
-                "--object-path",
-                GNOME_IDLE_MONITOR_PATH,
-                "--method",
-                "org.gnome.Mutter.IdleMonitor.GetIdletime",
-            ])
-            .output()
-            .ok()?;
+impl SessionBusGnomeIdleMonitorProbe {
+    fn new() -> Result<Self, SessionBusError> {
+        Ok(Self {
+            bus: new_session_bus_client()?,
+        })
+    }
+}
 
-        if !output.status.success() {
-            return None;
-        }
-
-        parse_gnome_idletime_output(&String::from_utf8_lossy(&output.stdout))
+impl IdleMonitorProbe for SessionBusGnomeIdleMonitorProbe {
+    fn current_idletime_ms(&mut self) -> Option<u64> {
+        current_idle_monitor_idletime_ms(&mut self.bus).ok()
     }
 }
 
@@ -548,14 +539,13 @@ fn start_gnome_idle_monitor_poller(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_signal = Arc::clone(&stop);
     let handle = thread::spawn(move || {
-        let probe = SystemGnomeIdleMonitorProbe;
+        let mut probe = match SessionBusGnomeIdleMonitorProbe::new() {
+            Ok(probe) => probe,
+            Err(_) => return,
+        };
         while !stop_signal.load(Ordering::SeqCst) {
-            if let Some(idletime_ms) = probe.current_idletime_ms() {
-                if !latest_observation
-                    .publish(&sender, InactivityObservation::IdleTimeMs(idletime_ms))
-                {
-                    break;
-                }
+            if !poll_gnome_idle_monitor_once(&mut probe, &sender, &latest_observation) {
+                break;
             }
 
             if stop_signal.load(Ordering::SeqCst) {
@@ -574,6 +564,18 @@ fn stop_gnome_idle_monitor_poller(poller: &mut Option<GnomeIdleMonitorPoller>) {
         poller.stop.store(true, Ordering::SeqCst);
         let _ = poller.handle.join();
     }
+}
+
+fn poll_gnome_idle_monitor_once(
+    probe: &mut impl IdleMonitorProbe,
+    sender: &mpsc::Sender<RunnerMessage>,
+    latest_observation: &LatestInactivityObservation,
+) -> bool {
+    let Some(idletime_ms) = probe.current_idletime_ms() else {
+        return true;
+    };
+
+    latest_observation.publish(sender, InactivityObservation::IdleTimeMs(idletime_ms))
 }
 
 fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
@@ -604,15 +606,6 @@ fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
     }
 
     Ok(())
-}
-
-fn parse_gnome_idletime_output(output: &str) -> Option<u64> {
-    output
-        .trim()
-        .strip_prefix("(uint64 ")?
-        .strip_suffix(",)")?
-        .parse::<u64>()
-        .ok()
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -647,13 +640,18 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 mod tests {
     use super::{
         handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
-        parse_gnome_idletime_output, process_gnome_monitor_output, shell_quote,
-        LatestInactivityObservation, RunnerMessage, SessionActionExecutor, SessionEventDispatcher,
+        poll_gnome_idle_monitor_once, process_gnome_monitor_output, shell_quote,
+        LatestInactivityObservation, RunnerMessage, SessionActionExecutor,
+        SessionBusGnomeIdleMonitorProbe, SessionEventDispatcher,
     };
     use crate::session::inactivity::{
         InactivityEngine, InactivityObservation, InactivityThresholds,
     };
     use crate::session::SessionEvent;
+    use crate::session_bus::{
+        BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
+        SessionBusError,
+    };
     use crate::RunError;
     use std::io::Cursor;
     use std::path::Path;
@@ -684,6 +682,42 @@ mod tests {
                 return Err(RunError::Policy(message.clone()));
             }
             Ok(self.screen_on_output.clone())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeSessionBus {
+        method_replies: Vec<Result<BusReply, SessionBusError>>,
+        method_calls: Vec<(String, String, String, String)>,
+    }
+
+    impl SessionBusClient for FakeSessionBus {
+        fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+            let _ = name;
+            unreachable!("name probing is not used in runner poller tests")
+        }
+
+        fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            self.method_calls.push((
+                call.destination.to_string(),
+                call.path.to_string(),
+                call.interface.to_string(),
+                call.member.to_string(),
+            ));
+            self.method_replies.remove(0)
+        }
+
+        fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+            let _ = rule;
+            unreachable!("signal matches are not used in runner poller tests")
+        }
+
+        fn process(
+            &mut self,
+            timeout: std::time::Duration,
+        ) -> Result<Option<BusSignal>, SessionBusError> {
+            let _ = timeout;
+            unreachable!("message pumping is not used in runner poller tests")
         }
     }
 
@@ -826,12 +860,6 @@ unrelated\n";
     }
 
     #[test]
-    fn parses_gnome_idle_monitor_output() {
-        assert_eq!(parse_gnome_idletime_output("(uint64 777,)\n"), Some(777));
-        assert_eq!(parse_gnome_idletime_output("unexpected"), None);
-    }
-
-    #[test]
     fn zero_idle_timeout_falls_back_to_default() {
         assert_eq!(
             normalize_idle_timeout_secs(0),
@@ -883,6 +911,46 @@ unrelated\n";
             latest.take(),
             Some(InactivityObservation::IdleTimeMs(3_000))
         );
+    }
+
+    #[test]
+    fn gnome_idle_monitor_poller_publishes_idletime_from_session_bus() {
+        let (sender, receiver) = mpsc::channel();
+        let latest = LatestInactivityObservation::default();
+        let mut probe = SessionBusGnomeIdleMonitorProbe {
+            bus: Box::new(FakeSessionBus {
+                method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
+                ..FakeSessionBus::default()
+            }),
+        };
+
+        assert!(poll_gnome_idle_monitor_once(&mut probe, &sender, &latest));
+        assert!(matches!(
+            receiver.recv().expect("notification"),
+            RunnerMessage::InactivityObservationReady
+        ));
+        assert_eq!(
+            latest.take(),
+            Some(InactivityObservation::IdleTimeMs(1_500))
+        );
+    }
+
+    #[test]
+    fn gnome_idle_monitor_poller_ignores_bus_errors() {
+        let (sender, receiver) = mpsc::channel();
+        let latest = LatestInactivityObservation::default();
+        let mut probe = SessionBusGnomeIdleMonitorProbe {
+            bus: Box::new(FakeSessionBus {
+                method_replies: vec![Err(SessionBusError::Transport(
+                    "simulated bus failure".to_string(),
+                ))],
+                ..FakeSessionBus::default()
+            }),
+        };
+
+        assert!(poll_gnome_idle_monitor_once(&mut probe, &sender, &latest));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(latest.take(), None);
     }
 
     #[test]

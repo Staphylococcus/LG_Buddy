@@ -1,13 +1,18 @@
+use dbus::blocking::Connection as DbusConnection;
+use dbus::channel::MatchingReceiver;
+use dbus_crossroads::Crossroads;
 use serde_json::{json, Map, Value};
+use std::collections::VecDeque;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{self, Command as ProcessCommand};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 pub struct MockBscpylgtv {
@@ -473,6 +478,184 @@ impl MockGdbus {
         )
         .expect("write mock state");
     }
+}
+
+#[allow(dead_code)]
+pub struct MockSessionBusIdleMonitor {
+    _temp_dir: TestDir,
+    address: String,
+    daemon_pid: i32,
+    state: Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    stop: Arc<AtomicBool>,
+    service_thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+struct MockSessionBusIdleMonitorState {
+    default_idletime: u64,
+    idletime_plan: VecDeque<u64>,
+}
+
+#[allow(dead_code)]
+impl MockSessionBusIdleMonitor {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let (address, daemon_pid) = start_private_session_bus();
+        let state = Arc::new(Mutex::new(MockSessionBusIdleMonitorState {
+            default_idletime: 1500,
+            ..MockSessionBusIdleMonitorState::default()
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let service_thread = Some(spawn_mock_idle_monitor_service(
+            address.clone(),
+            Arc::clone(&state),
+            Arc::clone(&stop),
+            ready_tx,
+        ));
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock session-bus idle monitor should become ready");
+
+        Self {
+            _temp_dir: temp_dir,
+            address,
+            daemon_pid,
+            state,
+            stop,
+            service_thread,
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn set_idle_monitor_idletime(&self, value: u64) {
+        self.patch_state(|state| state.default_idletime = value);
+    }
+
+    pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
+        self.patch_state(|state| {
+            state.idletime_plan = values.iter().copied().collect();
+        });
+    }
+
+    pub fn queue_idle_monitor_idletime(&self, value: u64) {
+        self.patch_state(|state| {
+            state.idletime_plan.push_back(value);
+        });
+    }
+
+    fn patch_state<F>(&self, f: F)
+    where
+        F: FnOnce(&mut MockSessionBusIdleMonitorState),
+    {
+        let mut state = self
+            .state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        f(&mut state);
+    }
+}
+
+impl Drop for MockSessionBusIdleMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(service_thread) = self.service_thread.take() {
+            let _ = service_thread.join();
+        }
+
+        unsafe {
+            libc::kill(self.daemon_pid, libc::SIGTERM);
+        }
+    }
+}
+
+fn start_private_session_bus() -> (String, i32) {
+    let output = ProcessCommand::new(dbus_daemon_path())
+        .args([
+            "--session",
+            "--fork",
+            "--print-address=1",
+            "--print-pid=1",
+            "--nopidfile",
+        ])
+        .output()
+        .expect("spawn private dbus-daemon");
+    assert!(
+        output.status.success(),
+        "dbus-daemon failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("dbus-daemon stdout utf8");
+    let mut lines = stdout.lines();
+    let address = lines
+        .next()
+        .expect("dbus-daemon address line")
+        .trim()
+        .to_string();
+    let daemon_pid = lines
+        .next()
+        .expect("dbus-daemon pid line")
+        .trim()
+        .parse::<i32>()
+        .expect("dbus-daemon pid integer");
+    (address, daemon_pid)
+}
+
+fn spawn_mock_idle_monitor_service(
+    address: String,
+    state: Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    stop: Arc<AtomicBool>,
+    ready: mpsc::Sender<()>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let connection = DbusConnection::new_address(&address)
+            .expect("connect mock idle monitor service to private session bus");
+        connection
+            .request_name("org.gnome.Mutter.IdleMonitor", false, true, false)
+            .expect("request mock idle monitor bus name");
+
+        let mut crossroads = Crossroads::new();
+        let iface = crossroads.register("org.gnome.Mutter.IdleMonitor", move |builder| {
+            let state = Arc::clone(&state);
+            builder.method("GetIdletime", (), ("idletime",), move |_, _, ()| {
+                let mut state = state
+                    .lock()
+                    .expect("mock session-bus idle monitor state lock");
+                let value = state
+                    .idletime_plan
+                    .pop_front()
+                    .unwrap_or(state.default_idletime);
+                Ok((value,))
+            });
+        });
+        crossroads.insert("/org/gnome/Mutter/IdleMonitor/Core", &[iface], ());
+
+        let shared_crossroads = Arc::new(Mutex::new(crossroads));
+        let crossroads_receiver = Arc::clone(&shared_crossroads);
+        connection.start_receive(
+            dbus::message::MatchRule::new_method_call(),
+            Box::new(move |message, conn| {
+                crossroads_receiver
+                    .lock()
+                    .expect("mock idle monitor crossroads lock")
+                    .handle_message(message, conn)
+                    .expect("handle mock idle monitor message");
+                true
+            }),
+        );
+
+        let _ = ready.send(());
+        while !stop.load(Ordering::SeqCst) {
+            let _ = connection.process(Duration::from_millis(50));
+        }
+    })
 }
 
 #[allow(dead_code)]
@@ -1058,6 +1241,18 @@ fn python3_path() -> PathBuf {
         .clone()
 }
 
+fn dbus_daemon_path() -> PathBuf {
+    static DBUS_DAEMON_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+    DBUS_DAEMON_PATH
+        .get_or_init(|| {
+            find_command_in_path("dbus-daemon")
+                .or_else(find_dbus_daemon_in_standard_locations)
+                .unwrap_or_else(|| PathBuf::from("dbus-daemon"))
+        })
+        .clone()
+}
+
 fn find_command_in_path(command: &str) -> Option<PathBuf> {
     if command.contains(std::path::MAIN_SEPARATOR) {
         let path = PathBuf::from(command);
@@ -1079,6 +1274,17 @@ fn find_python3_in_standard_locations() -> Option<PathBuf> {
         "/usr/bin/python",
         "/usr/local/bin/python",
         "/bin/python",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|candidate| candidate.is_file())
+}
+
+fn find_dbus_daemon_in_standard_locations() -> Option<PathBuf> {
+    [
+        "/usr/bin/dbus-daemon",
+        "/usr/local/bin/dbus-daemon",
+        "/bin/dbus-daemon",
     ]
     .iter()
     .map(PathBuf::from)

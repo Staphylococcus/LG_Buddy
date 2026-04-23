@@ -1,6 +1,6 @@
 use crate::support::{
-    ExecutableScript, MockBscpylgtv, MockGdbus, MockNmOnline, MockSwayidle, RuntimeStateLayout,
-    TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockGdbus, MockNmOnline, MockSessionBusIdleMonitor,
+    MockSwayidle, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
 use cucumber::World;
 use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
@@ -15,6 +15,7 @@ pub struct LgBuddyWorld {
     runtime: Option<RuntimeStateLayout>,
     tv: Option<MockBscpylgtv>,
     gdbus: Option<MockGdbus>,
+    session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
@@ -35,6 +36,10 @@ impl fmt::Debug for LgBuddyWorld {
             .field("runtime", &self.runtime.is_some())
             .field("tv", &self.tv.is_some())
             .field("gdbus", &self.gdbus.is_some())
+            .field(
+                "session_bus_idle_monitor",
+                &self.session_bus_idle_monitor.is_some(),
+            )
             .field("nm_online", &self.nm_online.is_some())
             .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
@@ -236,9 +241,12 @@ impl LgBuddyWorld {
     }
 
     pub fn gnome_idle_monitor_reports_idletimes(&mut self, values: &[u64]) {
-        let gdbus = self.ensure_mock_gdbus();
-        gdbus.set_idle_monitor_available(true);
-        gdbus.set_idle_monitor_idletime_plan(values);
+        self.ensure_mock_gdbus().set_idle_monitor_available(true);
+        let idle_monitor = self.ensure_mock_session_bus_idle_monitor();
+        if let Some(last) = values.last().copied() {
+            idle_monitor.set_idle_monitor_idletime(last);
+        }
+        idle_monitor.set_idle_monitor_idletime_plan(values);
     }
 
     pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {
@@ -330,6 +338,9 @@ impl LgBuddyWorld {
 
     pub fn run_named_command(&mut self, command_line: &str) {
         let args = command_line.split_whitespace().collect::<Vec<_>>();
+        if args == ["monitor"] && self.gdbus.is_some() {
+            let _ = self.ensure_mock_session_bus_idle_monitor();
+        }
         let output = ProcessCommand::new(env!("CARGO_BIN_EXE_lg-buddy"))
             .args(args)
             .output()
@@ -374,5 +385,21 @@ impl LgBuddyWorld {
         }
 
         self.gdbus.as_mut().expect("mock gdbus configured")
+    }
+
+    fn ensure_mock_session_bus_idle_monitor(&mut self) -> &mut MockSessionBusIdleMonitor {
+        if self.session_bus_idle_monitor.is_none() {
+            let session_bus_idle_monitor =
+                MockSessionBusIdleMonitor::new("cucumber-session-bus-idle-monitor");
+            self.ensure_env().set(
+                "DBUS_SESSION_BUS_ADDRESS",
+                session_bus_idle_monitor.address(),
+            );
+            self.session_bus_idle_monitor = Some(session_bus_idle_monitor);
+        }
+
+        self.session_bus_idle_monitor
+            .as_mut()
+            .expect("mock session-bus idle monitor configured")
     }
 }

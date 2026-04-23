@@ -1,8 +1,12 @@
+use dbus::arg::messageitem::MessageItem as DbusMessageItem;
+use dbus::blocking::{BlockingSender as DbusBlockingSender, Connection as DbusConnection};
+use dbus::Message as DbusMessage;
 use std::fmt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 const SESSION_BUS_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DBUS_METHOD_CALL_TIMEOUT: Duration = Duration::from_secs(1);
 const DBUS_SERVICE_NAME: &str = "org.freedesktop.DBus";
 const DBUS_OBJECT_PATH: &str = "/org/freedesktop/DBus";
 
@@ -238,6 +242,100 @@ pub trait SessionBusClient {
     }
 }
 
+impl<T: SessionBusClient + ?Sized> SessionBusClient for Box<T> {
+    fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+        (**self).name_has_owner(name)
+    }
+
+    fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+        (**self).call_method(call)
+    }
+
+    fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+        (**self).add_signal_match(rule)
+    }
+
+    fn process(&mut self, timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+        (**self).process(timeout)
+    }
+
+    fn wait_for_name(&mut self, name: &str, timeout: Duration) -> Result<(), SessionBusError> {
+        (**self).wait_for_name(name, timeout)
+    }
+}
+
+pub fn new_session_bus_client() -> Result<Box<dyn SessionBusClient + Send>, SessionBusError> {
+    Ok(Box::new(DbusSessionBusClient::new_session()?))
+}
+
+pub struct DbusSessionBusClient {
+    connection: DbusConnection,
+    method_call_timeout: Duration,
+}
+
+impl DbusSessionBusClient {
+    pub fn new_session() -> Result<Self, SessionBusError> {
+        Ok(Self {
+            connection: DbusConnection::new_session()
+                .map_err(|err| SessionBusError::Transport(err.to_string()))?,
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+        })
+    }
+}
+
+impl SessionBusClient for DbusSessionBusClient {
+    fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+        self.call_method(
+            BusMethodCall::new(
+                DBUS_SERVICE_NAME,
+                DBUS_OBJECT_PATH,
+                "org.freedesktop.DBus",
+                "NameHasOwner",
+            )
+            .with_body(vec![BusValue::String(name.to_string())]),
+        )?
+        .single_bool()
+    }
+
+    fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+        let mut message =
+            DbusMessage::new_method_call(call.destination, call.path, call.interface, call.member)
+                .map_err(SessionBusError::Transport)?;
+        for value in call.body {
+            message = append_dbus_message_value(message, value);
+        }
+
+        let reply = DbusBlockingSender::send_with_reply_and_block(
+            &self.connection,
+            message,
+            self.method_call_timeout,
+        )
+        .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+
+        Ok(BusReply::new(
+            reply
+                .get_items()
+                .into_iter()
+                .map(bus_value_from_dbus_message_item)
+                .collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+        let _ = rule;
+        Err(SessionBusError::Transport(
+            "DbusSessionBusClient does not implement signal matches yet".to_string(),
+        ))
+    }
+
+    fn process(&mut self, timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+        self.connection
+            .process(timeout)
+            .map(|_| None)
+            .map_err(|err| SessionBusError::Transport(err.to_string()))
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct GdbusSessionBusClient;
 
@@ -291,10 +389,38 @@ impl SessionBusClient for GdbusSessionBusClient {
     }
 
     fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
-        let _ = call;
-        Err(SessionBusError::Transport(
-            "GdbusSessionBusClient does not implement generic method calls".to_string(),
-        ))
+        let mut command = Command::new("gdbus");
+        command.args([
+            "call",
+            "--session",
+            "--dest",
+            call.destination,
+            "--object-path",
+            call.path,
+            "--method",
+            &format!("{}.{}", call.interface, call.member),
+        ]);
+        for argument in call.body {
+            command.arg(render_gdbus_call_argument(argument));
+        }
+
+        let output = command
+            .output()
+            .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+
+        if !output.status.success() {
+            return Err(SessionBusError::Transport(format!(
+                "gdbus call {}.{} failed with status {}",
+                call.interface, call.member, output.status
+            )));
+        }
+
+        parse_gdbus_call_reply_output(&String::from_utf8_lossy(&output.stdout)).ok_or(
+            SessionBusError::UnexpectedReplyShape {
+                expected: "single bool/u64/string",
+                actual: "unparsed gdbus reply",
+            },
+        )
     }
 
     fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
@@ -322,11 +448,86 @@ fn parse_gdbus_name_has_owner_output(output: &str) -> Option<bool> {
     }
 }
 
+fn append_dbus_message_value(message: DbusMessage, value: BusValue) -> DbusMessage {
+    match value {
+        BusValue::Bool(value) => message.append1(value),
+        BusValue::U64(value) => message.append1(value),
+        BusValue::String(value) => message.append1(value),
+    }
+}
+
+fn bus_value_from_dbus_message_item(item: DbusMessageItem) -> Result<BusValue, SessionBusError> {
+    match item {
+        DbusMessageItem::Bool(value) => Ok(BusValue::Bool(value)),
+        DbusMessageItem::UInt64(value) => Ok(BusValue::U64(value)),
+        DbusMessageItem::Str(value) => Ok(BusValue::String(value)),
+        other => Err(SessionBusError::UnexpectedReplyShape {
+            expected: "bool/u64/string",
+            actual: dbus_message_item_kind(&other),
+        }),
+    }
+}
+
+fn dbus_message_item_kind(item: &DbusMessageItem) -> &'static str {
+    match item {
+        DbusMessageItem::Bool(_) => "bool",
+        DbusMessageItem::UInt64(_) => "u64",
+        DbusMessageItem::Str(_) => "string",
+        DbusMessageItem::Array(_) => "array",
+        DbusMessageItem::Struct(_) => "struct",
+        DbusMessageItem::Variant(_) => "variant",
+        DbusMessageItem::Dict(_) => "dict",
+        DbusMessageItem::ObjectPath(_) => "object path",
+        DbusMessageItem::Signature(_) => "signature",
+        DbusMessageItem::Byte(_) => "byte",
+        DbusMessageItem::Int16(_) => "i16",
+        DbusMessageItem::Int32(_) => "i32",
+        DbusMessageItem::Int64(_) => "i64",
+        DbusMessageItem::UInt16(_) => "u16",
+        DbusMessageItem::UInt32(_) => "u32",
+        DbusMessageItem::Double(_) => "f64",
+        DbusMessageItem::UnixFd(_) => "fd",
+    }
+}
+
+fn render_gdbus_call_argument(value: BusValue) -> String {
+    match value {
+        BusValue::Bool(value) => value.to_string(),
+        BusValue::U64(value) => value.to_string(),
+        BusValue::String(value) => value,
+    }
+}
+
+fn parse_gdbus_call_reply_output(output: &str) -> Option<BusReply> {
+    let trimmed = output.trim();
+    if trimmed == "(true,)" {
+        return Some(BusReply::new(vec![BusValue::Bool(true)]));
+    }
+
+    if trimmed == "(false,)" {
+        return Some(BusReply::new(vec![BusValue::Bool(false)]));
+    }
+
+    if let Some(value) = trimmed.strip_prefix("(uint64 ") {
+        if let Some(value) = value
+            .strip_suffix(",)")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            return Some(BusReply::new(vec![BusValue::U64(value)]));
+        }
+    }
+
+    trimmed
+        .strip_prefix("('")
+        .and_then(|value| value.strip_suffix("',)"))
+        .map(|value| BusReply::new(vec![BusValue::String(value.to_string())]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_gdbus_name_has_owner_output, BusMethodCall, BusReply, BusSignal, BusSignalMatch,
-        BusValue, SessionBusClient, SessionBusError,
+        parse_gdbus_call_reply_output, parse_gdbus_name_has_owner_output, BusMethodCall, BusReply,
+        BusSignal, BusSignalMatch, BusValue, SessionBusClient, SessionBusError,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
@@ -494,6 +695,23 @@ mod tests {
                 actual: "u64",
             })
         );
+    }
+
+    #[test]
+    fn parse_gdbus_call_reply_handles_bool_u64_and_string_values() {
+        assert_eq!(
+            parse_gdbus_call_reply_output("(true,)\n"),
+            Some(BusReply::new(vec![BusValue::Bool(true)]))
+        );
+        assert_eq!(
+            parse_gdbus_call_reply_output("(uint64 777,)\n"),
+            Some(BusReply::new(vec![BusValue::U64(777)]))
+        );
+        assert_eq!(
+            parse_gdbus_call_reply_output("('hello',)\n"),
+            Some(BusReply::new(vec![BusValue::String("hello".to_string())]))
+        );
+        assert_eq!(parse_gdbus_call_reply_output("unexpected"), None);
     }
 
     #[test]

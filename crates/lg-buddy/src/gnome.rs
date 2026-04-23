@@ -4,10 +4,14 @@ use crate::session::{
     IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
     SessionEvent,
 };
-use crate::session_bus::{GdbusSessionBusClient, SessionBusClient};
+use crate::session_bus::{BusMethodCall, GdbusSessionBusClient, SessionBusClient, SessionBusError};
 
 pub const GNOME_SCREEN_SAVER_NAME: &str = "org.gnome.ScreenSaver";
+pub const GNOME_SCREEN_SAVER_PATH: &str = "/org/gnome/ScreenSaver";
+pub const GNOME_SCREEN_SAVER_INTERFACE: &str = "org.gnome.ScreenSaver";
 pub const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
+pub const GNOME_IDLE_MONITOR_PATH: &str = "/org/gnome/Mutter/IdleMonitor/Core";
+pub const GNOME_IDLE_MONITOR_INTERFACE: &str = "org.gnome.Mutter.IdleMonitor";
 pub const GNOME_REQUIRED_SERVICES_REASON: &str =
     "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required";
 
@@ -120,6 +124,18 @@ pub fn map_monitor_line(line: &str) -> Option<SessionEvent> {
     }
 }
 
+pub fn current_idle_monitor_idletime_ms(
+    bus: &mut impl SessionBusClient,
+) -> Result<u64, SessionBusError> {
+    bus.call_method(BusMethodCall::new(
+        GNOME_IDLE_MONITOR_NAME,
+        GNOME_IDLE_MONITOR_PATH,
+        GNOME_IDLE_MONITOR_INTERFACE,
+        "GetIdletime",
+    ))?
+    .single_u64()
+}
+
 #[cfg(test)]
 fn gnome_backend_status_from_session_bus(
     bus: &mut impl SessionBusClient,
@@ -135,8 +151,8 @@ fn gnome_backend_status_from_session_bus(
 #[cfg(test)]
 mod tests {
     use super::{
-        gnome_backend_status_from_session_bus, map_monitor_line, GnomeBackend, GnomeBackendStatus,
-        GnomeProbe, GNOME_REQUIRED_SERVICES_REASON,
+        current_idle_monitor_idletime_ms, gnome_backend_status_from_session_bus, map_monitor_line,
+        GnomeBackend, GnomeBackendStatus, GnomeProbe, GNOME_REQUIRED_SERVICES_REASON,
     };
     use crate::config::ScreenBackend;
     use crate::session::{
@@ -159,6 +175,8 @@ mod tests {
     struct FakeSessionBus {
         screen_saver_available: bool,
         idle_monitor_available: bool,
+        idletime_ms: Option<u64>,
+        method_calls: Vec<(String, String, String, String)>,
         failed_names: Vec<String>,
     }
 
@@ -178,8 +196,32 @@ mod tests {
         }
 
         fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
-            let _ = call;
-            unreachable!("not used in GNOME probing tests")
+            self.method_calls.push((
+                call.destination.to_string(),
+                call.path.to_string(),
+                call.interface.to_string(),
+                call.member.to_string(),
+            ));
+            match (
+                call.destination,
+                call.path,
+                call.interface,
+                call.member,
+                self.idletime_ms,
+            ) {
+                (
+                    super::GNOME_IDLE_MONITOR_NAME,
+                    super::GNOME_IDLE_MONITOR_PATH,
+                    super::GNOME_IDLE_MONITOR_INTERFACE,
+                    "GetIdletime",
+                    Some(value),
+                ) => Ok(BusReply::new(vec![crate::session_bus::BusValue::U64(
+                    value,
+                )])),
+                _ => Err(SessionBusError::Transport(
+                    "no queued GNOME method reply".to_string(),
+                )),
+            }
         }
 
         fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
@@ -322,6 +364,7 @@ mod tests {
             screen_saver_available: true,
             idle_monitor_available: true,
             failed_names: vec![super::GNOME_IDLE_MONITOR_NAME.to_string()],
+            ..FakeSessionBus::default()
         };
 
         assert_eq!(
@@ -331,6 +374,25 @@ mod tests {
                 screen_saver_available: true,
                 idle_monitor_available: false,
             }
+        );
+    }
+
+    #[test]
+    fn current_idle_monitor_idletime_uses_gnome_idle_monitor_endpoint() {
+        let mut bus = FakeSessionBus {
+            idletime_ms: Some(1_500),
+            ..FakeSessionBus::default()
+        };
+
+        assert_eq!(current_idle_monitor_idletime_ms(&mut bus), Ok(1_500));
+        assert_eq!(
+            bus.method_calls,
+            vec![(
+                super::GNOME_IDLE_MONITOR_NAME.to_string(),
+                super::GNOME_IDLE_MONITOR_PATH.to_string(),
+                super::GNOME_IDLE_MONITOR_INTERFACE.to_string(),
+                "GetIdletime".to_string(),
+            )]
         );
     }
 }
