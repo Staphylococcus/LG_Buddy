@@ -1,14 +1,14 @@
-use crate::backend::{BackendProbe, SystemBackendProbe};
 use crate::config::ScreenBackend;
 use crate::session::{
     IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
     SessionEvent,
 };
 use crate::session_bus::{
-    get_name_owner, parse_name_owner_changed_signal, BusMethodCall, BusSignal, BusValue,
-    GdbusSessionBusClient, SessionBusClient, SessionBusError,
+    get_name_owner, new_session_bus_client, parse_name_owner_changed_signal, BusMethodCall,
+    BusSignal, BusValue, SessionBusClient, SessionBusError,
 };
 
+pub const GNOME_SHELL_NAME: &str = "org.gnome.Shell";
 pub const GNOME_SCREEN_SAVER_NAME: &str = "org.gnome.ScreenSaver";
 pub const GNOME_SCREEN_SAVER_PATH: &str = "/org/gnome/ScreenSaver";
 pub const GNOME_SCREEN_SAVER_INTERFACE: &str = "org.gnome.ScreenSaver";
@@ -42,17 +42,26 @@ pub struct SystemGnomeProbe;
 
 impl GnomeProbe for SystemGnomeProbe {
     fn gnome_shell_available(&self) -> bool {
-        let probe = SystemBackendProbe;
-        probe.has_command("gdbus") && probe.gnome_shell_available()
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
+        bus.name_has_owner(GNOME_SHELL_NAME).unwrap_or(false)
     }
 
     fn screen_saver_available(&self) -> bool {
-        let mut bus = GdbusSessionBusClient;
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
         bus.name_has_owner(GNOME_SCREEN_SAVER_NAME).unwrap_or(false)
     }
 
     fn idle_monitor_available(&self) -> bool {
-        let mut bus = GdbusSessionBusClient;
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
         bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
     }
 }

@@ -264,20 +264,15 @@ echo ""
 echo "Checking screen idle/resume backend for configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)..."
 case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
     gnome)
-        if command -v gdbus &>/dev/null; then
-            echo "  [OK]      gdbus command (required for GNOME backend)"
-            SCREEN_MONITOR_AVAILABLE=1
-            SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=gnome "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
-            if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "gnome" ]; then
-                echo "  [OK]      current session satisfies the GNOME backend contract"
-            else
-                SCREEN_MONITOR_RUNTIME_BACKEND=""
-                echo "  [INFO]    current session did not verify the full GNOME backend contract"
-                echo "            GNOME requires GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
-                echo "            The user service will start automatically in a compatible GNOME session."
-            fi
+        SCREEN_MONITOR_AVAILABLE=1
+        SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=gnome "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
+        if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "gnome" ]; then
+            echo "  [OK]      current session satisfies the GNOME backend contract"
         else
-            echo "  [MISSING] gdbus command (required for GNOME backend)"
+            SCREEN_MONITOR_RUNTIME_BACKEND=""
+            echo "  [INFO]    current session did not verify the full GNOME backend contract"
+            echo "            GNOME requires GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
+            echo "            The user service will start automatically in a compatible GNOME session."
         fi
         ;;
     swayidle)
@@ -290,13 +285,6 @@ case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
         fi
         ;;
     *)
-        if command -v gdbus &>/dev/null; then
-            echo "  [OK]      gdbus (GNOME backend)"
-            SCREEN_MONITOR_AVAILABLE=1
-        else
-            echo "  [OPTIONAL] gdbus (required for GNOME backend)"
-        fi
-
         if command -v swayidle &>/dev/null; then
             echo "  [OK]      swayidle (wlroots/COSMIC backend)"
             SCREEN_MONITOR_AVAILABLE=1
@@ -306,6 +294,7 @@ case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
 
         SCREEN_MONITOR_RUNTIME_BACKEND="$("$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
         if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
+            SCREEN_MONITOR_AVAILABLE=1
             echo "  [OK]      current session backend: $SCREEN_MONITOR_RUNTIME_BACKEND"
         else
             echo "  [INFO]    no supported backend detected in the current session"
@@ -422,14 +411,14 @@ else
     echo "No supported screen idle backend detected for the configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)."
     case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
         gnome)
-            echo "Install gdbus and use a GNOME session with GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
+            echo "Use a GNOME session with GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
             echo "Then enable LG_Buddy_screen.service later."
             ;;
         swayidle)
             echo "Install swayidle, then enable LG_Buddy_screen.service later."
             ;;
         *)
-            echo "Install gdbus for GNOME or swayidle for wlroots/COSMIC, then enable LG_Buddy_screen.service later."
+            echo "Use a compatible GNOME session or install swayidle for wlroots/COSMIC, then enable LG_Buddy_screen.service later."
             ;;
     esac
 fi

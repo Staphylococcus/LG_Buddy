@@ -493,6 +493,9 @@ pub struct MockSessionBusIdleMonitor {
 
 #[derive(Debug, Default)]
 struct MockSessionBusIdleMonitorState {
+    shell_available: bool,
+    screen_saver_available: bool,
+    idle_monitor_available: bool,
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
     screen_saver_signals: VecDeque<MockScreenSaverSignal>,
@@ -539,6 +542,23 @@ impl MockSessionBusIdleMonitor {
 
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    pub fn set_shell_available(&self, value: bool) {
+        self.patch_state(|state| state.shell_available = value);
+    }
+
+    pub fn set_screen_saver_available(&self, value: bool) {
+        self.patch_state(|state| state.screen_saver_available = value);
+    }
+
+    pub fn set_idle_monitor_available(&self, value: bool) {
+        self.patch_state(|state| {
+            state.idle_monitor_available = value;
+            if !value {
+                state.client_ready = false;
+            }
+        });
     }
 
     pub fn set_idle_monitor_idletime(&self, value: u64) {
@@ -656,12 +676,6 @@ fn spawn_mock_idle_monitor_service(
     thread::spawn(move || {
         let connection = DbusConnection::new_address(&address)
             .expect("connect mock idle monitor service to private session bus");
-        connection
-            .request_name("org.gnome.Mutter.IdleMonitor", false, true, false)
-            .expect("request mock idle monitor bus name");
-        connection
-            .request_name("org.gnome.ScreenSaver", false, true, false)
-            .expect("request mock screen saver bus name");
 
         let mut crossroads = Crossroads::new();
         let idle_monitor_state = Arc::clone(&state);
@@ -696,11 +710,74 @@ fn spawn_mock_idle_monitor_service(
         );
 
         let _ = ready.send(());
+        let mut owned_names = MockOwnedBusNames::default();
         while !stop.load(Ordering::SeqCst) {
             let _ = connection.process(Duration::from_millis(50));
+            sync_mock_bus_names(&connection, &state, &mut owned_names);
             emit_queued_mock_screen_saver_signal(&connection, &state);
         }
     })
+}
+
+#[derive(Debug, Default)]
+struct MockOwnedBusNames {
+    shell: bool,
+    screen_saver: bool,
+    idle_monitor: bool,
+}
+
+fn sync_mock_bus_names(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+    owned_names: &mut MockOwnedBusNames,
+) {
+    let (want_shell, want_screen_saver, want_idle_monitor) = {
+        let state = state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        (
+            state.shell_available,
+            state.screen_saver_available,
+            state.idle_monitor_available,
+        )
+    };
+
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.Shell",
+        want_shell,
+        &mut owned_names.shell,
+    );
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.ScreenSaver",
+        want_screen_saver,
+        &mut owned_names.screen_saver,
+    );
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.Mutter.IdleMonitor",
+        want_idle_monitor,
+        &mut owned_names.idle_monitor,
+    );
+}
+
+fn sync_mock_bus_name(connection: &DbusConnection, name: &str, wanted: bool, owned: &mut bool) {
+    if wanted == *owned {
+        return;
+    }
+
+    if wanted {
+        connection
+            .request_name(name, false, true, false)
+            .unwrap_or_else(|err| panic!("request mock bus name `{name}`: {err}"));
+    } else {
+        connection
+            .release_name(name)
+            .unwrap_or_else(|err| panic!("release mock bus name `{name}`: {err}"));
+    }
+
+    *owned = wanted;
 }
 
 fn emit_queued_mock_screen_saver_signal(
@@ -711,7 +788,7 @@ fn emit_queued_mock_screen_saver_signal(
         let mut state = state
             .lock()
             .expect("mock session-bus idle monitor state lock");
-        if !state.client_ready {
+        if !state.client_ready || !state.screen_saver_available {
             return;
         }
         state.screen_saver_signals.pop_front()

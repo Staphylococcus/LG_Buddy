@@ -89,7 +89,6 @@ Mock the API surface we consume, not the whole system behind it.
 Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
-- the `gdbus` mock should reproduce only the remaining subprocess surfaces LG Buddy still consumes
 - GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
 
 If a contract shape is unclear, probe the real dependency and update the mock.
@@ -166,7 +165,6 @@ Primary concern:
 Examples:
 
 - `bscpylgtvcommand`
-- `gdbus`
 - later, possibly `systemctl` and `swayidle`
 
 ### Desktop backend work

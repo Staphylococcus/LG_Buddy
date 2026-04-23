@@ -12,7 +12,6 @@ This document covers building, local installation, validation, release tooling, 
 
 Backend-specific tools used in development and local testing:
 
-- `gdbus` for GNOME shell wait and availability probes
 - `swayidle` for the `swayidle` monitor backend
 
 For GNOME end-to-end work, the running session also needs the full GNOME contract:

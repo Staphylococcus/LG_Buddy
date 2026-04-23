@@ -7,10 +7,10 @@ use std::time::Duration;
 use crate::config::{load_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend};
 use crate::gnome::{
     GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
+    GNOME_SHELL_NAME,
 };
-use crate::session_bus::{GdbusSessionBusClient, SessionBusClient};
+use crate::session_bus::new_session_bus_client;
 
-const GNOME_SHELL_NAME: &str = "org.gnome.Shell";
 const GNOME_SHELL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl fmt::Display for BackendDetectionError {
             Self::NoSupportedBackend => {
                 write!(
                     f,
-                    "no supported backend detected; install swayidle or run under GNOME with gdbus"
+                    "no supported backend detected; install swayidle or run under a compatible GNOME session"
                 )
             }
             Self::UnavailableBackend { backend, reason } => {
@@ -83,7 +83,10 @@ impl BackendProbe for SystemBackendProbe {
     }
 
     fn gnome_shell_available(&self) -> bool {
-        let mut bus = GdbusSessionBusClient;
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
         if bus.name_has_owner(GNOME_SHELL_NAME).unwrap_or(false) {
             return true;
         }
@@ -93,12 +96,18 @@ impl BackendProbe for SystemBackendProbe {
     }
 
     fn gnome_screen_saver_available(&self) -> bool {
-        let mut bus = GdbusSessionBusClient;
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
         bus.name_has_owner(GNOME_SCREEN_SAVER_NAME).unwrap_or(false)
     }
 
     fn gnome_idle_monitor_available(&self) -> bool {
-        let mut bus = GdbusSessionBusClient;
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
         bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
     }
 }
@@ -138,7 +147,7 @@ pub fn detect_backend_with_probe(
 ) -> Result<ScreenBackend, BackendDetectionError> {
     match configured {
         ScreenBackend::Auto => {
-            if probe.has_command("gdbus") && probe.gnome_shell_available() {
+            if probe.gnome_shell_available() {
                 if probe.gnome_screen_saver_available() && probe.gnome_idle_monitor_available() {
                     return Ok(ScreenBackend::Gnome);
                 }
@@ -160,13 +169,6 @@ pub fn detect_backend_with_probe(
             Err(BackendDetectionError::NoSupportedBackend)
         }
         ScreenBackend::Gnome => {
-            if !probe.has_command("gdbus") {
-                return Err(BackendDetectionError::MissingRequiredCommand {
-                    backend: ScreenBackend::Gnome,
-                    command: "gdbus",
-                });
-            }
-
             if probe.gnome_shell_available()
                 && probe.gnome_screen_saver_available()
                 && probe.gnome_idle_monitor_available()
@@ -214,7 +216,6 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     struct FakeProbe {
-        has_gdbus: bool,
         gnome_shell_available: bool,
         gnome_screen_saver_available: bool,
         gnome_idle_monitor_available: bool,
@@ -224,7 +225,6 @@ mod tests {
     impl BackendProbe for FakeProbe {
         fn has_command(&self, command: &str) -> bool {
             match command {
-                "gdbus" => self.has_gdbus,
                 "swayidle" => self.has_swayidle,
                 _ => false,
             }
@@ -281,7 +281,6 @@ mod tests {
     #[test]
     fn auto_prefers_gnome_when_available() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: true,
@@ -297,7 +296,6 @@ mod tests {
     #[test]
     fn auto_falls_back_to_swayidle() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: false,
             gnome_screen_saver_available: false,
             gnome_idle_monitor_available: false,
@@ -313,7 +311,6 @@ mod tests {
     #[test]
     fn auto_errors_when_no_supported_backend_is_available() {
         let probe = FakeProbe {
-            has_gdbus: false,
             gnome_shell_available: false,
             gnome_screen_saver_available: false,
             gnome_idle_monitor_available: false,
@@ -327,9 +324,8 @@ mod tests {
     }
 
     #[test]
-    fn forced_gnome_requires_gdbus() {
+    fn forced_gnome_requires_full_service_surface() {
         let probe = FakeProbe {
-            has_gdbus: false,
             gnome_shell_available: false,
             gnome_screen_saver_available: false,
             gnome_idle_monitor_available: false,
@@ -337,13 +333,14 @@ mod tests {
         };
 
         let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome)
-            .expect_err("forced gnome without gdbus should fail");
+            .expect_err("forced gnome without a full GNOME session should fail");
 
         assert_eq!(
             err,
-            BackendDetectionError::MissingRequiredCommand {
+            BackendDetectionError::UnavailableBackend {
                 backend: ScreenBackend::Gnome,
-                command: "gdbus",
+                reason:
+                    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
             }
         );
     }
@@ -351,7 +348,6 @@ mod tests {
     #[test]
     fn auto_reports_gnome_unavailable_when_idle_monitor_is_missing_and_no_fallback_exists() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
@@ -374,7 +370,6 @@ mod tests {
     #[test]
     fn auto_falls_back_to_swayidle_when_gnome_idle_monitor_is_missing() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
@@ -388,9 +383,8 @@ mod tests {
     }
 
     #[test]
-    fn forced_gnome_requires_full_service_surface() {
+    fn forced_gnome_requires_idle_monitor() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
@@ -413,7 +407,6 @@ mod tests {
     #[test]
     fn forced_swayidle_requires_command() {
         let probe = FakeProbe {
-            has_gdbus: true,
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: true,

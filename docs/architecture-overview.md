@@ -48,7 +48,6 @@ the TV transport boundary.
 flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
-        GDBUS["gdbus<br/>wait / call"]
         SWAY["swayidle<br/>idle hooks"]
     end
 
@@ -89,8 +88,6 @@ flowchart LR
     BACKEND --> SADAPTER
 
     GNOME --> BUS
-    GNOME --> GDBUS
-    GDBUS --> GADAPTER
     BUS --> GADAPTER
     GADAPTER -->|"SessionEvent"| SESSIONMODEL
 

@@ -25,34 +25,32 @@ Install prerequisites:
 
 Backend-specific:
 
-- `gdbus` for GNOME startup/probing checks
 - `swayidle` for the `swayidle` backend
 
-The GNOME backend also requires a compatible GNOME session with:
+The GNOME backend requires a compatible GNOME session with:
 
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
 
-At runtime, GNOME monitoring now uses a persistent in-process session-bus client
-for ScreenSaver signals and Mutter idletime polling. `gdbus` is still used for
-the remaining shell wait and name-owner probe paths.
+At runtime, GNOME support now uses a persistent in-process session-bus client
+for shell detection, ScreenSaver signals, and Mutter idletime polling.
 
 Typical package installs:
 
 **Debian/Ubuntu/Pop!_OS**
 ```bash
-sudo apt install python3-venv python3-pip zenity libglib2.0-bin
+sudo apt install python3-venv python3-pip zenity
 ```
 
 **Fedora**
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity glib2
+sudo dnf install python3 python3-pip python3-virtualenv zenity
 ```
 
 **Arch**
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity glib2
+sudo pacman -S python python-pip python-virtualenv zenity
 ```
 
 For source builds, also install a C toolchain:

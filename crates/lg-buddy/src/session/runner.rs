@@ -18,7 +18,7 @@ use crate::config::{
 use crate::gnome::{
     current_idle_monitor_idletime_ms, map_screen_saver_signal, resolve_screen_saver_owner,
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
-    GNOME_SCREEN_SAVER_PATH,
+    GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
 };
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
@@ -310,24 +310,18 @@ fn run_swayidle_monitor<W: Write>(writer: &mut W) -> Result<(), SessionRunnerErr
 }
 
 fn wait_for_gnome_shell() -> Result<(), SessionRunnerError> {
-    let status = ProcessCommand::new("gdbus")
-        .args([
-            "wait",
-            "--session",
-            "--timeout",
-            &GNOME_WAIT_TIMEOUT_SECS.to_string(),
-            "org.gnome.Shell",
-        ])
-        .status()?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(SessionRunnerError::Failed {
-            backend: ScreenBackend::Gnome,
-            message: "timed out waiting for GNOME Shell on the session bus".to_string(),
-        })
-    }
+    let mut bus = new_session_bus_client().map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Gnome,
+        message: format!("failed to open GNOME session bus client: {err}"),
+    })?;
+    bus.wait_for_name(
+        GNOME_SHELL_NAME,
+        Duration::from_secs(GNOME_WAIT_TIMEOUT_SECS),
+    )
+    .map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Gnome,
+        message: format!("failed waiting for GNOME Shell on the session bus: {err}"),
+    })
 }
 
 fn resolve_idle_timeout_secs() -> u64 {
