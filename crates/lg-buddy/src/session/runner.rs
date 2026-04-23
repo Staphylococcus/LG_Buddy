@@ -355,8 +355,8 @@ fn resolve_gnome_monitor_test_timeout() -> Option<Duration> {
     std::env::var(GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV)
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| *value > 0.0)
-        .map(Duration::from_secs_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value).ok())
 }
 
 fn spawn_gnome_monitor_thread(
@@ -640,7 +640,13 @@ mod tests {
     };
     use crate::RunError;
     use std::path::Path;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[derive(Debug, Default)]
     struct FakeActionExecutor {
@@ -825,6 +831,33 @@ mod tests {
             crate::config::DEFAULT_IDLE_TIMEOUT
         );
         assert_eq!(normalize_idle_timeout_secs(180), 180);
+    }
+
+    #[test]
+    fn invalid_gnome_monitor_timeout_env_values_are_ignored() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::set_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV, "0.5");
+        assert_eq!(
+            super::resolve_gnome_monitor_test_timeout(),
+            Some(Duration::from_millis(500))
+        );
+
+        std::env::set_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV, "NaN");
+        assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
+
+        std::env::set_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV, "inf");
+        assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
+
+        std::env::set_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV, "0");
+        assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
+
+        std::env::set_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV, "-1");
+        assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
+
+        std::env::remove_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV);
     }
 
     #[test]

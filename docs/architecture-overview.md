@@ -260,7 +260,7 @@ Selection order:
 
 Detection behavior:
 
-- `auto` prefers GNOME when the current session satisfies the full GNOME contract and the required probe tools are available
+- `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
 - otherwise falls back to `swayidle` if installed
 - forced backends validate required commands
 
