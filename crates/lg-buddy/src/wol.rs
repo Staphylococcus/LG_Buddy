@@ -33,7 +33,7 @@ impl Error for WakeOnLanError {
 }
 
 pub trait WakeOnLanSender {
-    fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError>;
+    fn send_magic_packet(&self, mac: &MacAddress, target_ip: Option<Ipv4Addr>, subnet_mask: Option<Ipv4Addr>) -> Result<(), WakeOnLanError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,10 +70,26 @@ impl UdpWakeOnLanSender {
     pub fn target_addr(&self) -> SocketAddrV4 {
         self.target_addr
     }
+
+    // Helper function to calculate directed broadcast address
+    fn calculate_broadcast_addr(ip: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Addr {
+        let ip_u32 = u32::from(ip);
+        let mask_u32 = u32::from(mask);
+        let broadcast_u32 = ip_u32 | !mask_u32;
+        Ipv4Addr::from(broadcast_u32)
+    }
 }
 
 impl WakeOnLanSender for UdpWakeOnLanSender {
-    fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
+    fn send_magic_packet(&self, mac: &MacAddress, target_ip: Option<Ipv4Addr>, subnet_mask: Option<Ipv4Addr>) -> Result<(), WakeOnLanError> {
+        let target_addr = if let Some(ip) = target_ip {
+            let mask = subnet_mask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0)); // Default to /24
+            let broadcast_addr = Self::calculate_broadcast_addr(ip, mask);
+            SocketAddrV4::new(broadcast_addr, self.target_addr.port())
+        } else {
+            self.target_addr
+        };
+
         let socket = UdpSocket::bind(self.bind_addr).map_err(|source| WakeOnLanError::Io {
             action: "bind UDP socket",
             source,
@@ -87,7 +103,7 @@ impl WakeOnLanSender for UdpWakeOnLanSender {
 
         let packet = build_magic_packet(mac);
         socket
-            .send_to(&packet, self.target_addr)
+            .send_to(&packet, target_addr)
             .map_err(|source| WakeOnLanError::Io {
                 action: "send Wake-on-LAN packet",
                 source,
@@ -167,7 +183,7 @@ mod tests {
         let sender = UdpWakeOnLanSender::new(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0), target);
         let mac = parse_mac("01:23:45:67:89:ab");
         sender
-            .send_magic_packet(&mac)
+            .send_magic_packet(&mac, None, None)
             .expect("send magic packet over udp");
 
         let (size, received) = receiver.join().expect("join receiver thread");
