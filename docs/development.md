@@ -5,6 +5,7 @@ This document covers building, local installation, validation, release tooling, 
 ## Build Prerequisites
 
 - a Rust toolchain with `cargo`
+- a working C toolchain
 - `python3-venv`
 - `python3-pip`
 - `zenity`
@@ -19,6 +20,14 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
+
+The C toolchain is required because `cargo build` now compiles vendored
+`libdbus` as part of the dependency graph. On common Linux distributions that
+usually means:
+
+- Debian/Ubuntu/Pop!_OS: `build-essential`
+- Fedora: `gcc`
+- Arch: `base-devel`
 
 ## Build
 
