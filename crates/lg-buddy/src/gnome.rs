@@ -1,14 +1,15 @@
-use std::process::Command;
-
 use crate::backend::{BackendProbe, SystemBackendProbe};
 use crate::config::ScreenBackend;
 use crate::session::{
     IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
     SessionEvent,
 };
+use crate::session_bus::{GdbusSessionBusClient, SessionBusClient};
 
-const GNOME_DBUS_NAME: &str = "org.gnome.ScreenSaver";
-const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
+pub const GNOME_SCREEN_SAVER_NAME: &str = "org.gnome.ScreenSaver";
+pub const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
+pub const GNOME_REQUIRED_SERVICES_REASON: &str =
+    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GnomeBackendStatus {
@@ -39,11 +40,13 @@ impl GnomeProbe for SystemGnomeProbe {
     }
 
     fn screen_saver_available(&self) -> bool {
-        dbus_name_has_owner(GNOME_DBUS_NAME)
+        let mut bus = GdbusSessionBusClient;
+        bus.name_has_owner(GNOME_SCREEN_SAVER_NAME).unwrap_or(false)
     }
 
     fn idle_monitor_available(&self) -> bool {
-        dbus_name_has_owner(GNOME_IDLE_MONITOR_NAME)
+        let mut bus = GdbusSessionBusClient;
+        bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
     }
 }
 
@@ -84,7 +87,7 @@ impl<P: GnomeProbe> SessionBackend for GnomeBackend<P> {
         if !status.can_start() {
             return Err(SessionBackendError::Unavailable {
                 backend: ScreenBackend::Gnome,
-                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                reason: GNOME_REQUIRED_SERVICES_REASON,
             });
         }
 
@@ -117,39 +120,77 @@ pub fn map_monitor_line(line: &str) -> Option<SessionEvent> {
     }
 }
 
-fn dbus_name_has_owner(name: &str) -> bool {
-    Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.DBus",
-            "--object-path",
-            "/org/freedesktop/DBus",
-            "--method",
-            "org.freedesktop.DBus.NameHasOwner",
-            name,
-        ])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("(true,)")
-        })
+#[cfg(test)]
+fn gnome_backend_status_from_session_bus(
+    bus: &mut impl SessionBusClient,
+    shell_available: bool,
+) -> GnomeBackendStatus {
+    GnomeBackendStatus {
+        shell_available,
+        screen_saver_available: bus.name_has_owner(GNOME_SCREEN_SAVER_NAME).unwrap_or(false),
+        idle_monitor_available: bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{map_monitor_line, GnomeBackend, GnomeBackendStatus, GnomeProbe};
+    use super::{
+        gnome_backend_status_from_session_bus, map_monitor_line, GnomeBackend, GnomeBackendStatus,
+        GnomeProbe, GNOME_REQUIRED_SERVICES_REASON,
+    };
     use crate::config::ScreenBackend;
     use crate::session::{
         IdleTimeoutSource, SessionBackend, SessionBackendCapabilities, SessionBackendError,
         SessionEvent,
     };
+    use crate::session_bus::{
+        BusMethodCall, BusReply, BusSignal, BusSignalMatch, SessionBusClient, SessionBusError,
+    };
+    use std::time::Duration;
 
     #[derive(Debug, Clone, Copy)]
     struct FakeProbe {
         shell_available: bool,
         screen_saver_available: bool,
         idle_monitor_available: bool,
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeSessionBus {
+        screen_saver_available: bool,
+        idle_monitor_available: bool,
+        failed_names: Vec<String>,
+    }
+
+    impl SessionBusClient for FakeSessionBus {
+        fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+            if self.failed_names.iter().any(|failed| failed == name) {
+                return Err(SessionBusError::Transport(
+                    "simulated bus failure".to_string(),
+                ));
+            }
+
+            match name {
+                super::GNOME_SCREEN_SAVER_NAME => Ok(self.screen_saver_available),
+                super::GNOME_IDLE_MONITOR_NAME => Ok(self.idle_monitor_available),
+                _ => Ok(false),
+            }
+        }
+
+        fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            let _ = call;
+            unreachable!("not used in GNOME probing tests")
+        }
+
+        fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+            let _ = rule;
+            unreachable!("not used in GNOME probing tests")
+        }
+
+        fn process(&mut self, timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+            let _ = timeout;
+            unreachable!("not used in GNOME probing tests")
+        }
     }
 
     impl GnomeProbe for FakeProbe {
@@ -235,7 +276,7 @@ mod tests {
             backend.capabilities(),
             Err(SessionBackendError::Unavailable {
                 backend: ScreenBackend::Gnome,
-                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                reason: GNOME_REQUIRED_SERVICES_REASON,
             })
         );
     }
@@ -252,8 +293,44 @@ mod tests {
             backend.capabilities(),
             Err(SessionBackendError::Unavailable {
                 backend: ScreenBackend::Gnome,
-                reason: "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required",
+                reason: GNOME_REQUIRED_SERVICES_REASON,
             })
+        );
+    }
+
+    #[test]
+    fn status_from_session_bus_uses_required_gnome_service_names() {
+        let mut bus = FakeSessionBus {
+            screen_saver_available: true,
+            idle_monitor_available: false,
+            ..FakeSessionBus::default()
+        };
+
+        assert_eq!(
+            gnome_backend_status_from_session_bus(&mut bus, true),
+            GnomeBackendStatus {
+                shell_available: true,
+                screen_saver_available: true,
+                idle_monitor_available: false,
+            }
+        );
+    }
+
+    #[test]
+    fn status_from_session_bus_treats_bus_errors_as_unavailable() {
+        let mut bus = FakeSessionBus {
+            screen_saver_available: true,
+            idle_monitor_available: true,
+            failed_names: vec![super::GNOME_IDLE_MONITOR_NAME.to_string()],
+        };
+
+        assert_eq!(
+            gnome_backend_status_from_session_bus(&mut bus, true),
+            GnomeBackendStatus {
+                shell_available: true,
+                screen_saver_available: true,
+                idle_monitor_available: false,
+            }
         );
     }
 }

@@ -1,7 +1,10 @@
 use std::fmt;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 const SESSION_BUS_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DBUS_SERVICE_NAME: &str = "org.freedesktop.DBus";
+const DBUS_OBJECT_PATH: &str = "/org/freedesktop/DBus";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionBusError {
@@ -235,11 +238,95 @@ pub trait SessionBusClient {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GdbusSessionBusClient;
+
+impl SessionBusClient for GdbusSessionBusClient {
+    fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+        let output = Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                DBUS_SERVICE_NAME,
+                "--object-path",
+                DBUS_OBJECT_PATH,
+                "--method",
+                "org.freedesktop.DBus.NameHasOwner",
+                name,
+            ])
+            .output()
+            .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+
+        if !output.status.success() {
+            return Err(SessionBusError::Transport(format!(
+                "gdbus NameHasOwner failed with status {}",
+                output.status
+            )));
+        }
+
+        parse_gdbus_name_has_owner_output(&String::from_utf8_lossy(&output.stdout)).ok_or(
+            SessionBusError::UnexpectedReplyShape {
+                expected: "single bool",
+                actual: "unparsed gdbus reply",
+            },
+        )
+    }
+
+    fn wait_for_name(&mut self, name: &str, timeout: Duration) -> Result<(), SessionBusError> {
+        let timeout_secs = timeout.as_secs().max(1).to_string();
+        let status = Command::new("gdbus")
+            .args(["wait", "--session", "--timeout", &timeout_secs, name])
+            .status()
+            .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(SessionBusError::Timeout {
+                name: name.to_string(),
+                timeout,
+            })
+        }
+    }
+
+    fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+        let _ = call;
+        Err(SessionBusError::Transport(
+            "GdbusSessionBusClient does not implement generic method calls".to_string(),
+        ))
+    }
+
+    fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+        let _ = rule;
+        Err(SessionBusError::Transport(
+            "GdbusSessionBusClient does not implement signal matches".to_string(),
+        ))
+    }
+
+    fn process(&mut self, timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+        let _ = timeout;
+        Err(SessionBusError::Transport(
+            "GdbusSessionBusClient does not implement in-process message pumping".to_string(),
+        ))
+    }
+}
+
+fn parse_gdbus_name_has_owner_output(output: &str) -> Option<bool> {
+    if output.contains("(true,)") {
+        Some(true)
+    } else if output.contains("(false,)") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
-        SessionBusError,
+        parse_gdbus_name_has_owner_output, BusMethodCall, BusReply, BusSignal, BusSignalMatch,
+        BusValue, SessionBusClient, SessionBusError,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::Duration;
@@ -528,5 +615,12 @@ mod tests {
 
         assert_eq!(bus.name_has_owner("org.example.Service"), Ok(true));
         assert_eq!(bus.name_has_owner("org.example.Missing"), Ok(false));
+    }
+
+    #[test]
+    fn parses_gdbus_name_has_owner_output() {
+        assert_eq!(parse_gdbus_name_has_owner_output("(true,)\n"), Some(true));
+        assert_eq!(parse_gdbus_name_has_owner_output("(false,)\n"), Some(false));
+        assert_eq!(parse_gdbus_name_has_owner_output("unexpected"), None);
     }
 }

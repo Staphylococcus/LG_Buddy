@@ -2,14 +2,16 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
 
 use crate::config::{load_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend};
+use crate::gnome::{
+    GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
+};
+use crate::session_bus::{GdbusSessionBusClient, SessionBusClient};
 
-const GNOME_SCREEN_SAVER_NAME: &str = "org.gnome.ScreenSaver";
-const GNOME_IDLE_MONITOR_NAME: &str = "org.gnome.Mutter.IdleMonitor";
-const GNOME_REQUIRED_SERVICES_REASON: &str =
-    "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required";
+const GNOME_SHELL_NAME: &str = "org.gnome.Shell";
+const GNOME_SHELL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendSelectionError {
@@ -81,22 +83,23 @@ impl BackendProbe for SystemBackendProbe {
     }
 
     fn gnome_shell_available(&self) -> bool {
-        if dbus_name_has_owner("org.gnome.Shell") {
+        let mut bus = GdbusSessionBusClient;
+        if bus.name_has_owner(GNOME_SHELL_NAME).unwrap_or(false) {
             return true;
         }
 
-        Command::new("gdbus")
-            .args(["wait", "--session", "--timeout", "2", "org.gnome.Shell"])
-            .status()
-            .is_ok_and(|status| status.success())
+        bus.wait_for_name(GNOME_SHELL_NAME, GNOME_SHELL_WAIT_TIMEOUT)
+            .is_ok()
     }
 
     fn gnome_screen_saver_available(&self) -> bool {
-        dbus_name_has_owner(GNOME_SCREEN_SAVER_NAME)
+        let mut bus = GdbusSessionBusClient;
+        bus.name_has_owner(GNOME_SCREEN_SAVER_NAME).unwrap_or(false)
     }
 
     fn gnome_idle_monitor_available(&self) -> bool {
-        dbus_name_has_owner(GNOME_IDLE_MONITOR_NAME)
+        let mut bus = GdbusSessionBusClient;
+        bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
     }
 }
 
@@ -199,25 +202,6 @@ fn command_in_path(command: &str) -> bool {
     };
 
     env::split_paths(&path).any(|dir| dir.join(command).is_file())
-}
-
-fn dbus_name_has_owner(name: &str) -> bool {
-    Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.DBus",
-            "--object-path",
-            "/org/freedesktop/DBus",
-            "--method",
-            "org.freedesktop.DBus.NameHasOwner",
-            name,
-        ])
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("(true,)")
-        })
 }
 
 #[cfg(test)]
