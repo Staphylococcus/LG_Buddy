@@ -192,6 +192,7 @@ impl FromStr for MacAddress {
 pub struct Config {
     pub tv_ip: Ipv4Addr,
     pub tv_mac: MacAddress,
+    pub tv_subnet: Option<Ipv4Addr>,
     pub input: HdmiInput,
     pub screen_backend: ScreenBackend,
     pub screen_idle_timeout: u64,
@@ -360,6 +361,9 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
                     expected: "a MAC address like aa:bb:cc:dd:ee:ff",
                 })
         })?;
+    let tv_subnet = entries
+        .get("tv_subnet")
+        .and_then(|value| value.parse::<Ipv4Addr>().ok());
 
     let input = entries
         .get("input")
@@ -392,6 +396,7 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
     Ok(Config {
         tv_ip,
         tv_mac,
+        tv_subnet,
         input,
         screen_backend,
         screen_idle_timeout,
@@ -576,6 +581,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             Config {
                 tv_ip: "192.168.1.42".parse().expect("ipv4"),
                 tv_mac: "aa:bb:cc:dd:ee:ff".parse().expect("mac"),
+                tv_subnet: parse().expect("subnet"),
                 input: HdmiInput::Hdmi1,
                 screen_backend: ScreenBackend::Auto,
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,

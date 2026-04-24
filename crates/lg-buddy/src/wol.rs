@@ -40,6 +40,7 @@ pub trait WakeOnLanSender {
 pub struct UdpWakeOnLanSender {
     bind_addr: SocketAddrV4,
     target_addr: SocketAddrV4,
+    subnet_mask: Option<Ipv4Addr>,
 }
 
 impl Default for UdpWakeOnLanSender {
@@ -53,6 +54,15 @@ impl UdpWakeOnLanSender {
         Self {
             bind_addr,
             target_addr,
+            subnet_mask: None,
+        }
+    }
+
+    pub fn with_subnet_mask(bind_addr: SocketAddrV4, target_addr: SocketAddrV4, subnet_mask: Option<Ipv4Addr>) -> Self {
+        Self {
+            bind_addr,
+            target_addr,
+            subnet_mask,
         }
     }
 
@@ -83,7 +93,7 @@ impl UdpWakeOnLanSender {
 impl WakeOnLanSender for UdpWakeOnLanSender {
     fn send_magic_packet(&self, mac: &MacAddress, target_ip: Option<Ipv4Addr>, subnet_mask: Option<Ipv4Addr>) -> Result<(), WakeOnLanError> {
         let target_addr = if let Some(ip) = target_ip {
-            let mask = subnet_mask.unwrap_or(Ipv4Addr::new(255, 255, 255, 0)); // Default to /24
+            let mask = subnet_mask.or(self.subnet_mask).unwrap_or(Ipv4Addr::new(255, 255, 255, 0)); // Default to /24
             let broadcast_addr = Self::calculate_broadcast_addr(ip, mask);
             SocketAddrV4::new(broadcast_addr, self.target_addr.port())
         } else {
