@@ -2173,6 +2173,7 @@ mod tests {
             tv_mac: "aa:bb:cc:dd:ee:ff"
                 .parse::<MacAddress>()
                 .expect("parse mac"),
+            tv_subnet: None,
             input,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,

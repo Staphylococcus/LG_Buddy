@@ -581,7 +581,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             Config {
                 tv_ip: "192.168.1.42".parse().expect("ipv4"),
                 tv_mac: "aa:bb:cc:dd:ee:ff".parse().expect("mac"),
-                tv_subnet: parse().expect("subnet"),
+                tv_subnet: None,
                 input: HdmiInput::Hdmi1,
                 screen_backend: ScreenBackend::Auto,
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,
