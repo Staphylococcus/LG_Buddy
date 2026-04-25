@@ -132,7 +132,7 @@ check_python3_venv() {
 }
 
 check_dep "python3-venv" "python3-venv" "check_python3_venv"
-check_dep "python3-pip" "python3-pip" "/usr/bin/python3 -m pip --version"
+check_dep "python3-pip" "python3-pip" "python3 -m pip --version"
 check_dep "zenity" "zenity" "command -v zenity"
 
 write_config_override() {
