@@ -101,6 +101,7 @@ Set `screen_restore_policy=aggressive` to let session wake/activity and system w
 
 - [User guide](docs/user-guide.md)
 - [Development](docs/development.md)
+- [Contributing](CONTRIBUTING.md)
 - [Release process](docs/release-process.md)
 
 ## Credits
