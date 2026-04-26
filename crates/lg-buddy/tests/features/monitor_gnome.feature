@@ -54,6 +54,26 @@ Feature: GNOME monitor
     And the session marker exists
     And the TV screen is blanked
 
+  Scenario: GNOME gamepad activity restores a blanked TV while idletime remains stale
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME emits no ScreenSaver signals
+    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000"
+    And gamepad activity is observed after 0.1 seconds
+    And GNOME monitor stays open for 0.6 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session event `user-activity` requests screen restore."
+    And the TV client received "turn_screen_off" exactly 1 times
+    And the TV client received "turn_screen_on" exactly 1 times
+    And the session marker is absent
+    And the TV screen is visible
+
   Scenario: GNOME inactivity skips TV blanking on a different input
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds

@@ -35,7 +35,7 @@ main.rs
            -> tv.rs
            -> wol.rs
            -> backend.rs
-           -> session.rs / session/inactivity.rs / gnome.rs / swayidle.rs
+           -> session.rs / session/inactivity.rs / session/gamepad/ / gnome.rs / swayidle.rs
 ```
 
 ## System Diagram
@@ -49,6 +49,7 @@ flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
         SWAY["swayidle<br/>idle hooks"]
+        INPUT["Linux input devices<br/>gamepads / wheels"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -61,6 +62,7 @@ flowchart LR
             BACKEND["backend.rs<br/>backend selection"]
             SESSIONMODEL["session.rs<br/>shared session model"]
             RUNNER["session::runner<br/>monitor command"]
+            GAMEPAD["session::gamepad<br/>gamepad activity source"]
             BUS["session_bus.rs<br/>generic session-bus transport"]
 
             subgraph DEAdapters["Desktop Environment Adapters"]
@@ -93,6 +95,8 @@ flowchart LR
 
     SWAY -->|"timeout / resume hooks"| SADAPTER
     SADAPTER -->|"SessionEvent"| SESSIONMODEL
+    INPUT --> GAMEPAD
+    GAMEPAD -->|"UserActivity"| RUNNER
     SESSIONMODEL --> RUNNER
 
     RUNNER -->|"Idle / Active /<br/>WakeRequested / UserActivity"| COMMANDS
@@ -138,6 +142,11 @@ The intended split is:
 - `session/inactivity.rs`
   - synthesizes idle and active transitions from provider signals and configured thresholds
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
+- `session/gamepad/`
+  - discovers readable Linux gamepad-like input devices
+  - maps raw controller events into activity observations
+  - includes a narrow Logitech G923 raw HID fallback for wheel and pedal reports
+    that may not appear through evdev
 - `session_bus.rs`
   - generic blocking session-bus transport seam
   - persistent D-Bus client for the GNOME monitor runtime
@@ -161,6 +170,8 @@ The session-facing pieces should be read as one subsystem:
   - defines the homogenized session contract
 - `session/inactivity.rs`
   - owns session-phase synthesis from GNOME observations and configured thresholds
+- `session/gamepad/`
+  - supplies auxiliary user-activity observations for controller input
 - `session/runner.rs`
   - consumes normalized session events and idletime observations and dispatches runtime policy
 - `gnome.rs` and `swayidle.rs`
@@ -377,6 +388,9 @@ The session subsystem is intentionally asymmetric where the providers are asymme
 
 - GNOME monitor behavior combines ScreenSaver idle/active and wake signals with
   Mutter idletime observations, then passes them through the inactivity engine
+- the GNOME monitor also consumes gamepad activity directly from Linux input
+  devices; this is not modeled as a separate desktop backend because it only
+  supplements GNOME's activity observations
 - delegated `swayidle` monitor execution is implemented for `timeout` and
   `resume` parity with the shell monitor
 - `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,

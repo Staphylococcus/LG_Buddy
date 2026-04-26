@@ -13,6 +13,8 @@ This document covers building, local installation, validation, release tooling, 
 Backend-specific tools used in development and local testing:
 
 - `swayidle` for the `swayidle` monitor backend
+- readable `/dev/input/event*` devices for local gamepad activity testing
+- readable `/dev/hidraw*` devices when testing the Logitech G923 raw HID fallback
 
 For GNOME end-to-end work, the running session also needs the full GNOME contract:
 
@@ -69,6 +71,18 @@ cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
 ```
 
+Optional hardware smoke for gamepad activity:
+
+```bash
+LG_BUDDY_GAMEPAD_SMOKE_SECS=20 cargo test -p lg-buddy --lib \
+  session::gamepad::tests::hardware_smoke_reports_real_gamepad_activity \
+  -- --ignored --nocapture
+```
+
+Run that from a desktop session that has read access to the connected
+controllers. The test uses the production gamepad activity source and requires
+manual input during the capture window.
+
 ## Release Tooling
 
 Build a release bundle locally with:
@@ -107,6 +121,7 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `crates/lg-buddy/src/commands.rs` | Runtime lifecycle and policy commands |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity synthesis and thresholds |
+| `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic session-bus transport seam |
 | `crates/lg-buddy/src/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/swayidle.rs` | `swayidle` backend integration |

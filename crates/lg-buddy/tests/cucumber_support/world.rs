@@ -258,6 +258,13 @@ impl LgBuddyWorld {
         );
     }
 
+    pub fn gamepad_activity_occurs_after_secs(&mut self, seconds: f64) {
+        self.ensure_env().set(
+            "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS",
+            seconds.to_string(),
+        );
+    }
+
     pub fn install_swayidle_stub(&mut self) {
         if self.swayidle.is_none() {
             let swayidle = MockSwayidle::new("cucumber-swayidle");

@@ -49,6 +49,9 @@ These are the semantic events the runtime should reason about.
 - `UserActivity` is earlier and weaker than `Active`.
   - It exists for backends like GNOME + Mutter where LG Buddy may observe fresh
     activity before the desktop emits its normal active/wake signal.
+  - It can also come from backend-adjacent activity sources owned by the session
+    runtime, such as gamepad input that the desktop does not classify as
+    activity.
 - `WakeRequested` is optional.
   - Some providers expose an explicit wake request.
   - Others only expose idle/resume transitions.
@@ -125,12 +128,19 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
 | `org.gnome.Mutter.IdleMonitor.GetIdletime` | LG Buddy-owned inactivity thresholding and activity synthesis | Implemented |
+| Linux gamepad input devices | `UserActivity` | Implemented in the GNOME monitor runtime |
 
 Notes:
 
 - GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
 - LG Buddy owns the configured timeout value for this backend.
 - ScreenSaver idle/active signals and Mutter idletime are both observation inputs into LG Buddy policy.
+- Gamepad activity is not a separate desktop backend. It is an auxiliary
+  activity source used by the GNOME monitor because GNOME's idle APIs may not
+  count controller input as desktop activity.
+- Standard controller input is read from evdev. Logitech G923 wheel and pedal
+  activity has a narrow raw HID fallback for hosts where those reports do not
+  appear on the evdev node.
 
 ### `swayidle`
 

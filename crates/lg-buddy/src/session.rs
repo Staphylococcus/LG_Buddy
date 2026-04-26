@@ -1,3 +1,4 @@
+pub mod gamepad;
 pub mod inactivity;
 pub mod runner;
 

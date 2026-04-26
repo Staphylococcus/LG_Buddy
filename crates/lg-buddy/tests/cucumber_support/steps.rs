@@ -174,6 +174,14 @@ fn gnome_monitor_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: Strin
     world.gnome_monitor_stays_open_for_secs(seconds);
 }
 
+#[given(regex = r#"gamepad activity is observed after ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn gamepad_activity_is_observed_after_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid gamepad activity delay `{seconds}`: {err}"));
+    world.gamepad_activity_occurs_after_secs(seconds);
+}
+
 #[given("swayidle is installed")]
 fn swayidle_installed(world: &mut LgBuddyWorld) {
     world.install_swayidle_stub();

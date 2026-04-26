@@ -28,6 +28,8 @@ This is where most tests should live.
 - Wake-on-LAN packet construction
 - backend selection rules
 - GNOME signal-to-event mapping
+- gamepad device classification, raw event mapping, registry behavior, and
+  activity policy
 - TV command output parsing
 - command-policy branching and retry logic
 
@@ -69,6 +71,7 @@ This is the place for integration tests and contract tests.
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
 - GNOME runner behavior against a private session-bus harness
+- GNOME inactivity merging with auxiliary gamepad activity observations
 
 ### How to test it
 
@@ -182,6 +185,31 @@ Examples:
 - GNOME capability probing
 - GNOME signal mapping
 - GNOME monitor and idletime integration over the session-bus seam
+- gamepad activity integration with the GNOME inactivity merger
+
+### Gamepad activity
+
+Primary concern:
+
+- module behavior for device classification, evdev event mapping, raw HID
+  fallback gating, per-device state, and activity policy
+
+Secondary concern:
+
+- module interoperability in the GNOME runner path
+
+Hardware validation:
+
+- use the ignored smoke test when changing real input-device behavior:
+
+```bash
+LG_BUDDY_GAMEPAD_SMOKE_SECS=20 cargo test -p lg-buddy --lib \
+  session::gamepad::tests::hardware_smoke_reports_real_gamepad_activity \
+  -- --ignored --nocapture
+```
+
+That test intentionally requires local readable input devices and manual
+controller movement. It is not part of the default suite.
 
 ### Shell, systemd, and install flow
 
@@ -199,7 +227,6 @@ These should not dominate the Rust test suite, but they still matter because ins
 
 The most important remaining gaps are:
 
-- documented hardware smoke checks
 - host-level validation for installer and service wiring
 - broader validation of the remaining shell setup surface
 - any future coverage needed for richer `swayidle` hooks beyond `timeout` and `resume`
@@ -209,7 +236,7 @@ The most important remaining gaps are:
 The next testing work should be:
 
 1. keep strengthening module-behavior tests where runtime logic is still moving
-2. document a repeatable hardware smoke checklist
+2. keep hardware smoke checks targeted and documented near the code path they validate
 3. decide how much of the installer and service wiring deserves automated host validation
 4. add targeted coverage only if new backend or setup behavior is introduced
 
