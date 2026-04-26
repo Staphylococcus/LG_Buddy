@@ -39,6 +39,7 @@ const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
 const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
 
@@ -232,7 +233,8 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
         match message {
             RunnerMessage::InactivityObservationReady => {
                 if let Some(observation) = latest_inactivity.take() {
-                    let observation = observation_merger.merge(observation, Instant::now());
+                    let observation =
+                        observation_merger.merge(observation.observation, observation.observed_at);
                     handle_gnome_inactivity_observation(
                         writer,
                         dispatcher,
@@ -241,9 +243,12 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     )?;
                 }
             }
-            RunnerMessage::SessionEvent(SessionEvent::Idle) => {
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::Idle,
+                observed_at,
+            } => {
                 let observation =
-                    observation_merger.merge(InactivityObservation::ProviderIdle, Instant::now());
+                    observation_merger.merge(InactivityObservation::ProviderIdle, observed_at);
                 handle_gnome_inactivity_observation(
                     writer,
                     dispatcher,
@@ -251,9 +256,12 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     observation,
                 )?;
             }
-            RunnerMessage::SessionEvent(SessionEvent::Active) => {
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::Active,
+                observed_at,
+            } => {
                 let observation =
-                    observation_merger.merge(InactivityObservation::ProviderActive, Instant::now());
+                    observation_merger.merge(InactivityObservation::ProviderActive, observed_at);
                 handle_gnome_inactivity_observation(
                     writer,
                     dispatcher,
@@ -261,9 +269,12 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     observation,
                 )?
             }
-            RunnerMessage::SessionEvent(SessionEvent::WakeRequested) => {
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::WakeRequested,
+                observed_at,
+            } => {
                 let observation =
-                    observation_merger.merge(InactivityObservation::WakeRequested, Instant::now());
+                    observation_merger.merge(InactivityObservation::WakeRequested, observed_at);
                 handle_gnome_inactivity_observation(
                     writer,
                     dispatcher,
@@ -271,9 +282,12 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     observation,
                 )?
             }
-            RunnerMessage::SessionEvent(SessionEvent::UserActivity) => {
+            RunnerMessage::SessionEvent {
+                event: SessionEvent::UserActivity,
+                observed_at,
+            } => {
                 let observation = observation_merger
-                    .merge(InactivityObservation::UserActivityObserved, Instant::now());
+                    .merge(InactivityObservation::UserActivityObserved, observed_at);
                 handle_gnome_inactivity_observation(
                     writer,
                     dispatcher,
@@ -281,7 +295,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
                     observation,
                 )?
             }
-            RunnerMessage::SessionEvent(event) => {
+            RunnerMessage::SessionEvent { event, .. } => {
                 dispatcher.dispatch_event(writer, event)?;
             }
             RunnerMessage::Diagnostic(message) => {
@@ -433,7 +447,10 @@ fn run_synthetic_gamepad_activity_process(
     }
 
     if !stop.load(Ordering::SeqCst) {
-        let _ = sender.send(RunnerMessage::SessionEvent(SessionEvent::UserActivity));
+        let _ = sender.send(RunnerMessage::SessionEvent {
+            event: SessionEvent::UserActivity,
+            observed_at: Instant::now(),
+        });
     }
 }
 
@@ -449,20 +466,27 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
         return;
     };
 
+    let mut last_activity_sent_at = None;
     while !stop.load(Ordering::SeqCst) {
-        let poll = source.poll_once(Instant::now());
+        let observed_at = Instant::now();
+        let poll = source.poll_once(observed_at);
         for diagnostic in poll.diagnostics {
             if sender.send(RunnerMessage::Diagnostic(diagnostic)).is_err() {
                 return;
             }
         }
 
-        if poll.activity
-            && sender
-                .send(RunnerMessage::SessionEvent(SessionEvent::UserActivity))
+        if poll.activity && gamepad_activity_send_due(last_activity_sent_at, observed_at) {
+            if sender
+                .send(RunnerMessage::SessionEvent {
+                    event: SessionEvent::UserActivity,
+                    observed_at,
+                })
                 .is_err()
-        {
-            return;
+            {
+                return;
+            }
+            last_activity_sent_at = Some(observed_at);
         }
 
         thread::sleep(GAMEPAD_ACTIVITY_POLL_INTERVAL);
@@ -545,14 +569,23 @@ fn run_gnome_monitor_process(
             continue;
         };
 
-        if sender.send(RunnerMessage::SessionEvent(event)).is_err() {
+        if sender
+            .send(RunnerMessage::SessionEvent {
+                event,
+                observed_at: Instant::now(),
+            })
+            .is_err()
+        {
             return Ok(());
         }
     }
 }
 
 enum RunnerMessage {
-    SessionEvent(SessionEvent),
+    SessionEvent {
+        event: SessionEvent,
+        observed_at: Instant,
+    },
     InactivityObservationReady,
     Diagnostic(String),
     MonitorExited(Result<(), SessionRunnerError>),
@@ -639,6 +672,17 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
+fn gamepad_activity_send_due(last_sent_at: Option<Instant>, observed_at: Instant) -> bool {
+    last_sent_at
+        .map(|last_sent_at| {
+            observed_at
+                .checked_duration_since(last_sent_at)
+                .unwrap_or_default()
+                >= GAMEPAD_ACTIVITY_SEND_INTERVAL
+        })
+        .unwrap_or(true)
+}
+
 #[derive(Debug, Default)]
 struct LatestInactivityObservation {
     state: Mutex<LatestInactivityObservationState>,
@@ -646,8 +690,14 @@ struct LatestInactivityObservation {
 
 #[derive(Debug, Default)]
 struct LatestInactivityObservationState {
-    observation: Option<InactivityObservation>,
+    observation: Option<TimedInactivityObservation>,
     notification_in_flight: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimedInactivityObservation {
+    observation: InactivityObservation,
+    observed_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -687,13 +737,17 @@ impl LatestInactivityObservation {
         &self,
         sender: &mpsc::Sender<RunnerMessage>,
         observation: InactivityObservation,
+        observed_at: Instant,
     ) -> bool {
         let should_notify = {
             let mut state = self
                 .state
                 .lock()
                 .expect("latest inactivity observation lock");
-            state.observation = Some(observation);
+            state.observation = Some(TimedInactivityObservation {
+                observation,
+                observed_at,
+            });
             if state.notification_in_flight {
                 false
             } else {
@@ -721,7 +775,7 @@ impl LatestInactivityObservation {
         false
     }
 
-    fn take(&self) -> Option<InactivityObservation> {
+    fn take(&self) -> Option<TimedInactivityObservation> {
         let mut state = self
             .state
             .lock()
@@ -741,7 +795,11 @@ fn poll_gnome_idle_monitor_once(
         return true;
     };
 
-    latest_observation.publish(sender, InactivityObservation::IdleTimeMs(idletime_ms))
+    latest_observation.publish(
+        sender,
+        InactivityObservation::IdleTimeMs(idletime_ms),
+        Instant::now(),
+    )
 }
 
 fn handle_gnome_inactivity_observation<W: Write, E: SessionActionExecutor>(
@@ -805,10 +863,11 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
-        poll_gnome_idle_monitor_once, shell_quote, InactivityObservationMerger,
-        LatestInactivityObservation, RunnerMessage, SessionActionExecutor, SessionEventDispatcher,
-        TrustedScreenSaverSignals,
+        gamepad_activity_send_due, handle_gnome_inactivity_observation,
+        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, shell_quote,
+        InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
+        SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
+        TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
     use crate::gnome::{
         GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
@@ -1047,9 +1106,19 @@ mod tests {
     fn latest_inactivity_observation_coalesces_pending_samples() {
         let (sender, receiver) = mpsc::channel();
         let latest = LatestInactivityObservation::default();
+        let first_observed_at = Instant::now();
+        let second_observed_at = first_observed_at + Duration::from_millis(250);
 
-        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(1_000)));
-        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(2_000)));
+        assert!(latest.publish(
+            &sender,
+            InactivityObservation::IdleTimeMs(1_000),
+            first_observed_at
+        ));
+        assert!(latest.publish(
+            &sender,
+            InactivityObservation::IdleTimeMs(2_000),
+            second_observed_at
+        ));
 
         assert!(matches!(
             receiver.recv().expect("notification"),
@@ -1057,7 +1126,10 @@ mod tests {
         ));
         assert_eq!(
             latest.take(),
-            Some(InactivityObservation::IdleTimeMs(2_000))
+            Some(TimedInactivityObservation {
+                observation: InactivityObservation::IdleTimeMs(2_000),
+                observed_at: second_observed_at,
+            })
         );
         assert!(receiver.try_recv().is_err());
     }
@@ -1066,25 +1138,41 @@ mod tests {
     fn latest_inactivity_observation_notifies_again_after_take() {
         let (sender, receiver) = mpsc::channel();
         let latest = LatestInactivityObservation::default();
+        let first_observed_at = Instant::now();
+        let second_observed_at = first_observed_at + Duration::from_millis(250);
 
-        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(1_000)));
+        assert!(latest.publish(
+            &sender,
+            InactivityObservation::IdleTimeMs(1_000),
+            first_observed_at
+        ));
         assert!(matches!(
             receiver.recv().expect("first notification"),
             RunnerMessage::InactivityObservationReady
         ));
         assert_eq!(
             latest.take(),
-            Some(InactivityObservation::IdleTimeMs(1_000))
+            Some(TimedInactivityObservation {
+                observation: InactivityObservation::IdleTimeMs(1_000),
+                observed_at: first_observed_at,
+            })
         );
 
-        assert!(latest.publish(&sender, InactivityObservation::IdleTimeMs(3_000)));
+        assert!(latest.publish(
+            &sender,
+            InactivityObservation::IdleTimeMs(3_000),
+            second_observed_at
+        ));
         assert!(matches!(
             receiver.recv().expect("second notification"),
             RunnerMessage::InactivityObservationReady
         ));
         assert_eq!(
             latest.take(),
-            Some(InactivityObservation::IdleTimeMs(3_000))
+            Some(TimedInactivityObservation {
+                observation: InactivityObservation::IdleTimeMs(3_000),
+                observed_at: second_observed_at,
+            })
         );
     }
 
@@ -1096,16 +1184,20 @@ mod tests {
             method_replies: vec![Ok(BusReply::new(vec![BusValue::U64(1_500)]))],
             ..FakeSessionBus::default()
         };
+        let before_poll = Instant::now();
 
         assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
         assert!(matches!(
             receiver.recv().expect("notification"),
             RunnerMessage::InactivityObservationReady
         ));
+        let observation = latest.take().expect("latest observation");
         assert_eq!(
-            latest.take(),
-            Some(InactivityObservation::IdleTimeMs(1_500))
+            observation.observation,
+            InactivityObservation::IdleTimeMs(1_500)
         );
+        assert!(observation.observed_at >= before_poll);
+        assert!(observation.observed_at <= Instant::now());
     }
 
     #[test]
@@ -1122,6 +1214,21 @@ mod tests {
         assert!(poll_gnome_idle_monitor_once(&mut bus, &sender, &latest));
         assert!(receiver.try_recv().is_err());
         assert_eq!(latest.take(), None);
+    }
+
+    #[test]
+    fn gamepad_activity_send_due_throttles_repeated_activity() {
+        let first_sent_at = Instant::now();
+
+        assert!(gamepad_activity_send_due(None, first_sent_at));
+        assert!(!gamepad_activity_send_due(
+            Some(first_sent_at),
+            first_sent_at + GAMEPAD_ACTIVITY_SEND_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(gamepad_activity_send_due(
+            Some(first_sent_at),
+            first_sent_at + GAMEPAD_ACTIVITY_SEND_INTERVAL
+        ));
     }
 
     #[test]

@@ -106,38 +106,38 @@ impl SystemGamepadActivitySource {
         #[cfg(test)]
         let mut activity_devices = Vec::new();
         let mut diagnostics = Vec::new();
-        let mut active_readers = Vec::with_capacity(self.readers.len());
 
-        for mut reader in self.readers.drain(..) {
-            let device_id = reader.device_id().clone();
-            match reader.read_available() {
-                Ok(events) => {
-                    for event in events {
-                        #[cfg(test)]
-                        let event_device_id = event.device_id.clone();
-                        if self.registry.observe(event, now) {
-                            activity = true;
+        {
+            let registry = &mut self.registry;
+            self.readers.retain_mut(|reader| {
+                let device_id = reader.device_id().clone();
+                match reader.read_available() {
+                    Ok(events) => {
+                        for event in events {
                             #[cfg(test)]
-                            if !activity_devices.contains(&event_device_id) {
-                                activity_devices.push(event_device_id);
+                            let event_device_id = event.device_id.clone();
+                            if registry.observe(event, now) {
+                                activity = true;
+                                #[cfg(test)]
+                                if !activity_devices.contains(&event_device_id) {
+                                    activity_devices.push(event_device_id);
+                                }
                             }
                         }
+                        true
                     }
-                    active_readers.push(reader);
+                    Err(err) => {
+                        registry.remove_device(&device_id);
+                        diagnostics.push(format!(
+                            "gamepad device `{device_id}` stopped producing activity events: {err}"
+                        ));
+                        false
+                    }
                 }
-                Err(err) => {
-                    self.registry.remove_device(&device_id);
-                    diagnostics.push(format!(
-                        "gamepad device `{device_id}` stopped producing activity events: {err}"
-                    ));
-                }
-            }
+            });
         }
 
-        self.readers = active_readers;
-
-        let mut active_raw_hid_readers = Vec::with_capacity(self.raw_hid_readers.len());
-        for mut reader in self.raw_hid_readers.drain(..) {
+        self.raw_hid_readers.retain_mut(|reader| {
             let device_id = reader.device_id().clone();
             match reader.read_available() {
                 Ok(report_seen) => {
@@ -148,17 +148,17 @@ impl SystemGamepadActivitySource {
                             activity_devices.push(device_id.clone());
                         }
                     }
-                    active_raw_hid_readers.push(reader);
+                    true
                 }
                 Err(err) => {
                     diagnostics.push(format!(
                         "gamepad raw HID device `{}` for `{device_id}` stopped producing activity events: {err}",
                         reader.path().display()
                     ));
+                    false
                 }
             }
-        }
-        self.raw_hid_readers = active_raw_hid_readers;
+        });
 
         GamepadActivityPoll {
             activity,
@@ -204,27 +204,45 @@ fn open_gamepad_activity_source_from_dir(
         }
     }
 
+    let source_available = !readers.is_empty() || !raw_hid_readers.is_empty();
     if let Some(err) = discovery.input_dir_error {
         diagnostics.push(format!(
             "gamepad activity source unavailable: failed to read `{}`: {err}",
             input_dir.display()
         ));
-    } else if readers.is_empty() && !reader_failures.is_empty() {
+    } else if !source_available && !reader_failures.is_empty() {
         diagnostics.push(format!(
             "gamepad activity source unavailable: failed to open {} detected gamepad device(s); first error: {}",
             reader_failures.len(),
             reader_failures[0]
         ));
-    } else if readers.is_empty() && !discovery.inspect_failures.is_empty() {
+    } else if !source_available && !discovery.inspect_failures.is_empty() {
         diagnostics.push(format!(
             "gamepad activity source unavailable: failed to inspect {} input device(s); first error: {}",
             discovery.inspect_failures.len(),
             discovery.inspect_failures[0]
         ));
+    } else if readers.is_empty() && !reader_failures.is_empty() {
+        diagnostics.push(format!(
+            "gamepad evdev activity source unavailable: failed to open {} detected gamepad device(s); first error: {}; raw HID activity remains available",
+            reader_failures.len(),
+            reader_failures[0]
+        ));
+    } else if readers.is_empty() && !discovery.inspect_failures.is_empty() {
+        diagnostics.push(format!(
+            "gamepad evdev activity source unavailable: failed to inspect {} input device(s); first error: {}; raw HID activity remains available",
+            discovery.inspect_failures.len(),
+            discovery.inspect_failures[0]
+        ));
     }
     if !raw_hid_reader_failures.is_empty() {
+        let availability = if raw_hid_readers.is_empty() {
+            "unavailable"
+        } else {
+            "partially unavailable"
+        };
         diagnostics.push(format!(
-            "gamepad raw HID activity source unavailable for {} detected device path(s); first error: {}",
+            "gamepad raw HID activity source {availability} for {} detected device path(s); first error: {}",
             raw_hid_reader_failures.len(),
             raw_hid_reader_failures[0]
         ));
