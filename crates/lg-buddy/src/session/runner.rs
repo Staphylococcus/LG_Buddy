@@ -40,6 +40,7 @@ const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
+const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
 
 pub trait SessionActionExecutor {
     fn screen_off(&mut self) -> Result<String, RunError>;
@@ -392,11 +393,47 @@ fn spawn_gnome_monitor_thread(
 fn spawn_gamepad_activity_thread(sender: mpsc::Sender<RunnerMessage>) -> GamepadActivityThread {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let handle = thread::spawn(move || run_gamepad_activity_process(sender, thread_stop));
+    let handle = match resolve_gamepad_activity_test_delay() {
+        Some(delay) => thread::spawn(move || {
+            run_synthetic_gamepad_activity_process(sender, thread_stop, delay)
+        }),
+        None => thread::spawn(move || run_gamepad_activity_process(sender, thread_stop)),
+    };
 
     GamepadActivityThread {
         stop,
         handle: Some(handle),
+    }
+}
+
+fn resolve_gamepad_activity_test_delay() -> Option<Duration> {
+    std::env::var(GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value).ok())
+}
+
+fn run_synthetic_gamepad_activity_process(
+    sender: mpsc::Sender<RunnerMessage>,
+    stop: Arc<AtomicBool>,
+    delay: Duration,
+) {
+    let started = Instant::now();
+    while started.elapsed() < delay {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+
+        thread::sleep(
+            delay
+                .saturating_sub(started.elapsed())
+                .min(GAMEPAD_ACTIVITY_POLL_INTERVAL),
+        );
+    }
+
+    if !stop.load(Ordering::SeqCst) {
+        let _ = sender.send(RunnerMessage::SessionEvent(SessionEvent::UserActivity));
     }
 }
 
