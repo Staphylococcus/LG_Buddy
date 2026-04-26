@@ -6,7 +6,7 @@ It can:
 
 - turn the TV on at boot and wake
 - turn the TV off at shutdown and before system sleep
-- blank and restore the panel on desktop idle and activity
+- blank and restore the panel on desktop idle and activity, including gamepad activity on GNOME
 - adjust OLED pixel brightness with a small desktop dialog
 
 LG Buddy supports GNOME and `swayidle`-based sessions. Official release bundles include a prebuilt `lg-buddy` binary, so normal installation does not require a Rust toolchain.
@@ -35,6 +35,9 @@ The GNOME backend requires a compatible GNOME session with:
 
 At runtime, GNOME support now uses a persistent in-process session-bus client
 for shell detection, ScreenSaver signals, and Mutter idletime polling.
+The GNOME monitor also observes readable Linux gamepad input devices so
+controller activity can keep the TV output awake even when GNOME does not count
+that input as desktop activity.
 
 Typical package installs:
 
