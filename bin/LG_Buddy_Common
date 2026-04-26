@@ -106,10 +106,11 @@ lg_buddy_expected_app() {
 }
 
 lg_buddy_send_wol() {
-    local mac="$1"
+    local ip="$1"
+    local mac="$2"
 
     if command -v wakeonlan >/dev/null 2>&1; then
-        wakeonlan "$mac"
+        wakeonlan -i "$ip" "$mac"
     elif command -v wol >/dev/null 2>&1; then
         wol "$mac"
     else

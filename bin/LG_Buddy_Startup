@@ -39,7 +39,7 @@ else
     fi
 fi
 
-lg_buddy_send_wol "$tv_mac" || true
+lg_buddy_send_wol "$tv_ip" "$tv_mac" || true
 
 # Let the TV fully bring up its WebSocket endpoint after WoL.
 sleep 6
@@ -51,7 +51,7 @@ for i in 1 2 3 4 5 6; do
     fi
     retry_delay=$(( (i * 2) > 30 ? 30 : (i * 2) ))
     echo "Attempt $i failed, retrying in ${retry_delay}s..."
-    lg_buddy_send_wol "$tv_mac" || true
+    lg_buddy_send_wol "$tv_ip" "$tv_mac" || true
     sleep "$retry_delay"
 done
 
