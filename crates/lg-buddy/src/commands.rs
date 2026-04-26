@@ -2173,6 +2173,7 @@ mod tests {
             tv_mac: "aa:bb:cc:dd:ee:ff"
                 .parse::<MacAddress>()
                 .expect("parse mac"),
+            tv_subnet: None,
             input,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,
@@ -2213,7 +2214,7 @@ mod tests {
     }
 
     impl WakeOnLanSender for RecordingWakeOnLanSender {
-        fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
+        fn send_magic_packet(&self, mac: &MacAddress, _target_ip: Option<Ipv4Addr>, _subnet_mask: Option<Ipv4Addr>) -> Result<(), WakeOnLanError> {
             self.calls.borrow_mut().push(mac.clone());
             Ok(())
         }

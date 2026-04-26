@@ -71,6 +71,7 @@ normalize_restore_policy() {
 
 current_tv_ip=""
 current_tv_mac=""
+current_tv_subnet="255.255.255.0"
 current_input="HDMI_1"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
@@ -79,6 +80,7 @@ current_screen_restore_policy="$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY"
 if lg_buddy_load_config >/dev/null 2>&1; then
     current_tv_ip="$tv_ip"
     current_tv_mac="$tv_mac"
+    current_tv_subnet="$tv_subnet"
     current_input="$input"
     current_screen_backend="$screen_backend"
     current_screen_idle_timeout="$screen_idle_timeout"
@@ -89,6 +91,7 @@ fi
 if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     tv_ip="${LG_BUDDY_TV_IP:-$current_tv_ip}"
     tv_mac="${LG_BUDDY_TV_MAC:-$current_tv_mac}"
+    tv_subnet="${LG_BUDDY_TV_SUBNET:-$current_tv_subnet}"
     input="${LG_BUDDY_INPUT:-$current_input}"
     screen_backend="${LG_BUDDY_SCREEN_BACKEND:-$current_screen_backend}"
     screen_idle_timeout="${LG_BUDDY_SCREEN_IDLE_TIMEOUT:-$current_screen_idle_timeout}"
@@ -102,6 +105,12 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
         echo "LG_BUDDY_TV_MAC must be set to a valid MAC address in non-interactive mode."
         exit 1
     }
+    if [ -n "$tv_subnet" ]; then
+        validate_ip "$tv_subnet" || {
+            echo "LG_BUDDY_TV_SUBNET must be set to a valid IPv4 address in non-interactive mode."
+            exit 1
+        }
+    fi
     validate_input "$input" || {
         echo "LG_BUDDY_INPUT must be one of HDMI_1, HDMI_2, HDMI_3, or HDMI_4."
         exit 1
@@ -158,6 +167,14 @@ else
             echo "  Invalid format. Expected: 192.168.1.100"
         done
     fi
+
+    while true; do
+        tv_subnet="$(prompt_with_default "Enter your TV's subnet mask (e.g. 255.255.255.0)" "$current_tv_subnet")"
+        if [ -z "$tv_subnet" ] || validate_ip "$tv_subnet"; then
+            break
+        fi
+        echo "  Invalid format. Expected: 255.255.255.0"
+    done
 
     if ! ping -c 1 -W 2 "$tv_ip" &>/dev/null; then
         echo "  Warning: TV not responding at $tv_ip (may be in standby). Continuing."
@@ -262,6 +279,7 @@ echo ""
 echo "Configuration to apply:"
 echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
+echo "  TV Subnet:           $tv_subnet"
 echo "  PC Input:            $input"
 echo "  Screen Backend:      $screen_backend"
 echo "  Screen Idle Timeout: $screen_idle_timeout"
@@ -286,6 +304,7 @@ cat >"$CONFIG_FILE" <<EOF
 # LG Buddy configuration
 tv_ip=$tv_ip
 tv_mac=$tv_mac
+tv_subnet=$tv_subnet
 input=$input
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout

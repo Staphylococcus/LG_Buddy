@@ -270,7 +270,7 @@ impl<'a, C: TvClient> TvPower<'a, C> {
         sender: &W,
         tv_mac: &MacAddress,
     ) -> Result<(), WakeOnLanError> {
-        sender.send_magic_packet(tv_mac)
+        sender.send_magic_packet(tv_mac, Some(self.tv_ip), None)
     }
 
     pub fn off(&self) -> Result<CommandOutput, TvError> {
@@ -1276,7 +1276,7 @@ mod tests {
     }
 
     impl WakeOnLanSender for RecordingWakeOnLanSender {
-        fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
+        fn send_magic_packet(&self, mac: &MacAddress, _target_ip: Option<Ipv4Addr>, _subnet_mask: Option<Ipv4Addr>) -> Result<(), WakeOnLanError> {
             self.calls.borrow_mut().push(mac.clone());
             Ok(())
         }
