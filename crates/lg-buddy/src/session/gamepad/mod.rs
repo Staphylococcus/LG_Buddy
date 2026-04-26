@@ -4,6 +4,7 @@ mod hidraw;
 mod reader;
 mod registry;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::time::Instant;
@@ -101,6 +102,14 @@ pub(crate) struct SystemGamepadActivitySource {
 }
 
 impl SystemGamepadActivitySource {
+    pub(crate) fn refresh(&mut self, now: Instant) -> Vec<String> {
+        refresh_gamepad_activity_source_from_dir(self, Path::new(DEFAULT_INPUT_DIR), now)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.readers.is_empty() && self.raw_hid_readers.is_empty()
+    }
+
     pub(crate) fn poll_once(&mut self, now: Instant) -> GamepadActivityPoll {
         let mut activity = false;
         #[cfg(test)]
@@ -171,6 +180,109 @@ impl SystemGamepadActivitySource {
 
 pub(crate) fn open_system_gamepad_activity_source() -> GamepadActivitySourceSetup {
     open_gamepad_activity_source_from_dir(Path::new(DEFAULT_INPUT_DIR), ActivityPolicy::default())
+}
+
+fn refresh_gamepad_activity_source_from_dir(
+    source: &mut SystemGamepadActivitySource,
+    input_dir: &Path,
+    now: Instant,
+) -> Vec<String> {
+    let discovery = discover_gamepad_devices(input_dir);
+    let mut diagnostics = Vec::new();
+
+    if let Some(input_dir_error) = discovery.input_dir_error {
+        diagnostics.push(format!(
+            "gamepad activity source refresh failed: failed to read `{}`: {input_dir_error}",
+            input_dir.display()
+        ));
+        return diagnostics;
+    }
+
+    let existing_readers = source
+        .readers
+        .iter()
+        .map(|reader| reader.device_id().clone())
+        .collect::<HashSet<_>>();
+    let existing_raw_hid_paths = source
+        .raw_hid_readers
+        .iter()
+        .map(|reader| reader.path().to_path_buf())
+        .collect::<HashSet<_>>();
+    let mut reader_failures = Vec::new();
+    let mut raw_hid_reader_failures = Vec::new();
+    let mut added_readers = Vec::new();
+    let mut added_raw_hid_readers = Vec::new();
+
+    for device in discovery.devices {
+        if raw_hid_activity_is_supported(&device) {
+            for path in &device.hidraw_paths {
+                if existing_raw_hid_paths.contains(path) {
+                    continue;
+                }
+
+                match RawHidActivityReader::open(device.id.clone(), path.clone()) {
+                    Ok(reader) => {
+                        added_raw_hid_readers.push(path.display().to_string());
+                        source.raw_hid_readers.push(reader);
+                    }
+                    Err(err) => raw_hid_reader_failures.push(format!(
+                        "{} for {}: {err}",
+                        path.display(),
+                        device.path.display()
+                    )),
+                }
+            }
+        }
+
+        if existing_readers.contains(&device.id) {
+            continue;
+        }
+
+        match GamepadDeviceReader::open(&device) {
+            Ok(mut reader) => {
+                seed_initial_axis_events(&mut source.registry, &mut reader, now);
+                added_readers.push(device.id.to_string());
+                source.readers.push(reader);
+            }
+            Err(err) => reader_failures.push(format!("{}: {err}", device.path.display())),
+        }
+    }
+
+    if !added_readers.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refreshed: added input device reader(s): {}",
+            added_readers.join(", ")
+        ));
+    }
+    if !added_raw_hid_readers.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refreshed: added raw HID reader(s): {}",
+            added_raw_hid_readers.join(", ")
+        ));
+    }
+    if !reader_failures.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refresh could not open {} detected input device(s); first error: {}",
+            reader_failures.len(),
+            reader_failures[0]
+        ));
+    }
+    if !raw_hid_reader_failures.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refresh could not open {} detected raw HID path(s); first error: {}",
+            raw_hid_reader_failures.len(),
+            raw_hid_reader_failures[0]
+        ));
+    }
+    if !discovery.inspect_failures.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refresh could not inspect {} input device(s); first error: {}",
+            discovery.inspect_failures.len(),
+            discovery.inspect_failures[0]
+        ));
+    }
+
+    diagnostics
 }
 
 fn open_gamepad_activity_source_from_dir(
@@ -251,9 +363,7 @@ fn open_gamepad_activity_source_from_dir(
     let mut registry = ActivityRegistry::new(policy);
     let baseline_seeded_at = Instant::now();
     for reader in &mut readers {
-        for event in reader.take_initial_axis_events() {
-            registry.observe(event, baseline_seeded_at);
-        }
+        seed_initial_axis_events(&mut registry, reader, baseline_seeded_at);
     }
 
     let source = if readers.is_empty() && raw_hid_readers.is_empty() {
@@ -269,6 +379,16 @@ fn open_gamepad_activity_source_from_dir(
     GamepadActivitySourceSetup {
         source,
         diagnostics,
+    }
+}
+
+fn seed_initial_axis_events(
+    registry: &mut ActivityRegistry,
+    reader: &mut GamepadDeviceReader,
+    now: Instant,
+) {
+    for event in reader.take_initial_axis_events() {
+        registry.observe(event, now);
     }
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
@@ -23,7 +24,7 @@ use crate::gnome::{
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
     GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
 };
-use crate::session::gamepad::open_system_gamepad_activity_source;
+use crate::session::gamepad::{open_system_gamepad_activity_source, SystemGamepadActivitySource};
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
@@ -39,6 +40,7 @@ const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
 const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const GAMEPAD_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
@@ -455,25 +457,48 @@ fn run_synthetic_gamepad_activity_process(
 }
 
 fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<AtomicBool>) {
-    let setup = open_system_gamepad_activity_source();
-    for diagnostic in setup.diagnostics {
-        if sender.send(RunnerMessage::Diagnostic(diagnostic)).is_err() {
-            return;
-        }
-    }
-
-    let Some(mut source) = setup.source else {
-        return;
-    };
-
+    let mut diagnostics = GamepadDiagnosticEmitter::default();
+    let mut source: Option<SystemGamepadActivitySource> = None;
+    let mut next_refresh_at = Instant::now();
     let mut last_activity_sent_at = None;
+
     while !stop.load(Ordering::SeqCst) {
         let observed_at = Instant::now();
-        let poll = source.poll_once(observed_at);
-        for diagnostic in poll.diagnostics {
-            if sender.send(RunnerMessage::Diagnostic(diagnostic)).is_err() {
-                return;
+
+        if observed_at >= next_refresh_at {
+            if let Some(current_source) = source.as_mut() {
+                if !diagnostics.send_all(&sender, current_source.refresh(observed_at)) {
+                    return;
+                }
+                if current_source.is_empty() {
+                    source = None;
+                }
             }
+
+            if source.is_none() {
+                let setup = open_system_gamepad_activity_source();
+                if !diagnostics.send_all(&sender, setup.diagnostics) {
+                    return;
+                }
+                source = setup.source;
+            }
+
+            next_refresh_at = observed_at + GAMEPAD_ACTIVITY_REFRESH_INTERVAL;
+        }
+
+        let Some(current_source) = source.as_mut() else {
+            thread::sleep(GAMEPAD_ACTIVITY_POLL_INTERVAL);
+            continue;
+        };
+
+        let poll = current_source.poll_once(observed_at);
+        if !diagnostics.send_all(&sender, poll.diagnostics) {
+            return;
+        }
+
+        if current_source.is_empty() {
+            source = None;
+            next_refresh_at = Instant::now();
         }
 
         if poll.activity && gamepad_activity_send_due(last_activity_sent_at, observed_at) {
@@ -681,6 +706,25 @@ fn gamepad_activity_send_due(last_sent_at: Option<Instant>, observed_at: Instant
                 >= GAMEPAD_ACTIVITY_SEND_INTERVAL
         })
         .unwrap_or(true)
+}
+
+#[derive(Debug, Default)]
+struct GamepadDiagnosticEmitter {
+    seen: HashSet<String>,
+}
+
+impl GamepadDiagnosticEmitter {
+    fn send_all(&mut self, sender: &mpsc::Sender<RunnerMessage>, diagnostics: Vec<String>) -> bool {
+        for diagnostic in diagnostics {
+            if self.seen.insert(diagnostic.clone())
+                && sender.send(RunnerMessage::Diagnostic(diagnostic)).is_err()
+            {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[derive(Debug, Default)]

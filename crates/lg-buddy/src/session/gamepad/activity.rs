@@ -129,7 +129,12 @@ fn movement_threshold(policy: &ActivityPolicy, range: AxisRange) -> i64 {
     let hardware_noise = i64::from(range.flat)
         .abs()
         .max(i64::from(range.fuzz).abs().saturating_mul(2));
-    let minimum = i64::from(policy.minimum_axis_movement).max(1);
+    let configured_minimum = i64::from(policy.minimum_axis_movement).max(1);
+    let minimum = if span > 0 && span <= configured_minimum {
+        1
+    } else {
+        configured_minimum
+    };
 
     range_threshold
         .max(hardware_noise.saturating_add(1))
@@ -365,5 +370,27 @@ mod tests {
         );
 
         assert_eq!(evaluation.decision, ActivityDecision::NoActivity);
+    }
+
+    #[test]
+    fn one_step_hat_axis_movement_counts_as_activity() {
+        let started = Instant::now();
+        let range = AxisRange {
+            minimum: -1,
+            maximum: 1,
+            flat: 0,
+            fuzz: 0,
+        };
+        let previous = evaluate_axis_event(&test_policy(), None, 0, range, started).next_state;
+
+        let evaluation = evaluate_axis_event(
+            &test_policy(),
+            Some(&previous),
+            1,
+            range,
+            started + Duration::from_millis(100),
+        );
+
+        assert_eq!(evaluation.decision, ActivityDecision::Activity);
     }
 }
