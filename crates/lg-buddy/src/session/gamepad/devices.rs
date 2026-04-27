@@ -43,7 +43,26 @@ pub(crate) struct DeviceCapabilities {
     pub absolute_axes: Vec<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceInspection {
+    capabilities: DeviceCapabilities,
+    vendor_id: u16,
+    product_id: u16,
+}
+
 pub(crate) fn discover_gamepad_devices(input_dir: &Path) -> DeviceDiscovery {
+    discover_gamepad_devices_from_dirs(
+        input_dir,
+        Path::new(SYS_CLASS_INPUT_DIR),
+        inspect_evdev_device,
+    )
+}
+
+fn discover_gamepad_devices_from_dirs(
+    input_dir: &Path,
+    sys_class_input_dir: &Path,
+    mut inspect_device: impl FnMut(&Path) -> io::Result<DeviceInspection>,
+) -> DeviceDiscovery {
     let mut devices = Vec::new();
     let mut inspect_failures = Vec::new();
 
@@ -59,16 +78,15 @@ pub(crate) fn discover_gamepad_devices(input_dir: &Path) -> DeviceDiscovery {
     };
 
     for path in event_paths {
-        match Device::open(&path) {
-            Ok(device) => {
-                let capabilities = capabilities_from_evdev(&device);
-                if capabilities_are_gamepad_like(&capabilities) {
-                    let input_id = device.input_id();
+        match inspect_device(&path) {
+            Ok(inspection) => {
+                if capabilities_are_gamepad_like(&inspection.capabilities) {
                     devices.push(GamepadDevice {
                         id: DeviceId::from_path(&path),
-                        vendor_id: input_id.vendor(),
-                        product_id: input_id.product(),
-                        hidraw_paths: hidraw_paths_for_event_path(&path).unwrap_or_default(),
+                        vendor_id: inspection.vendor_id,
+                        product_id: inspection.product_id,
+                        hidraw_paths: hidraw_paths_for_event_path(&path, sys_class_input_dir)
+                            .unwrap_or_default(),
                         path,
                     });
                 }
@@ -87,6 +105,17 @@ pub(crate) fn discover_gamepad_devices(input_dir: &Path) -> DeviceDiscovery {
         inspect_failures,
         input_dir_error: None,
     }
+}
+
+fn inspect_evdev_device(path: &Path) -> io::Result<DeviceInspection> {
+    let device = Device::open(path)?;
+    let input_id = device.input_id();
+
+    Ok(DeviceInspection {
+        capabilities: capabilities_from_evdev(&device),
+        vendor_id: input_id.vendor(),
+        product_id: input_id.product(),
+    })
 }
 
 pub(crate) fn capabilities_are_gamepad_like(capabilities: &DeviceCapabilities) -> bool {
@@ -131,7 +160,10 @@ fn capabilities_from_evdev(device: &Device) -> DeviceCapabilities {
     }
 }
 
-fn hidraw_paths_for_event_path(event_path: &Path) -> io::Result<Vec<PathBuf>> {
+fn hidraw_paths_for_event_path(
+    event_path: &Path,
+    sys_class_input_dir: &Path,
+) -> io::Result<Vec<PathBuf>> {
     let event_name = event_path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -142,7 +174,7 @@ fn hidraw_paths_for_event_path(event_path: &Path) -> io::Result<Vec<PathBuf>> {
         )
     })?;
 
-    hidraw_paths_for_event_name(event_name, Path::new(SYS_CLASS_INPUT_DIR))
+    hidraw_paths_for_event_name(event_name, sys_class_input_dir)
 }
 
 fn hidraw_paths_for_event_name(
@@ -184,9 +216,14 @@ fn inspect_error_message(err: &io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{capabilities_are_gamepad_like, hidraw_paths_for_event_name, DeviceCapabilities};
+    use super::{
+        capabilities_are_gamepad_like, discover_gamepad_devices_from_dirs,
+        hidraw_paths_for_event_name, DeviceCapabilities, DeviceInspection,
+    };
+    use crate::session::gamepad::DeviceId;
     use std::ffi::OsStr;
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -198,6 +235,50 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create temp dir");
         path
+    }
+
+    fn gamepad_inspection(vendor_id: u16, product_id: u16) -> DeviceInspection {
+        DeviceInspection {
+            capabilities: DeviceCapabilities {
+                keys: vec![0x130],
+                absolute_axes: vec![0x00],
+            },
+            vendor_id,
+            product_id,
+        }
+    }
+
+    fn keyboard_inspection() -> DeviceInspection {
+        DeviceInspection {
+            capabilities: DeviceCapabilities {
+                keys: vec![30, 31, 32],
+                absolute_axes: Vec::new(),
+            },
+            vendor_id: 0x0001,
+            product_id: 0x0001,
+        }
+    }
+
+    fn create_event_file(input_dir: &Path, name: &str) {
+        fs::write(input_dir.join(name), []).expect("create input event file");
+    }
+
+    fn map_event_to_hidraw(root: &Path, event_name: &str, hidraw_names: &[&str]) {
+        let sys_class_input = root.join("sys/class/input");
+        let hid_device = root.join(format!("devices/usb/0003:046D:C267.{event_name}"));
+        let input_device = hid_device.join("input/input56");
+        let hidraw_dir = hid_device.join("hidraw");
+        fs::create_dir_all(&sys_class_input).expect("create sys input dir");
+        fs::create_dir_all(&input_device).expect("create input device dir");
+        fs::create_dir_all(&hidraw_dir).expect("create hidraw dir");
+        for hidraw_name in hidraw_names {
+            fs::create_dir(hidraw_dir.join(hidraw_name)).expect("create hidraw entry");
+        }
+
+        let event_dir = sys_class_input.join(event_name);
+        fs::create_dir(&event_dir).expect("create event sysfs dir");
+        std::os::unix::fs::symlink(&input_device, event_dir.join("device"))
+            .expect("symlink device");
     }
 
     #[test]
@@ -282,6 +363,97 @@ mod tests {
                 .expect("hidraw paths"),
             vec![PathBuf::from("/dev/hidraw8")]
         );
+
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn discovery_filters_event_devices_and_reports_gamepad_metadata() {
+        let root = temp_dir("discover-success");
+        let input_dir = root.join("dev/input");
+        let sys_class_input = root.join("sys/class/input");
+        fs::create_dir_all(&input_dir).expect("create input dir");
+        create_event_file(&input_dir, "event2");
+        create_event_file(&input_dir, "event10");
+        create_event_file(&input_dir, "mouse0");
+        map_event_to_hidraw(&root, "event2", &["hidraw8", "hidraw2"]);
+
+        let mut inspected_paths = Vec::new();
+        let discovery = discover_gamepad_devices_from_dirs(&input_dir, &sys_class_input, |path| {
+            inspected_paths.push(path.file_name().expect("file name").to_owned());
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("event2") => Ok(gamepad_inspection(0x054c, 0x0df2)),
+                Some("event10") => Ok(keyboard_inspection()),
+                other => panic!("unexpected inspected path: {other:?}"),
+            }
+        });
+
+        assert_eq!(discovery.input_dir_error, None);
+        assert!(discovery.inspect_failures.is_empty());
+        assert_eq!(
+            inspected_paths,
+            vec![
+                OsStr::new("event10").to_owned(),
+                OsStr::new("event2").to_owned()
+            ]
+        );
+        assert_eq!(discovery.devices.len(), 1);
+        let device = &discovery.devices[0];
+        assert_eq!(
+            device.id,
+            DeviceId::new(input_dir.join("event2").display().to_string())
+        );
+        assert_eq!(device.path, input_dir.join("event2"));
+        assert_eq!(device.vendor_id, 0x054c);
+        assert_eq!(device.product_id, 0x0df2);
+        assert_eq!(
+            device.hidraw_paths,
+            vec![PathBuf::from("/dev/hidraw2"), PathBuf::from("/dev/hidraw8")]
+        );
+
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn discovery_records_inspection_failures_without_stopping() {
+        let root = temp_dir("discover-failure");
+        let input_dir = root.join("dev/input");
+        let sys_class_input = root.join("sys/class/input");
+        fs::create_dir_all(&input_dir).expect("create input dir");
+        create_event_file(&input_dir, "event0");
+        create_event_file(&input_dir, "event1");
+
+        let discovery = discover_gamepad_devices_from_dirs(&input_dir, &sys_class_input, |path| {
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some("event0") => Err(io::Error::new(io::ErrorKind::PermissionDenied, "nope")),
+                Some("event1") => Ok(gamepad_inspection(0x045e, 0x0b13)),
+                other => panic!("unexpected inspected path: {other:?}"),
+            }
+        });
+
+        assert_eq!(discovery.input_dir_error, None);
+        assert_eq!(discovery.devices.len(), 1);
+        assert_eq!(discovery.devices[0].path, input_dir.join("event1"));
+        assert_eq!(discovery.inspect_failures.len(), 1);
+        assert_eq!(discovery.inspect_failures[0].path, input_dir.join("event0"));
+        assert_eq!(discovery.inspect_failures[0].error, "permission denied");
+
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn discovery_reports_input_directory_errors() {
+        let root = temp_dir("discover-input-error");
+        let input_dir = root.join("missing-input");
+        let sys_class_input = root.join("sys/class/input");
+
+        let discovery = discover_gamepad_devices_from_dirs(&input_dir, &sys_class_input, |_| {
+            panic!("input directory errors should stop before inspection")
+        });
+
+        assert!(discovery.input_dir_error.is_some());
+        assert!(discovery.devices.is_empty());
+        assert!(discovery.inspect_failures.is_empty());
 
         fs::remove_dir_all(root).expect("remove temp dir");
     }
