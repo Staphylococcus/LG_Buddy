@@ -49,7 +49,7 @@ flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
         SWAY["swayidle<br/>idle hooks"]
-        INPUT["Linux input devices<br/>gamepads / wheels"]
+        INPUT["Linux input devices<br/>gamepads / wheels / device events"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -144,6 +144,8 @@ The intended split is:
   - keeps blank and restore decisions edge-triggered instead of poll-triggered
 - `session/gamepad/`
   - discovers readable Linux gamepad-like input devices
+  - refreshes discovery from Linux input-device add, remove, and change events
+  - periodically reconciles the watched device set in case an event is missed
   - maps raw controller events into activity observations
   - includes a narrow Logitech G923 raw HID fallback for wheel and pedal reports
     that may not appear through evdev
@@ -172,6 +174,7 @@ The session-facing pieces should be read as one subsystem:
   - owns session-phase synthesis from GNOME observations and configured thresholds
 - `session/gamepad/`
   - supplies auxiliary user-activity observations for controller input
+  - owns gamepad device discovery, event-triggered refresh, and reconciliation
 - `session/runner.rs`
   - consumes normalized session events and idletime observations and dispatches runtime policy
 - `gnome.rs` and `swayidle.rs`
@@ -391,6 +394,8 @@ The session subsystem is intentionally asymmetric where the providers are asymme
 - the GNOME monitor also consumes gamepad activity directly from Linux input
   devices; this is not modeled as a separate desktop backend because it only
   supplements GNOME's activity observations
+- the gamepad source refreshes its device set from Linux device add, remove, and
+  change events, with periodic reconciliation for missed events
 - delegated `swayidle` monitor execution is implemented for `timeout` and
   `resume` parity with the shell monitor
 - `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,

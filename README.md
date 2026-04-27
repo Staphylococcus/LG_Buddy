@@ -37,7 +37,9 @@ At runtime, GNOME support now uses a persistent in-process session-bus client
 for shell detection, ScreenSaver signals, and Mutter idletime polling.
 The GNOME monitor also observes readable Linux gamepad input devices so
 controller activity can keep the TV output awake even when GNOME does not count
-that input as desktop activity.
+that input as desktop activity. It refreshes the watched device set when Linux
+reports input-device add, remove, or change events, with a periodic
+reconciliation scan as a fallback.
 
 Typical package installs:
 

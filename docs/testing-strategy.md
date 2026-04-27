@@ -28,8 +28,8 @@ This is where most tests should live.
 - Wake-on-LAN packet construction
 - backend selection rules
 - GNOME signal-to-event mapping
-- gamepad device classification, raw event mapping, registry behavior, and
-  activity policy
+- gamepad device discovery, device-event filtering, raw event mapping, registry
+  behavior, and activity policy
 - TV command output parsing
 - command-policy branching and retry logic
 
@@ -191,12 +191,18 @@ Examples:
 
 Primary concern:
 
-- module behavior for device classification, evdev event mapping, raw HID
-  fallback gating, per-device state, and activity policy
+- module behavior for device discovery, device-event filtering, evdev event
+  mapping, raw HID fallback gating, per-device state, and activity policy
 
 Secondary concern:
 
 - module interoperability in the GNOME runner path
+- runner refresh scheduling when device events arrive or reconciliation is due
+
+Discovery coverage should include event-node filtering, readable-device
+failures, sysfs hidraw mapping, device metadata propagation, device-event
+parsing, and refresh debounce/reconciliation behavior. Real hotplug is useful
+for manual validation but should not be required by the default suite.
 
 Hardware validation:
 

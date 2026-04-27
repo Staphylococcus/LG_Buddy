@@ -81,7 +81,10 @@ LG_BUDDY_GAMEPAD_SMOKE_SECS=20 cargo test -p lg-buddy --lib \
 
 Run that from a desktop session that has read access to the connected
 controllers. The test uses the production gamepad activity source and requires
-manual input during the capture window.
+manual input during the capture window. To smoke-test hotplug behavior, start
+the monitor and connect or disconnect a controller; the gamepad source should
+refresh without restarting the service. The production monitor also performs a
+periodic reconciliation scan for missed device events.
 
 ## Release Tooling
 
@@ -121,7 +124,7 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `crates/lg-buddy/src/commands.rs` | Runtime lifecycle and policy commands |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity synthesis and thresholds |
-| `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, capture, registry, and policy |
+| `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic session-bus transport seam |
 | `crates/lg-buddy/src/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/swayidle.rs` | `swayidle` backend integration |

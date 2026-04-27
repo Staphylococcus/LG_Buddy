@@ -52,9 +52,12 @@ shell detection, ScreenSaver signals, and Mutter idletime polling.
 
 When the GNOME backend is active, LG Buddy also watches readable Linux gamepad
 input devices and treats controller activity as user activity. This is automatic
-and has no configuration switch. Standard controllers are read through evdev.
-The Logitech G923 also has a raw HID fallback for wheel and pedal activity that
-is not exposed as evdev events on some Linux hosts.
+and has no configuration switch. Devices are discovered at monitor startup,
+refreshed when Linux reports input-device add, remove, or change events, and
+periodically reconciled so hot-plugged controllers can be picked up without
+restarting the service. Standard controllers are read through evdev. The
+Logitech G923 also has a raw HID fallback for wheel and pedal activity that is
+not exposed as evdev events on some Linux hosts.
 
 Gamepad activity detection requires the user session running
 `LG_Buddy_screen.service` to have read access to the relevant `/dev/input/event*`
