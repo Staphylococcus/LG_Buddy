@@ -24,7 +24,10 @@ use crate::gnome::{
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
     GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
 };
-use crate::session::gamepad::{open_system_gamepad_activity_source, SystemGamepadActivitySource};
+use crate::session::gamepad::{
+    open_system_gamepad_activity_source, open_system_gamepad_device_event_monitor,
+    SystemGamepadActivitySource, SystemGamepadDeviceEventMonitor,
+};
 use crate::session::inactivity::{
     InactivityDecision, InactivityEngine, InactivityObservation, InactivityThresholds,
 };
@@ -40,7 +43,8 @@ const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
 const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const GAMEPAD_ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
+const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
@@ -458,14 +462,39 @@ fn run_synthetic_gamepad_activity_process(
 
 fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<AtomicBool>) {
     let mut diagnostics = GamepadDiagnosticEmitter::default();
+    let mut event_monitor = match open_system_gamepad_device_event_monitor() {
+        Ok(monitor) => Some(monitor),
+        Err(err) => {
+            let _ = diagnostics.send_all(
+                &sender,
+                vec![format!(
+                    "gamepad device event monitor unavailable: {err}; falling back to periodic reconciliation"
+                )],
+            );
+            None
+        }
+    };
     let mut source: Option<SystemGamepadActivitySource> = None;
-    let mut next_refresh_at = Instant::now();
+    let mut pending_refresh_at = Some(Instant::now());
+    let mut next_reconcile_at = Instant::now() + GAMEPAD_ACTIVITY_RECONCILE_INTERVAL;
     let mut last_activity_sent_at = None;
 
     while !stop.load(Ordering::SeqCst) {
         let observed_at = Instant::now();
 
-        if observed_at >= next_refresh_at {
+        if gamepad_device_event_refresh_requested(&sender, &mut diagnostics, &mut event_monitor) {
+            schedule_gamepad_refresh(
+                &mut pending_refresh_at,
+                observed_at + GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE,
+            );
+        }
+
+        if observed_at >= next_reconcile_at {
+            schedule_gamepad_refresh(&mut pending_refresh_at, observed_at);
+            next_reconcile_at = observed_at + GAMEPAD_ACTIVITY_RECONCILE_INTERVAL;
+        }
+
+        if gamepad_refresh_due(pending_refresh_at, observed_at) {
             if let Some(current_source) = source.as_mut() {
                 if !diagnostics.send_all(&sender, current_source.refresh(observed_at)) {
                     return;
@@ -483,7 +512,7 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
                 source = setup.source;
             }
 
-            next_refresh_at = observed_at + GAMEPAD_ACTIVITY_REFRESH_INTERVAL;
+            pending_refresh_at = None;
         }
 
         let Some(current_source) = source.as_mut() else {
@@ -498,7 +527,7 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 
         if current_source.is_empty() {
             source = None;
-            next_refresh_at = Instant::now();
+            schedule_gamepad_refresh(&mut pending_refresh_at, Instant::now());
         }
 
         if poll.activity && gamepad_activity_send_due(last_activity_sent_at, observed_at) {
@@ -708,6 +737,47 @@ fn gamepad_activity_send_due(last_sent_at: Option<Instant>, observed_at: Instant
         .unwrap_or(true)
 }
 
+fn gamepad_device_event_refresh_requested(
+    sender: &mpsc::Sender<RunnerMessage>,
+    diagnostics: &mut GamepadDiagnosticEmitter,
+    event_monitor: &mut Option<SystemGamepadDeviceEventMonitor>,
+) -> bool {
+    let Some(monitor) = event_monitor.as_mut() else {
+        return false;
+    };
+
+    match monitor.has_relevant_event() {
+        Ok(refresh_requested) => refresh_requested,
+        Err(err) => {
+            *event_monitor = None;
+            diagnostics.send_all(
+                sender,
+                vec![format!(
+                    "gamepad device event monitor stopped: {err}; falling back to periodic reconciliation"
+                )],
+            );
+            false
+        }
+    }
+}
+
+fn schedule_gamepad_refresh(pending_refresh_at: &mut Option<Instant>, refresh_at: Instant) {
+    if pending_refresh_at
+        .map(|pending_refresh_at| pending_refresh_at <= refresh_at)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    *pending_refresh_at = Some(refresh_at);
+}
+
+fn gamepad_refresh_due(pending_refresh_at: Option<Instant>, observed_at: Instant) -> bool {
+    pending_refresh_at
+        .map(|pending_refresh_at| observed_at >= pending_refresh_at)
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Default)]
 struct GamepadDiagnosticEmitter {
     seen: HashSet<String>,
@@ -907,9 +977,9 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        gamepad_activity_send_due, handle_gnome_inactivity_observation,
-        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, shell_quote,
-        InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
+        gamepad_activity_send_due, gamepad_refresh_due, handle_gnome_inactivity_observation,
+        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, schedule_gamepad_refresh,
+        shell_quote, InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
         SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
@@ -1272,6 +1342,37 @@ mod tests {
         assert!(gamepad_activity_send_due(
             Some(first_sent_at),
             first_sent_at + GAMEPAD_ACTIVITY_SEND_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn gamepad_refresh_schedule_keeps_earliest_pending_refresh() {
+        let now = Instant::now();
+        let mut pending_refresh_at = None;
+
+        schedule_gamepad_refresh(&mut pending_refresh_at, now + Duration::from_secs(2));
+        schedule_gamepad_refresh(&mut pending_refresh_at, now + Duration::from_secs(5));
+
+        assert_eq!(pending_refresh_at, Some(now + Duration::from_secs(2)));
+
+        schedule_gamepad_refresh(&mut pending_refresh_at, now + Duration::from_secs(1));
+
+        assert_eq!(pending_refresh_at, Some(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn gamepad_refresh_due_detects_pending_refresh_time() {
+        let now = Instant::now();
+
+        assert!(!gamepad_refresh_due(None, now));
+        assert!(!gamepad_refresh_due(
+            Some(now + Duration::from_millis(1)),
+            now
+        ));
+        assert!(gamepad_refresh_due(Some(now), now));
+        assert!(gamepad_refresh_due(
+            Some(now),
+            now + Duration::from_millis(1)
         ));
     }
 

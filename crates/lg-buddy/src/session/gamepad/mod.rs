@@ -1,4 +1,5 @@
 mod activity;
+mod device_events;
 mod devices;
 mod hidraw;
 mod reader;
@@ -10,6 +11,9 @@ use std::path::Path;
 use std::time::Instant;
 
 pub(crate) use activity::ActivityPolicy;
+pub(crate) use device_events::{
+    open_system_gamepad_device_event_monitor, SystemGamepadDeviceEventMonitor,
+};
 use devices::discover_gamepad_devices;
 use hidraw::{raw_hid_activity_is_supported, RawHidActivityReader};
 use reader::GamepadDeviceReader;
