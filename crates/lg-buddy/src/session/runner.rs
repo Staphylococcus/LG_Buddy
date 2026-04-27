@@ -44,6 +44,7 @@ const GNOME_BUS_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GAMEPAD_ACTIVITY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
+const GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
@@ -502,8 +503,12 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
         }
 
         if gamepad_refresh_due(pending_refresh_at, observed_at) {
+            let mut retry_refresh = false;
+
             if let Some(current_source) = source.as_mut() {
-                if !diagnostics.send_all(&sender, current_source.refresh(observed_at)) {
+                let refresh = current_source.refresh(observed_at);
+                retry_refresh |= refresh.retry_requested;
+                if !diagnostics.send_all(&sender, refresh.diagnostics) {
                     return;
                 }
                 if current_source.is_empty() {
@@ -516,10 +521,11 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
                 if !diagnostics.send_all(&sender, setup.diagnostics) {
                     return;
                 }
+                retry_refresh |= setup.retry_requested;
                 source = setup.source;
             }
 
-            pending_refresh_at = None;
+            complete_gamepad_refresh(&mut pending_refresh_at, observed_at, retry_refresh);
         }
 
         let Some(current_source) = source.as_mut() else {
@@ -809,6 +815,21 @@ fn gamepad_refresh_due(pending_refresh_at: Option<Instant>, observed_at: Instant
         .unwrap_or(false)
 }
 
+fn complete_gamepad_refresh(
+    pending_refresh_at: &mut Option<Instant>,
+    observed_at: Instant,
+    retry_requested: bool,
+) {
+    *pending_refresh_at = None;
+
+    if retry_requested {
+        schedule_gamepad_refresh(
+            pending_refresh_at,
+            observed_at + GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct GamepadDiagnosticEmitter {
     seen: HashSet<String>,
@@ -1008,13 +1029,15 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        gamepad_activity_send_due, gamepad_device_event_refresh_requested, gamepad_refresh_due,
+        complete_gamepad_refresh, gamepad_activity_send_due,
+        gamepad_device_event_refresh_requested, gamepad_refresh_due,
         handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
         poll_gnome_idle_monitor_once, schedule_gamepad_refresh, shell_quote,
         GamepadDeviceEventMonitor, GamepadDeviceEventRefresh, GamepadDiagnosticEmitter,
         InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
         SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
-        TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_SEND_INTERVAL,
+        TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
+        GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
     use crate::gnome::{
         GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
@@ -1419,6 +1442,23 @@ mod tests {
             Some(now),
             now + Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn completed_gamepad_refresh_can_schedule_short_retry() {
+        let now = Instant::now();
+        let mut pending_refresh_at = Some(now);
+
+        complete_gamepad_refresh(&mut pending_refresh_at, now, true);
+
+        assert_eq!(
+            pending_refresh_at,
+            Some(now + GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL)
+        );
+
+        complete_gamepad_refresh(&mut pending_refresh_at, now, false);
+
+        assert_eq!(pending_refresh_at, None);
     }
 
     #[test]

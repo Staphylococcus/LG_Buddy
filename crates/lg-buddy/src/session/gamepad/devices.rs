@@ -31,6 +31,12 @@ pub(crate) struct DeviceInspectFailure {
     error: String,
 }
 
+impl DeviceInspectFailure {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl fmt::Display for DeviceInspectFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.path.display(), self.error)
