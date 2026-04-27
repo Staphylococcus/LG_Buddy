@@ -43,10 +43,7 @@ impl SystemGamepadDeviceEventMonitor {
     }
 
     pub(crate) fn has_relevant_event(&mut self) -> io::Result<bool> {
-        let mut saw_relevant_event = false;
-        let mut buffer = [0_u8; UEVENT_BUFFER_SIZE];
-
-        loop {
+        has_relevant_gamepad_device_event(|buffer| {
             let bytes_read = unsafe {
                 libc::recv(
                     self.socket.as_raw_fd(),
@@ -56,24 +53,34 @@ impl SystemGamepadDeviceEventMonitor {
                 )
             };
 
-            if bytes_read > 0 {
-                let bytes_read = usize::try_from(bytes_read).unwrap_or(buffer.len());
+            if bytes_read >= 0 {
+                Ok(usize::try_from(bytes_read).unwrap_or(buffer.len()))
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
+    }
+}
+
+fn has_relevant_gamepad_device_event(
+    mut recv_next: impl FnMut(&mut [u8]) -> io::Result<usize>,
+) -> io::Result<bool> {
+    let mut saw_relevant_event = false;
+    let mut buffer = [0_u8; UEVENT_BUFFER_SIZE];
+
+    loop {
+        match recv_next(&mut buffer) {
+            Ok(0) => continue,
+            Ok(bytes_read) => {
                 if is_relevant_gamepad_device_event(&buffer[..bytes_read]) {
                     saw_relevant_event = true;
                 }
-                continue;
             }
-
-            if bytes_read == 0 {
-                return Ok(saw_relevant_event);
-            }
-
-            let err = io::Error::last_os_error();
-            match err.kind() {
+            Err(err) => match err.kind() {
                 io::ErrorKind::Interrupted => continue,
                 io::ErrorKind::WouldBlock => return Ok(saw_relevant_event),
                 _ => return Err(err),
-            }
+            },
         }
     }
 }
@@ -152,7 +159,8 @@ fn uevent_fields(message: &[u8]) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_relevant_gamepad_device_event;
+    use super::{has_relevant_gamepad_device_event, is_relevant_gamepad_device_event};
+    use std::io;
 
     fn message(fields: &[&str]) -> Vec<u8> {
         fields.join("\0").into_bytes()
@@ -225,5 +233,32 @@ mod tests {
     #[test]
     fn malformed_utf8_is_ignored() {
         assert!(!is_relevant_gamepad_device_event(&[0xff, 0xfe, 0]));
+    }
+
+    #[test]
+    fn zero_length_datagram_does_not_stop_event_drain() {
+        let relevant_message = message(&[
+            "add@/devices/pci0000:00/input/input8/event21",
+            "ACTION=add",
+            "DEVPATH=/devices/pci0000:00/input/input8/event21",
+            "SUBSYSTEM=input",
+            "DEVNAME=/dev/input/event21",
+        ]);
+        let mut calls = 0;
+
+        let result = has_relevant_gamepad_device_event(|buffer| {
+            calls += 1;
+            match calls {
+                1 => Ok(0),
+                2 => {
+                    buffer[..relevant_message.len()].copy_from_slice(&relevant_message);
+                    Ok(relevant_message.len())
+                }
+                _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            }
+        });
+
+        assert!(result.expect("event drain"));
+        assert_eq!(calls, 3);
     }
 }

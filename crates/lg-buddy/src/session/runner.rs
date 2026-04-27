@@ -465,12 +465,14 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
     let mut event_monitor = match open_system_gamepad_device_event_monitor() {
         Ok(monitor) => Some(monitor),
         Err(err) => {
-            let _ = diagnostics.send_all(
+            if !diagnostics.send_all(
                 &sender,
                 vec![format!(
                     "gamepad device event monitor unavailable: {err}; falling back to periodic reconciliation"
                 )],
-            );
+            ) {
+                return;
+            }
             None
         }
     };
@@ -482,11 +484,16 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
     while !stop.load(Ordering::SeqCst) {
         let observed_at = Instant::now();
 
-        if gamepad_device_event_refresh_requested(&sender, &mut diagnostics, &mut event_monitor) {
-            schedule_gamepad_refresh(
-                &mut pending_refresh_at,
-                observed_at + GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE,
-            );
+        match gamepad_device_event_refresh_requested(&sender, &mut diagnostics, &mut event_monitor)
+        {
+            GamepadDeviceEventRefresh::Requested => {
+                schedule_gamepad_refresh(
+                    &mut pending_refresh_at,
+                    observed_at + GAMEPAD_ACTIVITY_REFRESH_DEBOUNCE,
+                );
+            }
+            GamepadDeviceEventRefresh::NotRequested => {}
+            GamepadDeviceEventRefresh::Stop => return,
         }
 
         if observed_at >= next_reconcile_at {
@@ -737,26 +744,50 @@ fn gamepad_activity_send_due(last_sent_at: Option<Instant>, observed_at: Instant
         .unwrap_or(true)
 }
 
-fn gamepad_device_event_refresh_requested(
+trait GamepadDeviceEventMonitor {
+    fn has_relevant_event(&mut self) -> io::Result<bool>;
+}
+
+impl GamepadDeviceEventMonitor for SystemGamepadDeviceEventMonitor {
+    fn has_relevant_event(&mut self) -> io::Result<bool> {
+        SystemGamepadDeviceEventMonitor::has_relevant_event(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GamepadDeviceEventRefresh {
+    Requested,
+    NotRequested,
+    Stop,
+}
+
+fn gamepad_device_event_refresh_requested<M>(
     sender: &mpsc::Sender<RunnerMessage>,
     diagnostics: &mut GamepadDiagnosticEmitter,
-    event_monitor: &mut Option<SystemGamepadDeviceEventMonitor>,
-) -> bool {
+    event_monitor: &mut Option<M>,
+) -> GamepadDeviceEventRefresh
+where
+    M: GamepadDeviceEventMonitor,
+{
     let Some(monitor) = event_monitor.as_mut() else {
-        return false;
+        return GamepadDeviceEventRefresh::NotRequested;
     };
 
     match monitor.has_relevant_event() {
-        Ok(refresh_requested) => refresh_requested,
+        Ok(true) => GamepadDeviceEventRefresh::Requested,
+        Ok(false) => GamepadDeviceEventRefresh::NotRequested,
         Err(err) => {
             *event_monitor = None;
-            diagnostics.send_all(
+            if diagnostics.send_all(
                 sender,
                 vec![format!(
                     "gamepad device event monitor stopped: {err}; falling back to periodic reconciliation"
                 )],
-            );
-            false
+            ) {
+                GamepadDeviceEventRefresh::NotRequested
+            } else {
+                GamepadDeviceEventRefresh::Stop
+            }
         }
     }
 }
@@ -977,9 +1008,11 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{
-        gamepad_activity_send_due, gamepad_refresh_due, handle_gnome_inactivity_observation,
-        normalize_idle_timeout_secs, poll_gnome_idle_monitor_once, schedule_gamepad_refresh,
-        shell_quote, InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
+        gamepad_activity_send_due, gamepad_device_event_refresh_requested, gamepad_refresh_due,
+        handle_gnome_inactivity_observation, normalize_idle_timeout_secs,
+        poll_gnome_idle_monitor_once, schedule_gamepad_refresh, shell_quote,
+        GamepadDeviceEventMonitor, GamepadDeviceEventRefresh, GamepadDiagnosticEmitter,
+        InactivityObservationMerger, LatestInactivityObservation, RunnerMessage,
         SessionActionExecutor, SessionEventDispatcher, TimedInactivityObservation,
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
@@ -995,6 +1028,7 @@ mod tests {
         SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
     use crate::RunError;
+    use std::io;
     use std::path::Path;
     use std::sync::{mpsc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -1012,6 +1046,17 @@ mod tests {
         screen_on_output: String,
         screen_off_error: Option<String>,
         screen_on_error: Option<String>,
+    }
+
+    #[derive(Debug)]
+    struct FakeGamepadDeviceEventMonitor {
+        result: Option<io::Result<bool>>,
+    }
+
+    impl GamepadDeviceEventMonitor for FakeGamepadDeviceEventMonitor {
+        fn has_relevant_event(&mut self) -> io::Result<bool> {
+            self.result.take().expect("event monitor result")
+        }
     }
 
     impl SessionActionExecutor for FakeActionExecutor {
@@ -1374,6 +1419,44 @@ mod tests {
             Some(now),
             now + Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn gamepad_device_event_error_emits_diagnostic_and_disables_monitor() {
+        let (sender, receiver) = mpsc::channel();
+        let mut diagnostics = GamepadDiagnosticEmitter::default();
+        let mut monitor = Some(FakeGamepadDeviceEventMonitor {
+            result: Some(Err(io::Error::other("boom"))),
+        });
+
+        assert_eq!(
+            gamepad_device_event_refresh_requested(&sender, &mut diagnostics, &mut monitor),
+            GamepadDeviceEventRefresh::NotRequested
+        );
+        assert!(monitor.is_none());
+        match receiver.recv().expect("diagnostic") {
+            RunnerMessage::Diagnostic(message) => assert_eq!(
+                message,
+                "gamepad device event monitor stopped: boom; falling back to periodic reconciliation"
+            ),
+            _ => panic!("expected diagnostic message"),
+        }
+    }
+
+    #[test]
+    fn gamepad_device_event_error_stops_when_diagnostic_receiver_is_disconnected() {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        let mut diagnostics = GamepadDiagnosticEmitter::default();
+        let mut monitor = Some(FakeGamepadDeviceEventMonitor {
+            result: Some(Err(io::Error::other("boom"))),
+        });
+
+        assert_eq!(
+            gamepad_device_event_refresh_requested(&sender, &mut diagnostics, &mut monitor),
+            GamepadDeviceEventRefresh::Stop
+        );
+        assert!(monitor.is_none());
     }
 
     #[test]
