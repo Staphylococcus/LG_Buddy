@@ -44,11 +44,15 @@ impl ActivityRegistry {
     pub(crate) fn remove_device(&mut self, device_id: &DeviceId) {
         self.devices.remove(device_id);
     }
+
+    pub(crate) fn retain_devices(&mut self, mut keep: impl FnMut(&DeviceId) -> bool) {
+        self.devices.retain(|device_id, _| keep(device_id));
+    }
 }
 
 #[cfg(test)]
 impl ActivityRegistry {
-    fn has_device(&self, device_id: &DeviceId) -> bool {
+    pub(crate) fn has_device(&self, device_id: &DeviceId) -> bool {
         self.devices.contains_key(device_id)
     }
 
@@ -179,5 +183,19 @@ mod tests {
         registry.remove_device(&device_id);
 
         assert!(!registry.has_device(&device_id));
+    }
+
+    #[test]
+    fn registry_retains_only_matching_device_state() {
+        let mut registry = ActivityRegistry::new(test_policy());
+        let retained = DeviceId::new("retained-controller");
+        let removed = DeviceId::new("removed-controller");
+
+        assert!(registry.observe(button_event(retained.clone()), Instant::now()));
+        assert!(registry.observe(button_event(removed.clone()), Instant::now()));
+        registry.retain_devices(|device_id| device_id == &retained);
+
+        assert!(registry.has_device(&retained));
+        assert!(!registry.has_device(&removed));
     }
 }
