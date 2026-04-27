@@ -189,10 +189,14 @@ Examples:
 
 ### Gamepad activity
 
+Subsystem design and adapter guidance live in
+[gamepad-subsystem.md](gamepad-subsystem.md).
+
 Primary concern:
 
 - module behavior for device discovery, device-event filtering, evdev event
-  mapping, raw HID fallback gating, per-device state, and activity policy
+  mapping, device adapter support detection, per-device state, and activity
+  policy
 
 Secondary concern:
 
@@ -201,8 +205,9 @@ Secondary concern:
 
 Discovery coverage should include event-node filtering, readable-device
 failures, sysfs hidraw mapping, device metadata propagation, device-event
-parsing, and refresh debounce/reconciliation behavior. Real hotplug is useful
-for manual validation but should not be required by the default suite.
+parsing, adapter reader specs, and refresh debounce/reconciliation behavior.
+Real hotplug is useful for manual validation but should not be required by the
+default suite.
 
 Hardware validation:
 

@@ -147,8 +147,10 @@ The intended split is:
   - refreshes discovery from Linux input-device add, remove, and change events
   - periodically reconciles the watched device set in case an event is missed
   - maps raw controller events into activity observations
-  - includes a narrow Logitech G923 raw HID fallback for wheel and pedal reports
-    that may not appear through evdev
+  - hosts device-specific adapters for supplemental activity surfaces
+  - includes a Logitech G923 adapter for raw HID wheel and pedal reports that
+    may not appear through evdev
+  - detailed in [gamepad-subsystem.md](gamepad-subsystem.md)
 - `session_bus.rs`
   - generic blocking session-bus transport seam
   - persistent D-Bus client for the GNOME monitor runtime
@@ -175,6 +177,7 @@ The session-facing pieces should be read as one subsystem:
 - `session/gamepad/`
   - supplies auxiliary user-activity observations for controller input
   - owns gamepad device discovery, event-triggered refresh, and reconciliation
+  - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
   - consumes normalized session events and idletime observations and dispatches runtime policy
 - `gnome.rs` and `swayidle.rs`
