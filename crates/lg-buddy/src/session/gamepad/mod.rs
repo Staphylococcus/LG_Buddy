@@ -1,4 +1,5 @@
 mod activity;
+mod device_events;
 mod devices;
 mod hidraw;
 mod reader;
@@ -10,6 +11,9 @@ use std::path::Path;
 use std::time::Instant;
 
 pub(crate) use activity::ActivityPolicy;
+pub(crate) use device_events::{
+    open_system_gamepad_device_event_monitor, SystemGamepadDeviceEventMonitor,
+};
 use devices::discover_gamepad_devices;
 use hidraw::{raw_hid_activity_is_supported, RawHidActivityReader};
 use reader::GamepadDeviceReader;
@@ -84,6 +88,13 @@ pub(crate) enum RawGamepadEventKind {
 pub(crate) struct GamepadActivitySourceSetup {
     pub source: Option<SystemGamepadActivitySource>,
     pub diagnostics: Vec<String>,
+    pub retry_requested: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct GamepadActivityRefresh {
+    pub diagnostics: Vec<String>,
+    pub retry_requested: bool,
 }
 
 #[derive(Debug)]
@@ -102,7 +113,7 @@ pub(crate) struct SystemGamepadActivitySource {
 }
 
 impl SystemGamepadActivitySource {
-    pub(crate) fn refresh(&mut self, now: Instant) -> Vec<String> {
+    pub(crate) fn refresh(&mut self, now: Instant) -> GamepadActivityRefresh {
         refresh_gamepad_activity_source_from_dir(self, Path::new(DEFAULT_INPUT_DIR), now)
     }
 
@@ -186,7 +197,7 @@ fn refresh_gamepad_activity_source_from_dir(
     source: &mut SystemGamepadActivitySource,
     input_dir: &Path,
     now: Instant,
-) -> Vec<String> {
+) -> GamepadActivityRefresh {
     let discovery = discover_gamepad_devices(input_dir);
     let mut diagnostics = Vec::new();
 
@@ -195,7 +206,10 @@ fn refresh_gamepad_activity_source_from_dir(
             "gamepad activity source refresh failed: failed to read `{}`: {input_dir_error}",
             input_dir.display()
         ));
-        return diagnostics;
+        return GamepadActivityRefresh {
+            diagnostics,
+            retry_requested: true,
+        };
     }
 
     let existing_readers = source
@@ -208,10 +222,59 @@ fn refresh_gamepad_activity_source_from_dir(
         .iter()
         .map(|reader| reader.path().to_path_buf())
         .collect::<HashSet<_>>();
+    let discovered_reader_ids = discovery
+        .devices
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<HashSet<_>>();
+    let inspect_failed_reader_ids = discovery
+        .inspect_failures
+        .iter()
+        .map(|failure| DeviceId::from_path(failure.path()))
+        .collect::<HashSet<_>>();
+    let retained_reader_ids = discovered_reader_ids
+        .union(&inspect_failed_reader_ids)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let discovered_raw_hid_paths = discovery
+        .devices
+        .iter()
+        .filter(|device| raw_hid_activity_is_supported(device))
+        .flat_map(|device| device.hidraw_paths.iter().cloned())
+        .collect::<HashSet<_>>();
     let mut reader_failures = Vec::new();
     let mut raw_hid_reader_failures = Vec::new();
+    let mut removed_readers = Vec::new();
+    let mut removed_raw_hid_readers = Vec::new();
     let mut added_readers = Vec::new();
     let mut added_raw_hid_readers = Vec::new();
+
+    {
+        let registry = &mut source.registry;
+        source.readers.retain(|reader| {
+            let device_id = reader.device_id();
+            let keep = retained_reader_ids.contains(device_id);
+            if !keep {
+                removed_readers.push(device_id.to_string());
+                registry.remove_device(device_id);
+            }
+            keep
+        });
+        registry.retain_devices(|device_id| retained_reader_ids.contains(device_id));
+    }
+
+    source.raw_hid_readers.retain(|reader| {
+        let keep = discovered_raw_hid_paths.contains(reader.path())
+            || inspect_failed_reader_ids.contains(reader.device_id());
+        if !keep {
+            removed_raw_hid_readers.push(format!(
+                "{} for {}",
+                reader.path().display(),
+                reader.device_id()
+            ));
+        }
+        keep
+    });
 
     for device in discovery.devices {
         if raw_hid_activity_is_supported(&device) {
@@ -248,6 +311,18 @@ fn refresh_gamepad_activity_source_from_dir(
         }
     }
 
+    if !removed_readers.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refreshed: removed input device reader(s): {}",
+            removed_readers.join(", ")
+        ));
+    }
+    if !removed_raw_hid_readers.is_empty() {
+        diagnostics.push(format!(
+            "gamepad activity source refreshed: removed raw HID reader(s): {}",
+            removed_raw_hid_readers.join(", ")
+        ));
+    }
     if !added_readers.is_empty() {
         diagnostics.push(format!(
             "gamepad activity source refreshed: added input device reader(s): {}",
@@ -282,7 +357,12 @@ fn refresh_gamepad_activity_source_from_dir(
         ));
     }
 
-    diagnostics
+    GamepadActivityRefresh {
+        diagnostics,
+        retry_requested: !reader_failures.is_empty()
+            || !raw_hid_reader_failures.is_empty()
+            || !discovery.inspect_failures.is_empty(),
+    }
 }
 
 fn open_gamepad_activity_source_from_dir(
@@ -291,6 +371,7 @@ fn open_gamepad_activity_source_from_dir(
 ) -> GamepadActivitySourceSetup {
     let discovery = discover_gamepad_devices(input_dir);
     let mut diagnostics = Vec::new();
+    let input_dir_failed = discovery.input_dir_error.is_some();
 
     let mut readers = Vec::new();
     let mut raw_hid_readers = Vec::new();
@@ -379,6 +460,10 @@ fn open_gamepad_activity_source_from_dir(
     GamepadActivitySourceSetup {
         source,
         diagnostics,
+        retry_requested: input_dir_failed
+            || !reader_failures.is_empty()
+            || !raw_hid_reader_failures.is_empty()
+            || !discovery.inspect_failures.is_empty(),
     }
 }
 
@@ -402,12 +487,27 @@ pub(crate) fn is_controller_axis_code(code: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::registry::ActivityRegistry;
     use super::{
         is_controller_axis_code, is_controller_button_code, open_system_gamepad_activity_source,
-        DeviceId,
+        refresh_gamepad_activity_source_from_dir, ActivityPolicy, DeviceId, RawGamepadEvent,
+        RawGamepadEventKind, SystemGamepadActivitySource,
     };
+    use std::fs;
+    use std::path::PathBuf;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lg-buddy-gamepad-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn controller_button_ranges_are_identified() {
@@ -433,6 +533,77 @@ mod tests {
 
         assert_eq!(id.as_str(), "event0");
         assert_eq!(id.to_string(), "event0");
+    }
+
+    #[test]
+    fn refresh_removes_registry_state_for_devices_missing_from_discovery() {
+        let root = temp_dir("refresh-removes-registry-state");
+        let input_dir = root.join("dev/input");
+        fs::create_dir_all(&input_dir).expect("create input dir");
+
+        let stale_device_id = DeviceId::new(input_dir.join("event23").display().to_string());
+        let mut registry = ActivityRegistry::new(ActivityPolicy::default());
+        registry.observe(
+            RawGamepadEvent {
+                device_id: stale_device_id.clone(),
+                kind: RawGamepadEventKind::Button {
+                    code: 0x130,
+                    pressed: true,
+                },
+            },
+            Instant::now(),
+        );
+        let mut source = SystemGamepadActivitySource {
+            readers: Vec::new(),
+            raw_hid_readers: Vec::new(),
+            registry,
+        };
+
+        assert!(source.registry.has_device(&stale_device_id));
+        let refresh =
+            refresh_gamepad_activity_source_from_dir(&mut source, &input_dir, Instant::now());
+
+        assert!(refresh.diagnostics.is_empty());
+        assert!(!refresh.retry_requested);
+        assert!(!source.registry.has_device(&stale_device_id));
+
+        fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn refresh_keeps_registry_state_for_devices_that_failed_inspection() {
+        let root = temp_dir("refresh-keeps-inspect-failures");
+        let input_dir = root.join("dev/input");
+        fs::create_dir_all(&input_dir).expect("create input dir");
+        let device_path = input_dir.join("event23");
+        fs::File::create(&device_path).expect("create unreadable evdev placeholder");
+
+        let device_id = DeviceId::new(device_path.display().to_string());
+        let mut registry = ActivityRegistry::new(ActivityPolicy::default());
+        registry.observe(
+            RawGamepadEvent {
+                device_id: device_id.clone(),
+                kind: RawGamepadEventKind::Button {
+                    code: 0x130,
+                    pressed: true,
+                },
+            },
+            Instant::now(),
+        );
+        let mut source = SystemGamepadActivitySource {
+            readers: Vec::new(),
+            raw_hid_readers: Vec::new(),
+            registry,
+        };
+
+        let refresh =
+            refresh_gamepad_activity_source_from_dir(&mut source, &input_dir, Instant::now());
+
+        assert!(refresh.retry_requested);
+        assert!(!refresh.diagnostics.is_empty());
+        assert!(source.registry.has_device(&device_id));
+
+        fs::remove_dir_all(root).expect("remove temp dir");
     }
 
     #[test]

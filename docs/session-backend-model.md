@@ -138,6 +138,9 @@ Notes:
 - Gamepad activity is not a separate desktop backend. It is an auxiliary
   activity source used by the GNOME monitor because GNOME's idle APIs may not
   count controller input as desktop activity.
+- The gamepad source owns its device set internally. It performs an initial
+  scan, refreshes on Linux input-device add, remove, and change events, and
+  periodically reconciles in case an event is missed.
 - Standard controller input is read from evdev. Logitech G923 wheel and pedal
   activity has a narrow raw HID fallback for hosts where those reports do not
   appear on the evdev node.
