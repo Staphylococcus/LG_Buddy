@@ -121,3 +121,4 @@ you do not want LG Buddy to control the TV around system sleep and wake.
 
 - <https://github.com/chros73> for `bscpylgtv`
 - <https://github.com/JPersson77> for the original inspiration
+- <https://github.com/Faceless3882> for the original shell script implementation
