@@ -119,6 +119,13 @@ pub(crate) struct StartupDeps<'a, C, S, Sl, N> {
     pub(crate) network_waiter: &'a N,
 }
 
+pub(crate) struct NetworkTeardownDeps<'a, C, Sl> {
+    pub(crate) marker: &'a ScreenOwnershipMarker,
+    pub(crate) attempt_state: &'a SystemSleepAttemptState,
+    pub(crate) tv_client: &'a C,
+    pub(crate) sleeper: &'a Sl,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LifecyclePolicyDecision<N> {
     next: N,
@@ -883,33 +890,17 @@ pub(crate) fn attempt_system_sleep_power_off_once_with_outcome<
 pub(crate) fn handle_network_teardown_with<W: Write, C: TvClient, Sl: Sleeper>(
     writer: &mut W,
     config: &Config,
-    marker: &ScreenOwnershipMarker,
-    attempt_state: &SystemSleepAttemptState,
-    tv_client: &C,
-    sleeper: &Sl,
+    deps: NetworkTeardownDeps<'_, C, Sl>,
     event: RuntimeEvent,
     phase_read_error: Option<&str>,
 ) -> Result<(), RunError> {
-    handle_network_teardown_with_outcome(
-        writer,
-        config,
-        marker,
-        attempt_state,
-        tv_client,
-        sleeper,
-        event,
-        phase_read_error,
-    )
-    .map(|_| ())
+    handle_network_teardown_with_outcome(writer, config, deps, event, phase_read_error).map(|_| ())
 }
 
 pub(crate) fn handle_network_teardown_with_outcome<W: Write, C: TvClient, Sl: Sleeper>(
     writer: &mut W,
     config: &Config,
-    marker: &ScreenOwnershipMarker,
-    attempt_state: &SystemSleepAttemptState,
-    tv_client: &C,
-    sleeper: &Sl,
+    deps: NetworkTeardownDeps<'_, C, Sl>,
     event: RuntimeEvent,
     phase_read_error: Option<&str>,
 ) -> Result<PolicyOutcome, RunError> {
@@ -939,15 +930,15 @@ pub(crate) fn handle_network_teardown_with_outcome<W: Write, C: TvClient, Sl: Sl
             outcome.merge(attempt_system_sleep_power_off_once_with_outcome(
                 writer,
                 config,
-                marker,
-                attempt_state,
-                tv_client,
-                sleeper,
+                deps.marker,
+                deps.attempt_state,
+                deps.tv_client,
+                deps.sleeper,
             )?);
         }
         NetworkTeardownNext::ClearAttempt => {
             outcome.merge(decision.outcome);
-            if let Err(err) = attempt_state.clear() {
+            if let Err(err) = deps.attempt_state.clear() {
                 outcome.diagnostics.push(Diagnostic::warning(format!(
                     "could not clear stale system sleep attempt marker while not sleeping: {err}"
                 )));
@@ -1419,10 +1410,11 @@ mod tests {
         decide_shutdown_after_reboot, decide_startup_route, decide_system_sleep_after_input,
         decide_system_sleep_attempt_start, decide_system_sleep_power_off_result,
         handle_network_teardown_with_outcome, restore_after_system_sleep_with_outcome,
-        run_shutdown_with_outcome, run_startup_with_outcome, LifecycleEvent, NetworkTeardownNext,
-        NetworkTeardownPolicyInput, NetworkWaiter, RebootDetector, RebootObservation, RestoreNext,
-        ShutdownNext, Sleeper, StartupDeps, StartupRoute, SystemSleepAttemptNext, SystemSleepNext,
-        SystemSleepPowerOffContext, TvEffectObservation, TvInputObservation,
+        run_shutdown_with_outcome, run_startup_with_outcome, LifecycleEvent, NetworkTeardownDeps,
+        NetworkTeardownNext, NetworkTeardownPolicyInput, NetworkWaiter, RebootDetector,
+        RebootObservation, RestoreNext, ShutdownNext, Sleeper, StartupDeps, StartupRoute,
+        SystemSleepAttemptNext, SystemSleepNext, SystemSleepPowerOffContext, TvEffectObservation,
+        TvInputObservation,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
@@ -1839,10 +1831,12 @@ mod tests {
         let outcome = handle_network_teardown_with_outcome(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
-            &marker,
-            &attempt_state,
-            &client,
-            &sleeper,
+            NetworkTeardownDeps {
+                marker: &marker,
+                attempt_state: &attempt_state,
+                tv_client: &client,
+                sleeper: &sleeper,
+            },
             RuntimeEvent::network_teardown_imminent(Some(true)),
             None,
         )
@@ -1891,10 +1885,12 @@ mod tests {
         let outcome = handle_network_teardown_with_outcome(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
-            &marker,
-            &attempt_state,
-            &client,
-            &sleeper,
+            NetworkTeardownDeps {
+                marker: &marker,
+                attempt_state: &attempt_state,
+                tv_client: &client,
+                sleeper: &sleeper,
+            },
             RuntimeEvent::network_teardown_imminent(Some(false)),
             None,
         )
@@ -1931,10 +1927,12 @@ mod tests {
         let outcome = handle_network_teardown_with_outcome(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
-            &marker,
-            &attempt_state,
-            &client,
-            &sleeper,
+            NetworkTeardownDeps {
+                marker: &marker,
+                attempt_state: &attempt_state,
+                tv_client: &client,
+                sleeper: &sleeper,
+            },
             RuntimeEvent::network_teardown_imminent(None),
             Some("system bus unavailable"),
         )
@@ -1966,10 +1964,12 @@ mod tests {
         let outcome = handle_network_teardown_with_outcome(
             &mut output,
             &config,
-            &marker,
-            &attempt_state,
-            &client,
-            &sleeper,
+            NetworkTeardownDeps {
+                marker: &marker,
+                attempt_state: &attempt_state,
+                tv_client: &client,
+                sleeper: &sleeper,
+            },
             RuntimeEvent::network_teardown_imminent(Some(true)),
             None,
         )

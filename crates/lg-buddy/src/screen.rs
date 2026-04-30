@@ -38,6 +38,21 @@ impl Sleeper for ThreadSleeper {
     }
 }
 
+pub(crate) struct ScreenOnDeps<'a, C, S, Sl, P> {
+    pub(crate) tv_client: &'a C,
+    pub(crate) wol_sender: &'a S,
+    pub(crate) sleeper: &'a Sl,
+    pub(crate) phase_provider: &'a mut P,
+}
+
+struct ScreenOnWakeDeps<'a, C, S, Sl> {
+    marker: &'a ScreenOwnershipMarker,
+    marker_exists: bool,
+    tv: &'a TvDevice<'a, C>,
+    wol_sender: &'a S,
+    sleeper: &'a Sl,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScreenPolicyDecision<N> {
     next: N,
@@ -165,11 +180,13 @@ pub(crate) fn run_screen_on_from_env_for_event<W: Write>(
         writer,
         &config,
         &marker,
-        &tv_client,
-        &wol_sender,
-        &sleeper,
+        ScreenOnDeps {
+            tv_client: &tv_client,
+            wol_sender: &wol_sender,
+            sleeper: &sleeper,
+            phase_provider: &mut phase_provider,
+        },
         event,
-        &mut phase_provider,
     )
 }
 
@@ -302,14 +319,16 @@ pub(crate) fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: 
         writer,
         config,
         marker,
-        tv_client,
-        wol_sender,
-        sleeper,
+        ScreenOnDeps {
+            tv_client,
+            wol_sender,
+            sleeper,
+            phase_provider: &mut phase_provider,
+        },
         RuntimeEvent::new(
             EventSource::CliApi,
             RuntimeEventKind::ScreenRestoreRequested,
         ),
-        &mut phase_provider,
     )
 }
 
@@ -323,23 +342,10 @@ pub(crate) fn run_screen_on_with_event<
     writer: &mut W,
     config: &Config,
     marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    wol_sender: &S,
-    sleeper: &Sl,
+    deps: ScreenOnDeps<'_, C, S, Sl, P>,
     event: RuntimeEvent,
-    phase_provider: &mut P,
 ) -> Result<(), RunError> {
-    run_screen_on_with_outcome_for_event(
-        writer,
-        config,
-        marker,
-        tv_client,
-        wol_sender,
-        sleeper,
-        event,
-        phase_provider,
-    )
-    .map(|_| ())
+    run_screen_on_with_outcome_for_event(writer, config, marker, deps, event).map(|_| ())
 }
 
 #[cfg(test)]
@@ -356,14 +362,16 @@ pub(crate) fn run_screen_on_with_outcome<W: Write, C: TvClient, S: WakeOnLanSend
         writer,
         config,
         marker,
-        tv_client,
-        wol_sender,
-        sleeper,
+        ScreenOnDeps {
+            tv_client,
+            wol_sender,
+            sleeper,
+            phase_provider: &mut phase_provider,
+        },
         RuntimeEvent::new(
             EventSource::CliApi,
             RuntimeEventKind::ScreenRestoreRequested,
         ),
-        &mut phase_provider,
     )
 }
 
@@ -377,11 +385,8 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
     writer: &mut W,
     config: &Config,
     marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    wol_sender: &S,
-    sleeper: &Sl,
+    deps: ScreenOnDeps<'_, C, S, Sl, P>,
     event: RuntimeEvent,
-    phase_provider: &mut P,
 ) -> Result<PolicyOutcome, RunError> {
     let mut outcome = PolicyOutcome::new();
     if !apply_screen_action_eligibility(
@@ -389,7 +394,7 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
         "LG Buddy Screen On",
         config,
         event,
-        phase_provider,
+        deps.phase_provider,
         &mut outcome,
     )? {
         return Ok(outcome);
@@ -404,7 +409,7 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
         return Ok(outcome);
     }
 
-    let tv = TvDevice::new(tv_client, config.tv_ip);
+    let tv = TvDevice::new(deps.tv_client, config.tv_ip);
     if next == ScreenOnNext::Unblank
         && execute_screen_on_unblank(writer, config, marker, &tv, &mut outcome)?
     {
@@ -414,11 +419,13 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
     execute_screen_on_full_wake(
         writer,
         config,
-        marker,
-        marker_exists,
-        &tv,
-        wol_sender,
-        sleeper,
+        ScreenOnWakeDeps {
+            marker,
+            marker_exists,
+            tv: &tv,
+            wol_sender: deps.wol_sender,
+            sleeper: deps.sleeper,
+        },
         &mut outcome,
     )?;
     Ok(outcome)
@@ -857,11 +864,7 @@ fn execute_screen_on_immediate_input_restore<W: Write, C: TvClient>(
 fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
     writer: &mut W,
     config: &Config,
-    marker: &ScreenOwnershipMarker,
-    marker_exists: bool,
-    tv: &TvDevice<'_, C>,
-    wol_sender: &S,
-    sleeper: &Sl,
+    deps: ScreenOnWakeDeps<'_, C, S, Sl>,
     outcome: &mut PolicyOutcome,
 ) -> Result<(), RunError> {
     writeln!(
@@ -876,12 +879,12 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
     send_wake_packet(
         writer,
         "LG Buddy Screen On",
-        tv,
-        wol_sender,
+        deps.tv,
+        deps.wol_sender,
         &config.tv_mac,
         outcome,
     )?;
-    sleeper.sleep(screen_on_initial_wake_delay());
+    deps.sleeper.sleep(screen_on_initial_wake_delay());
 
     for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
         writeln!(
@@ -891,9 +894,9 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
         )?;
 
         outcome.merge(select_screen_on_input_restore_attempt());
-        if tv.input().set(config.input).is_ok() {
+        if deps.tv.input().set(config.input).is_ok() {
             let success_outcome = decide_screen_on_wake_attempt_succeeded();
-            apply_screen_state_transitions(marker, &success_outcome)?;
+            apply_screen_state_transitions(deps.marker, &success_outcome)?;
             writeln!(
                 writer,
                 "LG Buddy Screen On: Wake attempt {attempt} succeeded. Clearing wake state."
@@ -912,20 +915,20 @@ fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sl
         send_wake_packet(
             writer,
             "LG Buddy Screen On",
-            tv,
-            wol_sender,
+            deps.tv,
+            deps.wol_sender,
             &config.tv_mac,
             outcome,
         )?;
-        sleeper.sleep(retry_delay);
+        deps.sleeper.sleep(retry_delay);
     }
 
     writeln!(
         writer,
         "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. LG Buddy will retry on the next restore event."
     )?;
-    let exhausted_outcome = decide_screen_on_wake_exhausted(marker_exists);
-    apply_screen_state_transitions(marker, &exhausted_outcome)?;
+    let exhausted_outcome = decide_screen_on_wake_exhausted(deps.marker_exists);
+    apply_screen_state_transitions(deps.marker, &exhausted_outcome)?;
     outcome.merge(exhausted_outcome);
     Err(RunError::Policy(format!(
         "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
@@ -1056,7 +1059,7 @@ mod tests {
         run_screen_off_with_outcome, run_screen_off_with_outcome_for_event,
         run_screen_on_with_outcome, run_screen_on_with_outcome_for_event,
         ScreenActionEligibilityInput, ScreenEligibilityNext, ScreenOffInputObservation,
-        ScreenOffNext, ScreenOnNext, Sleeper,
+        ScreenOffNext, ScreenOnDeps, ScreenOnNext, Sleeper,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
@@ -1353,14 +1356,16 @@ mod tests {
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
-            &client,
-            &wol,
-            &sleeper,
+            ScreenOnDeps {
+                tv_client: &client,
+                wol_sender: &wol,
+                sleeper: &sleeper,
+                phase_provider: &mut phase,
+            },
             RuntimeEvent::new(
                 EventSource::AuxiliaryInput,
                 RuntimeEventKind::UserActivityObserved,
             ),
-            &mut phase,
         )
         .expect("pending machine sleep should skip session screen on");
 

@@ -52,10 +52,12 @@ pub(crate) fn handle_pre_down_with<W: Write, C: TvClient, Sl: Sleeper, B: Sessio
     lifecycle::handle_network_teardown_with(
         writer,
         config,
-        marker,
-        attempt_state,
-        tv_client,
-        sleeper,
+        lifecycle::NetworkTeardownDeps {
+            marker,
+            attempt_state,
+            tv_client,
+            sleeper,
+        },
         event.event,
         event.phase_read_error.as_deref(),
     )
