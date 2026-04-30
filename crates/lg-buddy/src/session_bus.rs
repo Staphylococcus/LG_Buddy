@@ -23,6 +23,10 @@ pub enum SessionBusError {
         expected: &'static str,
         actual: &'static str,
     },
+    UnsupportedMessageBody {
+        context: &'static str,
+        kind: &'static str,
+    },
 }
 
 impl fmt::Display for SessionBusError {
@@ -40,6 +44,9 @@ impl fmt::Display for SessionBusError {
                     f,
                     "unexpected bus reply shape: expected {expected}, got {actual}"
                 )
+            }
+            Self::UnsupportedMessageBody { context, kind } => {
+                write!(f, "unsupported D-Bus {context}: {kind}")
             }
         }
     }
@@ -469,7 +476,7 @@ impl SessionBusClient for DbusSessionBusClient {
             DbusMessage::new_method_call(call.destination, call.path, call.interface, call.member)
                 .map_err(SessionBusError::Transport)?;
         for value in call.body {
-            message = append_dbus_message_value(message, value);
+            message = append_dbus_message_value(message, value)?;
         }
 
         let reply = DbusBlockingSender::send_with_reply_and_block(
@@ -529,18 +536,24 @@ impl SessionBusClient for DbusSessionBusClient {
     }
 }
 
-fn append_dbus_message_value(message: DbusMessage, value: BusValue) -> DbusMessage {
+fn append_dbus_message_value(
+    message: DbusMessage,
+    value: BusValue,
+) -> Result<DbusMessage, SessionBusError> {
     match value {
-        BusValue::Bool(value) => message.append1(value),
+        BusValue::Bool(value) => Ok(message.append1(value)),
         BusValue::UnixFd(value) => {
             // SAFETY: the descriptor is owned by the caller-provided BusValue for
             // this message construction path.
             let fd = unsafe { dbus::arg::OwnedFd::from_raw_fd(value) };
-            message.append1(fd)
+            Ok(message.append1(fd))
         }
-        BusValue::U64(value) => message.append1(value),
-        BusValue::String(value) => message.append1(value),
-        BusValue::Variant(value) => append_dbus_message_value(message, *value),
+        BusValue::U64(value) => Ok(message.append1(value)),
+        BusValue::String(value) => Ok(message.append1(value)),
+        BusValue::Variant(_) => Err(SessionBusError::UnsupportedMessageBody {
+            context: "method-call body",
+            kind: "variant",
+        }),
     }
 }
 
@@ -614,10 +627,11 @@ fn dbus_message_item_kind(item: &DbusMessageItem) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_name_owner, parse_name_owner_changed_signal, BusMethodCall, BusReply, BusSignal,
-        BusSignalMatch, BusValue, NameOwnerChanged, SessionBusClient, SessionBusError,
-        DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
+        append_dbus_message_value, get_name_owner, parse_name_owner_changed_signal, BusMethodCall,
+        BusReply, BusSignal, BusSignalMatch, BusValue, NameOwnerChanged, SessionBusClient,
+        SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
+    use dbus::Message as DbusMessage;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::os::fd::AsRawFd;
     use std::time::Duration;
@@ -802,6 +816,26 @@ mod tests {
         unsafe {
             libc::close(pipe_fds[1]);
         }
+    }
+
+    #[test]
+    fn outgoing_method_body_rejects_decode_only_variant_values() {
+        let message = DbusMessage::new_method_call(
+            "org.example.Service",
+            "/org/example/Object",
+            "org.example.Interface",
+            "Method",
+        )
+        .expect("valid method call");
+
+        assert_eq!(
+            append_dbus_message_value(message, BusValue::Variant(Box::new(BusValue::Bool(true))))
+                .expect_err("outgoing variants should be rejected"),
+            SessionBusError::UnsupportedMessageBody {
+                context: "method-call body",
+                kind: "variant",
+            }
+        );
     }
 
     #[test]

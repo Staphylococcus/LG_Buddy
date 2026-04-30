@@ -182,7 +182,10 @@ assert_file "$DESKTOP_ENTRY"
 }
 assert_executable "$NM_LIFECYCLE_HOOK"
 grep -q 'lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
-grep -q "$CONFIG_FILE" "$NM_LIFECYCLE_HOOK"
+if grep -q 'LG_BUDDY_CONFIG' "$NM_LIFECYCLE_HOOK"; then
+    echo "NetworkManager lifecycle hook should rely on installed config pointer, not embed LG_BUDDY_CONFIG."
+    exit 1
+fi
 
 grep -q '^tv_ip=192.168.1.10$' "$CONFIG_FILE"
 grep -q '^tv_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"

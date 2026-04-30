@@ -161,11 +161,6 @@ write_config_pointer() {
 
 write_nm_pre_down_hook() {
     local hook_file="$1"
-    local config_path="$2"
-    local escaped_config_path=""
-
-    escaped_config_path="${config_path//\\/\\\\}"
-    escaped_config_path="${escaped_config_path//\"/\\\"}"
 
     cat >"$hook_file" <<EOF
 #!/bin/sh
@@ -175,7 +170,6 @@ if [ "\${2:-}" != "pre-down" ]; then
     exit 0
 fi
 
-export LG_BUDDY_CONFIG="$escaped_config_path"
 exec /usr/bin/lg-buddy nm-pre-down
 EOF
 }
@@ -402,7 +396,7 @@ if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     SYSTEM_CONFIG_OVERRIDE_TMP=""
     run_privileged install -d "$NM_PRE_DOWN_DIR"
     NM_HOOK_TMP="$(mktemp)"
-    write_nm_pre_down_hook "$NM_HOOK_TMP" "$CONFIG_FILE"
+    write_nm_pre_down_hook "$NM_HOOK_TMP"
     run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
     rm -f "$NM_HOOK_TMP"
     NM_HOOK_TMP=""

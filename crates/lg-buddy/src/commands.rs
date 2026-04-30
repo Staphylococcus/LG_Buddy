@@ -10,7 +10,7 @@ use crate::auth::resolve_bscpylgtv_auth_context_from_env;
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::lifecycle::ThreadSleeper;
 use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
-use crate::state::{ScreenOwnershipMarker, StateScope};
+use crate::state::{ScreenOwnershipMarker, StateScope, SystemSleepAttemptState};
 use crate::tv::{BscpylgtvCommandClient, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher};
 use crate::wol::UdpWakeOnLanSender;
 use crate::{RunError, StartupMode};
@@ -236,19 +236,15 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let attempt_state = crate::state::SystemSleepAttemptState::from_env(StateScope::System)
-        .map_err(RunError::StateDir)?;
+    let attempt_state =
+        SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let tv_client =
         build_tv_client(&config_path)?.with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT);
     let sleeper = ThreadSleeper;
     let mut bus = match crate::session_bus::new_system_bus_client() {
         Ok(bus) => bus,
         Err(err) => {
-            writeln!(
-                writer,
-                "LG Buddy NetworkManager: could not open system bus for logind PreparingForSleep; failing open. {err}"
-            )?;
-            return Ok(());
+            return fail_open_nm_pre_down_after_system_bus_error(writer, &attempt_state, err);
         }
     };
 
@@ -302,8 +298,8 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let attempt_state = crate::state::SystemSleepAttemptState::from_env(StateScope::System)
-        .map_err(RunError::StateDir)?;
+    let attempt_state =
+        SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let tv_client = build_tv_client(&config_path)?;
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
@@ -322,7 +318,7 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
     if let Err(err) = attempt_state.clear() {
         writeln!(
             writer,
-            "LG Buddy Startup: could not clear system sleep attempt marker after resume. {err}"
+            "LG Buddy System Resume: could not clear system sleep attempt marker after resume. {err}"
         )?;
         if result.is_ok() {
             return Err(RunError::Io(err));
@@ -330,6 +326,25 @@ pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
     }
 
     result
+}
+
+fn fail_open_nm_pre_down_after_system_bus_error<W: Write, E: std::fmt::Display>(
+    writer: &mut W,
+    attempt_state: &SystemSleepAttemptState,
+    err: E,
+) -> Result<(), RunError> {
+    writeln!(
+        writer,
+        "LG Buddy NetworkManager: could not open system bus for logind PreparingForSleep; failing open. {err}"
+    )?;
+    if let Err(clear_err) = attempt_state.clear() {
+        writeln!(
+            writer,
+            "LG Buddy NetworkManager: could not clear stale system sleep attempt marker after system bus failure. {clear_err}"
+        )?;
+    }
+
+    Ok(())
 }
 
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -429,6 +444,7 @@ mod tests {
     };
     use crate::screen::{run_screen_off_with, run_screen_on_with};
     use crate::state::ScreenOwnershipMarker;
+    use crate::state::SystemSleepAttemptState;
     use crate::tv::BscpylgtvCommandClient;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use crate::StartupMode;
@@ -497,6 +513,26 @@ mod tests {
         assert!(marker.exists());
         assert_call_commands(&mock, &["get_input", "turn_screen_off"]);
         assert!(rendered(&output).contains("Screen blank command succeeded."));
+    }
+
+    #[test]
+    fn nm_pre_down_system_bus_failure_clears_stale_attempt_marker() {
+        let temp_dir = TestDir::new("nm-pre-down-bus-failure");
+        let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
+        attempt_state
+            .mark_attempted()
+            .expect("create stale attempt marker");
+
+        let mut output = Vec::new();
+        super::fail_open_nm_pre_down_after_system_bus_error(
+            &mut output,
+            &attempt_state,
+            "simulated bus failure",
+        )
+        .expect("fail-open path should succeed");
+
+        assert!(!attempt_state.exists());
+        assert!(rendered(&output).contains("could not open system bus"));
     }
 
     #[test]

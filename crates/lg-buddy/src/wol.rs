@@ -246,7 +246,12 @@ fn sockaddr_ipv4(addr: *const libc::sockaddr) -> Option<Ipv4Addr> {
     }
 
     let addr = unsafe { &*(addr.cast::<libc::sockaddr_in>()) };
-    Some(Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()))
+    Some(ipv4_from_network_order_s_addr(addr.sin_addr.s_addr))
+}
+
+#[cfg(unix)]
+fn ipv4_from_network_order_s_addr(s_addr: libc::in_addr_t) -> Ipv4Addr {
+    Ipv4Addr::from(s_addr.to_ne_bytes())
 }
 
 fn subnet_broadcast(addr: Ipv4Addr, netmask: Ipv4Addr) -> Option<Ipv4Addr> {
@@ -352,6 +357,17 @@ mod tests {
         let (size, received) = receiver.join().expect("join receiver thread");
         assert_eq!(size, MAGIC_PACKET_LEN);
         assert_eq!(received, build_magic_packet(&mac));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_order_sockaddr_address_preserves_octets() {
+        let s_addr = u32::from_ne_bytes([192, 168, 1, 20]);
+
+        assert_eq!(
+            super::ipv4_from_network_order_s_addr(s_addr),
+            Ipv4Addr::new(192, 168, 1, 20)
+        );
     }
 
     #[test]
