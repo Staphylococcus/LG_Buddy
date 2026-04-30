@@ -32,6 +32,14 @@ done
     exit 1
 }
 
+case "$TAG" in
+    v[0-9]*) ;;
+    *)
+        echo "Release tag must start with v followed by a digit, for example v1.0.0."
+        exit 1
+        ;;
+esac
+
 [ -d "$DIST_DIR" ] || {
     echo "Distribution directory not found: $DIST_DIR"
     exit 1
@@ -50,6 +58,11 @@ CHECKSUM_FILE="$DIST_DIR/sha256sums.txt"
 }
 
 VERSION="${TAG#v}"
+[ -n "$VERSION" ] || {
+    echo "Release tag must include a version after v."
+    exit 1
+}
+
 TITLE="LG Buddy ${VERSION}"
 NOTES="Prebuilt LG Buddy release bundle for Linux. Extract the archive and run ./install.sh from inside the bundle."
 RELEASE_FLAGS=()

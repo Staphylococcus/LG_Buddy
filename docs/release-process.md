@@ -1,6 +1,7 @@
 # Release Process
 
-LG Buddy release automation is triggered by pushing a Git tag that matches `v*`.
+LG Buddy release automation is triggered by pushing a version tag that starts
+with `v` followed by a digit, such as `v1.0.0` or `v1.0.0-beta.1`.
 
 ## What the release workflow does
 
