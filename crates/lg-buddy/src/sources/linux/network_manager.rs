@@ -275,7 +275,7 @@ mod tests {
         .expect("sleeping pre-down should power off");
 
         assert!(marker.exists());
-        assert!(attempt_state.exists());
+        assert!(!attempt_state.exists());
         assert_call_commands(&mock, &["get_input", "power_off"]);
         assert!(sleeper.durations().is_empty());
         let output = rendered(&output);
@@ -284,11 +284,11 @@ mod tests {
     }
 
     #[test]
-    fn pre_down_dedupes_repeated_sleep_hooks() {
-        let temp_dir = TestDir::new("nm-pre-down-dedupe");
+    fn pre_down_repeated_sleep_hooks_are_idempotent() {
+        let temp_dir = TestDir::new("nm-pre-down-idempotent");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-dedupe-tv");
+        let mock = MockBscpylgtv::new("nm-pre-down-idempotent-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
@@ -315,12 +315,12 @@ mod tests {
             &sleeper,
             &mut second_bus,
         )
-        .expect("duplicate sleeping pre-down should skip");
+        .expect("repeated sleeping pre-down should remain safe");
 
         assert!(marker.exists());
-        assert!(attempt_state.exists());
-        assert_call_commands(&mock, &["get_input", "power_off"]);
-        assert!(rendered(&output).contains("already handled"));
+        assert!(!attempt_state.exists());
+        assert_call_commands(&mock, &["get_input", "power_off", "get_input", "power_off"]);
+        assert!(rendered(&output).contains("Could not query TV input"));
     }
 
     #[test]

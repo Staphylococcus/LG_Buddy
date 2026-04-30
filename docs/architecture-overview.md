@@ -176,7 +176,7 @@ The intended split is:
   - edge glue that reads reboot state, TV state, and marker state, applies
     marker transitions, renders output, dispatches TV/Wake-on-LAN effects, and
     performs retry/backoff
-  - deduped pre-sleep attempt handling
+  - locked, idempotent pre-sleep attempt handling
   - system marker ownership rules
 - `runtime_phase.rs`
   - source-agnostic machine sleep phase read used by screen policy
@@ -379,14 +379,14 @@ Flow:
    - do not run TV network I/O
 5. On `PrepareForSleep(false)`:
    - run wake restore policy from the canonical logind resume event
-   - clear system sleep attempt state
+   - clear stale legacy system sleep attempt state
 6. If config is changed to disable lifecycle handling while the service is
    running, stop the lifecycle monitor cleanly.
 
 The NetworkManager pre-down gate runs `lg-buddy nm-pre-down`. That command reads
-logind `PreparingForSleep`; false or read failure returns quickly, true runs the
-deduped pre-sleep power-off policy before NetworkManager tears down the
-interface.
+logind `PreparingForSleep`; false or read failure returns quickly, true runs an
+idempotent pre-sleep power-off policy under a process lock before NetworkManager
+tears down the interface.
 
 ### `detect-backend`
 
@@ -446,11 +446,10 @@ This is a transitional integration boundary. It keeps the runtime architecture i
 
 State is intentionally small.
 
-The runtime currently uses two ownership markers and one dedupe marker:
+The runtime currently uses two ownership markers:
 
 - `screen_off_by_us` in session scope
 - `screen_off_by_us` in system scope
-- `system_sleep_attempted` in system scope
 
 The ownership markers answer one question:
 
@@ -468,6 +467,11 @@ There are two scopes:
   - fallback under `/run/user/<uid>/lg_buddy`
 
 This is a direct replacement for the earlier ad hoc script coordination pattern.
+
+The NetworkManager pre-down path also uses a system-scope lock file to prevent
+concurrent pre-sleep handlers from racing each other. It does not use persisted
+attempt state to skip later hooks; repeated hooks are expected to be safe through
+idempotent TV policy.
 
 ## Desktop Backend Strategy
 

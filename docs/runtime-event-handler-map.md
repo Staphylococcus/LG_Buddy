@@ -38,9 +38,9 @@ same normalized inactivity observations.
 | --- | --- | --- | --- |
 | system boot / service start | `lg-buddy startup boot` | `commands` -> `lifecycle` | Send Wake-on-LAN and restore the configured input. |
 | system shutdown / service stop | `lg-buddy shutdown` | `commands` -> `lifecycle` | Power off the TV when the configured input is active, unless a reboot is pending. |
-| NetworkManager `pre-down` while logind `PreparingForSleep=true` | `lg-buddy nm-pre-down` | `sources::linux::network_manager` -> `lifecycle` | Run deduped pre-sleep TV power-off before network teardown. |
+| NetworkManager `pre-down` while logind `PreparingForSleep=true` | `lg-buddy nm-pre-down` | `sources::linux::network_manager` -> `lifecycle` | Run pre-sleep TV power-off under a process lock before network teardown. |
 | logind `PrepareForSleep(true)` | `lg-buddy lifecycle` | `session::runner` | Log diagnostic sleep intent; do not run TV network I/O. |
-| logind `PrepareForSleep(false)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Run wake restore policy and clear system sleep attempt state. |
+| logind `PrepareForSleep(false)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Run wake restore policy and clear stale legacy system sleep attempt state. |
 | user graphical session start | `lg-buddy monitor` | `session::runner::run_monitor` | Detect the session backend and run the selected monitor path. |
 | manual screen blank | `lg-buddy screen-off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
 | manual screen restore | `lg-buddy screen-on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
@@ -175,12 +175,12 @@ org.freedesktop.login1 PrepareForSleep(false)
 
 The NetworkManager pre-down gate is the only default pre-sleep TV power-off
 owner. It reads logind `PreparingForSleep` synchronously; false or read failure
-returns quickly, true runs the deduped pre-sleep policy while NetworkManager is
-still holding interface teardown.
+returns quickly, true runs the idempotent pre-sleep policy under a process lock
+while NetworkManager is still holding interface teardown.
 
 The lifecycle service subscribes to logind manager signals on the system bus.
 `PrepareForSleep(true)` is diagnostic only. `PrepareForSleep(false)` runs wake
-restore policy and clears system sleep attempt state.
+restore policy and clears stale legacy system sleep attempt state.
 
 The installer must not leave a second lifecycle owner active. It removes or
 disables these legacy artifacts during install and uninstall:

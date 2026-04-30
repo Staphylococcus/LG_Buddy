@@ -480,9 +480,8 @@ fn decide_system_sleep_power_off_result(
 
 fn decide_system_sleep_attempt_start(
     lock_acquired: bool,
-    already_attempted: bool,
 ) -> LifecyclePolicyDecision<SystemSleepAttemptNext> {
-    if !lock_acquired || already_attempted {
+    if !lock_acquired {
         return LifecyclePolicyDecision::with_outcome(
             SystemSleepAttemptNext::Stop,
             PolicyOutcome::new()
@@ -498,9 +497,12 @@ fn decide_system_sleep_attempt_start(
 
     LifecyclePolicyDecision::with_outcome(
         SystemSleepAttemptNext::Continue,
-        PolicyOutcome::new().with_state_transition(StateTransition::create_marker(
+        PolicyOutcome::new().with_state_transition(StateTransition::clear_marker(
             StateMarker::SystemSleepAttempt,
-            TransitionReason::new(TransitionReasonCode::ActionSelected),
+            TransitionReason::with_detail(
+                TransitionReasonCode::Other,
+                "clear stale legacy sleep-attempt marker before pre-sleep handling",
+            ),
         )),
     )
 }
@@ -881,7 +883,7 @@ pub(crate) fn attempt_system_sleep_power_off_once_with_outcome<
     let mut outcome = PolicyOutcome::new();
     let guard = attempt_state.try_lock()?;
     let lock_acquired = guard.is_some();
-    let decision = decide_system_sleep_attempt_start(lock_acquired, false);
+    let decision = decide_system_sleep_attempt_start(lock_acquired);
     if decision.next == SystemSleepAttemptNext::Stop {
         writeln!(
             writer,
@@ -892,18 +894,7 @@ pub(crate) fn attempt_system_sleep_power_off_once_with_outcome<
     };
 
     let _guard = guard.expect("lock should be present when acquired");
-    let already_attempted = attempt_state.exists();
-    let decision = decide_system_sleep_attempt_start(true, already_attempted);
-    if decision.next == SystemSleepAttemptNext::Stop {
-        writeln!(
-            writer,
-            "LG Buddy Sleep Pre: system sleep was already handled for this cycle; skipping duplicate pre-sleep handling."
-        )?;
-        outcome.merge(decision.outcome);
-        return Ok(outcome);
-    }
-
-    apply_system_sleep_attempt_transitions(attempt_state, &decision.outcome)?;
+    apply_system_sleep_attempt_transitions(writer, attempt_state, &decision.outcome)?;
     outcome.merge(decision.outcome);
     outcome.merge(attempt_system_sleep_power_off_with_outcome(
         writer, config, marker, tv_client, sleeper,
@@ -1363,7 +1354,8 @@ fn apply_system_screen_marker_transitions(
     Ok(())
 }
 
-fn apply_system_sleep_attempt_transitions(
+fn apply_system_sleep_attempt_transitions<W: Write>(
+    writer: &mut W,
     attempt_state: &SystemSleepAttemptState,
     outcome: &PolicyOutcome,
 ) -> Result<(), RunError> {
@@ -1376,7 +1368,14 @@ fn apply_system_sleep_attempt_transitions(
             StateTransition::ClearMarker {
                 marker: StateMarker::SystemSleepAttempt,
                 ..
-            } => attempt_state.clear()?,
+            } => {
+                if let Err(err) = attempt_state.clear() {
+                    writeln!(
+                        writer,
+                        "LG Buddy Sleep Pre: could not clear stale system sleep attempt marker before pre-sleep handling. {err}"
+                    )?;
+                }
+            }
             StateTransition::PreserveMarker {
                 marker: StateMarker::SystemSleepAttempt,
                 ..
@@ -1724,8 +1723,8 @@ mod tests {
     }
 
     #[test]
-    fn pure_system_sleep_attempt_policy_dedupes_before_effects() {
-        let blocked_by_lock = decide_system_sleep_attempt_start(false, false);
+    fn pure_system_sleep_attempt_policy_only_dedupes_concurrent_handlers() {
+        let blocked_by_lock = decide_system_sleep_attempt_start(false);
 
         assert_eq!(blocked_by_lock.next, SystemSleepAttemptNext::Stop);
         assert_eq!(
@@ -1740,22 +1739,17 @@ mod tests {
             )]
         );
 
-        let already_attempted = decide_system_sleep_attempt_start(true, true);
-
-        assert_eq!(already_attempted.next, SystemSleepAttemptNext::Stop);
-        assert_eq!(
-            already_attempted.outcome.no_actions[0].reason.code,
-            DecisionReasonCode::DuplicateSystemSleepAttempt
-        );
-
-        let first_attempt = decide_system_sleep_attempt_start(true, false);
+        let first_attempt = decide_system_sleep_attempt_start(true);
 
         assert_eq!(first_attempt.next, SystemSleepAttemptNext::Continue);
         assert_eq!(
             first_attempt.outcome.state_transitions,
-            vec![StateTransition::create_marker(
+            vec![StateTransition::clear_marker(
                 StateMarker::SystemSleepAttempt,
-                TransitionReason::new(TransitionReasonCode::ActionSelected),
+                TransitionReason::with_detail(
+                    TransitionReasonCode::Other,
+                    "clear stale legacy sleep-attempt marker before pre-sleep handling",
+                ),
             )]
         );
     }
@@ -1930,14 +1924,15 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_system_sleep_attempt_records_no_action_and_preserves_attempt_marker() {
-        let temp_dir = TestDir::new("lifecycle-duplicate-sleep-outcome");
+    fn stale_system_sleep_attempt_marker_does_not_block_pre_sleep_handling() {
+        let temp_dir = TestDir::new("lifecycle-stale-sleep-attempt");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
         attempt_state
             .mark_attempted()
-            .expect("create existing attempt marker");
-        let mock = MockBscpylgtv::new("lifecycle-duplicate-sleep-outcome-tv");
+            .expect("create stale attempt marker");
+        let mock = MockBscpylgtv::new("lifecycle-stale-sleep-attempt-tv");
+        mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
 
@@ -1950,26 +1945,39 @@ mod tests {
             &client,
             &sleeper,
         )
-        .expect("duplicate system sleep attempt should skip");
+        .expect("stale system sleep attempt marker should not block pre-sleep handling");
 
-        assert!(outcome.actions.is_empty());
-        assert_eq!(outcome.no_actions.len(), 1);
         assert_eq!(
-            outcome.no_actions[0].reason.code,
-            DecisionReasonCode::DuplicateSystemSleepAttempt
+            outcome
+                .actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            vec![ActionKind::TvSystemSleepPowerOff]
         );
         assert_eq!(
             outcome.state_transitions,
-            vec![StateTransition::preserve_marker(
-                StateMarker::SystemSleepAttempt,
-                TransitionReason::new(TransitionReasonCode::DuplicateSystemSleepAttempt),
-            )]
+            vec![
+                StateTransition::clear_marker(
+                    StateMarker::SystemSleepAttempt,
+                    TransitionReason::with_detail(
+                        TransitionReasonCode::Other,
+                        "clear stale legacy sleep-attempt marker before pre-sleep handling",
+                    ),
+                ),
+                StateTransition::create_marker(
+                    StateMarker::SystemScreenOwnership,
+                    TransitionReason::new(TransitionReasonCode::ActionSelected),
+                ),
+            ]
         );
-        assert_call_commands(&mock, &[]);
+        assert!(marker.exists());
+        assert!(!attempt_state.exists());
+        assert_call_commands(&mock, &["get_input", "power_off"]);
     }
 
     #[test]
-    fn network_teardown_pending_sleep_records_attempt_and_sleep_power_off() {
+    fn network_teardown_pending_sleep_records_cleanup_and_sleep_power_off() {
         let temp_dir = TestDir::new("lifecycle-nm-pending-sleep");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
@@ -2004,9 +2012,12 @@ mod tests {
         assert_eq!(
             outcome.state_transitions,
             vec![
-                StateTransition::create_marker(
+                StateTransition::clear_marker(
                     StateMarker::SystemSleepAttempt,
-                    TransitionReason::new(TransitionReasonCode::ActionSelected),
+                    TransitionReason::with_detail(
+                        TransitionReasonCode::Other,
+                        "clear stale legacy sleep-attempt marker before pre-sleep handling",
+                    ),
                 ),
                 StateTransition::create_marker(
                     StateMarker::SystemScreenOwnership,
@@ -2015,7 +2026,7 @@ mod tests {
             ]
         );
         assert!(marker.exists());
-        assert!(attempt_state.exists());
+        assert!(!attempt_state.exists());
         assert_call_commands(&mock, &["get_input", "power_off"]);
         assert!(rendered(&output).contains("logind is preparing for sleep"));
     }

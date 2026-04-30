@@ -165,7 +165,7 @@ fn run_system_resume_loads_config_and_clears_system_sleep_attempt() {
 }
 
 #[test]
-fn run_nm_pre_down_uses_logind_property_and_dedupes_sleep_cycle() {
+fn run_nm_pre_down_uses_logind_property_and_retries_idempotently() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-nm-pre-down-logind");
     logind.reset();
@@ -190,7 +190,7 @@ fn run_nm_pre_down_uses_logind_property_and_dedupes_sleep_cycle() {
         .expect("NetworkManager pre-down should succeed during system sleep");
 
     runtime.assert_system_marker_exists();
-    runtime.assert_system_sleep_attempt_marker_exists();
+    runtime.assert_system_sleep_attempt_marker_absent();
     assert_eq!(
         mock.calls()
             .iter()
@@ -205,20 +205,20 @@ fn run_nm_pre_down_uses_logind_property_and_dedupes_sleep_cycle() {
 
     let mut second_output = Vec::new();
     run_command(Command::NetworkManagerPreDown, &mut second_output)
-        .expect("duplicate NetworkManager pre-down should be deduped");
+        .expect("repeated NetworkManager pre-down should stay idempotent");
 
     assert_eq!(
         mock.calls()
             .iter()
             .map(|call| call.command.as_str())
             .collect::<Vec<_>>(),
-        vec!["get_input", "power_off"]
+        vec!["get_input", "power_off", "get_input", "power_off"]
     );
     runtime.assert_system_marker_exists();
-    runtime.assert_system_sleep_attempt_marker_exists();
+    runtime.assert_system_sleep_attempt_marker_absent();
     assert!(String::from_utf8(second_output)
         .expect("utf8 output")
-        .contains("already handled for this cycle"));
+        .contains("Could not query TV input"));
 }
 
 #[test]
