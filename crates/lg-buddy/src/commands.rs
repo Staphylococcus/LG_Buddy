@@ -757,11 +757,11 @@ mod tests {
     }
 
     #[test]
-    fn screen_on_restores_input_when_screen_is_already_active() {
-        let temp_dir = TestDir::new("screen-on-already-active");
+    fn screen_on_uses_full_wake_when_unblank_is_rejected_by_substate() {
+        let temp_dir = TestDir::new("screen-on-substate-mismatch");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-on-already-active-tv");
+        let mock = MockBscpylgtv::new("screen-on-substate-mismatch-tv");
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
@@ -775,15 +775,16 @@ mod tests {
             &wol,
             &sleeper,
         )
-        .expect("already-active path should succeed");
+        .expect("substate mismatch should use full wake recovery");
 
         assert!(!marker.exists());
         assert_call_commands(&mock, &["turn_screen_on", "set_input"]);
-        assert!(wol.calls().is_empty());
-        assert!(sleeper.durations().is_empty());
+        assert_eq!(wol.calls().len(), 1);
+        assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
         let rendered = rendered(&output);
-        assert!(rendered.contains("TV reported an active screen state."));
-        assert!(rendered.contains("Immediate input restore succeeded."));
+        assert!(rendered.contains("TV rejected screen unblank"));
+        assert!(rendered.contains("Falling back to full wake."));
+        assert!(rendered.contains("Wake attempt 1 succeeded."));
     }
 
     #[test]

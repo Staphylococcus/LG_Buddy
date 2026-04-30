@@ -115,7 +115,7 @@ impl Error for TvError {
 }
 
 impl TvError {
-    pub fn indicates_active_screen_state(&self) -> bool {
+    pub fn indicates_screen_unblank_substate_mismatch(&self) -> bool {
         match self {
             Self::CommandFailed { output, .. } | Self::InvalidOutput { output, .. } => {
                 output.stderr().contains("errorCode': '-102'")

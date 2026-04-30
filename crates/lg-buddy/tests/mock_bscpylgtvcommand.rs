@@ -78,13 +78,13 @@ fn mock_get_picture_settings_includes_backlight() {
 }
 
 #[test]
-fn mock_turn_screen_on_active_error_matches_real_traceback_shape() {
-    let mock = MockBscpylgtv::new("mock-turn-screen-on-active");
+fn mock_turn_screen_on_substate_error_matches_real_traceback_shape() {
+    let mock = MockBscpylgtv::new("mock-turn-screen-on-substate");
     let client = mock_client(&mock);
 
     let err = client
         .turn_screen_on(ip("10.0.0.39"))
-        .expect_err("active screen should fail");
+        .expect_err("substate mismatch should fail");
 
     match err {
         TvError::CommandFailed { status, output, .. } => {

@@ -113,7 +113,6 @@ enum ScreenOffFallbackContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenOnNext {
     Unblank,
-    ImmediateInputRestore,
     FullWake,
     Stop,
 }
@@ -121,7 +120,7 @@ enum ScreenOnNext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ScreenOnUnblankObservation {
     Succeeded,
-    ActiveScreenState(String),
+    SubstateMismatch(String),
     Failed(String),
 }
 
@@ -411,7 +410,7 @@ pub(crate) fn run_screen_on_with_outcome_for_event<
 
     let tv = TvDevice::new(deps.tv_client, config.tv_ip);
     if next == ScreenOnNext::Unblank
-        && execute_screen_on_unblank(writer, config, marker, &tv, &mut outcome)?
+        && execute_screen_on_unblank(writer, marker, &tv, &mut outcome)?
     {
         return Ok(outcome);
     }
@@ -571,40 +570,18 @@ fn decide_screen_on_after_unblank(
                 TransitionReasonCode::RestoreCompleted,
             )),
         ),
-        ScreenOnUnblankObservation::ActiveScreenState(detail) => {
-            ScreenPolicyDecision::with_outcome(
-                ScreenOnNext::ImmediateInputRestore,
-                PolicyOutcome::new()
-                    .with_diagnostic(Diagnostic::info(format!(
-                        "screen restore reported active screen state: {detail}"
-                    )))
-                    .with_action(
-                        ActionKind::TvInputRestore,
-                        DecisionReason::new(DecisionReasonCode::RuntimeEvent),
-                    ),
-            )
-        }
+        ScreenOnUnblankObservation::SubstateMismatch(detail) => ScreenPolicyDecision::with_outcome(
+            ScreenOnNext::FullWake,
+            PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
+                "screen unblank rejected because the TV is not in the screen-off substate: {detail}"
+            ))),
+        ),
         ScreenOnUnblankObservation::Failed(detail) => ScreenPolicyDecision::with_outcome(
             ScreenOnNext::FullWake,
             PolicyOutcome::new().with_diagnostic(Diagnostic::warning(format!(
                 "screen unblank failed: {detail}"
             ))),
         ),
-    }
-}
-
-fn decide_screen_on_after_immediate_input_restore(
-    succeeded: bool,
-) -> ScreenPolicyDecision<ScreenOnNext> {
-    if succeeded {
-        ScreenPolicyDecision::with_outcome(
-            ScreenOnNext::Stop,
-            PolicyOutcome::new().with_state_transition(clear_session_marker(
-                TransitionReasonCode::RestoreCompleted,
-            )),
-        )
-    } else {
-        ScreenPolicyDecision::new(ScreenOnNext::FullWake)
     }
 }
 
@@ -795,15 +772,14 @@ fn execute_screen_off_power_off_fallback<W: Write, C: TvClient>(
 
 fn execute_screen_on_unblank<W: Write, C: TvClient>(
     writer: &mut W,
-    config: &Config,
     marker: &ScreenOwnershipMarker,
     tv: &TvDevice<'_, C>,
     outcome: &mut PolicyOutcome,
 ) -> Result<bool, RunError> {
     let observation = match tv.screen().unblank() {
         Ok(_) => ScreenOnUnblankObservation::Succeeded,
-        Err(err) if err.indicates_active_screen_state() => {
-            ScreenOnUnblankObservation::ActiveScreenState(err.to_string())
+        Err(err) if err.indicates_screen_unblank_substate_mismatch() => {
+            ScreenOnUnblankObservation::SubstateMismatch(err.to_string())
         }
         Err(err) => ScreenOnUnblankObservation::Failed(err.to_string()),
     };
@@ -817,10 +793,10 @@ fn execute_screen_on_unblank<W: Write, C: TvClient>(
                 "LG Buddy Screen On: Screen unblank succeeded. Clearing wake state."
             )?;
         }
-        ScreenOnUnblankObservation::ActiveScreenState(_) => {
+        ScreenOnUnblankObservation::SubstateMismatch(_) => {
             writeln!(
                 writer,
-                "LG Buddy Screen On: TV reported an active screen state. Trying immediate input restore before full wake."
+                "LG Buddy Screen On: TV rejected screen unblank because it is not in the screen-off substate. Falling back to full wake."
             )?;
         }
         ScreenOnUnblankObservation::Failed(_) => {}
@@ -830,35 +806,9 @@ fn execute_screen_on_unblank<W: Write, C: TvClient>(
     outcome.merge(decision.outcome);
     match next {
         ScreenOnNext::Stop => Ok(true),
-        ScreenOnNext::ImmediateInputRestore => {
-            execute_screen_on_immediate_input_restore(writer, config, marker, tv, outcome)
-        }
         ScreenOnNext::FullWake => Ok(false),
         ScreenOnNext::Unblank => unreachable!("unblank cannot select itself"),
     }
-}
-
-fn execute_screen_on_immediate_input_restore<W: Write, C: TvClient>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv: &TvDevice<'_, C>,
-    outcome: &mut PolicyOutcome,
-) -> Result<bool, RunError> {
-    let succeeded = tv.input().set(config.input).is_ok();
-    let decision = decide_screen_on_after_immediate_input_restore(succeeded);
-    apply_screen_state_transitions(marker, &decision.outcome)?;
-
-    if succeeded {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: Immediate input restore succeeded. Clearing wake state."
-        )?;
-    }
-
-    let completed = decision.next == ScreenOnNext::Stop;
-    outcome.merge(decision.outcome);
-    Ok(completed)
 }
 
 fn execute_screen_on_full_wake<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
