@@ -1,8 +1,11 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -10,6 +13,8 @@ use std::time::{Duration, SystemTime};
 
 const STATE_DIR_NAME: &str = "lg_buddy";
 pub const SCREEN_OFF_BY_US_MARKER: &str = "screen_off_by_us";
+pub const SYSTEM_SLEEP_ATTEMPTED_MARKER: &str = "system_sleep_attempted";
+pub const SYSTEM_SLEEP_ATTEMPT_LOCK: &str = "system_sleep_attempt.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateScope {
@@ -91,6 +96,81 @@ pub fn resolve_state_dir_from_env(scope: StateScope) -> Result<PathBuf, StateDir
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSleepAttemptState {
+    marker_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl SystemSleepAttemptState {
+    pub fn for_scope(
+        scope: StateScope,
+        sources: RuntimeDirSources<'_>,
+    ) -> Result<Self, StateDirError> {
+        let state_dir = resolve_state_dir(scope, sources)?;
+        Ok(Self::new(state_dir))
+    }
+
+    pub fn from_env(scope: StateScope) -> Result<Self, StateDirError> {
+        let state_dir = resolve_state_dir_from_env(scope)?;
+        Ok(Self::new(state_dir))
+    }
+
+    pub fn new(state_dir: PathBuf) -> Self {
+        Self {
+            marker_path: state_dir.join(SYSTEM_SLEEP_ATTEMPTED_MARKER),
+            lock_path: state_dir.join(SYSTEM_SLEEP_ATTEMPT_LOCK),
+        }
+    }
+
+    pub fn marker_path(&self) -> &Path {
+        &self.marker_path
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    pub fn state_dir(&self) -> &Path {
+        self.marker_path
+            .parent()
+            .expect("system sleep attempt marker should always have a parent directory")
+    }
+
+    pub fn mark_attempted(&self) -> io::Result<()> {
+        fs::create_dir_all(self.state_dir())?;
+        create_marker_file(&self.marker_path)
+    }
+
+    pub fn clear(&self) -> io::Result<()> {
+        match fs::remove_file(&self.marker_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn exists(&self) -> bool {
+        self.marker_path.is_file()
+    }
+
+    pub fn try_lock(&self) -> io::Result<Option<SystemSleepAttemptLock>> {
+        fs::create_dir_all(self.state_dir())?;
+        let file = open_lock_file(&self.lock_path)?;
+        try_lock_file(file).map(|file| file.map(SystemSleepAttemptLock))
+    }
+}
+
+#[derive(Debug)]
+pub struct SystemSleepAttemptLock(File);
+
+#[cfg(unix)]
+impl Drop for SystemSleepAttemptLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenOwnershipMarker {
     path: PathBuf,
 }
@@ -159,6 +239,44 @@ impl ScreenOwnershipMarker {
 }
 
 #[cfg(unix)]
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn try_lock_file(file: File) -> io::Result<Option<File>> {
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(Some(file));
+    }
+
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN => Ok(None),
+        _ => Err(err),
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_file(file: File) -> io::Result<Option<File>> {
+    Ok(Some(file))
+}
+
+#[cfg(unix)]
 fn create_marker_file(path: &Path) -> io::Result<()> {
     OpenOptions::new()
         .write(true)
@@ -192,7 +310,8 @@ fn current_uid() -> Option<u32> {
 mod tests {
     use super::{
         resolve_state_dir, RuntimeDirSources, ScreenOwnershipMarker, StateDirError, StateScope,
-        SCREEN_OFF_BY_US_MARKER,
+        SystemSleepAttemptState, SCREEN_OFF_BY_US_MARKER, SYSTEM_SLEEP_ATTEMPTED_MARKER,
+        SYSTEM_SLEEP_ATTEMPT_LOCK,
     };
     use std::fs;
     #[cfg(unix)]
@@ -293,6 +412,53 @@ mod tests {
 
         marker.clear().expect("clear marker");
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn system_sleep_attempt_state_uses_expected_files() {
+        let state = SystemSleepAttemptState::new(PathBuf::from("/tmp/lg-buddy-state"));
+
+        assert_eq!(
+            state.marker_path(),
+            Path::new("/tmp/lg-buddy-state").join(SYSTEM_SLEEP_ATTEMPTED_MARKER)
+        );
+        assert_eq!(
+            state.lock_path(),
+            Path::new("/tmp/lg-buddy-state").join(SYSTEM_SLEEP_ATTEMPT_LOCK)
+        );
+    }
+
+    #[test]
+    fn system_sleep_attempt_marker_create_and_clear_manage_file() {
+        let temp_dir = TestDir::new("system-sleep-attempt-marker");
+        let state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
+
+        assert!(!state.exists());
+        state.mark_attempted().expect("mark attempted");
+        assert!(state.exists());
+        state.clear().expect("clear attempted");
+        assert!(!state.exists());
+        state.clear().expect("clear missing attempted marker");
+    }
+
+    #[test]
+    fn system_sleep_attempt_lock_rejects_concurrent_holder() {
+        let temp_dir = TestDir::new("system-sleep-attempt-lock");
+        let state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
+
+        let first = state
+            .try_lock()
+            .expect("acquire first lock")
+            .expect("first lock should be available");
+        let second = state.try_lock().expect("second lock should not error");
+        assert!(second.is_none());
+
+        drop(first);
+        let third = state
+            .try_lock()
+            .expect("reacquire lock")
+            .expect("lock should be available after drop");
+        drop(third);
     }
 
     #[test]

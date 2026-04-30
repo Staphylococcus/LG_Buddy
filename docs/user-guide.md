@@ -16,6 +16,7 @@ Available commands:
 - `shutdown`
 - `sleep-pre`
 - `sleep`
+- `nm-pre-down`
 - `brightness`
 - `screen-off`
 - `screen-on`
@@ -33,9 +34,9 @@ lg-buddy brightness
 
 In normal use, systemd starts the relevant commands automatically. Most users only need `brightness` or `configure.sh`.
 
-`lifecycle`, `sleep-pre`, and `startup wake` are normally service-owned system
-lifecycle commands. They are documented for troubleshooting, not day-to-day
-manual use.
+`lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
+service-owned system lifecycle commands. They are documented for
+troubleshooting, not day-to-day manual use.
 
 ## Desktop Idle Monitoring
 
@@ -100,9 +101,21 @@ Default installs enable system sleep/wake TV control through:
 systemctl status LG_Buddy_lifecycle.service
 ```
 
-The lifecycle service listens to logind `PrepareForSleep` events on the system
-bus. Before sleep, it runs LG Buddy's pre-sleep TV power-off policy. After
-resume, it runs wake restore policy.
+The installed lifecycle path has two Linux event sources:
+
+- a NetworkManager `pre-down` dispatcher hook gates network teardown and checks
+  logind `PreparingForSleep`
+- `LG_Buddy_lifecycle.service` listens to logind `PrepareForSleep(false)` for
+  resume restore
+
+When NetworkManager reports `pre-down` and logind says the system is preparing
+for sleep, LG Buddy runs pre-sleep TV power-off before the interface is torn
+down. Ordinary network disconnects return quickly. After resume, the lifecycle
+service runs wake restore policy and clears the sleep-attempt marker.
+
+While system sleep is pending, session idle/activity events do not run screen
+blank or restore TV commands. This avoids racing session-level TV control
+against the lifecycle sleep path.
 
 LG Buddy does not install the old sleep and wake systemd oneshot handlers or the
 old NetworkManager sleep hook. The installer and uninstaller remove those legacy
@@ -144,7 +157,8 @@ LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
 
 `system_sleep_wake_policy` controls automatic system sleep/wake TV handling:
 
-- `enabled`: default behavior, install and run the logind lifecycle service
+- `enabled`: default behavior, install the NetworkManager pre-down gate and run
+  the logind lifecycle service
 - `disabled`: do not install an active lifecycle owner
 
 The running lifecycle service rereads config and stops cleanly when this value

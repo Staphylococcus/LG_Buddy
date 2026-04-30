@@ -61,6 +61,7 @@ SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
 SCREEN_MONITOR_RUNTIME_BACKEND=""
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
+NM_HOOK_TMP=""
 INSTALL_CMD=()
 
 prefix_path() {
@@ -101,6 +102,7 @@ TMPFILES_CONF_DIR="$(prefix_path "/etc/tmpfiles.d")"
 TMPFILES_CONF_PATH="${TMPFILES_CONF_DIR}/lg_buddy.conf"
 NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
 NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
+NM_LIFECYCLE_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_lifecycle"
 APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
 DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
 USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
@@ -157,6 +159,27 @@ write_config_pointer() {
     printf '%s\n' "$config_path" >"$pointer_file"
 }
 
+write_nm_pre_down_hook() {
+    local hook_file="$1"
+    local config_path="$2"
+    local escaped_config_path=""
+
+    escaped_config_path="${config_path//\\/\\\\}"
+    escaped_config_path="${escaped_config_path//\"/\\\"}"
+
+    cat >"$hook_file" <<EOF
+#!/bin/sh
+set -eu
+
+if [ "\${2:-}" != "pre-down" ]; then
+    exit 0
+fi
+
+export LG_BUDDY_CONFIG="$escaped_config_path"
+exec /usr/bin/lg-buddy nm-pre-down
+EOF
+}
+
 cleanup_legacy_sleep_wake_handlers() {
     if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
         echo "Skipping legacy sleep/wake systemctl cleanup because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
@@ -200,6 +223,10 @@ cleanup() {
 
     if [ -n "$CONFIG_POINTER_TMP" ]; then
         rm -f "$CONFIG_POINTER_TMP"
+    fi
+
+    if [ -n "$NM_HOOK_TMP" ]; then
+        rm -f "$NM_HOOK_TMP"
     fi
 
 }
@@ -373,6 +400,12 @@ if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
     rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
     SYSTEM_CONFIG_OVERRIDE_TMP=""
+    run_privileged install -d "$NM_PRE_DOWN_DIR"
+    NM_HOOK_TMP="$(mktemp)"
+    write_nm_pre_down_hook "$NM_HOOK_TMP" "$CONFIG_FILE"
+    run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
+    rm -f "$NM_HOOK_TMP"
+    NM_HOOK_TMP=""
 else
     if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
         echo "Skipping lifecycle service disable because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
@@ -383,6 +416,7 @@ else
     run_privileged rm -f "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
     run_privileged rm -f "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
     run_privileged rmdir "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR" 2>/dev/null || true
+    run_privileged rm -f "$NM_LIFECYCLE_HOOK_PATH"
 fi
 
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
@@ -449,7 +483,7 @@ else
 fi
 
 if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
-    echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service."
+    echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
 else
     echo "System sleep/wake TV control disabled by config. Startup/shutdown will still work."
 fi

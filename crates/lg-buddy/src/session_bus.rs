@@ -53,6 +53,7 @@ pub enum BusValue {
     UnixFd(RawFd),
     U64(u64),
     String(String),
+    Variant(Box<BusValue>),
 }
 
 impl BusValue {
@@ -62,6 +63,7 @@ impl BusValue {
             Self::UnixFd(_) => "fd",
             Self::U64(_) => "u64",
             Self::String(_) => "string",
+            Self::Variant(_) => "variant",
         }
     }
 }
@@ -79,6 +81,13 @@ impl BusReply {
     pub fn single_bool(&self) -> Result<bool, SessionBusError> {
         match self.body.as_slice() {
             [BusValue::Bool(value)] => Ok(*value),
+            [BusValue::Variant(value)] => match value.as_ref() {
+                BusValue::Bool(value) => Ok(*value),
+                value => Err(SessionBusError::UnexpectedReplyShape {
+                    expected: "single bool",
+                    actual: value.kind(),
+                }),
+            },
             [value] => Err(SessionBusError::UnexpectedReplyShape {
                 expected: "single bool",
                 actual: value.kind(),
@@ -531,6 +540,7 @@ fn append_dbus_message_value(message: DbusMessage, value: BusValue) -> DbusMessa
         }
         BusValue::U64(value) => message.append1(value),
         BusValue::String(value) => message.append1(value),
+        BusValue::Variant(value) => append_dbus_message_value(message, *value),
     }
 }
 
@@ -540,8 +550,11 @@ fn bus_value_from_dbus_message_item(item: DbusMessageItem) -> Result<BusValue, S
         DbusMessageItem::UnixFd(value) => Ok(BusValue::UnixFd(value.into_raw_fd())),
         DbusMessageItem::UInt64(value) => Ok(BusValue::U64(value)),
         DbusMessageItem::Str(value) => Ok(BusValue::String(value)),
+        DbusMessageItem::Variant(value) => {
+            bus_value_from_dbus_message_item(*value).map(|value| BusValue::Variant(Box::new(value)))
+        }
         other => Err(SessionBusError::UnexpectedReplyShape {
-            expected: "bool/u64/string/fd",
+            expected: "bool/u64/string/fd/variant",
             actual: dbus_message_item_kind(&other),
         }),
     }
@@ -763,6 +776,10 @@ mod tests {
         assert_eq!(
             BusReply::new(vec![BusValue::Bool(true)]).single_bool(),
             Ok(true)
+        );
+        assert_eq!(
+            BusReply::new(vec![BusValue::Variant(Box::new(BusValue::Bool(false)))]).single_bool(),
+            Ok(false)
         );
         assert_eq!(BusReply::new(vec![BusValue::U64(42)]).single_u64(), Ok(42));
         assert_eq!(

@@ -31,7 +31,8 @@ This is where most tests should live.
 - gamepad device discovery, device-event filtering, raw event mapping, registry
   behavior, and activity policy
 - TV command output parsing
-- command-policy branching and retry logic
+- screen and lifecycle policy branching, retry logic, and state-transition
+  outcomes
 
 ### How to test it
 
@@ -44,10 +45,14 @@ This is where most tests should live.
 - `crates/lg-buddy/src/config.rs`
 - `crates/lg-buddy/src/state.rs`
 - `crates/lg-buddy/src/backend.rs`
-- `crates/lg-buddy/src/gnome.rs`
+- `crates/lg-buddy/src/sources/desktop/gnome.rs`
 - `crates/lg-buddy/src/wol.rs`
 - `crates/lg-buddy/src/tv.rs`
 - `crates/lg-buddy/src/commands.rs`
+- `crates/lg-buddy/src/screen.rs`
+- `crates/lg-buddy/src/lifecycle.rs`
+- `crates/lg-buddy/src/runtime_phase.rs`
+- `crates/lg-buddy/src/sources/linux/network_manager.rs`
 
 ### Design rule
 
@@ -71,6 +76,8 @@ This is the place for integration tests and contract tests.
 - subprocess contracts to external tools
 - backend detection against mocked command/process boundaries
 - GNOME runner behavior against a private session-bus harness
+- logind lifecycle and NetworkManager gate behavior against a private system-bus
+  harness
 - GNOME inactivity merging with auxiliary gamepad activity observations
 
 ### How to test it
@@ -93,6 +100,8 @@ Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
 - GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
+- logind lifecycle/runtime tests should use the private system-bus harness for
+  `PreparingForSleep` and `PrepareForSleep` behavior
 
 If a contract shape is unclear, probe the real dependency and update the mock.
 
@@ -157,7 +166,8 @@ Secondary concern:
 
 Examples:
 
-- `config.rs`, `state.rs`, `tv.rs`, `backend.rs`, `commands.rs`
+- `config.rs`, `state.rs`, `tv.rs`, `backend.rs`, `screen.rs`,
+  `lifecycle.rs`, `runtime_phase.rs`, `sources/linux/network_manager.rs`
 
 ### External tool boundaries
 
@@ -186,6 +196,7 @@ Examples:
 - GNOME signal mapping
 - GNOME monitor and idletime integration over the session-bus seam
 - gamepad activity integration with the GNOME inactivity merger
+- screen runtime-phase eligibility over the private logind system-bus seam
 
 ### Gamepad activity
 

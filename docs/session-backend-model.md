@@ -51,8 +51,9 @@ These are the semantic events the runtime should reason about.
   - Some backends can report an active display transition without a session
     unlock event.
 - `UserActivity` is earlier and weaker than `Active`.
-  - It exists for backends like GNOME + Mutter where LG Buddy may observe fresh
-    activity before the desktop emits its normal active/wake signal.
+  - It exists for native desktop adapters that can expose fresh activity before
+    the desktop emits its normal active/wake signal. GNOME + Mutter is the
+    current production example.
   - It can also come from backend-adjacent activity sources owned by the session
     runtime, such as gamepad input that the desktop does not classify as
     activity.
@@ -140,8 +141,8 @@ Notes:
 - LG Buddy owns the configured timeout value for this backend.
 - ScreenSaver idle/active signals and Mutter idletime are both observation inputs into LG Buddy policy.
 - Gamepad activity is not a separate desktop backend. It is an auxiliary
-  activity source used by the GNOME monitor because GNOME's idle APIs may not
-  count controller input as desktop activity.
+  activity source attached to the current native monitor path because some
+  desktop idle APIs may not count controller input as activity.
 - The gamepad source owns its device set internally. It performs an initial
   scan, refreshes on Linux input-device add, remove, and change events, and
   periodically reconciles in case an event is missed.
@@ -176,9 +177,9 @@ The code split is:
   - canonical events
   - capability model
   - backend-neutral traits and errors
-- `crates/lg-buddy/src/gnome.rs`
+- `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME-specific probing and event mapping
-- `crates/lg-buddy/src/swayidle.rs`
+- `crates/lg-buddy/src/sources/desktop/swayidle.rs`
   - `swayidle`-specific probing and event mapping
 
 This keeps backend-specific details out of runtime policy and prevents each

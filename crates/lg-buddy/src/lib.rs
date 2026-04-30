@@ -2,14 +2,20 @@ pub mod auth;
 pub mod backend;
 pub mod commands;
 pub mod config;
-pub mod gnome;
-pub mod logind;
+pub mod events;
+pub mod lifecycle;
+pub mod policy;
+pub mod runtime_phase;
+pub mod screen;
 pub mod session;
 pub mod session_bus;
+pub mod sources;
 pub mod state;
-pub mod swayidle;
 pub mod tv;
 pub mod wol;
+
+pub use sources::desktop::{gnome, swayidle};
+pub use sources::linux::{logind, network_manager};
 
 use crate::auth::AuthContextError;
 use crate::backend::{
@@ -17,7 +23,8 @@ use crate::backend::{
     BackendSelectionError,
 };
 use crate::commands::{
-    run_brightness, run_screen_off, run_screen_on, run_shutdown, run_sleep, run_sleep_pre,
+    run_brightness, run_nm_pre_down, run_screen_off, run_screen_on, run_shutdown, run_sleep,
+    run_sleep_pre,
 };
 use crate::config::{ConfigError, ConfigPathError};
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
@@ -31,6 +38,7 @@ pub enum Command {
     Shutdown,
     SleepPre,
     Sleep,
+    NetworkManagerPreDown,
     Brightness,
     ScreenOff,
     ScreenOn,
@@ -157,6 +165,7 @@ impl Command {
             Self::Shutdown => "shutdown",
             Self::SleepPre => "sleep-pre",
             Self::Sleep => "sleep",
+            Self::NetworkManagerPreDown => "nm-pre-down",
             Self::Brightness => "brightness",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
@@ -172,6 +181,7 @@ impl Command {
             Self::Shutdown => "TODO: implemented via command handler",
             Self::SleepPre => "TODO: implemented via command handler",
             Self::Sleep => "TODO: implemented via command handler",
+            Self::NetworkManagerPreDown => "TODO: implemented via command handler",
             Self::Brightness => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
@@ -196,6 +206,7 @@ Commands:
   shutdown        Power off the TV when LG Buddy owns the active input
   sleep-pre       Handle the pre-sleep TV power-off hook
   sleep           Handle the NetworkManager pre-down sleep hook
+  nm-pre-down     Handle NetworkManager pre-down system sleep gate
   brightness      Open the TV brightness control dialog
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
@@ -250,6 +261,7 @@ where
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
+        "nm-pre-down" => Command::NetworkManagerPreDown,
         "brightness" => Command::Brightness,
         "screen-off" => Command::ScreenOff,
         "screen-on" => Command::ScreenOn,
@@ -276,6 +288,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Shutdown => run_shutdown(writer),
         Command::SleepPre => run_sleep_pre(writer),
         Command::Sleep => run_sleep(writer),
+        Command::NetworkManagerPreDown => run_nm_pre_down(writer),
         Command::Brightness => run_brightness(writer),
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
@@ -334,6 +347,10 @@ mod tests {
         assert_eq!(
             parse_args(["sleep"]),
             Ok(ParseOutcome::Command(Command::Sleep))
+        );
+        assert_eq!(
+            parse_args(["nm-pre-down"]),
+            Ok(ParseOutcome::Command(Command::NetworkManagerPreDown))
         );
         assert_eq!(
             parse_args(["brightness"]),
@@ -397,6 +414,7 @@ mod tests {
             "shutdown",
             "sleep-pre",
             "sleep",
+            "nm-pre-down",
             "brightness",
             "screen-off",
             "screen-on",

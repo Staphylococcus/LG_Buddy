@@ -6,7 +6,9 @@ use std::fmt;
 use std::io;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::auth::{BscpylgtvAuthContext, SystemUser};
 use crate::config::{HdmiInput, MacAddress};
@@ -283,6 +285,7 @@ pub struct BscpylgtvInvocation {
     program: PathBuf,
     args: Vec<String>,
     launch_identity: Option<SystemUser>,
+    timeout: Option<Duration>,
 }
 
 impl BscpylgtvInvocation {
@@ -295,7 +298,13 @@ impl BscpylgtvInvocation {
             program: program.into(),
             args,
             launch_identity,
+            timeout: None,
         }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     pub fn program(&self) -> &Path {
@@ -312,6 +321,10 @@ impl BscpylgtvInvocation {
 
     pub fn launch_user(&self) -> Option<&str> {
         self.launch_identity().map(SystemUser::username)
+    }
+
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 }
 
@@ -364,9 +377,9 @@ impl BscpylgtvCommandLauncher for DirectBscpylgtvCommandLauncher {
             ));
         }
 
-        let output = Command::new(invocation.program())
-            .args(invocation.args())
-            .output()?;
+        let mut command = Command::new(invocation.program());
+        command.args(invocation.args());
+        let output = run_command_with_optional_timeout(command, invocation.timeout())?;
 
         Ok(BscpylgtvLaunchResult::new(
             output.status.code(),
@@ -388,7 +401,7 @@ impl BscpylgtvCommandLauncher for UserScopedBscpylgtvCommandLauncher {
             configure_command_for_identity(&mut command, identity)?;
         }
 
-        let output = command.output()?;
+        let output = run_command_with_optional_timeout(command, invocation.timeout())?;
 
         Ok(BscpylgtvLaunchResult::new(
             output.status.code(),
@@ -404,6 +417,7 @@ pub struct BscpylgtvCommandClient<L = DirectBscpylgtvCommandLauncher> {
     command_args: Vec<String>,
     auth_context: BscpylgtvAuthContext,
     launcher: L,
+    command_timeout: Option<Duration>,
 }
 
 impl Default for BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
@@ -419,6 +433,7 @@ impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
             command_args: Vec::new(),
             auth_context: BscpylgtvAuthContext::default(),
             launcher: DirectBscpylgtvCommandLauncher,
+            command_timeout: None,
         }
     }
 
@@ -432,6 +447,7 @@ impl BscpylgtvCommandClient<DirectBscpylgtvCommandLauncher> {
             command_args: command_args.into_iter().map(Into::into).collect(),
             auth_context: BscpylgtvAuthContext::default(),
             launcher: DirectBscpylgtvCommandLauncher,
+            command_timeout: None,
         }
     }
 
@@ -450,11 +466,17 @@ impl<L> BscpylgtvCommandClient<L> {
             command_args: self.command_args,
             auth_context: self.auth_context,
             launcher,
+            command_timeout: self.command_timeout,
         }
     }
 
     pub fn with_auth_context(mut self, auth_context: BscpylgtvAuthContext) -> Self {
         self.auth_context = auth_context;
+        self
+    }
+
+    pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        self.command_timeout = Some(timeout);
         self
     }
 
@@ -487,11 +509,48 @@ impl<L> BscpylgtvCommandClient<L> {
         args.push(operation.to_string());
         args.extend(extra_args.iter().map(|arg| arg.to_string()));
 
-        BscpylgtvInvocation::new(
+        let invocation = BscpylgtvInvocation::new(
             self.command_path.clone(),
             args,
             self.auth_context.owner().cloned(),
-        )
+        );
+
+        match self.command_timeout {
+            Some(timeout) => invocation.with_timeout(timeout),
+            None => invocation,
+        }
+    }
+}
+
+fn run_command_with_optional_timeout(
+    mut command: Command,
+    timeout: Option<Duration>,
+) -> io::Result<Output> {
+    let Some(timeout) = timeout else {
+        return command.output();
+    };
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("bscpylgtvcommand timed out after {timeout:?}"),
+            ));
+        }
+
+        let remaining = timeout.saturating_sub(elapsed);
+        thread::sleep(remaining.min(Duration::from_millis(50)));
     }
 }
 
@@ -713,6 +772,7 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::path::Path;
     use std::rc::Rc;
+    use std::time::Duration;
     use support::{ExecutableScript, MockBscpylgtv};
 
     #[test]
@@ -999,6 +1059,33 @@ mod tests {
     }
 
     #[test]
+    fn command_timeout_stops_slow_helper() {
+        let script = ExecutableScript::new(
+            "tv-command-timeout",
+            "slow-bscpylgtvcommand",
+            "#!/bin/sh\nsleep 5\n",
+        );
+        let client = BscpylgtvCommandClient::new(script.path())
+            .with_command_timeout(Duration::from_millis(100));
+
+        let err = client
+            .get_input(ip("10.0.0.8"))
+            .expect_err("slow command should time out");
+
+        match err {
+            TvError::Io { command, source } => {
+                assert_eq!(command, "get_input");
+                assert_eq!(source.kind(), io::ErrorKind::TimedOut);
+                assert!(
+                    source.to_string().contains("timed out after"),
+                    "io error was: {source}"
+                );
+            }
+            other => panic!("expected timeout io error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn invocation_places_key_file_override_before_tv_ip() {
         let auth_context =
             BscpylgtvAuthContext::new().with_key_file_path("/tmp/lg-buddy/.aiopylgtv.sqlite");
@@ -1053,6 +1140,22 @@ mod tests {
                 Some(SystemUser::new("vas", 1000, 1000, "/home/vas")),
             )]
         );
+    }
+
+    #[test]
+    fn command_timeout_is_attached_to_launcher_invocation() {
+        let launcher = RecordingLauncher::default();
+        let client = BscpylgtvCommandClient::new("/usr/bin/mock-bscpylgtv")
+            .with_command_timeout(Duration::from_secs(3))
+            .with_launcher(launcher.clone());
+
+        client
+            .power_off(ip("10.0.0.8"))
+            .expect("custom launcher should succeed");
+
+        let calls = launcher.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].timeout(), Some(Duration::from_secs(3)));
     }
 
     #[test]

@@ -124,14 +124,20 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | Path | Purpose |
 | --- | --- |
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
-| `crates/lg-buddy/src/commands.rs` | Runtime lifecycle and policy commands |
+| `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
+| `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
+| `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
+| `crates/lg-buddy/src/screen.rs` | Session screen blank/restore policy |
+| `crates/lg-buddy/src/lifecycle.rs` | Startup, shutdown, system sleep, and system resume policy |
+| `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity synthesis and thresholds |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
-| `crates/lg-buddy/src/logind.rs` | Linux logind lifecycle signal and inhibitor adapter |
-| `crates/lg-buddy/src/gnome.rs` | GNOME backend integration |
-| `crates/lg-buddy/src/swayidle.rs` | `swayidle` backend integration |
+| `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle signal and property adapter |
+| `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
+| `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
+| `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
 | `configure.sh` | Interactive configuration tool |

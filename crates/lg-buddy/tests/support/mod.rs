@@ -1,7 +1,8 @@
+use dbus::arg::Variant as DbusVariant;
 use dbus::blocking::Connection as DbusConnection;
 use dbus::channel::{MatchingReceiver, Sender as DbusSender};
 use dbus::Message as DbusMessage;
-use dbus_crossroads::Crossroads;
+use dbus_crossroads::{Crossroads, MethodErr};
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
 use std::env;
@@ -399,10 +400,12 @@ impl MockSessionBusIdleMonitor {
 
     pub fn set_shell_available(&self, value: bool) {
         self.patch_state(|state| state.shell_available = value);
+        wait_for_mock_bus_name_sync();
     }
 
     pub fn set_screen_saver_available(&self, value: bool) {
         self.patch_state(|state| state.screen_saver_available = value);
+        wait_for_mock_bus_name_sync();
     }
 
     pub fn set_idle_monitor_available(&self, value: bool) {
@@ -412,6 +415,7 @@ impl MockSessionBusIdleMonitor {
                 state.client_ready = false;
             }
         });
+        wait_for_mock_bus_name_sync();
     }
 
     pub fn set_idle_monitor_idletime(&self, value: u64) {
@@ -481,6 +485,105 @@ impl Drop for MockSessionBusIdleMonitor {
 
         unsafe {
             libc::kill(self.daemon_pid, libc::SIGTERM);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct MockSystemLogind {
+    _temp_dir: TestDir,
+    address: String,
+    state: Arc<Mutex<MockSystemLogindState>>,
+}
+
+#[derive(Debug, Default)]
+struct MockSystemLogindState {
+    preparing_for_sleep: bool,
+    prepare_for_sleep_signals: VecDeque<bool>,
+}
+
+#[allow(dead_code)]
+impl MockSystemLogind {
+    pub fn new(label: &str) -> Self {
+        let temp_dir = TestDir::new(label);
+        let global = global_mock_system_logind();
+
+        Self {
+            _temp_dir: temp_dir,
+            address: global.address.clone(),
+            state: Arc::clone(&global.state),
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn reset(&self) {
+        self.patch_state(|state| {
+            state.preparing_for_sleep = false;
+            state.prepare_for_sleep_signals.clear();
+        });
+    }
+
+    pub fn set_preparing_for_sleep(&self, value: bool) {
+        self.patch_state(|state| state.preparing_for_sleep = value);
+    }
+
+    pub fn queue_prepare_for_sleep_signal(&self, value: bool) {
+        self.patch_state(|state| state.prepare_for_sleep_signals.push_back(value));
+    }
+
+    fn patch_state<F>(&self, f: F)
+    where
+        F: FnOnce(&mut MockSystemLogindState),
+    {
+        let mut state = self.state.lock().expect("mock logind state lock");
+        f(&mut state);
+    }
+}
+
+struct GlobalMockSystemLogind {
+    address: String,
+    state: Arc<Mutex<MockSystemLogindState>>,
+}
+
+fn global_mock_system_logind() -> &'static GlobalMockSystemLogind {
+    static GLOBAL: OnceLock<GlobalMockSystemLogind> = OnceLock::new();
+
+    GLOBAL.get_or_init(|| {
+        let (address, daemon_pid) = start_private_session_bus();
+        MOCK_SYSTEM_LOGIND_DAEMON_PID.store(daemon_pid, Ordering::SeqCst);
+        unsafe {
+            libc::atexit(kill_mock_system_logind_daemon);
+        }
+
+        let state = Arc::new(Mutex::new(MockSystemLogindState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let _service_thread = spawn_mock_logind_service(
+            address.clone(),
+            Arc::clone(&state),
+            Arc::clone(&stop),
+            ready_tx,
+        );
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("mock logind service should become ready");
+
+        GlobalMockSystemLogind { address, state }
+    })
+}
+
+static MOCK_SYSTEM_LOGIND_DAEMON_PID: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn kill_mock_system_logind_daemon() {
+    let pid = MOCK_SYSTEM_LOGIND_DAEMON_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
         }
     }
 }
@@ -572,6 +675,92 @@ fn spawn_mock_idle_monitor_service(
     })
 }
 
+fn spawn_mock_logind_service(
+    address: String,
+    state: Arc<Mutex<MockSystemLogindState>>,
+    stop: Arc<AtomicBool>,
+    ready: mpsc::Sender<()>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let connection = DbusConnection::new_address(&address)
+            .expect("connect mock logind service to private system bus");
+        connection
+            .request_name("org.freedesktop.login1", false, true, false)
+            .expect("request mock logind bus name");
+
+        let mut crossroads = Crossroads::new();
+        let properties_state = Arc::clone(&state);
+        let properties_iface =
+            crossroads.register("org.freedesktop.DBus.Properties", move |builder| {
+                let state = Arc::clone(&properties_state);
+                builder.method(
+                    "Get",
+                    ("interface_name", "property_name"),
+                    ("value",),
+                    move |_, _, (interface_name, property_name): (String, String)| {
+                        if interface_name != "org.freedesktop.login1.Manager" {
+                            return Err(MethodErr::no_interface(&interface_name));
+                        }
+
+                        if property_name != "PreparingForSleep" {
+                            return Err(MethodErr::no_property(&property_name));
+                        }
+
+                        let preparing_for_sleep = state
+                            .lock()
+                            .expect("mock logind state lock")
+                            .preparing_for_sleep;
+                        Ok((DbusVariant(preparing_for_sleep),))
+                    },
+                );
+            });
+        crossroads.insert("/org/freedesktop/login1", &[properties_iface], ());
+
+        let shared_crossroads = Arc::new(Mutex::new(crossroads));
+        let crossroads_receiver = Arc::clone(&shared_crossroads);
+        connection.start_receive(
+            dbus::message::MatchRule::new_method_call(),
+            Box::new(move |message, conn| {
+                crossroads_receiver
+                    .lock()
+                    .expect("mock logind crossroads lock")
+                    .handle_message(message, conn)
+                    .expect("handle mock logind message");
+                true
+            }),
+        );
+
+        let _ = ready.send(());
+        while !stop.load(Ordering::SeqCst) {
+            let _ = connection.process(Duration::from_millis(50));
+            emit_queued_mock_logind_signal(&connection, &state);
+        }
+    })
+}
+
+fn emit_queued_mock_logind_signal(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSystemLogindState>>,
+) {
+    let signal = {
+        let mut state = state.lock().expect("mock logind state lock");
+        state.prepare_for_sleep_signals.pop_front()
+    };
+    let Some(preparing_for_sleep) = signal else {
+        return;
+    };
+
+    let message = DbusMessage::new_signal(
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+        "PrepareForSleep",
+    )
+    .expect("create mock PrepareForSleep signal")
+    .append1(preparing_for_sleep);
+
+    let _ = connection.send(message);
+}
+
 #[derive(Debug, Default)]
 struct MockOwnedBusNames {
     shell: bool,
@@ -631,6 +820,10 @@ fn sync_mock_bus_name(connection: &DbusConnection, name: &str, wanted: bool, own
     }
 
     *owned = wanted;
+}
+
+fn wait_for_mock_bus_name_sync() {
+    thread::sleep(Duration::from_millis(100));
 }
 
 fn emit_queued_mock_screen_saver_signal(
@@ -891,12 +1084,20 @@ impl RuntimeStateLayout {
         self.system_dir().join("screen_off_by_us")
     }
 
+    pub fn system_sleep_attempt_marker_path(&self) -> PathBuf {
+        self.system_dir().join("system_sleep_attempted")
+    }
+
     pub fn create_session_marker(&self) {
         self.create_marker(&self.session_marker_path());
     }
 
     pub fn create_system_marker(&self) {
         self.create_marker(&self.system_marker_path());
+    }
+
+    pub fn create_system_sleep_attempt_marker(&self) {
+        self.create_marker(&self.system_sleep_attempt_marker_path());
     }
 
     pub fn assert_session_marker_exists(&self) {
@@ -928,6 +1129,22 @@ impl RuntimeStateLayout {
             !self.system_marker_path().exists(),
             "did not expect system marker at {}",
             self.system_marker_path().display()
+        );
+    }
+
+    pub fn assert_system_sleep_attempt_marker_exists(&self) {
+        assert!(
+            self.system_sleep_attempt_marker_path().is_file(),
+            "expected system sleep attempt marker at {}",
+            self.system_sleep_attempt_marker_path().display()
+        );
+    }
+
+    pub fn assert_system_sleep_attempt_marker_absent(&self) {
+        assert!(
+            !self.system_sleep_attempt_marker_path().exists(),
+            "did not expect system sleep attempt marker at {}",
+            self.system_sleep_attempt_marker_path().display()
         );
     }
 

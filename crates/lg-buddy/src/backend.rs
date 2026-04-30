@@ -5,11 +5,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::{load_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend};
-use crate::gnome::{
+use crate::session_bus::new_session_bus_client;
+use crate::sources::desktop::gnome::{
     GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
     GNOME_SHELL_NAME,
 };
-use crate::session_bus::new_session_bus_client;
 
 const GNOME_SHELL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 

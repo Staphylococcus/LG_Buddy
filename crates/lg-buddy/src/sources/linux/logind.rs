@@ -1,6 +1,6 @@
 use std::os::fd::OwnedFd;
 
-use crate::session::SessionEvent;
+use crate::events::RuntimeEvent;
 use crate::session_bus::{
     BusMethodCall, BusSignal, BusSignalMatch, BusValue, SessionBusClient, SessionBusError,
 };
@@ -10,10 +10,11 @@ pub const LOGIND_MANAGER_PATH: &str = "/org/freedesktop/login1";
 pub const LOGIND_MANAGER_INTERFACE: &str = "org.freedesktop.login1.Manager";
 pub const LOGIND_INHIBIT_WHO: &str = "LG Buddy";
 pub const LOGIND_INHIBIT_WHY: &str = "Handle LG TV power state around system sleep";
+const DBUS_PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
 
 pub fn logind_signal_match() -> BusSignalMatch<'static> {
     BusSignalMatch {
-        sender: Some(LOGIND_SERVICE_NAME),
+        sender: None,
         path: Some(LOGIND_MANAGER_PATH),
         interface: Some(LOGIND_MANAGER_INTERFACE),
         member: Some("PrepareForSleep"),
@@ -24,7 +25,7 @@ pub fn add_logind_signal_match(bus: &mut impl SessionBusClient) -> Result<(), Se
     bus.add_signal_match(logind_signal_match())
 }
 
-pub fn map_prepare_for_sleep_signal(signal: &BusSignal) -> Option<SessionEvent> {
+pub fn map_prepare_for_sleep_signal(signal: &BusSignal) -> Option<RuntimeEvent> {
     if signal.path != LOGIND_MANAGER_PATH
         || signal.interface != LOGIND_MANAGER_INTERFACE
         || signal.member != "PrepareForSleep"
@@ -33,8 +34,9 @@ pub fn map_prepare_for_sleep_signal(signal: &BusSignal) -> Option<SessionEvent> 
     }
 
     match signal.body.as_slice() {
-        [BusValue::Bool(true)] => Some(SessionEvent::BeforeSleep),
-        [BusValue::Bool(false)] => Some(SessionEvent::AfterResume),
+        [BusValue::Bool(preparing)] => {
+            Some(RuntimeEvent::from_logind_prepare_for_sleep(*preparing))
+        }
         _ => None,
     }
 }
@@ -59,6 +61,22 @@ pub fn acquire_sleep_delay_inhibitor(
     .single_unix_fd()
 }
 
+pub fn preparing_for_sleep(bus: &mut impl SessionBusClient) -> Result<bool, SessionBusError> {
+    bus.call_method(
+        BusMethodCall::new(
+            LOGIND_SERVICE_NAME,
+            LOGIND_MANAGER_PATH,
+            DBUS_PROPERTIES_INTERFACE,
+            "Get",
+        )
+        .with_body(vec![
+            BusValue::String(LOGIND_MANAGER_INTERFACE.to_string()),
+            BusValue::String("PreparingForSleep".to_string()),
+        ]),
+    )?
+    .single_bool()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -66,7 +84,8 @@ mod tests {
         map_prepare_for_sleep_signal, LOGIND_INHIBIT_WHO, LOGIND_INHIBIT_WHY,
         LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
     };
-    use crate::session::SessionEvent;
+    use super::{preparing_for_sleep, DBUS_PROPERTIES_INTERFACE};
+    use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
         SessionBusError,
@@ -140,18 +159,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_for_sleep_true_maps_to_before_sleep() {
+    fn prepare_for_sleep_true_maps_to_machine_preparing_event() {
         assert_eq!(
             map_prepare_for_sleep_signal(&prepare_for_sleep_signal(true)),
-            Some(SessionEvent::BeforeSleep)
+            Some(RuntimeEvent::new(
+                EventSource::LinuxLogind,
+                RuntimeEventKind::MachinePreparingForSleep
+            ))
         );
     }
 
     #[test]
-    fn prepare_for_sleep_false_maps_to_after_resume() {
+    fn prepare_for_sleep_false_maps_to_machine_resumed_event() {
         assert_eq!(
             map_prepare_for_sleep_signal(&prepare_for_sleep_signal(false)),
-            Some(SessionEvent::AfterResume)
+            Some(RuntimeEvent::new(
+                EventSource::LinuxLogind,
+                RuntimeEventKind::MachineResumed
+            ))
         );
     }
 
@@ -170,11 +195,11 @@ mod tests {
     }
 
     #[test]
-    fn logind_signal_match_targets_prepare_for_sleep() {
+    fn logind_signal_match_targets_prepare_for_sleep_without_sender_owner() {
         assert_eq!(
             logind_signal_match(),
             BusSignalMatch {
-                sender: Some(LOGIND_SERVICE_NAME),
+                sender: None,
                 path: Some(LOGIND_MANAGER_PATH),
                 interface: Some(LOGIND_MANAGER_INTERFACE),
                 member: Some("PrepareForSleep"),
@@ -228,5 +253,59 @@ mod tests {
         unsafe {
             libc::close(pipe_fds[1]);
         }
+    }
+
+    #[test]
+    fn preparing_for_sleep_reads_logind_property() {
+        let mut bus = FakeBus::default();
+        bus.replies
+            .push_back(BusReply::new(vec![BusValue::Variant(Box::new(
+                BusValue::Bool(true),
+            ))]));
+
+        let preparing = preparing_for_sleep(&mut bus).expect("read PreparingForSleep");
+
+        assert!(preparing);
+        assert_eq!(
+            bus.calls,
+            vec![(
+                LOGIND_SERVICE_NAME.to_string(),
+                LOGIND_MANAGER_PATH.to_string(),
+                DBUS_PROPERTIES_INTERFACE.to_string(),
+                "Get".to_string(),
+                vec![
+                    BusValue::String(LOGIND_MANAGER_INTERFACE.to_string()),
+                    BusValue::String("PreparingForSleep".to_string()),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn preparing_for_sleep_accepts_unwrapped_bool_for_tests() {
+        let mut bus = FakeBus::default();
+        bus.replies
+            .push_back(BusReply::new(vec![BusValue::Bool(false)]));
+
+        assert!(!preparing_for_sleep(&mut bus).expect("read PreparingForSleep"));
+    }
+
+    #[test]
+    fn preparing_for_sleep_rejects_unexpected_property_shape() {
+        let mut bus = FakeBus::default();
+        bus.replies
+            .push_back(BusReply::new(vec![BusValue::Variant(Box::new(
+                BusValue::String("false".to_string()),
+            ))]));
+
+        let err = preparing_for_sleep(&mut bus).expect_err("malformed property should fail");
+
+        assert_eq!(
+            err,
+            SessionBusError::UnexpectedReplyShape {
+                expected: "single bool",
+                actual: "string",
+            }
+        );
     }
 }

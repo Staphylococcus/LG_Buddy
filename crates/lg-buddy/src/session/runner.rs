@@ -15,18 +15,12 @@ use crate::backend::{
     configured_backend_from_env_or_config, detect_backend_from_system, BackendDetectionError,
     BackendSelectionError,
 };
-use crate::commands::{run_screen_off, run_screen_on};
+use crate::commands::run_system_resume;
 use crate::config::{
     load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
-use crate::gnome::{
-    current_idle_monitor_idletime_ms, map_screen_saver_signal, resolve_screen_saver_owner,
-    screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
-    GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
-};
-use crate::logind::{
-    acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
-};
+use crate::events::{EventSource, RuntimeEvent};
+use crate::lifecycle::LifecycleEvent;
 use crate::session::gamepad::{
     open_system_gamepad_activity_source, open_system_gamepad_device_event_monitor,
     SystemGamepadActivitySource, SystemGamepadDeviceEventMonitor,
@@ -39,7 +33,13 @@ use crate::session_bus::{
     new_session_bus_client, new_system_bus_client, BusSignal, BusSignalMatch, SessionBusClient,
     DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
 };
-use crate::{RunError, StartupMode};
+use crate::sources::desktop::gnome::{
+    current_idle_monitor_idletime_ms, map_screen_saver_signal, resolve_screen_saver_owner,
+    screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
+    GNOME_SCREEN_SAVER_PATH, GNOME_SHELL_NAME,
+};
+use crate::sources::linux::logind::{add_logind_signal_match, map_prepare_for_sleep_signal};
+use crate::RunError;
 
 const GNOME_WAIT_TIMEOUT_SECS: u64 = 15;
 const GNOME_ACTIVE_THRESHOLD_MS: u64 = 1000;
@@ -55,30 +55,30 @@ const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_T
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
 
 pub trait SessionActionExecutor {
-    fn screen_off(&mut self) -> Result<String, RunError>;
-    fn screen_on(&mut self) -> Result<String, RunError>;
-    fn before_sleep(&mut self) -> Result<String, RunError>;
-    fn after_resume(&mut self) -> Result<String, RunError>;
+    fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
+    fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
+    fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
+    fn after_resume(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RuntimeActionExecutor;
 
 impl SessionActionExecutor for RuntimeActionExecutor {
-    fn screen_off(&mut self) -> Result<String, RunError> {
-        run_action(run_screen_off)
+    fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
+        run_action(|writer| crate::screen::run_screen_off_from_env_for_event(writer, event))
     }
 
-    fn screen_on(&mut self) -> Result<String, RunError> {
-        run_action(run_screen_on)
+    fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
+        run_action(|writer| crate::screen::run_screen_on_from_env_for_event(writer, event))
     }
 
-    fn before_sleep(&mut self) -> Result<String, RunError> {
+    fn before_sleep(&mut self, _event: RuntimeEvent) -> Result<String, RunError> {
         run_action(crate::commands::run_sleep_pre)
     }
 
-    fn after_resume(&mut self) -> Result<String, RunError> {
-        run_action(|writer| crate::commands::run_startup(writer, StartupMode::Wake))
+    fn after_resume(&mut self, _event: RuntimeEvent) -> Result<String, RunError> {
+        run_action(run_system_resume)
     }
 }
 
@@ -160,7 +160,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
         match event {
             SessionEvent::Idle => {
                 writeln!(writer, "LG Buddy Monitor: Session became idle.")?;
-                match self.executor.screen_off() {
+                let runtime_event =
+                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                match self.executor.screen_off(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => {
                         writeln!(writer, "LG Buddy Monitor: screen-off action failed. {err}")?
@@ -173,7 +175,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     "LG Buddy Monitor: Session event `{}` requests screen restore.",
                     event.as_str()
                 )?;
-                match self.executor.screen_on() {
+                let runtime_event =
+                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                match self.executor.screen_on(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => writeln!(
                         writer,
@@ -186,7 +190,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     writer,
                     "LG Buddy Monitor: Session event `before-sleep` requests pre-sleep handling."
                 )?;
-                match self.executor.before_sleep() {
+                let runtime_event =
+                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                match self.executor.before_sleep(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => {
                         writeln!(writer, "LG Buddy Monitor: pre-sleep action failed. {err}")?
@@ -198,7 +204,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     writer,
                     "LG Buddy Monitor: Session event `after-resume` requests wake restore."
                 )?;
-                match self.executor.after_resume() {
+                let runtime_event =
+                    RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
+                match self.executor.after_resume(runtime_event) {
                     Ok(output) => write_command_output(writer, &output)?,
                     Err(err) => writeln!(
                         writer,
@@ -213,6 +221,42 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     event.as_str()
                 )?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn dispatch_lifecycle_event<W: Write>(
+        &mut self,
+        writer: &mut W,
+        event: RuntimeEvent,
+    ) -> Result<(), SessionRunnerError>
+    where
+        E: SessionActionExecutor,
+    {
+        match LifecycleEvent::from_runtime_event(event) {
+            Some(LifecycleEvent::MachineResumed) => {
+                writeln!(writer, "LG Buddy Lifecycle: System resumed from sleep.")?;
+                writeln!(
+                    writer,
+                    "LG Buddy Monitor: Session event `after-resume` requests wake restore."
+                )?;
+                match self.executor.after_resume(event) {
+                    Ok(output) => write_command_output(writer, &output)?,
+                    Err(err) => writeln!(
+                        writer,
+                        "LG Buddy Lifecycle: wake restore action failed. {err}"
+                    )?,
+                }
+            }
+            Some(LifecycleEvent::MachinePreparingForSleep) => {
+                writeln!(writer, "LG Buddy Lifecycle: System is preparing for sleep.")?;
+                writeln!(
+                    writer,
+                    "LG Buddy Lifecycle: logind pre-sleep is diagnostic only; NetworkManager pre-down owns TV power-off."
+                )?;
+            }
+            Some(_) | None => {}
         }
 
         Ok(())
@@ -269,13 +313,6 @@ fn run_lifecycle_monitor_with_bus<W: Write, E: SessionActionExecutor>(
         backend: ScreenBackend::Auto,
         message: format!("failed to subscribe to logind lifecycle signals: {err}"),
     })?;
-    let mut inhibitor =
-        Some(
-            acquire_sleep_delay_inhibitor(bus).map_err(|err| SessionRunnerError::Failed {
-                backend: ScreenBackend::Auto,
-                message: format!("failed to acquire logind sleep delay inhibitor: {err}"),
-            })?,
-        );
     let mut dispatcher = SessionEventDispatcher::new(executor);
 
     writeln!(
@@ -303,20 +340,10 @@ fn run_lifecycle_monitor_with_bus<W: Write, E: SessionActionExecutor>(
         };
 
         match map_prepare_for_sleep_signal(&signal) {
-            Some(SessionEvent::BeforeSleep) => {
-                writeln!(writer, "LG Buddy Lifecycle: System is preparing for sleep.")?;
-                if lifecycle_policy_enabled_from_config(config_path)? {
-                    dispatcher.dispatch_event(writer, SessionEvent::BeforeSleep)?;
-                } else {
-                    writeln!(
-                        writer,
-                        "LG Buddy Lifecycle: system sleep/wake handling is disabled by config; skipping pre-sleep handling."
-                    )?;
-                }
-                drop(inhibitor.take());
-            }
-            Some(SessionEvent::AfterResume) => {
-                writeln!(writer, "LG Buddy Lifecycle: System resumed from sleep.")?;
+            Some(event)
+                if LifecycleEvent::from_runtime_event(event)
+                    == Some(LifecycleEvent::MachineResumed) =>
+            {
                 if !lifecycle_policy_enabled_from_config(config_path)? {
                     writeln!(
                         writer,
@@ -325,15 +352,12 @@ fn run_lifecycle_monitor_with_bus<W: Write, E: SessionActionExecutor>(
                     return Ok(());
                 }
 
-                dispatcher.dispatch_event(writer, SessionEvent::AfterResume)?;
-                inhibitor = Some(acquire_sleep_delay_inhibitor(bus).map_err(|err| {
-                    SessionRunnerError::Failed {
-                        backend: ScreenBackend::Auto,
-                        message: format!("failed to reacquire logind sleep delay inhibitor: {err}"),
-                    }
-                })?);
+                dispatcher.dispatch_lifecycle_event(writer, event)?;
             }
-            Some(_) | None => {}
+            Some(event) => {
+                dispatcher.dispatch_lifecycle_event(writer, event)?;
+            }
+            None => {}
         }
     }
 }
@@ -1194,10 +1218,7 @@ mod tests {
         TrustedScreenSaverSignals, GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL,
         GAMEPAD_ACTIVITY_SEND_INTERVAL,
     };
-    use crate::gnome::{
-        GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
-    };
-    use crate::logind::{LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME};
+    use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::session::inactivity::{
         InactivityEngine, InactivityObservation, InactivityThresholds,
     };
@@ -1205,6 +1226,12 @@ mod tests {
     use crate::session_bus::{
         BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
         SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
+    };
+    use crate::sources::desktop::gnome::{
+        GNOME_SCREEN_SAVER_INTERFACE, GNOME_SCREEN_SAVER_NAME, GNOME_SCREEN_SAVER_PATH,
+    };
+    use crate::sources::linux::logind::{
+        LOGIND_MANAGER_INTERFACE, LOGIND_MANAGER_PATH, LOGIND_SERVICE_NAME,
     };
     use crate::RunError;
     use std::collections::VecDeque;
@@ -1223,8 +1250,12 @@ mod tests {
     struct FakeActionExecutor {
         screen_off_calls: usize,
         screen_on_calls: usize,
+        screen_off_events: Vec<RuntimeEvent>,
+        screen_on_events: Vec<RuntimeEvent>,
         before_sleep_calls: usize,
         after_resume_calls: usize,
+        before_sleep_events: Vec<RuntimeEvent>,
+        after_resume_events: Vec<RuntimeEvent>,
         screen_off_output: String,
         screen_on_output: String,
         before_sleep_output: String,
@@ -1247,32 +1278,36 @@ mod tests {
     }
 
     impl SessionActionExecutor for FakeActionExecutor {
-        fn screen_off(&mut self) -> Result<String, RunError> {
+        fn screen_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
             self.screen_off_calls += 1;
+            self.screen_off_events.push(event);
             if let Some(message) = &self.screen_off_error {
                 return Err(RunError::Policy(message.clone()));
             }
             Ok(self.screen_off_output.clone())
         }
 
-        fn screen_on(&mut self) -> Result<String, RunError> {
+        fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
             self.screen_on_calls += 1;
+            self.screen_on_events.push(event);
             if let Some(message) = &self.screen_on_error {
                 return Err(RunError::Policy(message.clone()));
             }
             Ok(self.screen_on_output.clone())
         }
 
-        fn before_sleep(&mut self) -> Result<String, RunError> {
+        fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
             self.before_sleep_calls += 1;
+            self.before_sleep_events.push(event);
             if let Some(message) = &self.before_sleep_error {
                 return Err(RunError::Policy(message.clone()));
             }
             Ok(self.before_sleep_output.clone())
         }
 
-        fn after_resume(&mut self) -> Result<String, RunError> {
+        fn after_resume(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
             self.after_resume_calls += 1;
+            self.after_resume_events.push(event);
             if let Some(message) = &self.after_resume_error {
                 return Err(RunError::Policy(message.clone()));
             }
@@ -1288,11 +1323,9 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeLifecycleBus {
-        method_replies: VecDeque<BusReply>,
         signals: VecDeque<BusSignal>,
         signal_match_count: usize,
-        inhibitor_calls: usize,
-        disable_config_after_inhibitor_call: Option<(usize, PathBuf)>,
+        disable_config_after_signals: Option<PathBuf>,
     }
 
     impl SessionBusClient for FakeSessionBus {
@@ -1330,21 +1363,8 @@ mod tests {
             unreachable!("name probing is not used in lifecycle loop tests")
         }
 
-        fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
-            assert_eq!(call.member, "Inhibit");
-            self.inhibitor_calls += 1;
-            let reply = self
-                .method_replies
-                .pop_front()
-                .expect("queued inhibitor reply");
-
-            if let Some((call_count, config_path)) = &self.disable_config_after_inhibitor_call {
-                if self.inhibitor_calls == *call_count {
-                    write_lifecycle_config(config_path, "disabled");
-                }
-            }
-
-            Ok(reply)
+        fn call_method(&mut self, _call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            unreachable!("method calls are not used in lifecycle loop tests")
         }
 
         fn add_signal_match(&mut self, _rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
@@ -1353,7 +1373,15 @@ mod tests {
         }
 
         fn process(&mut self, _timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
-            Ok(self.signals.pop_front())
+            if let Some(signal) = self.signals.pop_front() {
+                return Ok(Some(signal));
+            }
+
+            if let Some(config_path) = self.disable_config_after_signals.take() {
+                write_lifecycle_config(&config_path, "disabled");
+            }
+
+            Ok(None)
         }
     }
 
@@ -1393,17 +1421,6 @@ system_sleep_wake_policy={policy}
         .expect("write lifecycle test config");
     }
 
-    fn pipe_fd_reply() -> (BusReply, i32) {
-        let mut pipe_fds = [0; 2];
-        let pipe_result = unsafe { libc::pipe(pipe_fds.as_mut_ptr()) };
-        assert_eq!(pipe_result, 0, "test pipe should be created");
-
-        (
-            BusReply::new(vec![BusValue::UnixFd(pipe_fds[0])]),
-            pipe_fds[1],
-        )
-    }
-
     #[test]
     fn idle_event_dispatches_screen_off() {
         let executor = FakeActionExecutor {
@@ -1422,6 +1439,13 @@ system_sleep_wake_policy={policy}
         assert!(output.contains("screen-off output"));
         assert_eq!(dispatcher.executor.screen_off_calls, 1);
         assert_eq!(dispatcher.executor.screen_on_calls, 0);
+        assert_eq!(
+            dispatcher.executor.screen_off_events,
+            vec![RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::SessionIdle,
+            )]
+        );
     }
 
     #[test]
@@ -1449,6 +1473,20 @@ system_sleep_wake_policy={policy}
         assert!(output.contains("user-activity"));
         assert_eq!(dispatcher.executor.screen_off_calls, 0);
         assert_eq!(dispatcher.executor.screen_on_calls, 3);
+        assert_eq!(
+            dispatcher.executor.screen_on_events,
+            vec![
+                RuntimeEvent::new(EventSource::DesktopSession, RuntimeEventKind::SessionActive),
+                RuntimeEvent::new(
+                    EventSource::DesktopSession,
+                    RuntimeEventKind::ScreenWakeRequested,
+                ),
+                RuntimeEvent::new(
+                    EventSource::DesktopSession,
+                    RuntimeEventKind::UserActivityObserved,
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -1480,25 +1518,21 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
-    fn lifecycle_monitor_dispatches_logind_events_and_reacquires_inhibitor() {
+    fn lifecycle_monitor_treats_logind_sleep_as_diagnostic_and_dispatches_resume() {
         let config_path = unique_config_path("lifecycle-monitor");
         write_lifecycle_config(&config_path, "enabled");
-        let (initial_inhibitor_reply, initial_write_fd) = pipe_fd_reply();
-        let (resume_inhibitor_reply, resume_write_fd) = pipe_fd_reply();
         let executor = FakeActionExecutor {
             before_sleep_output: "before-sleep output\n".to_string(),
             after_resume_output: "after-resume output\n".to_string(),
             ..FakeActionExecutor::default()
         };
         let mut bus = FakeLifecycleBus {
-            method_replies: VecDeque::from([initial_inhibitor_reply, resume_inhibitor_reply]),
             signals: VecDeque::from([
                 prepare_for_sleep_signal(true),
                 prepare_for_sleep_signal(false),
             ]),
             signal_match_count: 0,
-            inhibitor_calls: 0,
-            disable_config_after_inhibitor_call: Some((2, config_path.clone())),
+            disable_config_after_signals: Some(config_path.clone()),
         };
         let mut output = Vec::new();
 
@@ -1508,17 +1542,12 @@ system_sleep_wake_policy={policy}
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("Using logind system lifecycle source"));
         assert!(output.contains("System is preparing for sleep"));
+        assert!(output.contains("diagnostic only"));
         assert!(output.contains("System resumed from sleep"));
-        assert!(output.contains("before-sleep output"));
         assert!(output.contains("after-resume output"));
         assert!(output.contains("stopping lifecycle monitor"));
         assert_eq!(bus.signal_match_count, 1);
-        assert_eq!(bus.inhibitor_calls, 2);
-
-        unsafe {
-            libc::close(initial_write_fd);
-            libc::close(resume_write_fd);
-        }
+        assert_eq!(bus.disable_config_after_signals, None);
         fs::remove_file(config_path).expect("remove lifecycle test config");
     }
 

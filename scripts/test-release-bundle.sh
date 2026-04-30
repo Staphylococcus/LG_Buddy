@@ -158,6 +158,7 @@ LEGACY_WAKE_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_wake.service"
 USER_SCREEN_SERVICE="$HOME/.config/systemd/user/LG_Buddy_screen.service"
 DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
 NM_SLEEP_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep"
+NM_LIFECYCLE_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle"
 
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
@@ -179,6 +180,9 @@ assert_file "$DESKTOP_ENTRY"
     echo "NetworkManager sleep hook installed unexpectedly: $NM_SLEEP_HOOK"
     exit 1
 }
+assert_executable "$NM_LIFECYCLE_HOOK"
+grep -q 'lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
+grep -q "$CONFIG_FILE" "$NM_LIFECYCLE_HOOK"
 
 grep -q '^tv_ip=192.168.1.10$' "$CONFIG_FILE"
 grep -q '^tv_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
@@ -232,6 +236,10 @@ export LG_BUDDY_REMOVE_CONFIG="1"
     echo "NetworkManager sleep hook still present after uninstall: $NM_SLEEP_HOOK"
     exit 1
 }
+[ ! -e "$NM_LIFECYCLE_HOOK" ] || {
+    echo "NetworkManager lifecycle hook still present after uninstall: $NM_LIFECYCLE_HOOK"
+    exit 1
+}
 [ ! -e "$CONFIG_FILE" ] || {
     echo "User config still present after uninstall: $CONFIG_FILE"
     exit 1
@@ -264,6 +272,10 @@ assert_file "$USER_SCREEN_SERVICE"
     echo "NetworkManager sleep hook installed unexpectedly: $NM_SLEEP_HOOK"
     exit 1
 }
+[ ! -e "$NM_LIFECYCLE_HOOK" ] || {
+    echo "NetworkManager lifecycle hook installed despite disabled policy: $NM_LIFECYCLE_HOOK"
+    exit 1
+}
 grep -q '^system_sleep_wake_policy=disabled$' "$CONFIG_FILE"
 
 (
@@ -281,6 +293,10 @@ grep -q '^system_sleep_wake_policy=disabled$' "$CONFIG_FILE"
 }
 [ ! -e "$CONFIG_FILE" ] || {
     echo "User config still present after disabled-policy uninstall: $CONFIG_FILE"
+    exit 1
+}
+[ ! -e "$NM_LIFECYCLE_HOOK" ] || {
+    echo "NetworkManager lifecycle hook still present after disabled-policy uninstall: $NM_LIFECYCLE_HOOK"
     exit 1
 }
 

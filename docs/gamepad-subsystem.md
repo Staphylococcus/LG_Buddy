@@ -11,17 +11,19 @@ modes or device-specific configuration.
 
 The subsystem watches readable Linux input devices and reports controller input
 as `UserActivity` to the session runner. The current runtime starts it from the
-GNOME monitor path, where LG Buddy has high-fidelity idletime observations and
-needs an auxiliary signal for input GNOME does not classify as activity.
+native GNOME monitor path because GNOME is the only production adapter on the
+native inactivity path today. The source itself is not GNOME-specific; future
+native desktop adapters can consume the same auxiliary activity signal when
+their idle APIs miss controller input.
 
 The subsystem does not decide whether to blank or restore the TV. It only
-reports activity. The session runner and command policy remain responsible for
+reports activity. The session runner and screen policy remain responsible for
 screen behavior.
 
 ## Runtime Flow
 
 1. `session/runner.rs` starts a background gamepad activity thread for the
-   GNOME monitor.
+   current native monitor path.
 2. `session/gamepad/devices.rs` scans `/dev/input/event*`, opens each event
    node, checks whether its capabilities look gamepad-like, records
    vendor/product IDs, and maps related `/dev/hidraw*` paths through sysfs.

@@ -4,49 +4,19 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
-use std::thread;
 use std::time::Duration;
 
 use crate::auth::resolve_bscpylgtv_auth_context_from_env;
-use crate::config::{load_config, resolve_config_path_from_env, Config, ScreenRestorePolicy};
+use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::lifecycle::ThreadSleeper;
+use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{
-    BscpylgtvCommandClient, CurrentInput, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher,
-};
-use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
+use crate::tv::{BscpylgtvCommandClient, TvClient, TvDevice, UserScopedBscpylgtvCommandLauncher};
+use crate::wol::UdpWakeOnLanSender;
 use crate::{RunError, StartupMode};
 
-const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
-const SCREEN_ON_WAKE_ATTEMPTS: u32 = 6;
-const STARTUP_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
-const STARTUP_WAKE_ATTEMPTS: u32 = 6;
-const SYSTEM_SLEEP_GET_INPUT_RETRIES: u32 = 3;
-const SYSTEM_SLEEP_POWER_OFF_RETRIES: u32 = 4;
+const SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const BRIGHTNESS_DEFAULT_VALUE: u8 = 50;
-
-trait Sleeper {
-    fn sleep(&self, duration: Duration);
-}
-
-struct ThreadSleeper;
-
-impl Sleeper for ThreadSleeper {
-    fn sleep(&self, duration: Duration) {
-        thread::sleep(duration);
-    }
-}
-
-trait RebootDetector {
-    fn is_reboot_pending(&self) -> io::Result<bool>;
-}
-
-trait SleepRequestDetector {
-    fn is_sleep_requested(&self) -> io::Result<bool>;
-}
-
-trait NetworkWaiter {
-    fn wait_for_network(&self) -> io::Result<()>;
-}
 
 trait ReachabilityChecker {
     fn is_reachable(&self, tv_ip: Ipv4Addr) -> io::Result<bool>;
@@ -65,14 +35,6 @@ struct SystemctlRebootDetector {
     command_path: PathBuf,
 }
 
-struct JournalctlSleepDetector {
-    command_path: PathBuf,
-}
-
-struct NmOnlineNetworkWaiter {
-    command_path: PathBuf,
-}
-
 struct PingReachabilityChecker {
     command_path: PathBuf,
 }
@@ -85,13 +47,6 @@ struct NotifySendNotifier {
     command_path: PathBuf,
 }
 
-struct StartupDeps<'a, C, S, Sl, N> {
-    tv_client: &'a C,
-    wol_sender: &'a S,
-    sleeper: &'a Sl,
-    network_waiter: &'a N,
-}
-
 struct BrightnessDeps<'a, C, R, U, N> {
     tv_client: &'a C,
     reachability: &'a R,
@@ -100,18 +55,6 @@ struct BrightnessDeps<'a, C, R, U, N> {
 }
 
 impl Default for SystemctlRebootDetector {
-    fn default() -> Self {
-        Self::from_env()
-    }
-}
-
-impl Default for JournalctlSleepDetector {
-    fn default() -> Self {
-        Self::from_env()
-    }
-}
-
-impl Default for NmOnlineNetworkWaiter {
     fn default() -> Self {
         Self::from_env()
     }
@@ -141,26 +84,6 @@ impl SystemctlRebootDetector {
             command_path: env::var_os("LG_BUDDY_SYSTEMCTL")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("systemctl")),
-        }
-    }
-}
-
-impl JournalctlSleepDetector {
-    fn from_env() -> Self {
-        Self {
-            command_path: env::var_os("LG_BUDDY_JOURNALCTL")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("journalctl")),
-        }
-    }
-}
-
-impl NmOnlineNetworkWaiter {
-    fn from_env() -> Self {
-        Self {
-            command_path: env::var_os("LG_BUDDY_NM_ONLINE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("nm-online")),
         }
     }
 }
@@ -195,7 +118,7 @@ impl NotifySendNotifier {
     }
 }
 
-impl RebootDetector for SystemctlRebootDetector {
+impl lifecycle::RebootDetector for SystemctlRebootDetector {
     fn is_reboot_pending(&self) -> io::Result<bool> {
         let output = ProcessCommand::new(&self.command_path)
             .arg("list-jobs")
@@ -209,31 +132,6 @@ impl RebootDetector for SystemctlRebootDetector {
         Ok(stdout
             .lines()
             .any(|line| line.contains("reboot.target") && line.contains("start")))
-    }
-}
-
-impl SleepRequestDetector for JournalctlSleepDetector {
-    fn is_sleep_requested(&self) -> io::Result<bool> {
-        let output = ProcessCommand::new(&self.command_path)
-            .args(["-u", "NetworkManager", "-n", "30", "--no-pager"])
-            .output()?;
-
-        if !output.status.success() {
-            return Ok(false);
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.contains("manager: sleep: sleep requested"))
-    }
-}
-
-impl NetworkWaiter for NmOnlineNetworkWaiter {
-    fn wait_for_network(&self) -> io::Result<()> {
-        let _ = ProcessCommand::new(&self.command_path)
-            .args(["-q", "-t", "60"])
-            .output()?;
-
-        Ok(())
     }
 }
 
@@ -307,23 +205,18 @@ impl Notifier for NotifySendNotifier {
 }
 
 pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker =
-        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
-
-    run_screen_off_with(writer, &config, &marker, &tv_client)
+    crate::screen::run_screen_off_from_env(writer)
 }
 
 pub fn run_sleep_pre<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
+    let tv_client =
+        build_tv_client(&config_path)?.with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT);
     let sleeper = ThreadSleeper;
 
-    run_sleep_pre_with(writer, &config, &marker, &tv_client, &sleeper)
+    lifecycle::attempt_system_sleep_power_off_with(writer, &config, &marker, &tv_client, &sleeper)
 }
 
 pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -334,7 +227,40 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let detector = JournalctlSleepDetector::default();
     let sleeper = ThreadSleeper;
 
-    run_sleep_with(writer, &config, &marker, &tv_client, &detector, &sleeper)
+    lifecycle::attempt_legacy_network_manager_sleep_with(
+        writer, &config, &marker, &tv_client, &detector, &sleeper,
+    )
+}
+
+pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
+    let attempt_state = crate::state::SystemSleepAttemptState::from_env(StateScope::System)
+        .map_err(RunError::StateDir)?;
+    let tv_client =
+        build_tv_client(&config_path)?.with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT);
+    let sleeper = ThreadSleeper;
+    let mut bus = match crate::session_bus::new_system_bus_client() {
+        Ok(bus) => bus,
+        Err(err) => {
+            writeln!(
+                writer,
+                "LG Buddy NetworkManager: could not open system bus for logind PreparingForSleep; failing open. {err}"
+            )?;
+            return Ok(());
+        }
+    };
+
+    crate::sources::linux::network_manager::handle_pre_down_with(
+        writer,
+        &config,
+        &marker,
+        &attempt_state,
+        &tv_client,
+        &sleeper,
+        &mut bus,
+    )
 }
 
 pub fn run_brightness<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -362,14 +288,48 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
     let wol_sender = UdpWakeOnLanSender::default();
     let sleeper = ThreadSleeper;
     let network_waiter = NmOnlineNetworkWaiter::default();
-    let deps = StartupDeps {
+    let deps = lifecycle::StartupDeps {
         tv_client: &tv_client,
         wol_sender: &wol_sender,
         sleeper: &sleeper,
         network_waiter: &network_waiter,
     };
 
-    run_startup_with(writer, &config, &marker, deps, mode)
+    lifecycle::run_startup_with(writer, &config, &marker, deps, mode)
+}
+
+pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
+    let attempt_state = crate::state::SystemSleepAttemptState::from_env(StateScope::System)
+        .map_err(RunError::StateDir)?;
+    let tv_client = build_tv_client(&config_path)?;
+    let wol_sender = UdpWakeOnLanSender::default();
+    let sleeper = ThreadSleeper;
+    let network_waiter = NmOnlineNetworkWaiter::default();
+
+    let result = lifecycle::restore_after_system_sleep_with(
+        writer,
+        &config,
+        &marker,
+        &tv_client,
+        &wol_sender,
+        &sleeper,
+        &network_waiter,
+    );
+
+    if let Err(err) = attempt_state.clear() {
+        writeln!(
+            writer,
+            "LG Buddy Startup: could not clear system sleep attempt marker after resume. {err}"
+        )?;
+        if result.is_ok() {
+            return Err(RunError::Io(err));
+        }
+    }
+
+    result
 }
 
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -378,19 +338,11 @@ pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let tv_client = build_tv_client(&config_path)?;
     let reboot_detector = SystemctlRebootDetector::default();
 
-    run_shutdown_with(writer, &config, &tv_client, &reboot_detector)
+    lifecycle::run_shutdown_with(writer, &config, &tv_client, &reboot_detector)
 }
 
 pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker =
-        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(&config_path)?;
-    let wol_sender = UdpWakeOnLanSender::default();
-    let sleeper = ThreadSleeper;
-
-    run_screen_on_with(writer, &config, &marker, &tv_client, &wol_sender, &sleeper)
+    crate::screen::run_screen_on_from_env(writer)
 }
 
 fn build_tv_client(
@@ -402,149 +354,6 @@ fn build_tv_client(
     Ok(BscpylgtvCommandClient::from_env()
         .with_auth_context(auth_context)
         .with_launcher(UserScopedBscpylgtvCommandLauncher))
-}
-
-fn restore_is_allowed(policy: ScreenRestorePolicy, marker_exists: bool) -> bool {
-    marker_exists || policy == ScreenRestorePolicy::Aggressive
-}
-
-fn log_markerless_restore_notice<W: Write>(writer: &mut W, prefix: &str) -> io::Result<()> {
-    writeln!(
-        writer,
-        "{prefix}: State file not found. Aggressive restore policy is enabled, so LG Buddy will attempt wake anyway."
-    )
-}
-
-pub fn run_screen_off_with<W: Write>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv_client: &impl TvClient,
-) -> Result<(), RunError> {
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-
-    match tv.input().current() {
-        Ok(current_input) => handle_known_input(writer, config, marker, tv, current_input),
-        Err(err) => {
-            writeln!(
-                writer,
-                "LG Buddy Screen Off: Could not query TV input. Falling back to power_off. {err}"
-            )?;
-
-            match tv.power().off() {
-                Ok(_) => {
-                    marker.create()?;
-                    writeln!(writer, "LG Buddy Screen Off: Fallback power_off succeeded.")?;
-                }
-                Err(fallback_err) => {
-                    writeln!(
-                        writer,
-                        "LG Buddy Screen Off: Could not power off the TV (may already be off or unreachable). {fallback_err}"
-                    )?;
-                }
-            }
-
-            Ok(())
-        }
-    }
-}
-
-fn run_startup_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper, N: NetworkWaiter>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    deps: StartupDeps<'_, C, S, Sl, N>,
-    mode: StartupMode,
-) -> Result<(), RunError> {
-    let tv = TvDevice::new(deps.tv_client, config.tv_ip);
-    let marker_exists = marker.exists();
-    let _ = deps.network_waiter.wait_for_network();
-
-    match mode {
-        StartupMode::Wake if !restore_is_allowed(config.screen_restore_policy, marker_exists) => {
-            writeln!(
-                writer,
-                "LG Buddy Startup: Wake from sleep: TV was not on our input. Skipping."
-            )?;
-            return Ok(());
-        }
-        StartupMode::Wake => {
-            if marker_exists {
-                writeln!(
-                    writer,
-                    "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
-                )?;
-            } else {
-                log_markerless_restore_notice(writer, "LG Buddy Startup")?;
-                writeln!(
-                    writer,
-                    "LG Buddy Startup: Wake from sleep: Restoring display state."
-                )?;
-            }
-        }
-        StartupMode::Boot => {
-            writeln!(
-                writer,
-                "LG Buddy Startup: Cold boot: Turning TV on and switching to {}.",
-                config.input.as_str()
-            )?;
-        }
-        StartupMode::Auto if marker.exists() => {
-            writeln!(
-                writer,
-                "LG Buddy Startup: Wake from sleep: LG Buddy turned TV off. Restoring."
-            )?;
-        }
-        StartupMode::Auto => {
-            writeln!(
-                writer,
-                "LG Buddy Startup: Cold boot: Turning TV on and switching to {}.",
-                config.input.as_str()
-            )?;
-        }
-    }
-
-    marker.clear()?;
-    send_wake_packet(
-        writer,
-        "LG Buddy Startup",
-        &tv,
-        deps.wol_sender,
-        &config.tv_mac,
-    )?;
-    deps.sleeper.sleep(startup_initial_wake_delay());
-
-    for attempt in 1..=STARTUP_WAKE_ATTEMPTS {
-        if tv.input().set(config.input).is_ok() {
-            writeln!(
-                writer,
-                "LG Buddy Startup: TV turned on and set to {}.",
-                config.input.as_str()
-            )?;
-            return Ok(());
-        }
-
-        let retry_delay = startup_retry_delay(attempt);
-        writeln!(
-            writer,
-            "LG Buddy Startup: Attempt {attempt} failed, retrying in {}s...",
-            retry_delay.as_secs()
-        )?;
-        send_wake_packet(
-            writer,
-            "LG Buddy Startup",
-            &tv,
-            deps.wol_sender,
-            &config.tv_mac,
-        )?;
-        deps.sleeper.sleep(retry_delay);
-    }
-
-    writeln!(
-        writer,
-        "LG Buddy Startup: set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
-    )?;
-    Ok(())
 }
 
 fn run_brightness_with<
@@ -601,438 +410,6 @@ fn run_brightness_with<
     }
 }
 
-fn run_sleep_pre_with<W: Write, C: TvClient, Sl: Sleeper>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    sleeper: &Sl,
-) -> Result<(), RunError> {
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-    let state_was_set = marker.exists();
-
-    match query_current_input_with_retries(&tv, sleeper, SYSTEM_SLEEP_GET_INPUT_RETRIES) {
-        Ok(current_input) if current_input.is_hdmi(config.input) => {
-            writeln!(
-                writer,
-                "LG Buddy Sleep Pre: TV is on {}. Turning off for sleep.",
-                config.input.as_str()
-            )?;
-
-            if tv.power().off().is_ok() {
-                marker.create()?;
-            } else {
-                writeln!(
-                    writer,
-                    "LG Buddy Sleep Pre: power_off failed on known input. State not set."
-                )?;
-            }
-        }
-        Ok(current_input) => {
-            marker.clear()?;
-            writeln!(
-                writer,
-                "LG Buddy Sleep Pre: TV is on {current_input} (not {}). Skipping.",
-                config.input.as_str()
-            )?;
-        }
-        Err(_) => {
-            writeln!(
-                writer,
-                "LG Buddy Sleep Pre: Could not query TV input. Attempting power_off fallback."
-            )?;
-
-            if retry_power_off(&tv, sleeper, SYSTEM_SLEEP_POWER_OFF_RETRIES) {
-                marker.create()?;
-            } else if state_was_set {
-                writeln!(
-                    writer,
-                    "LG Buddy Sleep Pre: Fallback power_off failed, but state already set by another hook. Keeping state."
-                )?;
-            } else {
-                marker.clear()?;
-                writeln!(
-                    writer,
-                    "LG Buddy Sleep Pre: Fallback power_off failed after retries. Leaving state unset."
-                )?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn run_shutdown_with<W: Write, C: TvClient, R: RebootDetector>(
-    writer: &mut W,
-    config: &Config,
-    tv_client: &C,
-    reboot_detector: &R,
-) -> Result<(), RunError> {
-    match reboot_detector.is_reboot_pending() {
-        Ok(true) => {
-            writeln!(writer, "LG Buddy Shutdown: Reboot; ignoring")?;
-            return Ok(());
-        }
-        Ok(false) => {}
-        Err(err) => {
-            writeln!(
-                writer,
-                "LG Buddy Shutdown: Could not determine reboot state. Continuing shutdown. {err}"
-            )?;
-        }
-    }
-
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-
-    match tv.input().current() {
-        Ok(current_input) if current_input.is_hdmi(config.input) => {
-            writeln!(
-                writer,
-                "LG Buddy Shutdown: TV is on {}. Turning off for shutdown.",
-                config.input.as_str()
-            )?;
-            log_shutdown_power_off_failure(writer, tv.power().off())?;
-        }
-        Ok(current_input) => {
-            writeln!(
-                writer,
-                "LG Buddy Shutdown: TV is on {current_input} (not {}). Skipping.",
-                config.input.as_str()
-            )?;
-        }
-        Err(_) => {
-            writeln!(
-                writer,
-                "LG Buddy Shutdown: Could not query TV input. Proceeding with power_off."
-            )?;
-            log_shutdown_power_off_failure(writer, tv.power().off())?;
-        }
-    }
-
-    Ok(())
-}
-
-fn run_sleep_with<W: Write, C: TvClient, D: SleepRequestDetector, Sl: Sleeper>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    detector: &D,
-    sleeper: &Sl,
-) -> Result<(), RunError> {
-    match detector.is_sleep_requested() {
-        Ok(false) => return Ok(()),
-        Ok(true) => {}
-        Err(err) => {
-            writeln!(
-                writer,
-                "LG Buddy Sleep: Could not determine NetworkManager sleep state. Skipping. {err}"
-            )?;
-            return Ok(());
-        }
-    }
-
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-
-    match query_current_input_with_retries(&tv, sleeper, SYSTEM_SLEEP_GET_INPUT_RETRIES) {
-        Ok(current_input) if !current_input.is_hdmi(config.input) => {
-            marker.clear()?;
-            return Ok(());
-        }
-        Ok(_) | Err(_) => {}
-    }
-
-    let state_was_set = marker.exists();
-
-    if retry_power_off(&tv, sleeper, SYSTEM_SLEEP_POWER_OFF_RETRIES) {
-        marker.create()?;
-    } else if !state_was_set {
-        marker.clear()?;
-    }
-
-    Ok(())
-}
-
-fn run_screen_on_with<W: Write, C: TvClient, S: WakeOnLanSender, Sl: Sleeper>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv_client: &C,
-    wol_sender: &S,
-    sleeper: &Sl,
-) -> Result<(), RunError> {
-    let marker_exists = marker.exists();
-    if !restore_is_allowed(config.screen_restore_policy, marker_exists) {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: State file not found. TV was not turned off by LG Buddy. Skipping wake."
-        )?;
-        return Ok(());
-    }
-
-    if !marker_exists {
-        log_markerless_restore_notice(writer, "LG Buddy Screen On")?;
-    }
-
-    let tv = TvDevice::new(tv_client, config.tv_ip);
-
-    writeln!(
-        writer,
-        "LG Buddy Screen On: Turning TV on (screen wake) using input {}...",
-        config.input.as_str()
-    )?;
-    writeln!(writer, "LG Buddy Screen On: Attempting screen unblank...")?;
-
-    match tv.screen().unblank() {
-        Ok(_) => {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: Screen unblank succeeded. Clearing wake state."
-            )?;
-            marker.clear()?;
-            return Ok(());
-        }
-        Err(err) if err.indicates_active_screen_state() => {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: TV reported an active screen state. Trying immediate input restore before full wake."
-            )?;
-
-            if tv.input().set(config.input).is_ok() {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen On: Immediate input restore succeeded. Clearing wake state."
-                )?;
-                marker.clear()?;
-                return Ok(());
-            }
-        }
-        Err(_) => {}
-    }
-
-    writeln!(
-        writer,
-        "LG Buddy Screen On: Screen unblank failed. Falling back to full wake."
-    )?;
-    writeln!(
-        writer,
-        "LG Buddy Screen On: Sending initial Wake-on-LAN packet..."
-    )?;
-    send_wake_packet(
-        writer,
-        "LG Buddy Screen On",
-        &tv,
-        wol_sender,
-        &config.tv_mac,
-    )?;
-    sleeper.sleep(screen_on_initial_wake_delay());
-
-    for attempt in 1..=SCREEN_ON_WAKE_ATTEMPTS {
-        writeln!(
-            writer,
-            "LG Buddy Screen On: Wake attempt {attempt}: setting input to {}...",
-            config.input.as_str()
-        )?;
-
-        if tv.input().set(config.input).is_ok() {
-            writeln!(
-                writer,
-                "LG Buddy Screen On: Wake attempt {attempt} succeeded. Clearing wake state."
-            )?;
-            marker.clear()?;
-            return Ok(());
-        }
-
-        let retry_delay = screen_on_retry_delay(attempt);
-        writeln!(
-            writer,
-            "LG Buddy Screen On: Wake attempt {attempt} failed. Resending WoL and retrying in {}s...",
-            retry_delay.as_secs()
-        )?;
-        send_wake_packet(
-            writer,
-            "LG Buddy Screen On",
-            &tv,
-            wol_sender,
-            &config.tv_mac,
-        )?;
-        sleeper.sleep(retry_delay);
-    }
-
-    writeln!(
-        writer,
-        "LG Buddy Screen On: Wake failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts. LG Buddy will retry on the next restore event."
-    )?;
-    Err(RunError::Policy(format!(
-        "screen-on wake sequence failed after {SCREEN_ON_WAKE_ATTEMPTS} attempts"
-    )))
-}
-
-fn handle_known_input<W: Write, C: TvClient>(
-    writer: &mut W,
-    config: &Config,
-    marker: &ScreenOwnershipMarker,
-    tv: TvDevice<'_, C>,
-    current_input: CurrentInput,
-) -> Result<(), RunError> {
-    if current_input.is_hdmi(config.input) {
-        writeln!(
-            writer,
-            "LG Buddy Screen Off: TV is on {}. Attempting screen blank for idle...",
-            config.input.as_str()
-        )?;
-
-        match tv.screen().blank() {
-            Ok(_) => {
-                marker.create()?;
-                writeln!(
-                    writer,
-                    "LG Buddy Screen Off: Screen blank command succeeded."
-                )?;
-            }
-            Err(err) => {
-                writeln!(
-                    writer,
-                    "LG Buddy Screen Off: Screen blank failed. Falling back to power_off. {err}"
-                )?;
-
-                match tv.power().off() {
-                    Ok(_) => {
-                        marker.create()?;
-                        writeln!(writer, "LG Buddy Screen Off: Fallback power_off succeeded.")?;
-                    }
-                    Err(fallback_err) => {
-                        writeln!(
-                            writer,
-                            "LG Buddy Screen Off: Fallback power_off failed. {fallback_err}"
-                        )?;
-                    }
-                }
-            }
-        }
-    } else {
-        marker.clear()?;
-        writeln!(
-            writer,
-            "LG Buddy Screen Off: TV is on {current_input} (not {}). Skipping idle action.",
-            config.input.as_str()
-        )?;
-    }
-
-    Ok(())
-}
-
-fn log_shutdown_power_off_failure<W: Write>(
-    writer: &mut W,
-    result: Result<crate::tv::CommandOutput, crate::tv::TvError>,
-) -> Result<(), RunError> {
-    if let Err(err) = result {
-        writeln!(
-            writer,
-            "LG Buddy Shutdown: power_off failed, continuing shutdown. {err}"
-        )?;
-    }
-
-    Ok(())
-}
-
-fn send_wake_packet<W: Write, C: TvClient, S: WakeOnLanSender>(
-    writer: &mut W,
-    prefix: &str,
-    tv: &TvDevice<'_, C>,
-    wol_sender: &S,
-    tv_mac: &crate::config::MacAddress,
-) -> Result<(), RunError> {
-    if let Err(err) = tv.power().wake(wol_sender, tv_mac) {
-        writeln!(
-            writer,
-            "{prefix}: Wake-on-LAN send failed. Continuing anyway. {err}"
-        )?;
-    }
-
-    Ok(())
-}
-
-fn query_current_input_with_retries<C: TvClient, Sl: Sleeper>(
-    tv: &TvDevice<'_, C>,
-    sleeper: &Sl,
-    retries: u32,
-) -> Result<CurrentInput, crate::tv::TvError> {
-    let mut last_err = None;
-
-    for attempt in 0..=retries {
-        match tv.input().current() {
-            Ok(current_input) => return Ok(current_input),
-            Err(err) => {
-                last_err = Some(err);
-                if attempt < retries {
-                    sleeper.sleep(system_sleep_retry_delay());
-                }
-            }
-        }
-    }
-
-    Err(last_err.expect("retry loop should capture a tv error"))
-}
-
-fn retry_power_off<C: TvClient, Sl: Sleeper>(
-    tv: &TvDevice<'_, C>,
-    sleeper: &Sl,
-    attempts: u32,
-) -> bool {
-    for attempt in 1..=attempts {
-        if tv.power().off().is_ok() {
-            return true;
-        }
-
-        if attempt < attempts {
-            sleeper.sleep(system_sleep_retry_delay());
-        }
-    }
-
-    false
-}
-
-fn duration_override_secs(env_key: &str, default: Duration) -> Duration {
-    env::var(env_key)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(default)
-}
-
-fn screen_on_initial_wake_delay() -> Duration {
-    duration_override_secs(
-        "LG_BUDDY_SCREEN_ON_INITIAL_WAKE_DELAY_SECS",
-        SCREEN_ON_INITIAL_WAKE_DELAY,
-    )
-}
-
-fn startup_initial_wake_delay() -> Duration {
-    duration_override_secs(
-        "LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS",
-        STARTUP_INITIAL_WAKE_DELAY,
-    )
-}
-
-fn screen_on_retry_delay(attempt: u32) -> Duration {
-    duration_override_secs(
-        "LG_BUDDY_SCREEN_ON_RETRY_DELAY_SECS",
-        Duration::from_secs(u64::from((attempt * 2).min(30))),
-    )
-}
-
-fn startup_retry_delay(attempt: u32) -> Duration {
-    duration_override_secs(
-        "LG_BUDDY_STARTUP_RETRY_DELAY_SECS",
-        Duration::from_secs(u64::from((attempt * 2).min(30))),
-    )
-}
-
-fn system_sleep_retry_delay() -> Duration {
-    duration_override_secs("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", Duration::from_secs(1))
-}
-
 #[cfg(test)]
 mod tests {
     mod support {
@@ -1040,14 +417,17 @@ mod tests {
     }
 
     use super::{
-        run_brightness_with, run_screen_off_with, run_screen_on_with, run_shutdown_with,
-        run_sleep_pre_with, run_sleep_with, run_startup_with, BrightnessDeps, BrightnessUi,
-        NetworkWaiter, Notifier, ReachabilityChecker, RebootDetector, SleepRequestDetector,
-        Sleeper, StartupDeps, BRIGHTNESS_DEFAULT_VALUE,
+        run_brightness_with, BrightnessDeps, BrightnessUi, Notifier, ReachabilityChecker,
+        BRIGHTNESS_DEFAULT_VALUE,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
     };
+    use crate::lifecycle::{
+        run_shutdown_with, run_startup_with, NetworkWaiter, RebootDetector, SleepRequestDetector,
+        Sleeper, StartupDeps,
+    };
+    use crate::screen::{run_screen_off_with, run_screen_on_with};
     use crate::state::ScreenOwnershipMarker;
     use crate::tv::BscpylgtvCommandClient;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
@@ -2003,7 +1383,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_pre_with(
+        crate::lifecycle::attempt_system_sleep_power_off_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi3),
             &marker,
@@ -2028,7 +1408,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_pre_with(
+        crate::lifecycle::attempt_system_sleep_power_off_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi4),
             &marker,
@@ -2047,14 +1427,12 @@ mod tests {
         let temp_dir = TestDir::new("sleep-pre-fallback");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let mock = MockBscpylgtv::new("sleep-pre-fallback-tv");
-        for _ in 0..4 {
-            mock.queue_error("get_input", 1, "offline\n");
-        }
+        mock.queue_error("get_input", 1, "offline\n");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_pre_with(
+        crate::lifecycle::attempt_system_sleep_power_off_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
@@ -2064,24 +1442,8 @@ mod tests {
         .expect("sleep-pre fallback should succeed");
 
         assert!(marker.exists());
-        assert_call_commands(
-            &mock,
-            &[
-                "get_input",
-                "get_input",
-                "get_input",
-                "get_input",
-                "power_off",
-            ],
-        );
-        assert_eq!(
-            sleeper.durations(),
-            vec![
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1)
-            ]
-        );
+        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert!(sleeper.durations().is_empty());
         assert!(rendered(&output).contains("Attempting power_off fallback."));
     }
 
@@ -2095,7 +1457,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_with(
+        crate::lifecycle::attempt_legacy_network_manager_sleep_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
@@ -2121,7 +1483,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_with(
+        crate::lifecycle::attempt_legacy_network_manager_sleep_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi2),
             &marker,
@@ -2147,7 +1509,7 @@ mod tests {
         let sleeper = RecordingSleeper::default();
 
         let mut output = Vec::new();
-        run_sleep_with(
+        crate::lifecycle::attempt_legacy_network_manager_sleep_with(
             &mut output,
             &sample_config(HdmiInput::Hdmi4),
             &marker,
@@ -2234,6 +1596,12 @@ mod tests {
     }
 
     impl Sleeper for RecordingSleeper {
+        fn sleep(&self, duration: Duration) {
+            self.durations.borrow_mut().push(duration);
+        }
+    }
+
+    impl crate::screen::Sleeper for RecordingSleeper {
         fn sleep(&self, duration: Duration) {
             self.durations.borrow_mut().push(duration);
         }
