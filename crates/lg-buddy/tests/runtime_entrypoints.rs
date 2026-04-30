@@ -143,6 +143,8 @@ fn run_system_resume_loads_config_and_clears_system_sleep_attempt() {
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_NM_ONLINE", nm_online_wrapper.path());
     env.set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
+    env.set("LG_BUDDY_TV_ROUTE_WAIT_ATTEMPTS", "1");
+    env.set("LG_BUDDY_TV_ROUTE_WAIT_DELAY_MS", "0");
 
     let mut output = Vec::new();
     run_system_resume(&mut output).expect("system resume should succeed");
@@ -315,6 +317,8 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_NM_ONLINE", nm_online_wrapper.path());
     env.set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
+    env.set("LG_BUDDY_TV_ROUTE_WAIT_ATTEMPTS", "1");
+    env.set("LG_BUDDY_TV_ROUTE_WAIT_DELAY_MS", "0");
 
     let (done_tx, done_rx) = mpsc::channel();
     let lifecycle_thread = thread::spawn(move || {

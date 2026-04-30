@@ -272,7 +272,7 @@ impl<'a, C: TvClient> TvPower<'a, C> {
         sender: &W,
         tv_mac: &MacAddress,
     ) -> Result<(), WakeOnLanError> {
-        sender.send_magic_packet(tv_mac)
+        sender.send_magic_packet_to(tv_mac, self.tv_ip)
     }
 
     pub fn off(&self) -> Result<CommandOutput, TvError> {
@@ -1031,7 +1031,7 @@ mod tests {
             .wake(&sender, &mac)
             .expect("wake on lan should succeed");
 
-        assert_eq!(sender.calls(), vec![mac]);
+        assert_eq!(sender.calls(), vec![(mac, Some(ip("10.0.0.15")))]);
     }
 
     #[test]
@@ -1369,18 +1369,27 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingWakeOnLanSender {
-        calls: RefCell<Vec<MacAddress>>,
+        calls: RefCell<Vec<(MacAddress, Option<Ipv4Addr>)>>,
     }
 
     impl RecordingWakeOnLanSender {
-        fn calls(&self) -> Vec<MacAddress> {
+        fn calls(&self) -> Vec<(MacAddress, Option<Ipv4Addr>)> {
             self.calls.borrow().clone()
         }
     }
 
     impl WakeOnLanSender for RecordingWakeOnLanSender {
         fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
-            self.calls.borrow_mut().push(mac.clone());
+            self.calls.borrow_mut().push((mac.clone(), None));
+            Ok(())
+        }
+
+        fn send_magic_packet_to(
+            &self,
+            mac: &MacAddress,
+            target_ip: Ipv4Addr,
+        ) -> Result<(), WakeOnLanError> {
+            self.calls.borrow_mut().push((mac.clone(), Some(target_ip)));
             Ok(())
         }
     }

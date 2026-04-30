@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 use std::thread;
@@ -13,11 +14,13 @@ use crate::policy::{
 };
 use crate::state::{ScreenOwnershipMarker, SystemSleepAttemptState};
 use crate::tv::{CurrentInput, TvClient, TvDevice};
-use crate::wol::WakeOnLanSender;
+use crate::wol::{WakeOnLanSender, DEFAULT_WOL_PORT};
 use crate::{RunError, StartupMode};
 
 const STARTUP_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
 pub(crate) const STARTUP_WAKE_ATTEMPTS: u32 = 6;
+const TV_ROUTE_WAIT_ATTEMPTS: u32 = 60;
+const TV_ROUTE_WAIT_DELAY: Duration = Duration::from_millis(500);
 const SYSTEM_PRE_SLEEP_GET_INPUT_RETRIES: u32 = 0;
 const SYSTEM_PRE_SLEEP_POWER_OFF_ATTEMPTS: u32 = 1;
 const SYSTEM_SLEEP_GET_INPUT_RETRIES: u32 = 3;
@@ -41,6 +44,10 @@ pub(crate) trait SleepRequestDetector {
 
 pub(crate) trait NetworkWaiter {
     fn wait_for_network(&self) -> io::Result<()>;
+
+    fn wait_for_route_to(&self, _target: Ipv4Addr) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) trait RebootDetector {
@@ -104,11 +111,22 @@ impl SleepRequestDetector for JournalctlSleepDetector {
 
 impl NetworkWaiter for NmOnlineNetworkWaiter {
     fn wait_for_network(&self) -> io::Result<()> {
-        let _ = ProcessCommand::new(&self.command_path)
+        let output = ProcessCommand::new(&self.command_path)
             .args(["-q", "-t", "60"])
             .output()?;
 
+        if !output.status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("nm-online exited with {}", output.status),
+            ));
+        }
+
         Ok(())
+    }
+
+    fn wait_for_route_to(&self, target: Ipv4Addr) -> io::Result<()> {
+        wait_for_route_to_target(target)
     }
 }
 
@@ -581,6 +599,10 @@ pub(crate) fn run_startup_with_outcome<
         outcome
             .diagnostics
             .push(Diagnostic::warning(format!("network wait failed: {err}")));
+        writeln!(
+            writer,
+            "LG Buddy Startup: Network wait failed. Continuing anyway. {err}"
+        )?;
     }
 
     match mode {
@@ -624,6 +646,7 @@ pub(crate) fn run_startup_with_outcome<
                 "LG Buddy Startup: TV turned on and set to {}.",
                 config.input.as_str()
             )?;
+            writer.flush()?;
             return Ok(outcome);
         }
 
@@ -650,6 +673,7 @@ pub(crate) fn run_startup_with_outcome<
         writer,
         "LG Buddy Startup: set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
     )?;
+    writer.flush()?;
     outcome.merge(decide_restore_input_exhausted(
         "startup input restore exhausted retries",
     ));
@@ -1052,7 +1076,6 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
     let mut outcome = PolicyOutcome::new();
     let tv = TvDevice::new(tv_client, config.tv_ip);
     let marker_exists = marker.exists();
-    let _ = network_waiter.wait_for_network();
 
     let start_decision =
         decide_restore_after_system_sleep_start(config.screen_restore_policy, marker_exists);
@@ -1062,9 +1085,13 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
         return Ok(outcome);
     }
 
+    wait_for_restore_network(writer, network_waiter, config.tv_ip, &mut outcome)?;
     apply_system_screen_marker_transitions(marker, &start_decision.outcome)?;
     outcome.merge(start_decision.outcome);
+    writeln!(writer, "LG Buddy Startup: Sending Wake-on-LAN packet...")?;
+    writer.flush()?;
     send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
+    writer.flush()?;
     sleeper.sleep(startup_initial_wake_delay());
 
     for attempt in 1..=STARTUP_WAKE_ATTEMPTS {
@@ -1078,6 +1105,7 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
                 "LG Buddy Startup: TV turned on and set to {}.",
                 config.input.as_str()
             )?;
+            writer.flush()?;
             return Ok(outcome);
         }
 
@@ -1087,10 +1115,14 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
             "LG Buddy Startup: Attempt {attempt} failed, retrying in {}s...",
             retry_delay.as_secs()
         )?;
+        writer.flush()?;
         outcome.merge(select_lifecycle_wake_packet(
             DecisionReasonCode::RuntimeEvent,
         ));
+        writeln!(writer, "LG Buddy Startup: Sending Wake-on-LAN packet...")?;
+        writer.flush()?;
         send_wake_packet(writer, "LG Buddy Startup", &tv, wol_sender, &config.tv_mac)?;
+        writer.flush()?;
         sleeper.sleep(retry_delay);
     }
 
@@ -1098,10 +1130,62 @@ pub(crate) fn restore_after_system_sleep_with_outcome<
         writer,
         "LG Buddy Startup: set_input failed after {STARTUP_WAKE_ATTEMPTS} attempts"
     )?;
+    writer.flush()?;
     outcome.merge(decide_restore_input_exhausted(
         "system resume input restore exhausted retries",
     ));
     Ok(outcome)
+}
+
+fn wait_for_restore_network<W: Write, N: NetworkWaiter>(
+    writer: &mut W,
+    network_waiter: &N,
+    tv_ip: Ipv4Addr,
+    outcome: &mut PolicyOutcome,
+) -> Result<(), RunError> {
+    writeln!(
+        writer,
+        "LG Buddy Startup: Waiting for NetworkManager connectivity..."
+    )?;
+    writer.flush()?;
+
+    if let Err(err) = network_waiter.wait_for_network() {
+        outcome
+            .diagnostics
+            .push(Diagnostic::warning(format!("network wait failed: {err}")));
+        writeln!(
+            writer,
+            "LG Buddy Startup: Network wait failed. Continuing anyway. {err}"
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+
+    writeln!(
+        writer,
+        "LG Buddy Startup: NetworkManager connectivity is available."
+    )?;
+    writeln!(
+        writer,
+        "LG Buddy Startup: Waiting for route to TV at {tv_ip}..."
+    )?;
+    writer.flush()?;
+
+    if let Err(err) = network_waiter.wait_for_route_to(tv_ip) {
+        outcome
+            .diagnostics
+            .push(Diagnostic::warning(format!("TV route wait failed: {err}")));
+        writeln!(
+            writer,
+            "LG Buddy Startup: TV route wait failed. Continuing anyway. {err}"
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+
+    writeln!(writer, "LG Buddy Startup: Route to TV is available.")?;
+    writer.flush()?;
+    Ok(())
 }
 
 pub(crate) fn restore_is_allowed(policy: ScreenRestorePolicy, marker_exists: bool) -> bool {
@@ -1393,8 +1477,58 @@ pub(crate) fn startup_retry_delay(attempt: u32) -> Duration {
     )
 }
 
+fn tv_route_wait_attempts() -> u32 {
+    env::var("LG_BUDDY_TV_ROUTE_WAIT_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|attempts| *attempts > 0)
+        .unwrap_or(TV_ROUTE_WAIT_ATTEMPTS)
+}
+
+fn tv_route_wait_delay() -> Duration {
+    env::var("LG_BUDDY_TV_ROUTE_WAIT_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(TV_ROUTE_WAIT_DELAY)
+}
+
 fn system_sleep_retry_delay() -> Duration {
     duration_override_secs("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", Duration::from_secs(1))
+}
+
+fn wait_for_route_to_target(target: Ipv4Addr) -> io::Result<()> {
+    let attempts = tv_route_wait_attempts();
+    let retry_delay = tv_route_wait_delay();
+    let mut last_error = None;
+
+    for attempt in 1..=attempts {
+        match check_route_to_target(target) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < attempts {
+                    thread::sleep(retry_delay);
+                }
+            }
+        }
+    }
+
+    let last_error = last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no route check was attempted for {target}"),
+        )
+    });
+    Err(io::Error::new(
+        last_error.kind(),
+        format!("route to {target} unavailable after {attempts} attempt(s): {last_error}"),
+    ))
+}
+
+fn check_route_to_target(target: Ipv4Addr) -> io::Result<()> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.connect(SocketAddrV4::new(target, DEFAULT_WOL_PORT))
 }
 
 #[cfg(test)]
@@ -1411,10 +1545,10 @@ mod tests {
         decide_system_sleep_attempt_start, decide_system_sleep_power_off_result,
         handle_network_teardown_with_outcome, restore_after_system_sleep_with_outcome,
         run_shutdown_with_outcome, run_startup_with_outcome, LifecycleEvent, NetworkTeardownDeps,
-        NetworkTeardownNext, NetworkTeardownPolicyInput, NetworkWaiter, RebootDetector,
-        RebootObservation, RestoreNext, ShutdownNext, Sleeper, StartupDeps, StartupRoute,
-        SystemSleepAttemptNext, SystemSleepNext, SystemSleepPowerOffContext, TvEffectObservation,
-        TvInputObservation,
+        NetworkTeardownNext, NetworkTeardownPolicyInput, NetworkWaiter, NmOnlineNetworkWaiter,
+        RebootDetector, RebootObservation, RestoreNext, ShutdownNext, Sleeper, StartupDeps,
+        StartupRoute, SystemSleepAttemptNext, SystemSleepNext, SystemSleepPowerOffContext,
+        TvEffectObservation, TvInputObservation,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
@@ -1432,6 +1566,8 @@ mod tests {
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1650,6 +1786,21 @@ mod tests {
                 TransitionReason::new(TransitionReasonCode::RestoreCompleted),
             )]
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nm_online_waiter_reports_nonzero_status() {
+        let temp_dir = TestDir::new("nm-online-nonzero-status");
+        let command_path = executable_script(temp_dir.path(), "nm-online", "#!/bin/sh\nexit 1\n");
+        let waiter = NmOnlineNetworkWaiter { command_path };
+
+        let err = waiter
+            .wait_for_network()
+            .expect_err("nonzero nm-online status should fail the wait");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(err.to_string().contains("nm-online exited with"));
     }
 
     #[test]
@@ -2032,7 +2183,42 @@ mod tests {
         assert_eq!(wol.calls().len(), 1);
         assert_eq!(sleeper.durations(), vec![Duration::from_secs(6)]);
         assert_eq!(network.calls(), 1);
+        assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
         assert_call_commands(&mock, &["set_input"]);
+    }
+
+    #[test]
+    fn system_resume_logs_route_wait_failure_and_still_attempts_restore() {
+        let temp_dir = TestDir::new("lifecycle-resume-route-wait-failure");
+        let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
+        marker.create().expect("create system marker");
+        let mock = MockBscpylgtv::new("lifecycle-resume-route-wait-failure-tv");
+        let client = client_for_mock(&mock);
+        let wol = RecordingWakeOnLanSender::default();
+        let sleeper = RecordingSleeper::default();
+        let network =
+            FakeNetworkWaiter::failing_route(io::ErrorKind::NetworkUnreachable, "no route");
+
+        let mut output = Vec::new();
+        restore_after_system_sleep_with_outcome(
+            &mut output,
+            &sample_config(HdmiInput::Hdmi4),
+            &marker,
+            &client,
+            &wol,
+            &sleeper,
+            &network,
+        )
+        .expect("route wait failure should not block restore retries");
+
+        assert_eq!(network.calls(), 1);
+        assert_eq!(network.route_targets(), vec![ip("192.0.2.42")]);
+        assert_eq!(wol.calls().len(), 1);
+        assert_call_commands(&mock, &["set_input"]);
+        let rendered = rendered(&output);
+        assert!(rendered.contains("Waiting for NetworkManager connectivity"));
+        assert!(rendered.contains("Waiting for route to TV at 192.0.2.42"));
+        assert!(rendered.contains("TV route wait failed. Continuing anyway."));
     }
 
     #[test]
@@ -2083,6 +2269,7 @@ mod tests {
         );
         assert!(!marker.exists());
         assert_eq!(network.calls(), 1);
+        assert!(network.route_targets().is_empty());
         assert_call_commands(&mock, &["set_input"]);
     }
 
@@ -2127,6 +2314,20 @@ mod tests {
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,
         }
+    }
+
+    fn ip(value: &str) -> Ipv4Addr {
+        value.parse().expect("parse ipv4")
+    }
+
+    #[cfg(unix)]
+    fn executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write executable script");
+        let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("set executable bit");
+        path
     }
 
     fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
@@ -2186,25 +2387,55 @@ mod tests {
     }
 
     struct FakeNetworkWaiter {
-        calls: RefCell<u32>,
+        network_calls: RefCell<u32>,
+        route_targets: RefCell<Vec<Ipv4Addr>>,
+        network_result: io::Result<()>,
+        route_result: io::Result<()>,
     }
 
     impl FakeNetworkWaiter {
         fn clear() -> Self {
             Self {
-                calls: RefCell::new(0),
+                network_calls: RefCell::new(0),
+                route_targets: RefCell::new(Vec::new()),
+                network_result: Ok(()),
+                route_result: Ok(()),
+            }
+        }
+
+        fn failing_route(kind: io::ErrorKind, message: &str) -> Self {
+            Self {
+                network_calls: RefCell::new(0),
+                route_targets: RefCell::new(Vec::new()),
+                network_result: Ok(()),
+                route_result: Err(io::Error::new(kind, message.to_string())),
             }
         }
 
         fn calls(&self) -> u32 {
-            *self.calls.borrow()
+            *self.network_calls.borrow()
+        }
+
+        fn route_targets(&self) -> Vec<Ipv4Addr> {
+            self.route_targets.borrow().clone()
         }
     }
 
     impl NetworkWaiter for FakeNetworkWaiter {
         fn wait_for_network(&self) -> io::Result<()> {
-            *self.calls.borrow_mut() += 1;
-            Ok(())
+            *self.network_calls.borrow_mut() += 1;
+            match &self.network_result {
+                Ok(()) => Ok(()),
+                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
+            }
+        }
+
+        fn wait_for_route_to(&self, target: Ipv4Addr) -> io::Result<()> {
+            self.route_targets.borrow_mut().push(target);
+            match &self.route_result {
+                Ok(()) => Ok(()),
+                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
+            }
         }
     }
 

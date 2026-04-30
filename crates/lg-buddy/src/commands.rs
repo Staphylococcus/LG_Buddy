@@ -881,7 +881,7 @@ mod tests {
 
         assert!(wol.calls().is_empty());
         assert!(sleeper.durations().is_empty());
-        assert_eq!(network.calls(), 1);
+        assert_eq!(network.calls(), 0);
         assert_call_commands(&mock, &[]);
         assert!(rendered(&output).contains("TV was not on our input. Skipping."));
     }

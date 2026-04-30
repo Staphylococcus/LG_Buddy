@@ -59,6 +59,16 @@ pub trait SessionActionExecutor {
     fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
     fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
     fn after_resume(&mut self, event: RuntimeEvent) -> Result<String, RunError>;
+
+    fn after_resume_streaming<W: Write>(
+        &mut self,
+        writer: &mut W,
+        event: RuntimeEvent,
+    ) -> Result<(), RunError> {
+        let output = self.after_resume(event)?;
+        write_command_output(writer, &output)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -79,6 +89,14 @@ impl SessionActionExecutor for RuntimeActionExecutor {
 
     fn after_resume(&mut self, _event: RuntimeEvent) -> Result<String, RunError> {
         run_action(run_system_resume)
+    }
+
+    fn after_resume_streaming<W: Write>(
+        &mut self,
+        writer: &mut W,
+        _event: RuntimeEvent,
+    ) -> Result<(), RunError> {
+        run_system_resume(writer)
     }
 }
 
@@ -204,10 +222,11 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     writer,
                     "LG Buddy Monitor: Session event `after-resume` requests wake restore."
                 )?;
+                writer.flush()?;
                 let runtime_event =
                     RuntimeEvent::from_session_event(EventSource::DesktopSession, event);
-                match self.executor.after_resume(runtime_event) {
-                    Ok(output) => write_command_output(writer, &output)?,
+                match self.executor.after_resume_streaming(writer, runtime_event) {
+                    Ok(()) => {}
                     Err(err) => writeln!(
                         writer,
                         "LG Buddy Monitor: wake restore action failed. {err}"
@@ -241,8 +260,9 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
                     writer,
                     "LG Buddy Monitor: Session event `after-resume` requests wake restore."
                 )?;
-                match self.executor.after_resume(event) {
-                    Ok(output) => write_command_output(writer, &output)?,
+                writer.flush()?;
+                match self.executor.after_resume_streaming(writer, event) {
+                    Ok(()) => {}
                     Err(err) => writeln!(
                         writer,
                         "LG Buddy Lifecycle: wake restore action failed. {err}"
@@ -1202,6 +1222,7 @@ fn write_command_output<W: Write>(writer: &mut W, output: &str) -> io::Result<()
         writeln!(writer)?;
     }
 
+    writer.flush()?;
     Ok(())
 }
 
