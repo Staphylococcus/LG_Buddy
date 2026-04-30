@@ -58,6 +58,11 @@ impl InactivityEngine {
 
     fn observe_idletime(&mut self, idletime_ms: u64) -> InactivityDecision {
         if self.provider_idle {
+            if idletime_ms < self.thresholds.active_threshold_ms {
+                self.provider_idle = false;
+                return self.activate_from_signal();
+            }
+
             return InactivityDecision::NoOp;
         }
 
@@ -244,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn idletime_drop_does_not_restore_while_provider_still_reports_idle() {
+    fn idletime_activity_restores_while_provider_still_reports_idle() {
         let mut engine = test_engine();
         assert_eq!(
             engine.observe(InactivityObservation::ProviderIdle),
@@ -253,6 +258,24 @@ mod tests {
 
         assert_eq!(
             engine.observe(InactivityObservation::IdleTimeMs(0)),
+            InactivityDecision::RestoreNow
+        );
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderActive),
+            InactivityDecision::NoOp
+        );
+    }
+
+    #[test]
+    fn idletime_above_active_threshold_does_not_restore_while_provider_reports_idle() {
+        let mut engine = test_engine();
+        assert_eq!(
+            engine.observe(InactivityObservation::ProviderIdle),
+            InactivityDecision::BlankNow
+        );
+
+        assert_eq!(
+            engine.observe(InactivityObservation::IdleTimeMs(1_000)),
             InactivityDecision::NoOp
         );
     }

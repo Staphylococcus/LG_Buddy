@@ -2070,6 +2070,58 @@ system_sleep_wake_policy={policy}
     }
 
     #[test]
+    fn idletime_activity_restores_while_provider_still_reports_idle() {
+        let executor = FakeActionExecutor {
+            screen_off_output: "screen-off output\n".to_string(),
+            screen_on_output: "screen-on output\n".to_string(),
+            ..FakeActionExecutor::default()
+        };
+        let mut dispatcher = SessionEventDispatcher::new(executor);
+        let mut inactivity = InactivityEngine::new(InactivityThresholds {
+            blank_threshold_ms: 1_000,
+            active_threshold_ms: 100,
+        });
+        let mut output = Vec::new();
+
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::ProviderIdle,
+        )
+        .expect("blank from provider idle");
+
+        let mut output = Vec::new();
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::IdleTimeMs(99),
+        )
+        .expect("restore from lock-screen user activity");
+        handle_gnome_inactivity_observation(
+            &mut output,
+            &mut dispatcher,
+            &mut inactivity,
+            InactivityObservation::ProviderActive,
+        )
+        .expect("provider active should not duplicate restore");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("user-activity"));
+        assert!(!output.contains("Session event `active` requests screen restore."));
+        assert_eq!(dispatcher.executor.screen_off_calls, 1);
+        assert_eq!(dispatcher.executor.screen_on_calls, 1);
+        assert_eq!(
+            dispatcher.executor.screen_on_events,
+            vec![RuntimeEvent::new(
+                EventSource::DesktopSession,
+                RuntimeEventKind::UserActivityObserved,
+            )]
+        );
+    }
+
+    #[test]
     fn external_activity_caps_effective_provider_idletime() {
         let started = Instant::now();
         let mut merger = InactivityObservationMerger::new(1_000);
