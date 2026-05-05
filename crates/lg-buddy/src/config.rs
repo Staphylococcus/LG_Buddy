@@ -365,7 +365,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 }
 
 pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
-    let entries = parse_entries(contents);
+    let entries = parse_config_entries(contents);
 
     let tv_ip = entries
         .get("tv_ip")
@@ -437,7 +437,7 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
     })
 }
 
-fn parse_entries(contents: &str) -> HashMap<String, String> {
+pub(crate) fn parse_config_entries(contents: &str) -> HashMap<String, String> {
     let mut entries = HashMap::new();
 
     for line in contents.lines() {

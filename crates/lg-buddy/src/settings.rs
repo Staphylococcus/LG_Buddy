@@ -1,7 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
-use crate::config::DEFAULT_IDLE_TIMEOUT;
+use crate::config::{
+    parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
+    ConfigPathSources, DEFAULT_IDLE_TIMEOUT,
+};
 
 const READ_WRITE_OPERATIONS: &[SettingOperation] = &[
     SettingOperation::Get,
@@ -80,6 +86,177 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
 pub static SETTINGS_REGISTRY: SettingsRegistry = SettingsRegistry {
     definitions: SETTING_DEFINITIONS,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsStore {
+    reader: ConfigEnvReader,
+}
+
+impl SettingsStore {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
+        ConfigEnvReader::load(path).map(Self::from_reader)
+    }
+
+    pub fn load_from_env() -> Result<Self, SettingsError> {
+        let path = ConfigPathResolver::resolve_from_env()?;
+        Self::load(path)
+    }
+
+    pub fn from_reader(reader: ConfigEnvReader) -> Self {
+        Self { reader }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.reader.path()
+    }
+
+    pub fn raw_storage_value(&self, storage_key: &str) -> Option<&str> {
+        self.reader.raw_value(storage_key)
+    }
+
+    pub fn effective_by_name(&self, key: &str) -> Result<EffectiveSetting, SettingsError> {
+        self.effective(SettingKey::parse(key)?)
+    }
+
+    pub fn effective(&self, key: SettingKey<'_>) -> Result<EffectiveSetting, SettingsError> {
+        let definition = SETTINGS_REGISTRY.get(key)?;
+        Ok(self.effective_definition(definition))
+    }
+
+    pub fn effective_definition(&self, definition: &'static SettingDefinition) -> EffectiveSetting {
+        let raw_value = self.reader.raw_value(definition.storage_key());
+        let parsed_value = raw_value.and_then(|value| definition.parse_value(value).ok());
+
+        match parsed_value {
+            Some(value) => EffectiveSetting {
+                definition,
+                value,
+                source: SettingSource::ConfigEnv,
+            },
+            None => EffectiveSetting {
+                definition,
+                value: definition.default_value(),
+                source: SettingSource::Default,
+            },
+        }
+    }
+
+    pub fn all_effective(&self) -> Vec<EffectiveSetting> {
+        SETTINGS_REGISTRY
+            .all()
+            .iter()
+            .map(|definition| self.effective_definition(definition))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEnvReader {
+    path: PathBuf,
+    entries: HashMap<String, String>,
+}
+
+impl ConfigEnvReader {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
+        let path = path.as_ref().to_path_buf();
+        match fs::read_to_string(&path) {
+            Ok(contents) => Ok(Self::parse(path, &contents)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::empty(path)),
+            Err(err) => Err(SettingsError::ReadConfig {
+                path,
+                kind: err.kind(),
+                message: err.to_string(),
+            }),
+        }
+    }
+
+    pub fn parse(path: impl Into<PathBuf>, contents: &str) -> Self {
+        Self {
+            path: path.into(),
+            entries: parse_config_entries(contents),
+        }
+    }
+
+    pub fn empty(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn raw_value(&self, storage_key: &str) -> Option<&str> {
+        self.entries.get(storage_key).map(String::as_str)
+    }
+
+    pub fn into_store(self) -> SettingsStore {
+        SettingsStore::from_reader(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConfigPathResolver;
+
+impl ConfigPathResolver {
+    pub fn resolve(sources: ConfigPathSources<'_>) -> Result<PathBuf, SettingsError> {
+        resolve_config_path(sources).map_err(SettingsError::ConfigPath)
+    }
+
+    pub fn resolve_from_env() -> Result<PathBuf, SettingsError> {
+        resolve_config_path_from_env().map_err(SettingsError::ConfigPath)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveSetting {
+    definition: &'static SettingDefinition,
+    value: SettingValue,
+    source: SettingSource,
+}
+
+impl EffectiveSetting {
+    pub fn definition(self) -> &'static SettingDefinition {
+        self.definition
+    }
+
+    pub fn key(self) -> SettingKey<'static> {
+        self.definition.key()
+    }
+
+    pub fn key_name(self) -> &'static str {
+        self.definition.key_name()
+    }
+
+    pub fn storage_key(self) -> &'static str {
+        self.definition.storage_key()
+    }
+
+    pub fn value(self) -> SettingValue {
+        self.value
+    }
+
+    pub fn source(self) -> SettingSource {
+        self.source
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSource {
+    Default,
+    ConfigEnv,
+}
+
+impl SettingSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::ConfigEnv => "config.env",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SettingsRegistry {
@@ -590,6 +767,12 @@ impl ApplyStrategy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsError {
+    ConfigPath(ConfigPathError),
+    ReadConfig {
+        path: PathBuf,
+        kind: io::ErrorKind,
+        message: String,
+    },
     InvalidKey {
         key: String,
         reason: &'static str,
@@ -610,6 +793,14 @@ pub enum SettingsError {
 impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConfigPath(err) => write!(f, "{err}"),
+            Self::ReadConfig { path, message, .. } => {
+                write!(
+                    f,
+                    "could not read settings config `{}`: {message}",
+                    path.display()
+                )
+            }
             Self::InvalidKey { key, reason } => {
                 write!(f, "invalid setting key `{key}`: {reason}")
             }
@@ -691,9 +882,14 @@ fn validate_storage_key(value: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyStrategy, SettingKey, SettingMutability, SettingOperation, SettingType, SettingValue,
-        SettingsError, SETTINGS_REGISTRY,
+        ApplyStrategy, ConfigEnvReader, ConfigPathResolver, SettingKey, SettingMutability,
+        SettingOperation, SettingSource, SettingType, SettingValue, SettingsError, SettingsStore,
+        SETTINGS_REGISTRY,
     };
+    use crate::config::ConfigPathSources;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn registry_metadata_is_internally_valid() {
@@ -734,6 +930,190 @@ mod tests {
                 ("screen.idle_timeout", "screen_idle_timeout"),
                 ("screen.restore_policy", "screen_restore_policy"),
                 ("system.sleep_wake_policy", "system_sleep_wake_policy"),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_path_resolver_reuses_config_path_resolution() {
+        let resolved = ConfigPathResolver::resolve(ConfigPathSources {
+            explicit_config: Some(Path::new("/tmp/custom.env")),
+            install_pointer_config: Some(Path::new("/tmp/pointer.env")),
+            sudo_user_home: Some(Path::new("/tmp/sudo-home")),
+            xdg_config_home: Some(Path::new("/tmp/xdg")),
+            home: Some(Path::new("/tmp/home")),
+        });
+
+        assert_eq!(resolved, Ok(PathBuf::from("/tmp/custom.env")));
+    }
+
+    #[test]
+    fn config_env_reader_sanitizes_comments_and_uses_last_duplicate_value() {
+        let reader = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            screen_backend=swayidle
+            screen_backend=gnome # use GNOME when available
+            unused=value
+            ",
+        );
+
+        assert_eq!(reader.raw_value("screen_backend"), Some("gnome"));
+        assert_eq!(reader.raw_value("unused"), Some("value"));
+        assert_eq!(reader.raw_value("missing"), None);
+    }
+
+    #[test]
+    fn settings_store_reads_existing_values_without_required_tv_config() {
+        let store = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            screen_backend=gnome
+            screen_idle_timeout=450
+            screen_restore_policy=aggressive
+            system_sleep_wake_policy=disabled
+            ",
+        )
+        .into_store();
+
+        let backend = store.effective_by_name("screen.backend").unwrap();
+        assert_eq!(backend.value(), SettingValue::Enum("gnome"));
+        assert_eq!(backend.source(), SettingSource::ConfigEnv);
+
+        let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
+        assert_eq!(idle_timeout.value(), SettingValue::Integer(450));
+        assert_eq!(idle_timeout.source(), SettingSource::ConfigEnv);
+
+        let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
+        assert_eq!(restore_policy.value(), SettingValue::Enum("aggressive"));
+        assert_eq!(restore_policy.source(), SettingSource::ConfigEnv);
+
+        let sleep_policy = store.effective_by_name("system.sleep_wake_policy").unwrap();
+        assert_eq!(sleep_policy.value(), SettingValue::Enum("disabled"));
+        assert_eq!(sleep_policy.source(), SettingSource::ConfigEnv);
+    }
+
+    #[test]
+    fn settings_store_uses_defaults_for_missing_values() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "").into_store();
+
+        let effective = store.effective_by_name("screen.idle_timeout").unwrap();
+
+        assert_eq!(effective.value(), SettingValue::Integer(300));
+        assert_eq!(effective.source(), SettingSource::Default);
+    }
+
+    #[test]
+    fn settings_store_uses_defaults_for_invalid_optional_values() {
+        let store = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            screen_backend=not-a-backend
+            screen_idle_timeout=not-a-number
+            screen_restore_policy=not-a-policy
+            ",
+        )
+        .into_store();
+
+        let backend = store.effective_by_name("screen.backend").unwrap();
+        assert_eq!(backend.value(), SettingValue::Enum("auto"));
+        assert_eq!(backend.source(), SettingSource::Default);
+
+        let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
+        assert_eq!(idle_timeout.value(), SettingValue::Integer(300));
+        assert_eq!(idle_timeout.source(), SettingSource::Default);
+
+        let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
+        assert_eq!(restore_policy.value(), SettingValue::Enum("conservative"));
+        assert_eq!(restore_policy.source(), SettingSource::Default);
+    }
+
+    #[test]
+    fn settings_store_canonicalizes_valid_alias_values_from_config_env() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_restore_policy=marker_only\n")
+                .into_store();
+
+        let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
+
+        assert_eq!(restore_policy.value(), SettingValue::Enum("conservative"));
+        assert_eq!(restore_policy.source(), SettingSource::ConfigEnv);
+    }
+
+    #[test]
+    fn settings_store_loads_existing_config_file() {
+        let path = unique_test_path("existing");
+        fs::write(&path, "screen_idle_timeout=123\n").unwrap();
+
+        let store = SettingsStore::load(&path).unwrap();
+
+        assert_eq!(store.path(), path.as_path());
+        assert_eq!(store.raw_storage_value("screen_idle_timeout"), Some("123"));
+        assert_eq!(
+            store
+                .effective_by_name("screen.idle_timeout")
+                .unwrap()
+                .value(),
+            SettingValue::Integer(123)
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn settings_store_loads_missing_config_file_as_empty_defaults() {
+        let path = unique_test_path("missing");
+        let _ = fs::remove_file(&path);
+
+        let store = SettingsStore::load(&path).unwrap();
+
+        assert_eq!(store.path(), path.as_path());
+        assert_eq!(
+            store.effective_by_name("screen.backend").unwrap().value(),
+            SettingValue::Enum("auto")
+        );
+        assert_eq!(
+            store.effective_by_name("screen.backend").unwrap().source(),
+            SettingSource::Default
+        );
+    }
+
+    #[test]
+    fn all_effective_returns_registry_order() {
+        let store = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            screen_backend=gnome
+            system_sleep_wake_policy=disabled
+            ",
+        )
+        .into_store();
+
+        let settings = store.all_effective();
+        let keys: Vec<&str> = settings.iter().map(|setting| setting.key_name()).collect();
+        let values: Vec<String> = settings
+            .iter()
+            .map(|setting| setting.value().to_string())
+            .collect();
+        let sources: Vec<SettingSource> = settings.iter().map(|setting| setting.source()).collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                "screen.backend",
+                "screen.idle_timeout",
+                "screen.restore_policy",
+                "system.sleep_wake_policy",
+            ]
+        );
+        assert_eq!(values, vec!["gnome", "300", "conservative", "disabled"]);
+        assert_eq!(
+            sources,
+            vec![
+                SettingSource::ConfigEnv,
+                SettingSource::Default,
+                SettingSource::Default,
+                SettingSource::ConfigEnv,
             ]
         );
     }
@@ -900,5 +1280,17 @@ mod tests {
             sleep_policy.apply_strategy(),
             ApplyStrategy::PendingLifecycleService
         );
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!(
+            "lg-buddy-settings-{name}-{}-{nanos}.env",
+            std::process::id()
+        ))
     }
 }
