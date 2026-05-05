@@ -1,0 +1,278 @@
+# LG Buddy Runtime Event Handler Map
+
+This document maps the top-level events LG Buddy consumes and the handler paths
+that act on them.
+
+It complements [session-backend-model.md](session-backend-model.md). The session
+backend model defines canonical session semantics. This document describes how
+real system, desktop, and user-service entrypoints reach runtime policy.
+Product-wide defaults and advanced configuration rules are documented in
+[defaults-and-configuration.md](defaults-and-configuration.md).
+
+## Event Vocabulary
+
+LG Buddy has four related but distinct event/result shapes.
+
+| Shape | Owner | Purpose |
+| --- | --- | --- |
+| Command entrypoint | `lib.rs` / `commands.rs` / `session::runner` | External service, hook, or user command invokes one runtime command. |
+| Runtime event | `events.rs` | Source-classified fact or intent, such as CLI/API, Linux logind, Linux NetworkManager, desktop session, or auxiliary input. |
+| Session event | `session.rs` | Backend-neutral event such as `Idle`, `Active`, `WakeRequested`, `BeforeSleep`, or `AfterResume`. |
+| Inactivity observation | `session/inactivity.rs` | Lower-level inactivity fact such as idletime, provider idle, wake request, or user activity. |
+| Policy outcome | `policy.rs` | Explicit selected actions, no-action decisions, diagnostics, and state transitions. |
+
+The command entrypoint layer remains the external integration surface. The
+session event layer is active for native monitor behavior and delegated backend
+modeling. System lifecycle handling is normalized through `RuntimeEvent` and
+the lifecycle policy domain. The inactivity observation layer owns
+edge-triggered blank and restore decisions for native idle/activity
+integrations.
+
+GNOME is the production pilot for the native inactivity path today, but the
+model is not GNOME-specific. A future non-GNOME Wayland adapter should feed the
+same normalized inactivity observations.
+
+## Current Top-Level Handlers
+
+| External event source | Runtime entrypoint | Primary handler | Current action |
+| --- | --- | --- | --- |
+| system boot / service start | `lg-buddy startup boot` | `commands` -> `lifecycle` | Send Wake-on-LAN and restore the configured input. |
+| system shutdown / service stop | `lg-buddy shutdown` | `commands` -> `lifecycle` | Power off the TV when the configured input is active, unless a reboot is pending. |
+| NetworkManager `pre-down` while logind `PreparingForSleep=true` | `lg-buddy nm-pre-down` | `sources::linux::network_manager` -> `lifecycle` | Run pre-sleep TV power-off under a process lock before network teardown. |
+| logind `PrepareForSleep(true)` | `lg-buddy lifecycle` | `session::runner` | Log diagnostic sleep intent; do not run TV network I/O. |
+| logind `PrepareForSleep(false)` | `lg-buddy lifecycle` | `sources::linux::logind` -> `session::runner` -> `lifecycle` | Run wake restore policy and clear stale legacy system sleep attempt state. |
+| user graphical session start | `lg-buddy monitor` | `session::runner::run_monitor` | Detect the session backend and run the selected monitor path. |
+| manual screen blank | `lg-buddy screen-off` | `commands` -> `screen` | Blank or power off the TV if LG Buddy owns the configured input. |
+| manual screen restore | `lg-buddy screen-on` | `commands` -> `screen` | Restore the screen when marker and restore-policy rules allow it. |
+
+Compatibility command surfaces still exist for direct/manual invocation:
+
+| Command | Current role |
+| --- | --- |
+| `lg-buddy sleep-pre` | Direct pre-sleep policy command retained for manual/debug invocation. |
+| `lg-buddy startup wake` | Direct wake restore policy command retained for manual/debug invocation. |
+| `lg-buddy sleep` | Legacy NetworkManager pre-down behavior. It is not installed as a default event handler. |
+
+These handlers are intentionally conservative around ownership:
+
+- session-scope screen blanking uses the session marker
+- system sleep uses the system marker
+- restore behavior is gated by `screen_restore_policy`
+- shutdown does not write ownership markers
+
+## Runtime Event Pipeline
+
+LG Buddy now uses a source-agnostic event and policy boundary for the screen and
+lifecycle paths:
+
+```text
+system lifecycle sources
+desktop idle/activity sources
+auxiliary activity sources
+  -> narrow source adapters
+  -> RuntimeEvent / normalized session events / inactivity observations
+  -> InactivityEngine
+  -> screen and lifecycle policy
+  -> PolicyOutcome
+  -> TV / Wake-on-LAN / state effects
+```
+
+Source adapters report facts. They do not own marker semantics, restore policy,
+retries, Wake-on-LAN, or TV transport behavior.
+
+Examples:
+
+| Source category | Example source | Runtime representation |
+| --- | --- | --- |
+| system lifecycle | `org.freedesktop.login1`, platform-native lifecycle APIs | `MachinePreparingForSleep`, `MachineResumed`, `NetworkTeardownImminent` |
+| desktop idle/activity | Mutter, native Wayland idle protocols | idletime and activity observations |
+| desktop wake request | GNOME ScreenSaver wake signal, future equivalents | `WakeRequested` |
+| auxiliary activity | Linux gamepad input | `UserActivityObserved` |
+
+## Monitor Event Paths
+
+### Native Inactivity Path
+
+The native inactivity path is the intended path for desktop adapters that can
+report activity facts directly. GNOME is the first production backend on this
+path. A future non-GNOME Wayland adapter should feed the same inactivity model
+instead of delegating blank/restore commands to an external tool.
+
+```text
+native desktop activity facts
+auxiliary activity facts
+  -> inactivity observations
+  -> InactivityEngine
+  -> Idle / Active / WakeRequested / UserActivity
+  -> screen policy
+```
+
+Current pilot inputs:
+
+| Provider surface | Runtime representation | Consumed by |
+| --- | --- | --- |
+| `org.gnome.ScreenSaver.ActiveChanged(true)` | `ProviderIdle` | `InactivityEngine` |
+| `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
+| `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
+| `org.gnome.Mutter.IdleMonitor.GetIdletime` | `IdleTimeMs` | `InactivityEngine` |
+| Linux gamepad activity | `UserActivityObserved` | `InactivityEngine` |
+
+These are GNOME-specific source surfaces, but the runtime representations are
+backend-neutral. The key architectural point is that blank/restore decisions are
+made after normalization, not inside the GNOME adapter.
+
+The resulting decisions are dispatched as:
+
+| Inactivity decision | Dispatched event | Policy target |
+| --- | --- | --- |
+| `BlankNow` | `SessionEvent::Idle` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_off_from_env_for_event` |
+| `RestoreNow` from provider active | `SessionEvent::Active` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+| `RestoreNow` from wake request | `SessionEvent::WakeRequested` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+| `RestoreNow` from idletime or auxiliary activity | `SessionEvent::UserActivity` -> `RuntimeEvent` from `DesktopSession` | `screen::run_screen_on_from_env_for_event` |
+
+### Delegated `swayidle` CLI/API Path
+
+The `swayidle` monitor is a delegated CLI/API client path.
+
+```text
+swayidle timeout/resume
+  -> external command string
+  -> lg-buddy screen-off / lg-buddy screen-on
+  -> canonical CLI/API RuntimeEvent
+  -> screen policy
+```
+
+`sources/desktop/swayidle.rs` models hook-to-`SessionEvent` mapping, including
+`BeforeSleep`, `AfterResume`, `Lock`, and `Unlock`, but the production monitor
+currently starts `swayidle` with direct `screen-off` and `screen-on` commands.
+Those richer hook events are not consumed by the monitor runner.
+
+This path exists for current non-GNOME Wayland support. It is delegated, but it
+is not a separate screen-policy quirks mode: `swayidle` re-enters LG Buddy
+through the same CLI/API command surface as manual `screen-off` and `screen-on`.
+Retiring it means replacing delegated timeout/resume execution with native
+idle/activity facts that feed the same inactivity engine used by the current
+native path.
+
+## System Lifecycle Event Handling
+
+LG Buddy handles system lifecycle through one Linux lifecycle subsystem with two
+cooperating Linux event sources:
+
+```text
+NetworkManager pre-down
+  -> lg-buddy nm-pre-down
+  -> logind PreparingForSleep property read
+  -> lifecycle policy
+  -> TV action executor
+
+org.freedesktop.login1 PrepareForSleep(false)
+  -> lg-buddy lifecycle
+  -> MachineResumed runtime event
+  -> lifecycle restore policy
+  -> TV action executor
+```
+
+The NetworkManager pre-down gate is the only default pre-sleep TV power-off
+owner. It reads logind `PreparingForSleep` synchronously; false or read failure
+returns quickly, true runs the idempotent pre-sleep policy under a process lock
+while NetworkManager is still holding interface teardown.
+
+The lifecycle service subscribes to logind manager signals on the system bus.
+`PrepareForSleep(true)` is diagnostic only. `PrepareForSleep(false)` runs wake
+restore policy and clears stale legacy system sleep attempt state.
+
+The installer must not leave a second lifecycle owner active. It removes or
+disables these legacy artifacts during install and uninstall:
+
+- `LG_Buddy_sleep.service`
+- `LG_Buddy_wake.service`
+- old unit override directories for those services
+- `/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep`
+- `/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook`
+
+Current lifecycle signal mapping:
+
+| logind surface | Canonical event | Runtime action |
+| --- | --- | --- |
+| `PreparingForSleep` property | `NetworkTeardownImminent { machine_sleep_pending }` in the NetworkManager source path; `RuntimePhaseRead` in screen eligibility | Gate pre-sleep policy and block session screen TV I/O during pending machine sleep. |
+| `PrepareForSleep(true)` | `MachinePreparingForSleep` | Diagnostic log only. |
+| `PrepareForSleep(false)` | `MachineResumed` | `run_system_resume` |
+
+The current `SessionEventDispatcher` handles these session events when a
+backend path dispatches them. The production `swayidle` path delegates timeout
+and resume to direct `screen-off` / `screen-on` CLI/API commands; richer
+`swayidle` hook events are modeled but not consumed by default.
+
+| Session event | Current action |
+| --- | --- |
+| `Idle` | Run `screen-off`. |
+| `Active` | Run `screen-on`. |
+| `WakeRequested` | Run `screen-on`. |
+| `UserActivity` | Run `screen-on`. |
+| `BeforeSleep` | Run pre-sleep TV power-off policy. |
+| `AfterResume` | Run wake restore policy. |
+| `Lock` | Log as unhandled. |
+| `Unlock` | Log as unhandled. |
+
+For session-originated `Idle`, `Active`, `WakeRequested`, and `UserActivity`,
+screen policy checks `runtime_phase.rs` before doing TV I/O. If logind reports
+that machine sleep is pending and lifecycle automation is enabled, screen policy
+records a runtime-phase no-action decision and leaves TV/state untouched. If the
+phase read fails, screen policy fails open and proceeds with the ordinary
+screen action.
+
+## Lifecycle Default And Migration Stance
+
+The general default/configuration stance is defined in
+[defaults-and-configuration.md](defaults-and-configuration.md). Applied to the
+lifecycle path:
+
+- automatic system sleep/wake TV control defaults to enabled
+- users who do not want automatic sleep/wake TV control opt out through
+  `system_sleep_wake_policy=disabled`
+- default installs do not ask whether lifecycle automation should run
+- the NetworkManager pre-down gate is the only default pre-sleep TV power-off
+  owner
+- logind `PrepareForSleep(true)` is diagnostic; logind
+  `PrepareForSleep(false)` owns resume restore
+- legacy systemd and old NetworkManager sleep/wake handlers are cleanup targets,
+  not parallel runtime handlers
+- legacy cleanup honors a persisted opt-out config value
+
+## Target Non-GNOME Wayland Shape
+
+Native non-GNOME Wayland idle work is separate from logind lifecycle work and
+should follow the same native inactivity path.
+
+Target event path:
+
+```text
+Wayland idle/activity facts
+  -> native Wayland adapter
+  -> inactivity observations
+  -> InactivityEngine
+  -> screen policy
+```
+
+That keeps the responsibilities separate:
+
+- logind reports machine lifecycle
+- desktop adapters report activity facts
+- native Wayland reports Wayland idle/activity facts
+- gamepad input reports auxiliary user activity
+- LG Buddy policy decides when those facts should blank or restore the TV
+
+## Remaining Migration Notes
+
+The current architecture has the Linux lifecycle sources, screen policy,
+lifecycle policy, runtime phase guard, and source adapter namespace in place.
+Remaining work should stay scoped:
+
+1. Keep native Wayland idle replacement separate from the logind lifecycle path.
+2. Retire the delegated `swayidle` monitor once native non-GNOME Wayland
+   activity facts are available.
+3. Preserve the one-lifecycle-owner invariant in installer, release-bundle, and
+   uninstall tests.
+4. Treat future platform lifecycle providers, such as a possible macOS provider,
+   as source adapters that emit the same canonical lifecycle events.

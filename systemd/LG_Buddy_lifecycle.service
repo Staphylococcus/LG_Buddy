@@ -1,0 +1,13 @@
+[Unit]
+Description=LG Buddy system sleep/wake lifecycle monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lg-buddy lifecycle
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

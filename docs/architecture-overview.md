@@ -1,0 +1,633 @@
+# LG Buddy Architecture Overview
+
+This document describes the current LG Buddy architecture.
+
+It is not a product roadmap. It is a map of what exists today and how the main pieces fit together.
+
+For the top-level system, desktop, and service event paths that enter the
+runtime, see [Runtime event handler map](runtime-event-handler-map.md).
+
+## Repository Shape
+
+The repository now has one runtime implementation and one setup surface:
+
+- Rust runtime workspace
+  - `Cargo.toml`
+  - `crates/lg-buddy/`
+- shell-based setup surface
+  - `configure.sh`
+  - `install.sh`
+  - `uninstall.sh`
+  - `bin/LG_Buddy_Common`
+  - `systemd/`
+
+The Rust runtime owns operational behavior. The remaining shell layer exists for configuration, installation, and removal.
+
+## High-Level Runtime Shape
+
+The Rust crate is organized as a small core with explicit boundaries:
+
+```text
+main.rs
+  -> lib.rs
+     -> parse CLI arguments
+     -> dispatch command
+        -> commands.rs
+           -> load config/state/dependencies
+           -> sources/
+              -> linux/logind.rs
+              -> linux/network_manager.rs
+              -> desktop/gnome.rs
+              -> desktop/swayidle.rs
+           -> events.rs
+           -> screen.rs
+           -> lifecycle.rs
+           -> policy.rs
+           -> runtime_phase.rs
+           -> tv.rs / wol.rs / state.rs
+```
+
+## System Diagram
+
+The current runtime can be visualized as desktop and system event paths into the
+Rust runtime, and then one control path from policy code into the TV transport
+boundary.
+
+```mermaid
+flowchart LR
+    subgraph Desktop["Desktop Session / External Tools"]
+        GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
+        SWAY["swayidle<br/>idle hooks"]
+        INPUT["Linux input devices<br/>gamepads / wheels / device events"]
+    end
+
+    subgraph SystemLifecycle["System Lifecycle"]
+        LOGIND["logind system bus<br/>PrepareForSleep"]
+        NM["NetworkManager dispatcher<br/>pre-down"]
+    end
+
+    subgraph Rust["Rust Runtime"]
+        MAIN["main.rs / lib.rs<br/>CLI + command dispatch"]
+        COMMANDS["commands.rs<br/>CLI/API dependency assembly"]
+        EVENTS["events.rs<br/>canonical runtime events"]
+        POLICY["policy.rs<br/>action / no-action / state trail"]
+        SCREEN["screen.rs<br/>session screen policy"]
+        LIFECYCLE["lifecycle.rs<br/>machine lifecycle policy"]
+        PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
+        CONFIG["config.rs<br/>config.env parsing"]
+        STATE["state.rs<br/>runtime markers"]
+
+        subgraph SessionSubsystem["Session Integration Subsystem"]
+            BACKEND["backend.rs<br/>backend selection"]
+            SESSIONMODEL["session.rs<br/>shared session model"]
+            RUNNER["session::runner<br/>monitor + lifecycle commands"]
+            GAMEPAD["session::gamepad<br/>gamepad activity source"]
+            BUS["session_bus.rs<br/>generic D-Bus transport"]
+
+            subgraph Sources["Source Adapters"]
+                LOGINDADAPTER["sources/linux/logind.rs<br/>logind lifecycle mapping"]
+                NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
+                GADAPTER["sources/desktop/gnome.rs<br/>GNOME probe + signal mapping"]
+                SADAPTER["sources/desktop/swayidle.rs<br/>hook mapping + capability probe"]
+            end
+        end
+
+        subgraph ExternalInterfaces["External Interfaces"]
+            TV["tv.rs<br/>TvDevice / TvClient"]
+            WOL["wol.rs<br/>Wake-on-LAN"]
+        end
+    end
+
+    subgraph TVBoundary["TV Control Boundary"]
+        BSCPY["bscpylgtvcommand"]
+        LGTV["LG TV"]
+    end
+
+    MAIN --> BACKEND
+    MAIN --> RUNNER
+    RUNNER --> BACKEND
+    RUNNER --> BUS
+    BACKEND --> GADAPTER
+    BACKEND --> SADAPTER
+
+    GNOME --> BUS
+    BUS --> GADAPTER
+    GADAPTER -->|"SessionEvent"| SESSIONMODEL
+    LOGIND --> BUS
+    BUS --> LOGINDADAPTER
+    LOGINDADAPTER -->|"RuntimeEvent"| EVENTS
+    NM --> MAIN
+    MAIN --> COMMANDS
+    COMMANDS --> EVENTS
+    COMMANDS --> NMGATE
+    COMMANDS --> SCREEN
+    COMMANDS --> LIFECYCLE
+    SCREEN --> POLICY
+    LIFECYCLE --> POLICY
+    SCREEN --> PHASE
+    NMGATE --> LIFECYCLE
+
+    SWAY -->|"delegated timeout / resume<br/>screen-off / screen-on CLI"| MAIN
+    SADAPTER -.->|"modeled SessionEvent hooks"| SESSIONMODEL
+    INPUT --> GAMEPAD
+    GAMEPAD -->|"UserActivity"| RUNNER
+    SESSIONMODEL --> RUNNER
+
+    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity"| SCREEN
+    RUNNER -->|"AfterResume"| LIFECYCLE
+    COMMANDS --> CONFIG
+    COMMANDS --> STATE
+    SCREEN --> STATE
+    LIFECYCLE --> STATE
+    SCREEN --> TV
+    LIFECYCLE --> TV
+    SCREEN --> WOL
+    LIFECYCLE --> WOL
+
+    TV --> BSCPY --> LGTV
+    WOL -->|"magic packet"| LGTV
+```
+
+The intended split is:
+
+- `lib.rs`
+  - public entry surface for the binary
+  - command parsing
+  - shared error types
+- `commands.rs`
+  - CLI/API command entrypoints
+  - config, state, and dependency loading for command execution
+  - command output handoff
+- `events.rs`
+  - canonical runtime event envelope and source classification
+- `policy.rs`
+  - explicit policy outcomes: selected actions, no-action decisions,
+    diagnostics, and state-transition trail
+- `screen.rs`
+  - pure session screen blank and restore policy decisions over already-read
+    observations
+  - edge glue that reads runtime phase and TV state, applies marker
+    transitions, renders output, and dispatches TV/Wake-on-LAN effects
+  - session marker ownership rules
+  - screen restore policy and retry behavior for screen actions
+- `lifecycle.rs`
+  - pure startup, shutdown, system sleep pre-action, NetworkManager sleep-gate,
+    and system resume decisions over already-read observations
+  - edge glue that reads reboot state, TV state, and marker state, applies
+    marker transitions, renders output, dispatches TV/Wake-on-LAN effects, and
+    performs retry/backoff
+  - locked, idempotent pre-sleep attempt handling
+  - system marker ownership rules
+- `runtime_phase.rs`
+  - source-agnostic machine sleep phase read used by screen policy
+  - Linux implementation reads logind `PreparingForSleep`
+- `config.rs`
+  - config path resolution
+  - parsing of the existing `config.env` format
+  - typed values for HDMI input, backend, MAC address, and idle timeout
+- `state.rs`
+  - runtime directory resolution
+  - system/session state separation
+  - ownership marker management
+- `tv.rs`
+  - TV transport abstraction
+  - subprocess-backed `bscpylgtvcommand` client
+  - typed facade for input, screen, and power operations
+- `wol.rs`
+  - native Wake-on-LAN packet generation and UDP send
+- `backend.rs`
+  - backend selection and detection
+  - `auto`, `gnome`, and `swayidle` support
+- `session.rs`
+  - backend-neutral session event model
+  - capability surface for desktop backends
+  - top-level event consumption is mapped separately in
+    [runtime-event-handler-map.md](runtime-event-handler-map.md)
+- `session/inactivity.rs`
+  - synthesizes idle and active transitions from native backend observations
+    and configured thresholds
+  - keeps blank and restore decisions edge-triggered instead of poll-triggered
+- `session/gamepad/`
+  - discovers readable Linux gamepad-like input devices
+  - refreshes discovery from Linux input-device add, remove, and change events
+  - periodically reconciles the watched device set in case an event is missed
+  - maps raw controller events into activity observations
+  - hosts device-specific adapters for supplemental activity surfaces
+  - includes a Logitech G923 adapter for raw HID wheel and pedal reports that
+    may not appear through evdev
+  - detailed in [gamepad-subsystem.md](gamepad-subsystem.md)
+- `session_bus.rs`
+  - generic blocking D-Bus transport seam
+  - session-bus use for the GNOME monitor runtime
+  - system-bus use for the logind lifecycle runtime
+- `session/runner.rs`
+  - backend-neutral monitor and lifecycle runners
+  - combines backend observations with the inactivity engine
+  - dispatches semantic session events into screen and lifecycle policy
+  - runs delegated `swayidle` by invoking the current executable's
+    `screen-off` and `screen-on` CLI commands
+- `sources/linux/logind.rs`
+  - Linux system lifecycle adapter
+  - maps `org.freedesktop.login1` resume signals into canonical lifecycle
+    events
+  - reads the `PreparingForSleep` property used by the NetworkManager pre-down
+    gate
+- `sources/linux/network_manager.rs`
+  - NetworkManager `pre-down` dispatcher source
+  - emits `NetworkTeardownImminent` with the logind sleep-phase reading
+- `sources/desktop/gnome.rs`
+  - GNOME-specific capability probing plus ScreenSaver signal and IdleMonitor
+    method mapping
+- `sources/desktop/swayidle.rs`
+  - `swayidle`-specific capability probing and hook-to-event mapping
+  - models the `swayidle` hook surface; production timeout/resume handling
+    currently delegates through the CLI/API command path
+
+The session-facing pieces should be read as one subsystem:
+
+- `backend.rs`
+  - selects the active session backend
+- `session.rs`
+  - defines the homogenized session contract
+- `session/inactivity.rs`
+  - owns session-phase synthesis from native inactivity observations and
+    configured thresholds
+- `session/gamepad/`
+  - supplies auxiliary user-activity observations for controller input
+  - owns gamepad device discovery, event-triggered refresh, and reconciliation
+  - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
+- `session/runner.rs`
+  - consumes normalized session events and idletime observations and dispatches runtime policy
+  - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
+  - owns the `lifecycle` event loop for system sleep/wake handling
+- `sources/linux/logind.rs`
+  - adapts Linux system lifecycle signals into canonical lifecycle events
+- `sources/desktop/gnome.rs` and `sources/desktop/swayidle.rs`
+  - adapt or model backend-specific surfaces against that shared session
+    contract; the production `swayidle` timeout/resume path enters through
+    CLI/API commands
+
+## Command Model
+
+The binary currently supports these commands:
+
+- `startup [auto|boot|wake]`
+- `shutdown`
+- `sleep-pre`
+- `sleep`
+- `nm-pre-down`
+- `brightness`
+- `screen-off`
+- `screen-on`
+- `monitor`
+- `lifecycle`
+- `detect-backend`
+
+`lib.rs` parses the command line into a typed command enum and dispatches into
+the runtime command handlers in `commands.rs` and `session/runner.rs`.
+`commands.rs` then delegates screen and lifecycle decisions to their domain
+modules and delegates platform ingestion to `sources/`.
+
+This keeps CLI parsing separate from operational behavior.
+
+## Core Control Flows
+
+### `screen-off`
+
+`screen-off` is an idle policy action.
+
+Flow:
+
+1. Load config.
+2. Resolve the session state marker path.
+3. For session-originated events, read the runtime sleep phase through
+   `runtime_phase.rs`.
+4. If machine sleep is pending and lifecycle automation is enabled, record a
+   no-action decision and do not touch the TV.
+5. Query the TV's current input.
+6. If the configured HDMI input is active:
+   - try to blank the screen
+   - if blanking fails, fall back to `power_off`
+   - create the ownership marker on success
+7. If another input is active:
+   - clear the marker
+   - do nothing to the TV
+
+### `screen-on`
+
+`screen-on` is a resume policy action.
+
+Flow:
+
+1. Load config.
+2. Resolve the session marker.
+3. For session-originated events, read the runtime sleep phase through
+   `runtime_phase.rs`.
+4. If machine sleep is pending and lifecycle automation is enabled, record a
+   no-action decision and do not touch the TV.
+5. Apply `screen_restore_policy`:
+   - `conservative`: skip if the marker is missing
+   - `aggressive`: continue even without the marker
+6. Try `turn_screen_on`.
+7. If the TV reports the known active-screen error (`-102`), try immediate input restore.
+8. Otherwise fall back to Wake-on-LAN plus repeated `set_input` attempts.
+9. Clear the marker on success.
+10. Leave the marker in place if wake recovery fails.
+
+### `startup`
+
+`startup` handles both cold-boot and wake restoration behavior.
+
+Flow:
+
+1. Load config.
+2. Resolve the system-scope marker.
+3. Decide behavior from `StartupMode` and `screen_restore_policy`:
+   - `boot`: always restore
+   - `wake`: restore only when policy allows it
+   - `auto`: treat marker presence as wake, otherwise boot
+4. Clear the marker before attempting restore.
+5. Send Wake-on-LAN.
+6. Retry `set_input` until the TV is reachable on the configured HDMI input or attempts are exhausted.
+
+### `shutdown`
+
+`shutdown` is a guard-rail policy action.
+
+Flow:
+
+1. Load config.
+2. Ask `systemctl list-jobs` whether a reboot is pending.
+3. If reboot is pending, skip TV power-off.
+4. Otherwise query current input.
+5. If the configured HDMI input is active, issue `power_off`.
+6. If input query fails, still attempt `power_off`.
+7. Power-off failures are logged but do not abort shutdown handling.
+
+### `lifecycle`
+
+`lifecycle` is the system sleep/wake resume event loop. Linux pre-sleep TV
+power-off is owned by the NetworkManager pre-down gate.
+
+Flow:
+
+1. Load config and exit successfully if `system_sleep_wake_policy=disabled`.
+2. Open the system bus.
+3. Subscribe to logind `PrepareForSleep` signals.
+4. On `PrepareForSleep(true)`:
+   - log the diagnostic event
+   - do not run TV network I/O
+5. On `PrepareForSleep(false)`:
+   - run wake restore policy from the canonical logind resume event
+   - clear stale legacy system sleep attempt state
+6. If config is changed to disable lifecycle handling while the service is
+   running, stop the lifecycle monitor cleanly.
+
+The NetworkManager pre-down gate runs `lg-buddy nm-pre-down`. That command reads
+logind `PreparingForSleep`; false or read failure returns quickly, true runs an
+idempotent pre-sleep power-off policy under a process lock before NetworkManager
+tears down the interface.
+
+### `detect-backend`
+
+`detect-backend` resolves the desktop backend to use.
+
+Selection order:
+
+1. `LG_BUDDY_SCREEN_BACKEND` override if present
+2. `screen_backend` from config
+3. default to `auto`
+
+Detection behavior:
+
+- `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
+- otherwise falls back to `swayidle` if installed
+- forced backends validate required commands
+
+## TV Integration Boundary
+
+The TV layer is intentionally split into two levels:
+
+- low-level transport trait: `TvClient`
+- higher-level domain facade: `TvDevice`
+
+`TvClient` models the transport operations that the current backend can actually perform:
+
+- `get_input`
+- `set_input`
+- `power_off`
+- `turn_screen_off`
+- `turn_screen_on`
+
+`TvDevice` provides a more readable surface to policy code:
+
+- `tv.input().current()`
+- `tv.input().set(...)`
+- `tv.screen().blank()`
+- `tv.screen().unblank()`
+- `tv.power().off()`
+- `tv.power().wake(...)`
+
+This keeps the subprocess client simple while giving command logic a typed domain API.
+
+### Transitional Backend
+
+The current production-side TV backend is still `bscpylgtvcommand`.
+
+The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
+
+- shells out to the configured command path
+- preserves stdout, stderr, and exit status on failure
+- parses `get_input` output into a typed `CurrentInput`
+
+This is a transitional integration boundary. It keeps the runtime architecture independent from the current Python CLI without requiring a native WebOS client yet.
+
+## State Model
+
+State is intentionally small.
+
+The runtime currently uses two ownership markers:
+
+- `screen_off_by_us` in session scope
+- `screen_off_by_us` in system scope
+
+The ownership markers answer one question:
+
+- did LG Buddy blank or power off the TV as part of its own policy?
+
+It does not answer whether restore should always be blocked.
+In `aggressive` mode, restore may proceed even when the marker is absent.
+When the system-scope marker exists after a sleep pre-action, session screen
+actions defer to the lifecycle resume path while `system_sleep_wake_policy` is
+enabled. The lifecycle path keeps that marker present while it waits for network
+readiness and attempts input restore, then clears it after success or exhausted
+restore attempts.
+
+There are two scopes:
+
+- `System`
+  - default path under `/run/lg_buddy`
+- `Session`
+  - default path under `$XDG_RUNTIME_DIR/lg_buddy`
+  - fallback under `/run/user/<uid>/lg_buddy`
+
+This is a direct replacement for the earlier ad hoc script coordination pattern.
+
+The NetworkManager pre-down path also uses a system-scope lock file to prevent
+concurrent pre-sleep handlers from racing each other. It does not use persisted
+attempt state to skip later hooks; repeated hooks are expected to be safe through
+idempotent TV policy.
+
+## Desktop Backend Strategy
+
+Desktop backends are treated as adapters, not owners of policy.
+
+The runtime core owns:
+
+- config
+- state
+- TV control
+- Wake-on-LAN
+- retries and recovery behavior
+- lifecycle decisions
+
+Desktop backends should only answer questions like:
+
+- which backend is active?
+- which session signals are available?
+- how should backend-specific signals map into runtime events?
+
+`session.rs` defines the backend-neutral semantic contract:
+
+- canonical session events
+  - `Idle`
+  - `Active`
+  - `WakeRequested`
+  - `UserActivity`
+  - `BeforeSleep`
+  - `AfterResume`
+  - `Lock`
+  - `Unlock`
+- backend capability flags
+- idle-timeout ownership semantics
+
+The detailed session model is documented in `docs/session-backend-model.md`.
+
+`sources/desktop/gnome.rs` is the native GNOME adapter. It currently provides:
+
+- capability probing
+- mapping from GNOME D-Bus monitor lines into `SessionEvent`
+- the GNOME event and idletime sources used by `lg-buddy monitor`
+
+`sources/desktop/swayidle.rs` is the delegated-tool adapter. It currently provides:
+
+- capability probing
+- mapping from `swayidle` hooks into `SessionEvent`
+
+Production `swayidle` monitor execution does not dispatch those modeled events
+directly for timeout/resume. It starts `swayidle` with command strings pointing
+back to the current LG Buddy executable:
+
+- `screen-off` for timeout
+- `screen-on` for resume
+
+That means `swayidle` acts as a CLI/API client of LG Buddy. It is delegated, but
+not a separate quirks path for screen policy: the invoked commands load config
+and state normally, construct canonical CLI/API runtime events, and enter
+`screen.rs` through the same command surface as manual invocations.
+
+The session subsystem is intentionally asymmetric where the providers are
+asymmetric:
+
+- the current GNOME pilot combines ScreenSaver idle/active and wake signals
+  with Mutter idletime observations, then passes them through the inactivity
+  engine
+- the native monitor path also consumes gamepad activity directly from Linux
+  input devices; today that is attached to GNOME because GNOME is the only
+  native production adapter, but the source is not GNOME-specific
+- the gamepad source refreshes its device set from Linux device add, remove, and
+  change events, with periodic reconciliation for missed events
+- delegated `swayidle` monitor execution is implemented as CLI/API delegation
+  for `timeout` and `resume` parity with the shell monitor
+- `swayidle` systemd-style hooks such as `before-sleep`, `after-resume`,
+  `lock`, and `unlock` are not wired into monitor behavior; system lifecycle is
+  handled by the NetworkManager pre-down gate plus logind lifecycle service
+  instead
+
+`swayidle` remains the current external-tool compatibility backend. Its
+delegated CLI/API shape is intentionally conservative: native non-GNOME Wayland
+idle/activity sources can later replace delegated timeout and resume execution
+without redefining screen policy.
+
+## Configuration and Override Surface
+
+The runtime is designed to be testable and relocatable.
+
+Important environment overrides:
+
+- `LG_BUDDY_CONFIG`
+  - explicit config file path
+- `LG_BUDDY_SCREEN_BACKEND`
+  - force backend selection
+- `LG_BUDDY_BSCPYLGTV_COMMAND`
+  - override TV command path
+- `LG_BUDDY_SYSTEM_RUNTIME_DIR`
+  - override system state directory
+- `LG_BUDDY_SESSION_RUNTIME_DIR`
+  - override session state directory
+- `LG_BUDDY_SYSTEMCTL`
+  - override the `systemctl` command path used by shutdown logic
+
+These exist mainly so the runtime can be tested without mutating real system paths or depending on globally installed commands.
+
+## Testing Shape
+
+The test strategy has three layers:
+
+- unit tests for parsing, state, backend selection, and policy
+- subprocess-backed integration tests for TV behavior
+- manual hardware probes when exact external behavior is unclear
+
+The important current design choice is that TV-facing tests now run against a stateful subprocess mock rather than an in-memory fake.
+
+Relevant test assets:
+
+- `tools/mock_bscpylgtvcommand.py`
+- `crates/lg-buddy/tests/support/mod.rs`
+- `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
+
+That mock preserves the real command/response shapes we have already observed
+from the installed TV client, so TV-policy tests exercise the same subprocess
+boundary the runtime uses in production.
+
+## Current Boundary
+
+The Rust runtime currently owns:
+
+- config loading
+- state handling
+- TV abstraction
+- Wake-on-LAN
+- backend detection
+- startup
+- shutdown
+- system lifecycle handling through the NetworkManager pre-down gate plus
+  logind resume monitor
+- screen-off
+- screen-on
+- brightness control
+- `monitor` command with GNOME and `swayidle` parity paths
+
+The shell layer still owns:
+
+- interactive configuration
+- installation
+- uninstallation
+
+What is still not implemented:
+
+- `swayidle` `before-sleep`, `after-resume`, `lock`, and `unlock` handling
+- additional desktop backends
+- native WebOS transport
+
+So the current architecture should be read as a Rust-owned runtime with a thin shell setup surface.
