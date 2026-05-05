@@ -374,8 +374,19 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     });
 
     wait_until(Duration::from_secs(4), || {
-        logind.queue_prepare_for_sleep_signal(false);
-        mock.calls().iter().any(|call| call.command == "set_input")
+        let calls = mock.calls();
+        let set_input_count = calls
+            .iter()
+            .filter(|call| call.command == "set_input")
+            .count();
+
+        if set_input_count == 0 {
+            logind.queue_prepare_for_sleep_signal(false);
+        }
+
+        set_input_count == 1
+            && !runtime.system_marker_path().exists()
+            && !runtime.system_sleep_attempt_marker_path().exists()
     });
 
     assert_eq!(
