@@ -162,6 +162,10 @@ DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
 NM_SLEEP_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep"
 NM_LIFECYCLE_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle"
 
+# The installed Rust binary does not know about LG_BUDDY_INSTALL_ROOT, so pin
+# CLI config operations to the smoke-test sandbox instead of any host install.
+export LG_BUDDY_CONFIG="$CONFIG_FILE"
+
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_VENV_PIP"
@@ -204,6 +208,33 @@ INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
+
+"$INSTALLED_BINARY" settings set screen.backend gnome
+"$INSTALLED_BINARY" settings set screen.idle_timeout 900
+"$INSTALLED_BINARY" settings set screen.restore_policy aggressive
+grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
+grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
+
+(
+    unset LG_BUDDY_SCREEN_BACKEND
+    unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
+    unset LG_BUDDY_SCREEN_RESTORE_POLICY
+    unset LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY
+    export LG_BUDDY_TV_IP="192.168.1.11"
+    export LG_BUDDY_TV_MAC="11:22:33:44:55:66"
+    export LG_BUDDY_INPUT="HDMI_3"
+    cd "$BUNDLE_DIR"
+    ./configure.sh
+)
+
+grep -q '^tv_ip=192.168.1.11$' "$CONFIG_FILE"
+grep -q '^tv_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
+grep -q '^input=HDMI_3$' "$CONFIG_FILE"
+grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
+grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
+grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 
 export LG_BUDDY_REMOVE_CONFIG="1"
 (

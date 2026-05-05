@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
@@ -673,6 +673,8 @@ impl SystemdUserServiceController {
         ProcessCommand::new(&self.command_path)
             .arg("--user")
             .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|status| status.success())
     }

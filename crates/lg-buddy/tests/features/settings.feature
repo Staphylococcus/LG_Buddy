@@ -60,6 +60,7 @@ Feature: Settings CLI
     When I run the command "settings set screen.backend gnome"
     Then the command succeeds
     And stdout contains "apply: restarted LG_Buddy_screen.service"
+    And stdout does not contain "Description=LG Buddy Screen Monitor Service"
     And config.env contains "screen_backend=gnome"
     And systemctl was invoked with "--user restart LG_Buddy_screen.service"
 

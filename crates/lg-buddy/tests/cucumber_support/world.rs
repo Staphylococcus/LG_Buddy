@@ -56,6 +56,8 @@ impl LgBuddyWorld {
         let config = TestConfigFile::new("cucumber-config");
         config.write_sample(input);
         self.ensure_env().set("LG_BUDDY_CONFIG", config.path());
+        self.ensure_env()
+            .set("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled");
         self.config = Some(config);
     }
 
@@ -113,7 +115,15 @@ log_path={}\n\
 printf '%s\\n' \"$*\" >> \"$log_path\"\n\
 if [ \"$1\" = \"--user\" ]; then\n\
   case \"$2\" in\n\
-    cat|is-active|is-enabled|restart) exit 0 ;;\n\
+    cat)\n\
+      cat <<'EOF'\n\
+# /home/test/.config/systemd/user/LG_Buddy_screen.service\n\
+[Unit]\n\
+Description=LG Buddy Screen Monitor Service\n\
+EOF\n\
+      exit 0\n\
+      ;;\n\
+    is-active|is-enabled|restart) exit 0 ;;\n\
   esac\n\
 fi\n\
 exit 1\n",
@@ -339,6 +349,8 @@ exit 1\n",
     }
 
     pub fn gamepad_activity_occurs_after_secs(&mut self, seconds: f64) {
+        self.ensure_env()
+            .set("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "synthetic");
         self.ensure_env().set(
             "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS",
             seconds.to_string(),

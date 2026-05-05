@@ -52,6 +52,7 @@ const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const LOGIND_LIFECYCLE_PROCESS_INTERVAL: Duration = Duration::from_secs(5);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
+const GAMEPAD_ACTIVITY_SOURCE_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
 
 pub trait SessionActionExecutor {
@@ -610,19 +611,44 @@ fn spawn_gnome_monitor_thread(
     })
 }
 
-fn spawn_gamepad_activity_thread(sender: mpsc::Sender<RunnerMessage>) -> GamepadActivityThread {
+fn spawn_gamepad_activity_thread(
+    sender: mpsc::Sender<RunnerMessage>,
+) -> Option<GamepadActivityThread> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let handle = match resolve_gamepad_activity_test_delay() {
-        Some(delay) => thread::spawn(move || {
+    let handle = match resolve_gamepad_activity_source_mode() {
+        GamepadActivitySourceMode::Disabled => return None,
+        GamepadActivitySourceMode::Synthetic(delay) => thread::spawn(move || {
             run_synthetic_gamepad_activity_process(sender, thread_stop, delay)
         }),
-        None => thread::spawn(move || run_gamepad_activity_process(sender, thread_stop)),
+        GamepadActivitySourceMode::System => {
+            thread::spawn(move || run_gamepad_activity_process(sender, thread_stop))
+        }
     };
 
-    GamepadActivityThread {
+    Some(GamepadActivityThread {
         stop,
         handle: Some(handle),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GamepadActivitySourceMode {
+    System,
+    Synthetic(Duration),
+    Disabled,
+}
+
+fn resolve_gamepad_activity_source_mode() -> GamepadActivitySourceMode {
+    match std::env::var(GAMEPAD_ACTIVITY_SOURCE_ENV).ok().as_deref() {
+        Some("disabled" | "none" | "off") => GamepadActivitySourceMode::Disabled,
+        Some("synthetic" | "test") => GamepadActivitySourceMode::Synthetic(
+            resolve_gamepad_activity_test_delay().unwrap_or(Duration::ZERO),
+        ),
+        Some("system" | "real") => GamepadActivitySourceMode::System,
+        Some(_) | None => resolve_gamepad_activity_test_delay()
+            .map(GamepadActivitySourceMode::Synthetic)
+            .unwrap_or(GamepadActivitySourceMode::System),
     }
 }
 
@@ -1666,6 +1692,47 @@ system_sleep_wake_policy={policy}
         assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
 
         std::env::remove_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV);
+    }
+
+    #[test]
+    fn gamepad_activity_source_mode_is_explicitly_selectable() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV);
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::System
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV, "0.25");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Synthetic(Duration::from_millis(250))
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "disabled");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Disabled
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "synthetic");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Synthetic(Duration::from_millis(250))
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "system");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::System
+        );
+
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV);
     }
 
     #[test]

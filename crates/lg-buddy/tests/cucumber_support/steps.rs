@@ -301,6 +301,15 @@ fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
     );
 }
 
+#[then(regex = r#"stdout does not contain "([^"]+)""#)]
+fn stdout_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
+    assert!(
+        !world.command_result().stdout.contains(&unexpected),
+        "stdout was: {}",
+        world.command_result().stdout
+    );
+}
+
 #[then(regex = r#"stderr contains "([^"]+)""#)]
 fn stderr_contains(world: &mut LgBuddyWorld, expected: String) {
     assert!(
