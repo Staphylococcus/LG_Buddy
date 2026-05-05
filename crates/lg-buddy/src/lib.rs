@@ -29,11 +29,12 @@ use crate::commands::{
 };
 use crate::config::{ConfigError, ConfigPathError};
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
+use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
 use crate::state::StateDirError;
 use std::fmt;
 use std::io::{self, Write};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Startup(StartupMode),
     Shutdown,
@@ -46,6 +47,7 @@ pub enum Command {
     Monitor,
     Lifecycle,
     DetectBackend,
+    Settings(SettingsCommand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,7 @@ pub enum ParseOutcome {
 pub enum ParseError {
     UnknownCommand(String),
     UnknownStartupMode(String),
+    Settings(SettingsParseError),
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -99,6 +102,7 @@ impl fmt::Display for ParseError {
             Self::UnknownStartupMode(mode) => {
                 write!(f, "unknown startup mode `{mode}`")
             }
+            Self::Settings(err) => write!(f, "{err}"),
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
                     f,
@@ -121,6 +125,7 @@ pub enum RunError {
     StateDir(StateDirError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
+    Settings(SettingsError),
 }
 
 impl fmt::Display for RunError {
@@ -134,6 +139,7 @@ impl fmt::Display for RunError {
             Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
+            Self::Settings(err) => write!(f, "{err}"),
         }
     }
 }
@@ -149,6 +155,7 @@ impl std::error::Error for RunError {
             Self::StateDir(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
+            Self::Settings(err) => Some(err),
         }
     }
 }
@@ -160,7 +167,7 @@ impl From<io::Error> for RunError {
 }
 
 impl Command {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
@@ -173,10 +180,11 @@ impl Command {
             Self::Monitor => "monitor",
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
+            Self::Settings(_) => "settings",
         }
     }
 
-    pub fn placeholder_message(self) -> &'static str {
+    pub fn placeholder_message(&self) -> &'static str {
         match self {
             Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implemented via command handler",
@@ -189,6 +197,7 @@ impl Command {
             Self::Monitor => "TODO: implemented via command handler",
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
+            Self::Settings(_) => "TODO: implemented via command handler",
         }
     }
 }
@@ -214,11 +223,19 @@ Commands:
   monitor         Run the user-session monitor loop
   lifecycle       Run the system lifecycle monitor loop
   detect-backend  Detect the active screen backend
+  settings        Inspect structured LG Buddy settings
 
 Startup modes:
   auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
   boot            Always treat startup as a cold boot
   wake            Only restore when LG Buddy owns the system marker
+
+Settings:
+  settings list
+  settings describe [key]
+  settings get <key>
+  settings set <key> <value>  Reserved for write support; currently fails without changes
+  settings unset <key>        Reserved for write support; currently fails without changes
 "
     )
 }
@@ -259,6 +276,11 @@ where
 
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
+        "settings" => {
+            return SettingsCommand::parse(args)
+                .map(|command| ParseOutcome::Command(Command::Settings(command)))
+                .map_err(ParseError::Settings);
+        }
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
@@ -296,6 +318,9 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::ScreenOn => run_screen_on(writer),
         Command::Monitor => run_monitor(writer),
         Command::Lifecycle => run_lifecycle_monitor(writer),
+        Command::Settings(command) => {
+            run_settings_command(command, writer).map_err(RunError::Settings)
+        }
     }
 }
 
@@ -310,6 +335,7 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::{parse_args, usage, Command, ParseError, ParseOutcome, StartupMode};
+    use crate::settings::{SettingsCommand, SettingsParseError};
 
     #[test]
     fn no_args_prints_help() {
@@ -377,6 +403,30 @@ mod tests {
             parse_args(["detect-backend"]),
             Ok(ParseOutcome::Command(Command::DetectBackend))
         );
+        assert_eq!(
+            parse_args(["settings", "list"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::List
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "describe"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::Describe(None)
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "describe", "screen.backend"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::Describe(Some("screen.backend".to_string()))
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "get", "screen.backend"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::Get("screen.backend".to_string())
+            )))
+        );
     }
 
     #[test]
@@ -407,6 +457,29 @@ mod tests {
     }
 
     #[test]
+    fn invalid_settings_command_is_rejected() {
+        assert_eq!(
+            parse_args(["settings"]),
+            Err(ParseError::Settings(SettingsParseError::MissingSubcommand))
+        );
+        assert_eq!(
+            parse_args(["settings", "get"]),
+            Err(ParseError::Settings(SettingsParseError::MissingKey {
+                subcommand: "get",
+            }))
+        );
+        assert_eq!(
+            parse_args(["settings", "list", "extra"]),
+            Err(ParseError::Settings(
+                SettingsParseError::UnexpectedArguments {
+                    subcommand: "list",
+                    arguments: vec!["extra".to_string()],
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn usage_mentions_all_commands() {
         let help = usage("lg-buddy");
 
@@ -422,6 +495,7 @@ mod tests {
             "monitor",
             "lifecycle",
             "detect-backend",
+            "settings",
         ] {
             assert!(
                 help.contains(command),

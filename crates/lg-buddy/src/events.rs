@@ -96,7 +96,10 @@ impl RuntimeEventKind {
             Command::Brightness => Some(Self::BrightnessRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
             Command::ScreenOn => Some(Self::ScreenRestoreRequested),
-            Command::Monitor | Command::Lifecycle | Command::DetectBackend => None,
+            Command::Monitor
+            | Command::Lifecycle
+            | Command::DetectBackend
+            | Command::Settings(_) => None,
         }
     }
 }
@@ -176,6 +179,10 @@ mod tests {
         assert_eq!(RuntimeEvent::from_command(Command::Monitor), None);
         assert_eq!(RuntimeEvent::from_command(Command::Lifecycle), None);
         assert_eq!(RuntimeEvent::from_command(Command::DetectBackend), None);
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Settings(crate::settings::SettingsCommand::List)),
+            None
+        );
     }
 
     #[test]

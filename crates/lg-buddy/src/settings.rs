@@ -9,6 +9,8 @@ use crate::config::{
     ConfigPathSources, DEFAULT_IDLE_TIMEOUT,
 };
 
+const SETTINGS_SUBCOMMANDS: &[&str] = &["list", "describe", "get", "set", "unset"];
+
 const READ_WRITE_OPERATIONS: &[SettingOperation] = &[
     SettingOperation::Get,
     SettingOperation::Describe,
@@ -86,6 +88,332 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
 pub static SETTINGS_REGISTRY: SettingsRegistry = SettingsRegistry {
     definitions: SETTING_DEFINITIONS,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsCommand {
+    List,
+    Describe(Option<String>),
+    Get(String),
+    Set { key: String, value: String },
+    Unset(String),
+}
+
+impl SettingsCommand {
+    pub fn parse<I, S>(args: I) -> Result<Self, SettingsParseError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut args = args.into_iter();
+        let Some(subcommand) = args.next() else {
+            return Err(SettingsParseError::MissingSubcommand);
+        };
+
+        match subcommand.as_ref() {
+            "list" => {
+                let extra_args = collect_args(args);
+                if extra_args.is_empty() {
+                    Ok(Self::List)
+                } else {
+                    Err(SettingsParseError::UnexpectedArguments {
+                        subcommand: "list",
+                        arguments: extra_args,
+                    })
+                }
+            }
+            "describe" => {
+                let key = args.next().map(|arg| arg.as_ref().to_string());
+                let extra_args = collect_args(args);
+                if extra_args.is_empty() {
+                    Ok(Self::Describe(key))
+                } else {
+                    Err(SettingsParseError::UnexpectedArguments {
+                        subcommand: "describe",
+                        arguments: extra_args,
+                    })
+                }
+            }
+            "get" => {
+                let key = args
+                    .next()
+                    .ok_or(SettingsParseError::MissingKey { subcommand: "get" })?;
+                let extra_args = collect_args(args);
+                if extra_args.is_empty() {
+                    Ok(Self::Get(key.as_ref().to_string()))
+                } else {
+                    Err(SettingsParseError::UnexpectedArguments {
+                        subcommand: "get",
+                        arguments: extra_args,
+                    })
+                }
+            }
+            "set" => {
+                let key = args
+                    .next()
+                    .ok_or(SettingsParseError::MissingKey { subcommand: "set" })?;
+                let value = args
+                    .next()
+                    .ok_or(SettingsParseError::MissingValue { subcommand: "set" })?;
+                let extra_args = collect_args(args);
+                if extra_args.is_empty() {
+                    Ok(Self::Set {
+                        key: key.as_ref().to_string(),
+                        value: value.as_ref().to_string(),
+                    })
+                } else {
+                    Err(SettingsParseError::UnexpectedArguments {
+                        subcommand: "set",
+                        arguments: extra_args,
+                    })
+                }
+            }
+            "unset" => {
+                let key = args.next().ok_or(SettingsParseError::MissingKey {
+                    subcommand: "unset",
+                })?;
+                let extra_args = collect_args(args);
+                if extra_args.is_empty() {
+                    Ok(Self::Unset(key.as_ref().to_string()))
+                } else {
+                    Err(SettingsParseError::UnexpectedArguments {
+                        subcommand: "unset",
+                        arguments: extra_args,
+                    })
+                }
+            }
+            other => Err(SettingsParseError::UnknownSubcommand(other.to_string())),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Describe(_) => "describe",
+            Self::Get(_) => "get",
+            Self::Set { .. } => "set",
+            Self::Unset(_) => "unset",
+        }
+    }
+
+    pub fn is_mutation(&self) -> bool {
+        matches!(self, Self::Set { .. } | Self::Unset(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsParseError {
+    MissingSubcommand,
+    UnknownSubcommand(String),
+    MissingKey {
+        subcommand: &'static str,
+    },
+    MissingValue {
+        subcommand: &'static str,
+    },
+    UnexpectedArguments {
+        subcommand: &'static str,
+        arguments: Vec<String>,
+    },
+}
+
+impl fmt::Display for SettingsParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingSubcommand => {
+                write!(
+                    f,
+                    "missing settings command; expected one of {}",
+                    SETTINGS_SUBCOMMANDS.join(", ")
+                )
+            }
+            Self::UnknownSubcommand(subcommand) => {
+                write!(f, "unknown settings command `{subcommand}`")
+            }
+            Self::MissingKey { subcommand } => {
+                write!(f, "missing setting key for `settings {subcommand}`")
+            }
+            Self::MissingValue { subcommand } => {
+                write!(f, "missing setting value for `settings {subcommand}`")
+            }
+            Self::UnexpectedArguments {
+                subcommand,
+                arguments,
+            } => {
+                write!(
+                    f,
+                    "unexpected arguments for `settings {subcommand}`: {}",
+                    arguments.join(" ")
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SettingsParseError {}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SettingsFormatter;
+
+impl SettingsFormatter {
+    pub fn write_get<W: io::Write>(
+        &self,
+        writer: &mut W,
+        setting: EffectiveSetting,
+    ) -> Result<(), SettingsError> {
+        writeln!(writer, "{}", setting.value()).map_err(output_error)
+    }
+
+    pub fn write_list<W: io::Write>(
+        &self,
+        writer: &mut W,
+        settings: &[EffectiveSetting],
+    ) -> Result<(), SettingsError> {
+        for setting in settings {
+            writeln!(
+                writer,
+                "{}={} ({}, {}, ops: {})",
+                setting.key_name(),
+                setting.value(),
+                setting.source().as_str(),
+                setting.definition().mutability().as_str(),
+                format_operations(setting.definition().supported_operations(), ",")
+            )
+            .map_err(output_error)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn write_describe<W: io::Write>(
+        &self,
+        writer: &mut W,
+        settings: &[EffectiveSetting],
+    ) -> Result<(), SettingsError> {
+        for (index, setting) in settings.iter().enumerate() {
+            if index > 0 {
+                writeln!(writer).map_err(output_error)?;
+            }
+
+            self.write_single_description(writer, *setting)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_single_description<W: io::Write>(
+        &self,
+        writer: &mut W,
+        setting: EffectiveSetting,
+    ) -> Result<(), SettingsError> {
+        let definition = setting.definition();
+
+        writeln!(writer, "{}", setting.key_name()).map_err(output_error)?;
+        writeln!(writer, "  storage key: {}", setting.storage_key()).map_err(output_error)?;
+        writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
+        writeln!(writer, "  current: {}", setting.value()).map_err(output_error)?;
+        writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
+        writeln!(writer, "  default: {}", definition.default_value()).map_err(output_error)?;
+        writeln!(writer, "  mutability: {}", definition.mutability().as_str())
+            .map_err(output_error)?;
+        writeln!(
+            writer,
+            "  supported operations: {}",
+            format_operations(definition.supported_operations(), ", ")
+        )
+        .map_err(output_error)?;
+
+        match definition.value_type() {
+            SettingType::Enum(enum_type) => {
+                writeln!(
+                    writer,
+                    "  allowed values: {}",
+                    enum_type.values().join(", ")
+                )
+                .map_err(output_error)?;
+                if !enum_type.aliases().is_empty() {
+                    writeln!(writer, "  aliases: {}", format_aliases(enum_type.aliases()))
+                        .map_err(output_error)?;
+                }
+            }
+            SettingType::Integer(integer_type) => {
+                writeln!(
+                    writer,
+                    "  range: {}..={}",
+                    integer_type.min(),
+                    integer_type.max()
+                )
+                .map_err(output_error)?;
+            }
+        }
+
+        writeln!(writer, "  apply: {}", definition.apply_strategy().as_str())
+            .map_err(output_error)?;
+        writeln!(writer, "  description: {}", definition.description()).map_err(output_error)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsCommandRunner {
+    store: SettingsStore,
+    formatter: SettingsFormatter,
+}
+
+impl SettingsCommandRunner {
+    pub fn new(store: SettingsStore) -> Self {
+        Self {
+            store,
+            formatter: SettingsFormatter,
+        }
+    }
+
+    pub fn run<W: io::Write>(
+        &self,
+        command: SettingsCommand,
+        writer: &mut W,
+    ) -> Result<(), SettingsError> {
+        match command {
+            SettingsCommand::List => {
+                let settings = self.store.all_effective();
+                self.formatter.write_list(writer, &settings)
+            }
+            SettingsCommand::Describe(key) => match key {
+                Some(key) => {
+                    let setting = self.store.effective_by_name(&key)?;
+                    self.formatter.write_describe(writer, &[setting])
+                }
+                None => {
+                    let settings = self.store.all_effective();
+                    self.formatter.write_describe(writer, &settings)
+                }
+            },
+            SettingsCommand::Get(key) => {
+                let setting = self.store.effective_by_name(&key)?;
+                self.formatter.write_get(writer, setting)
+            }
+            SettingsCommand::Set { .. } => {
+                Err(SettingsError::WriteCommandUnavailable { command: "set" })
+            }
+            SettingsCommand::Unset(_) => {
+                Err(SettingsError::WriteCommandUnavailable { command: "unset" })
+            }
+        }
+    }
+}
+
+pub fn run_settings_command<W: io::Write>(
+    command: SettingsCommand,
+    writer: &mut W,
+) -> Result<(), SettingsError> {
+    if command.is_mutation() {
+        return Err(SettingsError::WriteCommandUnavailable {
+            command: command.as_str(),
+        });
+    }
+
+    let store = SettingsStore::load_from_env()?;
+    SettingsCommandRunner::new(store).run(command, writer)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsStore {
@@ -535,6 +863,13 @@ impl SettingType {
             Self::Integer(integer_type) => integer_type.expected(),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enum(_) => "enum",
+            Self::Integer(_) => "integer",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,6 +1108,7 @@ pub enum SettingsError {
         kind: io::ErrorKind,
         message: String,
     },
+    WriteOutput(String),
     InvalidKey {
         key: String,
         reason: &'static str,
@@ -786,6 +1122,9 @@ pub enum SettingsError {
     UnsupportedOperation {
         key: String,
         operation: SettingOperation,
+    },
+    WriteCommandUnavailable {
+        command: &'static str,
     },
     RegistryInvariant(String),
 }
@@ -801,6 +1140,7 @@ impl fmt::Display for SettingsError {
                     path.display()
                 )
             }
+            Self::WriteOutput(message) => write!(f, "{message}"),
             Self::InvalidKey { key, reason } => {
                 write!(f, "invalid setting key `{key}`: {reason}")
             }
@@ -820,12 +1160,62 @@ impl fmt::Display for SettingsError {
                     operation.as_str()
                 )
             }
+            Self::WriteCommandUnavailable { command } => {
+                write!(
+                    f,
+                    "`settings {command}` is not implemented yet; no changes were made"
+                )
+            }
             Self::RegistryInvariant(message) => write!(f, "{message}"),
         }
     }
 }
 
-impl std::error::Error for SettingsError {}
+impl std::error::Error for SettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ConfigPath(err) => Some(err),
+            Self::ReadConfig { .. }
+            | Self::WriteOutput(_)
+            | Self::InvalidKey { .. }
+            | Self::UnknownKey(_)
+            | Self::InvalidValue { .. }
+            | Self::UnsupportedOperation { .. }
+            | Self::WriteCommandUnavailable { .. }
+            | Self::RegistryInvariant(_) => None,
+        }
+    }
+}
+
+fn collect_args<I, S>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|arg| arg.as_ref().to_string())
+        .collect()
+}
+
+fn format_operations(operations: &[SettingOperation], separator: &str) -> String {
+    operations
+        .iter()
+        .map(|operation| operation.as_str())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn format_aliases(aliases: &[SettingAlias]) -> String {
+    aliases
+        .iter()
+        .map(|alias| format!("{} -> {}", alias.from(), alias.to()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn output_error(err: io::Error) -> SettingsError {
+    SettingsError::WriteOutput(err.to_string())
+}
 
 fn validate_setting_key(value: &str) -> Result<(), &'static str> {
     if value.is_empty() {
@@ -883,8 +1273,8 @@ fn validate_storage_key(value: &str) -> Result<(), &'static str> {
 mod tests {
     use super::{
         ApplyStrategy, ConfigEnvReader, ConfigPathResolver, SettingKey, SettingMutability,
-        SettingOperation, SettingSource, SettingType, SettingValue, SettingsError, SettingsStore,
-        SETTINGS_REGISTRY,
+        SettingOperation, SettingSource, SettingType, SettingValue, SettingsCommand,
+        SettingsCommandRunner, SettingsError, SettingsParseError, SettingsStore, SETTINGS_REGISTRY,
     };
     use crate::config::ConfigPathSources;
     use std::fs;
@@ -932,6 +1322,194 @@ mod tests {
                 ("system.sleep_wake_policy", "system_sleep_wake_policy"),
             ]
         );
+    }
+
+    #[test]
+    fn settings_command_parser_accepts_supported_commands() {
+        assert_eq!(SettingsCommand::parse(["list"]), Ok(SettingsCommand::List));
+        assert_eq!(
+            SettingsCommand::parse(["describe"]),
+            Ok(SettingsCommand::Describe(None))
+        );
+        assert_eq!(
+            SettingsCommand::parse(["describe", "screen.backend"]),
+            Ok(SettingsCommand::Describe(Some(
+                "screen.backend".to_string()
+            )))
+        );
+        assert_eq!(
+            SettingsCommand::parse(["get", "screen.backend"]),
+            Ok(SettingsCommand::Get("screen.backend".to_string()))
+        );
+        assert_eq!(
+            SettingsCommand::parse(["set", "screen.backend", "gnome"]),
+            Ok(SettingsCommand::Set {
+                key: "screen.backend".to_string(),
+                value: "gnome".to_string(),
+            })
+        );
+        assert_eq!(
+            SettingsCommand::parse(["unset", "screen.backend"]),
+            Ok(SettingsCommand::Unset("screen.backend".to_string()))
+        );
+    }
+
+    #[test]
+    fn settings_command_parser_rejects_invalid_shapes() {
+        assert_eq!(
+            SettingsCommand::parse(Vec::<String>::new()),
+            Err(SettingsParseError::MissingSubcommand)
+        );
+        assert_eq!(
+            SettingsCommand::parse(["show"]),
+            Err(SettingsParseError::UnknownSubcommand("show".to_string()))
+        );
+        assert_eq!(
+            SettingsCommand::parse(["get"]),
+            Err(SettingsParseError::MissingKey { subcommand: "get" })
+        );
+        assert_eq!(
+            SettingsCommand::parse(["set", "screen.backend"]),
+            Err(SettingsParseError::MissingValue { subcommand: "set" })
+        );
+        assert_eq!(
+            SettingsCommand::parse(["describe", "screen.backend", "extra"]),
+            Err(SettingsParseError::UnexpectedArguments {
+                subcommand: "describe",
+                arguments: vec!["extra".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn settings_runner_lists_values_sources_mutability_and_operations() {
+        let store = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            screen_backend=gnome
+            system_sleep_wake_policy=disabled
+            ",
+        )
+        .into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        runner.run(SettingsCommand::List, &mut output).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output,
+            "\
+screen.backend=gnome (config.env, read-write, ops: get,describe,set,unset)
+screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
+screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)
+system.sleep_wake_policy=disabled (config.env, read-only, ops: get,describe)
+"
+        );
+    }
+
+    #[test]
+    fn settings_runner_get_prints_value_only() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_idle_timeout=450\n").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Get("screen.idle_timeout".to_string()),
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(String::from_utf8(output).unwrap(), "450\n");
+    }
+
+    #[test]
+    fn settings_runner_describe_includes_metadata_and_operations() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_restore_policy=marker_only\n")
+                .into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Describe(Some("screen.restore_policy".to_string())),
+                &mut output,
+            )
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("screen.restore_policy\n"));
+        assert!(output.contains("  storage key: screen_restore_policy\n"));
+        assert!(output.contains("  type: enum\n"));
+        assert!(output.contains("  current: conservative\n"));
+        assert!(output.contains("  source: config.env\n"));
+        assert!(output.contains("  default: conservative\n"));
+        assert!(output.contains("  mutability: read-write\n"));
+        assert!(output.contains("  supported operations: get, describe, set, unset\n"));
+        assert!(output.contains("  allowed values: conservative, aggressive\n"));
+        assert!(output.contains("  aliases: marker_only -> conservative\n"));
+        assert!(output.contains("  apply: restart-user-screen-service\n"));
+    }
+
+    #[test]
+    fn settings_runner_describe_without_key_describes_all_settings() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        runner
+            .run(SettingsCommand::Describe(None), &mut output)
+            .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("screen.backend\n"));
+        assert!(output.contains("screen.idle_timeout\n"));
+        assert!(output.contains("  range: 1..=86400\n"));
+        assert!(output.contains("system.sleep_wake_policy\n"));
+        assert!(output.contains("  supported operations: get, describe\n"));
+    }
+
+    #[test]
+    fn settings_runner_rejects_unknown_keys() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        let err = runner
+            .run(
+                SettingsCommand::Get("screen.unknown".to_string()),
+                &mut output,
+            )
+            .unwrap_err();
+
+        assert_eq!(err, SettingsError::UnknownKey("screen.unknown".to_string()));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn settings_runner_rejects_write_commands_without_changes() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        let err = runner
+            .run(
+                SettingsCommand::Set {
+                    key: "screen.backend".to_string(),
+                    value: "gnome".to_string(),
+                },
+                &mut output,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SettingsError::WriteCommandUnavailable { command: "set" }
+        );
+        assert!(output.is_empty());
     }
 
     #[test]
