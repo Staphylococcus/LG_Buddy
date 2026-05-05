@@ -223,7 +223,7 @@ Commands:
   monitor         Run the user-session monitor loop
   lifecycle       Run the system lifecycle monitor loop
   detect-backend  Detect the active screen backend
-  settings        Inspect structured LG Buddy settings
+  settings        Inspect and edit structured LG Buddy settings
 
 Startup modes:
   auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
@@ -234,8 +234,8 @@ Settings:
   settings list
   settings describe [key]
   settings get <key>
-  settings set <key> <value>  Reserved for write support; currently fails without changes
-  settings unset <key>        Reserved for write support; currently fails without changes
+  settings set <key> <value>
+  settings unset <key>
 "
     )
 }
@@ -427,6 +427,21 @@ mod tests {
                 SettingsCommand::Get("screen.backend".to_string())
             )))
         );
+        assert_eq!(
+            parse_args(["settings", "set", "screen.backend", "gnome"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::Set {
+                    key: "screen.backend".to_string(),
+                    value: "gnome".to_string(),
+                }
+            )))
+        );
+        assert_eq!(
+            parse_args(["settings", "unset", "screen.backend"]),
+            Ok(ParseOutcome::Command(Command::Settings(
+                SettingsCommand::Unset("screen.backend".to_string())
+            )))
+        );
     }
 
     #[test]
@@ -511,5 +526,21 @@ mod tests {
         for mode in ["auto", "boot", "wake"] {
             assert!(help.contains(mode), "missing startup mode `{mode}`");
         }
+    }
+
+    #[test]
+    fn usage_mentions_settings_commands_without_reserved_notice() {
+        let help = usage("lg-buddy");
+
+        for command in [
+            "settings list",
+            "settings describe [key]",
+            "settings get <key>",
+            "settings set <key> <value>",
+            "settings unset <key>",
+        ] {
+            assert!(help.contains(command), "missing `{command}` from help");
+        }
+        assert!(!help.contains("Reserved for write support"));
     }
 }

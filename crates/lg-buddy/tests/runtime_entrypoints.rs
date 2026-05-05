@@ -3,13 +3,15 @@ mod support;
 use lg_buddy::commands::{run_screen_off, run_screen_on, run_system_resume};
 use lg_buddy::session::runner::{RuntimeActionExecutor, SessionEventDispatcher};
 use lg_buddy::session::SessionEvent;
+use lg_buddy::settings::SettingsCommand;
 use lg_buddy::{run_command, Command};
 use std::fs;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    MockBscpylgtv, MockNmOnline, MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSystemLogind, RuntimeStateLayout,
+    TestConfigFile, TestEnv,
 };
 
 #[test]
@@ -120,6 +122,174 @@ fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(output.contains("Aggressive restore policy is enabled"));
     assert!(output.contains("Screen unblank succeeded."));
+}
+
+#[test]
+fn settings_set_restore_policy_is_loaded_by_screen_runtime() {
+    let mock = MockBscpylgtv::new("entrypoint-settings-set-runtime-tv");
+    mock.set_input("HDMI_3");
+    mock.set_screen_on(false);
+    let wrapper = mock.command_wrapper("entrypoint-settings-set-runtime-wrapper");
+
+    let config = TestConfigFile::new("entrypoint-settings-set-runtime-config");
+    config.write_sample("HDMI_3");
+    let runtime = RuntimeStateLayout::new("entrypoint-settings-set-runtime-state");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
+    env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
+    env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+    let mut settings_output = Vec::new();
+    run_command(
+        Command::Settings(SettingsCommand::Set {
+            key: "screen.restore_policy".to_string(),
+            value: "aggressive".to_string(),
+        }),
+        &mut settings_output,
+    )
+    .expect("settings set should succeed");
+
+    assert!(fs::read_to_string(config.path())
+        .expect("read config")
+        .contains("screen_restore_policy=aggressive\n"));
+    assert!(String::from_utf8(settings_output)
+        .expect("settings output utf8")
+        .contains("apply: skipped systemd apply"));
+
+    let mut output = Vec::new();
+    run_screen_on(&mut output).expect("screen-on should use settings-written policy");
+
+    runtime.assert_session_marker_absent();
+    assert_eq!(
+        mock.calls()
+            .into_iter()
+            .map(|call| call.command)
+            .collect::<Vec<_>>(),
+        vec!["turn_screen_on".to_string()]
+    );
+    assert!(String::from_utf8(output)
+        .expect("screen output utf8")
+        .contains("Aggressive restore policy is enabled"));
+}
+
+#[test]
+fn settings_unset_restore_policy_is_loaded_as_screen_runtime_default() {
+    let mock = MockBscpylgtv::new("entrypoint-settings-unset-runtime-tv");
+    mock.set_input("HDMI_3");
+    mock.set_screen_on(false);
+    let wrapper = mock.command_wrapper("entrypoint-settings-unset-runtime-wrapper");
+
+    let config = TestConfigFile::new("entrypoint-settings-unset-runtime-config");
+    config.write_sample("HDMI_3");
+    config.append_line("screen_restore_policy=aggressive");
+    let runtime = RuntimeStateLayout::new("entrypoint-settings-unset-runtime-state");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
+    env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
+    env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+    let mut settings_output = Vec::new();
+    run_command(
+        Command::Settings(SettingsCommand::Unset("screen.restore_policy".to_string())),
+        &mut settings_output,
+    )
+    .expect("settings unset should succeed");
+
+    assert!(!fs::read_to_string(config.path())
+        .expect("read config")
+        .contains("screen_restore_policy="));
+    assert!(String::from_utf8(settings_output)
+        .expect("settings output utf8")
+        .contains("screen.restore_policy unset"));
+
+    let mut output = Vec::new();
+    run_screen_on(&mut output).expect("screen-on should use default conservative policy");
+
+    runtime.assert_session_marker_absent();
+    assert!(mock.calls().is_empty());
+    assert!(String::from_utf8(output)
+        .expect("screen output utf8")
+        .contains("State file not found"));
+}
+
+#[test]
+fn settings_set_screen_key_restarts_active_user_screen_service() {
+    let config = TestConfigFile::new("entrypoint-settings-apply-config");
+    config.write_sample("HDMI_3");
+    let systemctl_log = config.path().with_file_name("systemctl.log");
+    let systemctl = ExecutableScript::new(
+        "entrypoint-settings-apply-systemctl",
+        "systemctl",
+        &format!(
+            "#!/bin/sh\n\
+printf '%s\\n' \"$*\" >> '{}'\n\
+case \"$2\" in\n\
+  cat|is-active|is-enabled|restart) exit 0 ;;\n\
+  *) exit 1 ;;\n\
+esac\n",
+            systemctl_log.display()
+        ),
+    );
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+
+    let mut output = Vec::new();
+    run_command(
+        Command::Settings(SettingsCommand::Set {
+            key: "screen.idle_timeout".to_string(),
+            value: "600".to_string(),
+        }),
+        &mut output,
+    )
+    .expect("settings set should restart active user service");
+
+    assert!(fs::read_to_string(config.path())
+        .expect("read config")
+        .contains("screen_idle_timeout=600\n"));
+    assert!(String::from_utf8(output)
+        .expect("settings output utf8")
+        .contains("apply: restarted LG_Buddy_screen.service"));
+
+    let systemctl_calls = fs::read_to_string(systemctl_log).expect("read systemctl log");
+    assert!(systemctl_calls.contains("--user cat LG_Buddy_screen.service"));
+    assert!(systemctl_calls.contains("--user is-active --quiet LG_Buddy_screen.service"));
+    assert!(systemctl_calls.contains("--user restart LG_Buddy_screen.service"));
+}
+
+#[test]
+fn settings_set_lifecycle_policy_is_read_only_and_leaves_config_unchanged() {
+    let config = TestConfigFile::new("entrypoint-settings-readonly-config");
+    config.write_sample("HDMI_3");
+    let original = fs::read_to_string(config.path()).expect("read original config");
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+
+    let mut output = Vec::new();
+    let err = run_command(
+        Command::Settings(SettingsCommand::Set {
+            key: "system.sleep_wake_policy".to_string(),
+            value: "disabled".to_string(),
+        }),
+        &mut output,
+    )
+    .expect_err("lifecycle policy should remain read-only");
+
+    assert!(err
+        .to_string()
+        .contains("setting `system.sleep_wake_policy` does not support `set`"));
+    assert!(output.is_empty());
+    assert_eq!(
+        fs::read_to_string(config.path()).expect("read config after rejection"),
+        original
+    );
 }
 
 #[test]

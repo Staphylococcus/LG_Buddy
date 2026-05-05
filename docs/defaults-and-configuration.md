@@ -36,6 +36,12 @@ extra behavior surface.
 
 The primary persistent configuration surface is `config.env`.
 
+The structured settings CLI is an access layer over that same file, not a second
+storage location. A dotted setting key such as `screen.restore_policy` maps to
+the existing `config.env` key `screen_restore_policy`. This keeps manual config
+editing, `configure.sh`, installer preservation, and `lg-buddy settings` on one
+durable source of truth.
+
 New behavior should use a config key when users may reasonably want to keep a
 non-default choice across reinstalls or upgrades. Prefer enum-shaped values over
 multiple booleans when the setting describes a mode.
@@ -86,6 +92,8 @@ choice.
 - `aggressive` is available for users who want LG Buddy to reclaim the TV more
   assertively
 - the choice lives in `config.env`
+- it is writeable through `lg-buddy settings set screen.restore_policy <value>`
+  because the command can apply screen-monitor changes
 
 `system_sleep_wake_policy` follows the same model:
 
@@ -94,3 +102,5 @@ choice.
 - the installer should not ask every user whether sleep/wake automation should
   be enabled
 - the supported values are `enabled` and `disabled`
+- it remains read-only through `lg-buddy settings` until the command can safely
+  apply lifecycle service and NetworkManager hook ownership changes

@@ -121,6 +121,8 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
 
 HELP_OUTPUT="$("$BUNDLE_DIR/lg-buddy" 2>&1 || true)"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
+printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
+printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -200,6 +202,8 @@ fi
 
 INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
+printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
+printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
 
 export LG_BUDDY_REMOVE_CONFIG="1"
 (

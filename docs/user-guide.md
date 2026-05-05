@@ -23,16 +23,19 @@ Available commands:
 - `monitor`
 - `lifecycle`
 - `detect-backend`
+- `settings`
 
 Examples:
 
 ```bash
 lg-buddy detect-backend
+lg-buddy settings list
 lg-buddy monitor
 lg-buddy brightness
 ```
 
-In normal use, systemd starts the relevant commands automatically. Most users only need `brightness` or `configure.sh`.
+In normal use, systemd starts the relevant commands automatically. Most users
+only need `brightness`, `settings`, or `configure.sh`.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for
@@ -123,13 +126,36 @@ artifacts from existing installs so there is only one system lifecycle owner.
 
 ## Configuration
 
-To change settings after installation:
+To inspect structured settings after installation:
+
+```bash
+lg-buddy settings list
+lg-buddy settings describe screen.restore_policy
+lg-buddy settings get screen.idle_timeout
+```
+
+To change supported screen settings:
+
+```bash
+lg-buddy settings set screen.idle_timeout 600
+lg-buddy settings set screen.restore_policy aggressive
+lg-buddy settings unset screen.restore_policy
+```
+
+`set` and `unset` write `config.env` and then apply screen-monitor settings by
+restarting `LG_Buddy_screen.service` when the user service is installed and
+active or enabled. If the user service is missing or disabled, the value remains
+saved and applies when that service is installed or started.
+
+To rerun full setup for TV IP, MAC address, HDMI input, or install-time service
+wiring:
 
 ```bash
 ./configure.sh
 ```
 
-The configurator writes `config.env` to:
+The settings CLI, configurator, installer, and manual edits all use the same
+`config.env` file. It is resolved from:
 
 - `LG_BUDDY_CONFIG`, if set
 - otherwise `${XDG_CONFIG_HOME}/lg-buddy/config.env`
@@ -144,6 +170,15 @@ Current config keys:
 - `screen_idle_timeout`
 - `screen_restore_policy`
 - `system_sleep_wake_policy`
+
+Current structured settings:
+
+| Setting key | `config.env` key | Operations |
+| --- | --- | --- |
+| `screen.backend` | `screen_backend` | `get`, `describe`, `set`, `unset` |
+| `screen.idle_timeout` | `screen_idle_timeout` | `get`, `describe`, `set`, `unset` |
+| `screen.restore_policy` | `screen_restore_policy` | `get`, `describe`, `set`, `unset` |
+| `system.sleep_wake_policy` | `system_sleep_wake_policy` | `get`, `describe` |
 
 `screen_idle_timeout` is the inactivity threshold in seconds used by the session monitor.
 LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
@@ -164,6 +199,10 @@ LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
 The running lifecycle service rereads config and stops cleanly when this value
 is changed to `disabled`. To apply the installed service enable/remove state
 after changing the value, rerun `./install.sh`.
+
+`system.sleep_wake_policy` is read-only in the structured settings CLI for now.
+Write support should only be added when LG Buddy can also apply the lifecycle
+service and NetworkManager hook changes in the same command.
 
 Example:
 
