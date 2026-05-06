@@ -81,6 +81,26 @@ lg_buddy_config_get_valid() {
     fi
 }
 
+lg_buddy_config_get_valid_any() {
+    local regex="$1"
+    local default_value="$2"
+    local config_file="$3"
+    local value=""
+    local key=""
+
+    shift 3
+
+    for key in "$@"; do
+        value="$(lg_buddy_config_get_raw "$key" "$config_file")" || value=""
+        if [ -n "$value" ] && [[ "$value" =~ $regex ]]; then
+            echo "$value"
+            return 0
+        fi
+    done
+
+    echo "$default_value"
+}
+
 lg_buddy_load_config() {
     LG_BUDDY_CONFIG_FILE="$(lg_buddy_effective_config_path)" || {
         echo "LG Buddy: could not determine config path."
@@ -92,9 +112,9 @@ lg_buddy_load_config() {
         return 1
     fi
 
-    tv_ip="$(lg_buddy_config_get_valid "tv_ip" '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "" "$LG_BUDDY_CONFIG_FILE")"
-    tv_mac="$(lg_buddy_config_get_valid "tv_mac" '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE")"
-    input="$(lg_buddy_config_get_valid "input" '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE")"
+    tv_ip="$(lg_buddy_config_get_valid_any '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_ip" "tv_ip")"
+    tv_mac="$(lg_buddy_config_get_valid_any '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_mac" "tv_mac")"
+    input="$(lg_buddy_config_get_valid_any '^HDMI_[1-4]$' "" "$LG_BUDDY_CONFIG_FILE" "tvs_primary_input" "input")"
     screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"
     screen_restore_policy="$(lg_buddy_config_get_valid "screen_restore_policy" '^(marker_only|conservative|aggressive)$' "$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY" "$LG_BUDDY_CONFIG_FILE")"

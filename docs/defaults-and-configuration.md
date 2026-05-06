@@ -42,6 +42,13 @@ the existing `config.env` key `screen_restore_policy`. This keeps manual config
 editing, `configure.sh`, installer preservation, and `lg-buddy settings` on one
 durable source of truth.
 
+The current public settings interface exposes one TV through `tv.ip`, `tv.mac`,
+and `tv.input`. New writes store those values as `tvs_primary_ip`,
+`tvs_primary_mac`, and `tvs_primary_input`. The profile-shaped storage is only an
+extensibility point; LG Buddy does not currently expose multiple TVs or TV
+profile selection. Existing single-TV keys `tv_ip`, `tv_mac`, and `input` remain
+readable for compatibility.
+
 New behavior should use a config key when users may reasonably want to keep a
 non-default choice across reinstalls or upgrades. Prefer enum-shaped values over
 multiple booleans when the setting describes a mode.
@@ -60,6 +67,9 @@ instead.
 Good shapes:
 
 ```ini
+tvs_primary_ip=192.168.1.100
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
 screen_restore_policy=conservative
 system_sleep_wake_policy=enabled
 ```

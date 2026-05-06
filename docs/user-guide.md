@@ -134,18 +134,20 @@ lg-buddy settings describe screen.restore_policy
 lg-buddy settings get screen.idle_timeout
 ```
 
-To change supported screen settings:
+To change supported settings:
 
 ```bash
+lg-buddy settings set tv.input HDMI_2
 lg-buddy settings set screen.idle_timeout 600
 lg-buddy settings set screen.restore_policy aggressive
 lg-buddy settings unset screen.restore_policy
 ```
 
-`set` and `unset` write `config.env` and then apply screen-monitor settings by
-restarting `LG_Buddy_screen.service` when the user service is installed and
-active or enabled. If the user service is missing or disabled, the value remains
-saved and applies when that service is installed or started.
+`set` and `unset` write `config.env` and then apply the setting when an explicit
+runtime apply step is needed. Screen-monitor settings restart
+`LG_Buddy_screen.service` when the user service is installed and active or
+enabled. TV identity and system sleep/wake policy changes are read by later
+runtime actions and do not require a service restart.
 
 To rerun full setup for TV IP, MAC address, HDMI input, or install-time service
 wiring:
@@ -163,22 +165,33 @@ The settings CLI, configurator, installer, and manual edits all use the same
 
 Current config keys:
 
-- `tv_ip`
-- `tv_mac`
-- `input`
+- `tvs_primary_ip`
+- `tvs_primary_mac`
+- `tvs_primary_input`
 - `screen_backend`
 - `screen_idle_timeout`
 - `screen_restore_policy`
 - `system_sleep_wake_policy`
 
+Legacy single-TV keys `tv_ip`, `tv_mac`, and `input` are still read as fallback
+values for existing installs. New writes use `tvs_primary_*` storage keys.
+
 Current structured settings:
 
 | Setting key | `config.env` key | Operations |
 | --- | --- | --- |
+| `tv.ip` | `tvs_primary_ip` | `get`, `describe`, `set` |
+| `tv.mac` | `tvs_primary_mac` | `get`, `describe`, `set` |
+| `tv.input` | `tvs_primary_input` | `get`, `describe`, `set` |
 | `screen.backend` | `screen_backend` | `get`, `describe`, `set`, `unset` |
 | `screen.idle_timeout` | `screen_idle_timeout` | `get`, `describe`, `set`, `unset` |
 | `screen.restore_policy` | `screen_restore_policy` | `get`, `describe`, `set`, `unset` |
 | `system.sleep_wake_policy` | `system_sleep_wake_policy` | `get`, `describe`, `set`, `unset` |
+
+The `tv.*` settings expose the single supported TV in the public API. Their
+storage keys are profile-shaped only to leave room for future storage growth;
+this version does not expose multiple TVs or TV profile selection. These values
+are required, so `unset` is not supported.
 
 `screen_idle_timeout` is the inactivity threshold in seconds used by the session monitor.
 LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
@@ -205,6 +218,9 @@ runtime policy without reinstalling services.
 Example:
 
 ```ini
+tvs_primary_ip=192.168.1.100
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
 screen_idle_timeout=300
 screen_restore_policy=aggressive
 system_sleep_wake_policy=enabled

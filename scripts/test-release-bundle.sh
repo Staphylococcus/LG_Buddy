@@ -193,9 +193,9 @@ if grep -q 'LG_BUDDY_CONFIG' "$NM_LIFECYCLE_HOOK"; then
     exit 1
 fi
 
-grep -q '^tv_ip=192.168.1.10$' "$CONFIG_FILE"
-grep -q '^tv_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
-grep -q '^input=HDMI_2$' "$CONFIG_FILE"
+grep -q '^tvs_primary_ip=192.168.1.10$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
@@ -212,9 +212,15 @@ printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
 "$INSTALLED_BINARY" settings set screen.backend gnome
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.restore_policy aggressive
+"$INSTALLED_BINARY" settings set tv.ip 192.168.1.12
+"$INSTALLED_BINARY" settings set tv.mac 22:33:44:55:66:77
+"$INSTALLED_BINARY" settings set tv.input HDMI_4
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
+grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=22:33:44:55:66:77$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
 
 (
     unset LG_BUDDY_SCREEN_BACKEND
@@ -228,9 +234,9 @@ grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
     ./configure.sh
 )
 
-grep -q '^tv_ip=192.168.1.11$' "$CONFIG_FILE"
-grep -q '^tv_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
-grep -q '^input=HDMI_3$' "$CONFIG_FILE"
+grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"

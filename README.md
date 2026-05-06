@@ -95,6 +95,8 @@ The settings CLI is a structured layer over `config.env`. These examples write
 the same file that manual editing and `configure.sh` use:
 
 ```bash
+lg-buddy settings describe tv.input
+lg-buddy settings set tv.input HDMI_2
 lg-buddy settings describe screen.restore_policy
 lg-buddy settings set screen.idle_timeout 600
 lg-buddy settings set screen.restore_policy aggressive
@@ -102,13 +104,20 @@ lg-buddy settings set system.sleep_wake_policy disabled
 lg-buddy settings unset screen.restore_policy
 ```
 
-Advanced session restore behavior can also be tuned directly in `config.env`:
+Settings can also be edited directly in `config.env`:
 
 ```ini
+tvs_primary_ip=192.168.1.100
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
 screen_idle_timeout=300
 screen_restore_policy=conservative
 system_sleep_wake_policy=enabled
 ```
+
+`tv_ip`, `tv_mac`, and `input` are still accepted as legacy single-TV keys, but
+new writes use the `tvs_primary_*` shape so the storage can grow later without
+changing the current single-TV settings interface.
 
 `screen_restore_policy=conservative` is the default. LG Buddy only restores when a matching LG Buddy marker says it previously blanked or powered off the TV.
 

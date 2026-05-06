@@ -1495,9 +1495,9 @@ mod tests {
             path,
             format!(
                 "\
-tv_ip=192.168.1.42
-tv_mac=aa:bb:cc:dd:ee:ff
-input=HDMI_1
+tvs_primary_ip=192.168.1.42
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_1
 system_sleep_wake_policy={policy}
 "
             ),

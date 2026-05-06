@@ -307,9 +307,9 @@ chmod 700 "$CONFIG_DIR"
 
 cat >"$CONFIG_FILE" <<EOF
 # LG Buddy configuration
-tv_ip=$tv_ip
-tv_mac=$tv_mac
-input=$input
+tvs_primary_ip=$tv_ip
+tvs_primary_mac=$tv_mac
+tvs_primary_input=$input
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout
 screen_restore_policy=$screen_restore_policy

@@ -5,9 +5,21 @@ Feature: Settings CLI
     Given a temporary LG Buddy config using input HDMI_2
     When I run the command "settings list"
     Then the command succeeds
+    And stdout contains "tv.ip=192.0.2.42 (config.env, read-write, ops: get,describe,set)"
+    And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
+    And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "screen.backend=auto (config.env, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "system.sleep_wake_policy=enabled (default, read-write, ops: get,describe,set,unset)"
+
+  Scenario: settings describe shows required TV operations
+    Given a temporary LG Buddy config using input HDMI_2
+    When I run the command "settings describe tv.input"
+    Then the command succeeds
+    And stdout contains "tv.input"
+    And stdout contains "storage key: tvs_primary_input"
+    And stdout contains "default: required"
+    And stdout contains "supported operations: get, describe, set"
 
   Scenario: settings describe shows lifecycle policy operations
     Given a temporary LG Buddy config using input HDMI_2
@@ -25,6 +37,21 @@ Feature: Settings CLI
     And stdout contains "screen.idle_timeout=600"
     And stdout contains "apply: skipped systemd apply"
     And config.env contains "screen_idle_timeout=600"
+
+  Scenario: settings set writes TV settings to profile-shaped storage
+    Given a temporary LG Buddy config using input HDMI_2
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_3
+    When I run the command "settings set tv.input HDMI_3"
+    Then the command succeeds
+    And stdout contains "tv.input=HDMI_3"
+    And stdout contains "apply: no runtime apply action required"
+    And config.env contains "tvs_primary_input=HDMI_3"
+    And config.env does not contain "input=HDMI_2"
+    When I run the command "screen-off"
+    Then the command succeeds
+    And the TV client received "turn_screen_off"
 
   Scenario: settings set writes a restore policy consumed by screen runtime
     Given a temporary LG Buddy config using input HDMI_3

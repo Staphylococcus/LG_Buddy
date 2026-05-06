@@ -181,7 +181,7 @@ impl FromStr for HdmiInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacAddress([u8; 6]);
 
 impl MacAddress {
@@ -367,40 +367,37 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
 pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
     let entries = parse_config_entries(contents);
 
-    let tv_ip = entries
-        .get("tv_ip")
-        .ok_or(ConfigError::MissingRequiredKey("tv_ip"))
+    let tv_ip = required_config_value(&entries, "tvs_primary_ip", &["tv_ip"])
+        .ok_or(ConfigError::MissingRequiredKey("tvs_primary_ip"))
         .and_then(|value| {
             value
                 .parse::<Ipv4Addr>()
                 .map_err(|_| ConfigError::InvalidValue {
-                    key: "tv_ip",
+                    key: "tvs_primary_ip",
                     value: value.clone(),
                     expected: "an IPv4 address",
                 })
         })?;
 
-    let tv_mac = entries
-        .get("tv_mac")
-        .ok_or(ConfigError::MissingRequiredKey("tv_mac"))
+    let tv_mac = required_config_value(&entries, "tvs_primary_mac", &["tv_mac"])
+        .ok_or(ConfigError::MissingRequiredKey("tvs_primary_mac"))
         .and_then(|value| {
             value
                 .parse::<MacAddress>()
                 .map_err(|_| ConfigError::InvalidValue {
-                    key: "tv_mac",
+                    key: "tvs_primary_mac",
                     value: value.clone(),
                     expected: "a MAC address like aa:bb:cc:dd:ee:ff",
                 })
         })?;
 
-    let input = entries
-        .get("input")
-        .ok_or(ConfigError::MissingRequiredKey("input"))
+    let input = required_config_value(&entries, "tvs_primary_input", &["input"])
+        .ok_or(ConfigError::MissingRequiredKey("tvs_primary_input"))
         .and_then(|value| {
             value
                 .parse::<HdmiInput>()
                 .map_err(|_| ConfigError::InvalidValue {
-                    key: "input",
+                    key: "tvs_primary_input",
                     value: value.clone(),
                     expected: "one of HDMI_1, HDMI_2, HDMI_3, HDMI_4",
                 })
@@ -434,6 +431,18 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
         screen_idle_timeout,
         screen_restore_policy,
         system_sleep_wake_policy,
+    })
+}
+
+fn required_config_value<'a>(
+    entries: &'a HashMap<String, String>,
+    primary_key: &str,
+    fallback_keys: &[&str],
+) -> Option<&'a String> {
+    entries.get(primary_key).or_else(|| {
+        fallback_keys
+            .iter()
+            .find_map(|fallback_key| entries.get(*fallback_key))
     })
 }
 
@@ -565,9 +574,9 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         let config = parse_config(
             "\
             # LG Buddy configuration
-            tv_ip=192.168.1.42
-            tv_mac=aa:bb:cc:dd:ee:ff
-            input=HDMI_2
+            tvs_primary_ip=192.168.1.42
+            tvs_primary_mac=aa:bb:cc:dd:ee:ff
+            tvs_primary_input=HDMI_2
             screen_backend=gnome
             screen_idle_timeout=450
             screen_restore_policy=aggressive
@@ -589,6 +598,22 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             config.system_sleep_wake_policy,
             SystemSleepWakePolicy::Disabled
         );
+    }
+
+    #[test]
+    fn parse_accepts_legacy_single_tv_keys() {
+        let config = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_2
+            ",
+        )
+        .expect("parse legacy TV config");
+
+        assert_eq!(config.tv_ip.to_string(), "192.168.1.42");
+        assert_eq!(config.tv_mac.to_string(), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(config.input, HdmiInput::Hdmi2);
     }
 
     #[test]
@@ -764,7 +789,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         )
         .expect_err("missing tv_mac should fail");
 
-        assert_eq!(err.to_string(), "missing required config key `tv_mac`");
+        assert_eq!(
+            err.to_string(),
+            "missing required config key `tvs_primary_mac`"
+        );
     }
 
     #[test]
@@ -780,7 +808,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
 
         assert!(matches!(
             err,
-            ConfigError::InvalidValue { key: "tv_ip", .. }
+            ConfigError::InvalidValue {
+                key: "tvs_primary_ip",
+                ..
+            }
         ));
     }
 

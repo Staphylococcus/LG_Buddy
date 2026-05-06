@@ -3,12 +3,13 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
-    ConfigPathSources, DEFAULT_IDLE_TIMEOUT,
+    ConfigPathSources, MacAddress, DEFAULT_IDLE_TIMEOUT,
 };
 
 const SETTINGS_SUBCOMMANDS: &[&str] = &["list", "describe", "get", "set", "unset"];
@@ -20,25 +21,72 @@ const READ_WRITE_OPERATIONS: &[SettingOperation] = &[
     SettingOperation::Set,
     SettingOperation::Unset,
 ];
+const READ_SET_OPERATIONS: &[SettingOperation] = &[
+    SettingOperation::Get,
+    SettingOperation::Describe,
+    SettingOperation::Set,
+];
 const EMPTY_ALIASES: &[SettingAlias] = &[];
+const EMPTY_STORAGE_KEYS: &[&str] = &[];
+const TV_IP_FALLBACK_STORAGE_KEYS: &[&str] = &["tv_ip"];
+const TV_MAC_FALLBACK_STORAGE_KEYS: &[&str] = &["tv_mac"];
+const TV_INPUT_FALLBACK_STORAGE_KEYS: &[&str] = &["input"];
 const SCREEN_RESTORE_POLICY_ALIASES: &[SettingAlias] = &[SettingAlias {
     from: "marker_only",
     to: "conservative",
 }];
 
+const TV_INPUT_VALUES: &[&str] = &["HDMI_1", "HDMI_2", "HDMI_3", "HDMI_4"];
 const SCREEN_BACKEND_VALUES: &[&str] = &["auto", "gnome", "swayidle"];
 const SCREEN_RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
 const SYSTEM_SLEEP_WAKE_POLICY_VALUES: &[&str] = &["enabled", "disabled"];
 
 const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     SettingDefinition {
+        key: "tv.ip",
+        storage_key: "tvs_primary_ip",
+        fallback_storage_keys: TV_IP_FALLBACK_STORAGE_KEYS,
+        value_type: SettingType::Ipv4,
+        default_value: None,
+        mutability: SettingMutability::ReadWrite,
+        operations: READ_SET_OPERATIONS,
+        apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
+        description: "IPv4 address of the primary configured TV.",
+    },
+    SettingDefinition {
+        key: "tv.mac",
+        storage_key: "tvs_primary_mac",
+        fallback_storage_keys: TV_MAC_FALLBACK_STORAGE_KEYS,
+        value_type: SettingType::MacAddress,
+        default_value: None,
+        mutability: SettingMutability::ReadWrite,
+        operations: READ_SET_OPERATIONS,
+        apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
+        description: "MAC address of the primary configured TV for Wake-on-LAN.",
+    },
+    SettingDefinition {
+        key: "tv.input",
+        storage_key: "tvs_primary_input",
+        fallback_storage_keys: TV_INPUT_FALLBACK_STORAGE_KEYS,
+        value_type: SettingType::Enum(EnumSettingType {
+            values: TV_INPUT_VALUES,
+            aliases: EMPTY_ALIASES,
+        }),
+        default_value: None,
+        mutability: SettingMutability::ReadWrite,
+        operations: READ_SET_OPERATIONS,
+        apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
+        description: "HDMI input used by the primary configured TV.",
+    },
+    SettingDefinition {
         key: "screen.backend",
         storage_key: "screen_backend",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
         value_type: SettingType::Enum(EnumSettingType {
             values: SCREEN_BACKEND_VALUES,
             aliases: EMPTY_ALIASES,
         }),
-        default_value: SettingValue::Enum("auto"),
+        default_value: Some(SettingValue::Enum("auto")),
         mutability: SettingMutability::ReadWrite,
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RestartUserScreenService,
@@ -47,11 +95,12 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     SettingDefinition {
         key: "screen.idle_timeout",
         storage_key: "screen_idle_timeout",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
         value_type: SettingType::Integer(IntegerSettingType {
             min: 1,
             max: 86_400,
         }),
-        default_value: SettingValue::Integer(DEFAULT_IDLE_TIMEOUT as i64),
+        default_value: Some(SettingValue::Integer(DEFAULT_IDLE_TIMEOUT as i64)),
         mutability: SettingMutability::ReadWrite,
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RestartUserScreenService,
@@ -60,11 +109,12 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     SettingDefinition {
         key: "screen.restore_policy",
         storage_key: "screen_restore_policy",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
         value_type: SettingType::Enum(EnumSettingType {
             values: SCREEN_RESTORE_POLICY_VALUES,
             aliases: SCREEN_RESTORE_POLICY_ALIASES,
         }),
-        default_value: SettingValue::Enum("conservative"),
+        default_value: Some(SettingValue::Enum("conservative")),
         mutability: SettingMutability::ReadWrite,
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RestartUserScreenService,
@@ -73,11 +123,12 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     SettingDefinition {
         key: "system.sleep_wake_policy",
         storage_key: "system_sleep_wake_policy",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
         value_type: SettingType::Enum(EnumSettingType {
             values: SYSTEM_SLEEP_WAKE_POLICY_VALUES,
             aliases: EMPTY_ALIASES,
         }),
-        default_value: SettingValue::Enum("enabled"),
+        default_value: Some(SettingValue::Enum("enabled")),
         mutability: SettingMutability::ReadWrite,
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RuntimePolicyOnly,
@@ -260,7 +311,7 @@ impl SettingsFormatter {
         writer: &mut W,
         setting: EffectiveSetting,
     ) -> Result<(), SettingsError> {
-        writeln!(writer, "{}", setting.value()).map_err(output_error)
+        writeln!(writer, "{}", setting.required_value()?).map_err(output_error)
     }
 
     pub fn write_list<W: io::Write>(
@@ -273,7 +324,7 @@ impl SettingsFormatter {
                 writer,
                 "{}={} ({}, {}, ops: {})",
                 setting.key_name(),
-                setting.value(),
+                format_effective_value(*setting),
                 setting.source().as_str(),
                 setting.definition().mutability().as_str(),
                 format_operations(setting.definition().supported_operations(), ",")
@@ -314,7 +365,7 @@ impl SettingsFormatter {
                     writer,
                     "{}={} (saved to {})",
                     mutation.key_name(),
-                    mutation.new_value(),
+                    mutation.new_value()?,
                     change.path().display()
                 )
                 .map_err(output_error)?;
@@ -324,7 +375,7 @@ impl SettingsFormatter {
                     writer,
                     "{} already set to {} ({})",
                     mutation.key_name(),
-                    mutation.new_value(),
+                    mutation.new_value()?,
                     change.path().display()
                 )
                 .map_err(output_error)?;
@@ -367,9 +418,10 @@ impl SettingsFormatter {
         writeln!(writer, "{}", setting.key_name()).map_err(output_error)?;
         writeln!(writer, "  storage key: {}", setting.storage_key()).map_err(output_error)?;
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
-        writeln!(writer, "  current: {}", setting.value()).map_err(output_error)?;
+        writeln!(writer, "  current: {}", format_effective_value(setting)).map_err(output_error)?;
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
-        writeln!(writer, "  default: {}", definition.default_value()).map_err(output_error)?;
+        writeln!(writer, "  default: {}", definition.default_value_label())
+            .map_err(output_error)?;
         writeln!(writer, "  mutability: {}", definition.mutability().as_str())
             .map_err(output_error)?;
         writeln!(
@@ -401,6 +453,7 @@ impl SettingsFormatter {
                 )
                 .map_err(output_error)?;
             }
+            SettingType::Ipv4 | SettingType::MacAddress => {}
         }
 
         writeln!(writer, "  apply: {}", definition.apply_strategy().as_str())
@@ -512,9 +565,9 @@ pub enum SettingsMutationAction {
 #[derive(Debug, Clone, Copy)]
 pub struct SettingsMutation {
     definition: &'static SettingDefinition,
-    old_value: SettingValue,
+    old_value: Option<SettingValue>,
     old_source: SettingSource,
-    new_value: SettingValue,
+    new_value: Option<SettingValue>,
     action: SettingsMutationAction,
 }
 
@@ -529,7 +582,7 @@ impl SettingsMutation {
             definition,
             old_value: old.value(),
             old_source: old.source(),
-            new_value,
+            new_value: Some(new_value),
             action: SettingsMutationAction::Set,
         })
     }
@@ -560,7 +613,7 @@ impl SettingsMutation {
         self.definition.storage_key()
     }
 
-    pub fn old_value(self) -> SettingValue {
+    pub fn old_value(self) -> Option<SettingValue> {
         self.old_value
     }
 
@@ -568,8 +621,11 @@ impl SettingsMutation {
         self.old_source
     }
 
-    pub fn new_value(self) -> SettingValue {
+    pub fn new_value(self) -> Result<SettingValue, SettingsError> {
         self.new_value
+            .ok_or_else(|| SettingsError::MissingRequiredSetting {
+                key: self.key_name().to_string(),
+            })
     }
 
     pub fn action(self) -> SettingsMutationAction {
@@ -749,7 +805,9 @@ impl<C: ServiceController> SettingsApplier<C> {
     pub fn apply(&self, change: &SettingsChange) -> Result<SettingsApplyOutcome, SettingsError> {
         match change.mutation().definition().apply_strategy() {
             ApplyStrategy::RestartUserScreenService => self.apply_screen_service_restart(),
-            ApplyStrategy::RuntimePolicyOnly => Ok(SettingsApplyOutcome::NoActionRequired),
+            ApplyStrategy::RuntimePolicyOnly | ApplyStrategy::NoRuntimeApplyRequired => {
+                Ok(SettingsApplyOutcome::NoActionRequired)
+            }
         }
     }
 
@@ -870,8 +928,20 @@ fn persist_settings_mutation(
 ) -> Result<SettingsChange, SettingsError> {
     let mut editor = ConfigEnvEditor::load(path)?;
     let file_changed = match mutation.action() {
-        SettingsMutationAction::Set => editor.set(mutation.storage_key(), mutation.new_value()),
-        SettingsMutationAction::Unset => editor.unset(mutation.storage_key()),
+        SettingsMutationAction::Set => {
+            let mut changed = editor.set(mutation.storage_key(), mutation.new_value()?);
+            for fallback_key in mutation.definition().fallback_storage_keys() {
+                changed |= editor.unset(fallback_key);
+            }
+            changed
+        }
+        SettingsMutationAction::Unset => {
+            let mut changed = editor.unset(mutation.storage_key());
+            for fallback_key in mutation.definition().fallback_storage_keys() {
+                changed |= editor.unset(fallback_key);
+            }
+            changed
+        }
     };
 
     if file_changed {
@@ -922,19 +992,29 @@ impl SettingsStore {
     }
 
     pub fn effective_definition(&self, definition: &'static SettingDefinition) -> EffectiveSetting {
-        let raw_value = self.reader.raw_value(definition.storage_key());
-        let parsed_value = raw_value.and_then(|value| definition.parse_value(value).ok());
+        let raw_value = self.reader.raw_setting_value(definition);
+        let parsed_value = raw_value.and_then(|(value, source)| {
+            definition
+                .parse_value(value)
+                .ok()
+                .map(|value| (value, source))
+        });
 
-        match parsed_value {
-            Some(value) => EffectiveSetting {
+        match (parsed_value, definition.default_value()) {
+            (Some((value, source)), _) => EffectiveSetting {
                 definition,
-                value,
-                source: SettingSource::ConfigEnv,
+                value: Some(value),
+                source,
             },
-            None => EffectiveSetting {
+            (None, Some(value)) => EffectiveSetting {
                 definition,
-                value: definition.default_value(),
+                value: Some(value),
                 source: SettingSource::Default,
+            },
+            (None, None) => EffectiveSetting {
+                definition,
+                value: None,
+                source: SettingSource::Missing,
             },
         }
     }
@@ -990,6 +1070,23 @@ impl ConfigEnvReader {
         self.entries.get(storage_key).map(String::as_str)
     }
 
+    pub fn raw_setting_value(
+        &self,
+        definition: &'static SettingDefinition,
+    ) -> Option<(&str, SettingSource)> {
+        self.raw_value(definition.storage_key())
+            .map(|value| (value, SettingSource::ConfigEnv))
+            .or_else(|| {
+                definition
+                    .fallback_storage_keys()
+                    .iter()
+                    .find_map(|storage_key| {
+                        self.raw_value(storage_key)
+                            .map(|value| (value, SettingSource::LegacyConfigEnv))
+                    })
+            })
+    }
+
     pub fn into_store(self) -> SettingsStore {
         SettingsStore::from_reader(self)
     }
@@ -1011,7 +1108,7 @@ impl ConfigPathResolver {
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveSetting {
     definition: &'static SettingDefinition,
-    value: SettingValue,
+    value: Option<SettingValue>,
     source: SettingSource,
 }
 
@@ -1032,8 +1129,15 @@ impl EffectiveSetting {
         self.definition.storage_key()
     }
 
-    pub fn value(self) -> SettingValue {
+    pub fn value(self) -> Option<SettingValue> {
         self.value
+    }
+
+    pub fn required_value(self) -> Result<SettingValue, SettingsError> {
+        self.value
+            .ok_or_else(|| SettingsError::MissingRequiredSetting {
+                key: self.key_name().to_string(),
+            })
     }
 
     pub fn source(self) -> SettingSource {
@@ -1045,6 +1149,8 @@ impl EffectiveSetting {
 pub enum SettingSource {
     Default,
     ConfigEnv,
+    LegacyConfigEnv,
+    Missing,
 }
 
 impl SettingSource {
@@ -1052,6 +1158,8 @@ impl SettingSource {
         match self {
             Self::Default => "default",
             Self::ConfigEnv => "config.env",
+            Self::LegacyConfigEnv => "legacy config.env",
+            Self::Missing => "missing",
         }
     }
 }
@@ -1104,6 +1212,21 @@ impl SettingsRegistry {
                 )));
             }
 
+            for fallback_storage_key in definition.fallback_storage_keys {
+                validate_storage_key(fallback_storage_key).map_err(|reason| {
+                    SettingsError::RegistryInvariant(format!(
+                        "invalid fallback storage key `{fallback_storage_key}` for `{}`: {reason}",
+                        definition.key
+                    ))
+                })?;
+
+                if !storage_keys.insert(*fallback_storage_key) {
+                    return Err(SettingsError::RegistryInvariant(format!(
+                        "duplicate storage key `{fallback_storage_key}`"
+                    )));
+                }
+            }
+
             definition.validate_type_metadata()?;
             definition.validate_default()?;
             definition.validate_operation_metadata()?;
@@ -1141,8 +1264,9 @@ impl fmt::Display for SettingKey<'_> {
 pub struct SettingDefinition {
     key: &'static str,
     storage_key: &'static str,
+    fallback_storage_keys: &'static [&'static str],
     value_type: SettingType,
-    default_value: SettingValue,
+    default_value: Option<SettingValue>,
     mutability: SettingMutability,
     operations: &'static [SettingOperation],
     apply_strategy: ApplyStrategy,
@@ -1162,12 +1286,22 @@ impl SettingDefinition {
         self.storage_key
     }
 
+    pub fn fallback_storage_keys(&self) -> &'static [&'static str] {
+        self.fallback_storage_keys
+    }
+
     pub fn value_type(&self) -> SettingType {
         self.value_type
     }
 
-    pub fn default_value(&self) -> SettingValue {
+    pub fn default_value(&self) -> Option<SettingValue> {
         self.default_value
+    }
+
+    pub fn default_value_label(&self) -> String {
+        self.default_value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "required".to_string())
     }
 
     pub fn mutability(&self) -> SettingMutability {
@@ -1212,22 +1346,27 @@ impl SettingDefinition {
         match self.value_type {
             SettingType::Enum(enum_type) => enum_type.validate(self.key),
             SettingType::Integer(integer_type) => integer_type.validate(self.key),
+            SettingType::Ipv4 | SettingType::MacAddress => Ok(()),
         }
     }
 
     fn validate_default(&self) -> Result<(), SettingsError> {
-        self.value_type
-            .validate_value(self.key, self.default_value)
-            .map_err(|err| match err {
-                SettingsError::InvalidValue {
-                    key,
-                    value,
-                    expected,
-                } => SettingsError::RegistryInvariant(format!(
-                    "invalid default value `{value}` for `{key}`: expected {expected}"
-                )),
-                other => other,
-            })
+        if let Some(default_value) = self.default_value {
+            self.value_type
+                .validate_value(self.key, default_value)
+                .map_err(|err| match err {
+                    SettingsError::InvalidValue {
+                        key,
+                        value,
+                        expected,
+                    } => SettingsError::RegistryInvariant(format!(
+                        "invalid default value `{value}` for `{key}`: expected {expected}"
+                    )),
+                    other => other,
+                })
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_operation_metadata(&self) -> Result<(), SettingsError> {
@@ -1240,8 +1379,12 @@ impl SettingDefinition {
 
         match self.mutability {
             SettingMutability::ReadWrite => {
-                for operation in READ_WRITE_OPERATIONS {
-                    if !self.operations.contains(operation) {
+                for operation in [
+                    SettingOperation::Get,
+                    SettingOperation::Describe,
+                    SettingOperation::Set,
+                ] {
+                    if !self.operations.contains(&operation) {
                         return Err(SettingsError::RegistryInvariant(format!(
                             "`{}` is read-write but does not support `{}`",
                             self.key,
@@ -1263,6 +1406,13 @@ impl SettingDefinition {
             }
         }
 
+        if self.default_value.is_none() && self.operations.contains(&SettingOperation::Unset) {
+            return Err(SettingsError::RegistryInvariant(format!(
+                "`{}` is required but supports `unset`",
+                self.key
+            )));
+        }
+
         Ok(())
     }
 }
@@ -1271,6 +1421,8 @@ impl SettingDefinition {
 pub enum SettingType {
     Enum(EnumSettingType),
     Integer(IntegerSettingType),
+    Ipv4,
+    MacAddress,
 }
 
 impl SettingType {
@@ -1292,6 +1444,22 @@ impl SettingType {
                     expected: integer_type.expected(),
                 }),
             },
+            Self::Ipv4 => value
+                .parse::<Ipv4Addr>()
+                .map(SettingValue::Ipv4)
+                .map_err(|_| SettingsError::InvalidValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    expected: Self::Ipv4.expected(),
+                }),
+            Self::MacAddress => value
+                .parse::<MacAddress>()
+                .map(SettingValue::MacAddress)
+                .map_err(|_| SettingsError::InvalidValue {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    expected: Self::MacAddress.expected(),
+                }),
         }
     }
 
@@ -1319,6 +1487,8 @@ impl SettingType {
                     expected: integer_type.expected(),
                 })
             }
+            (Self::Ipv4, SettingValue::Ipv4(_))
+            | (Self::MacAddress, SettingValue::MacAddress(_)) => Ok(()),
             (expected_type, actual_value) => Err(SettingsError::InvalidValue {
                 key: key.to_string(),
                 value: actual_value.to_string(),
@@ -1331,6 +1501,8 @@ impl SettingType {
         match self {
             Self::Enum(enum_type) => enum_type.expected(),
             Self::Integer(integer_type) => integer_type.expected(),
+            Self::Ipv4 => "an IPv4 address".to_string(),
+            Self::MacAddress => "a MAC address like aa:bb:cc:dd:ee:ff".to_string(),
         }
     }
 
@@ -1338,6 +1510,8 @@ impl SettingType {
         match self {
             Self::Enum(_) => "enum",
             Self::Integer(_) => "integer",
+            Self::Ipv4 => "ipv4",
+            Self::MacAddress => "mac-address",
         }
     }
 }
@@ -1488,19 +1662,21 @@ impl IntegerSettingType {
 pub enum SettingValue {
     Enum(&'static str),
     Integer(i64),
+    Ipv4(Ipv4Addr),
+    MacAddress(MacAddress),
 }
 
 impl SettingValue {
     pub fn as_enum(self) -> Option<&'static str> {
         match self {
             Self::Enum(value) => Some(value),
-            Self::Integer(_) => None,
+            Self::Integer(_) | Self::Ipv4(_) | Self::MacAddress(_) => None,
         }
     }
 
     pub fn as_integer(self) -> Option<i64> {
         match self {
-            Self::Enum(_) => None,
+            Self::Enum(_) | Self::Ipv4(_) | Self::MacAddress(_) => None,
             Self::Integer(value) => Some(value),
         }
     }
@@ -1511,6 +1687,8 @@ impl fmt::Display for SettingValue {
         match self {
             Self::Enum(value) => write!(f, "{value}"),
             Self::Integer(value) => write!(f, "{value}"),
+            Self::Ipv4(value) => write!(f, "{value}"),
+            Self::MacAddress(value) => write!(f, "{value}"),
         }
     }
 }
@@ -1559,6 +1737,7 @@ impl fmt::Display for SettingOperation {
 pub enum ApplyStrategy {
     RestartUserScreenService,
     RuntimePolicyOnly,
+    NoRuntimeApplyRequired,
 }
 
 impl ApplyStrategy {
@@ -1566,6 +1745,7 @@ impl ApplyStrategy {
         match self {
             Self::RestartUserScreenService => "restart-user-screen-service",
             Self::RuntimePolicyOnly => "runtime-policy-only",
+            Self::NoRuntimeApplyRequired => "no-runtime-apply-required",
         }
     }
 }
@@ -1600,6 +1780,9 @@ pub enum SettingsError {
         key: String,
         value: String,
         expected: String,
+    },
+    MissingRequiredSetting {
+        key: String,
     },
     UnsupportedOperation {
         key: String,
@@ -1645,6 +1828,9 @@ impl fmt::Display for SettingsError {
                 f,
                 "invalid value for setting `{key}`: `{value}`; expected {expected}"
             ),
+            Self::MissingRequiredSetting { key } => {
+                write!(f, "required setting `{key}` is not configured")
+            }
             Self::UnsupportedOperation { key, operation } => {
                 write!(
                     f,
@@ -1669,6 +1855,7 @@ impl std::error::Error for SettingsError {
             | Self::InvalidKey { .. }
             | Self::UnknownKey(_)
             | Self::InvalidValue { .. }
+            | Self::MissingRequiredSetting { .. }
             | Self::UnsupportedOperation { .. }
             | Self::RegistryInvariant(_) => None,
         }
@@ -1691,6 +1878,13 @@ fn format_operations(operations: &[SettingOperation], separator: &str) -> String
         .map(|operation| operation.as_str())
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+fn format_effective_value(setting: EffectiveSetting) -> String {
+    setting
+        .value()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "<missing>".to_string())
 }
 
 fn format_aliases(aliases: &[SettingAlias]) -> String {
@@ -1825,10 +2019,10 @@ fn validate_storage_key(value: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplyStrategy, ConfigEnvReader, ConfigPathResolver, ServiceController, SettingKey,
-        SettingMutability, SettingOperation, SettingSource, SettingType, SettingValue,
-        SettingsApplier, SettingsCommand, SettingsCommandRunner, SettingsError, SettingsParseError,
-        SettingsStore, UserServiceState, SETTINGS_REGISTRY,
+        format_effective_value, ApplyStrategy, ConfigEnvReader, ConfigPathResolver,
+        ServiceController, SettingKey, SettingMutability, SettingOperation, SettingSource,
+        SettingType, SettingValue, SettingsApplier, SettingsCommand, SettingsCommandRunner,
+        SettingsError, SettingsParseError, SettingsStore, UserServiceState, SETTINGS_REGISTRY,
     };
     use crate::config::ConfigPathSources;
     use std::cell::Cell;
@@ -1853,6 +2047,9 @@ mod tests {
         assert_eq!(
             keys,
             vec![
+                "tv.ip",
+                "tv.mac",
+                "tv.input",
                 "screen.backend",
                 "screen.idle_timeout",
                 "screen.restore_policy",
@@ -1872,6 +2069,9 @@ mod tests {
         assert_eq!(
             mappings,
             vec![
+                ("tv.ip", "tvs_primary_ip"),
+                ("tv.mac", "tvs_primary_mac"),
+                ("tv.input", "tvs_primary_input"),
                 ("screen.backend", "screen_backend"),
                 ("screen.idle_timeout", "screen_idle_timeout"),
                 ("screen.restore_policy", "screen_restore_policy"),
@@ -1956,6 +2156,9 @@ mod tests {
         assert_eq!(
             output,
             "\
+tv.ip=<missing> (missing, read-write, ops: get,describe,set)
+tv.mac=<missing> (missing, read-write, ops: get,describe,set)
+tv.input=<missing> (missing, read-write, ops: get,describe,set)
 screen.backend=gnome (config.env, read-write, ops: get,describe,set,unset)
 screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
 screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)
@@ -2042,6 +2245,25 @@ system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set
             .unwrap_err();
 
         assert_eq!(err, SettingsError::UnknownKey("screen.unknown".to_string()));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn settings_runner_rejects_missing_required_value_on_get() {
+        let store = ConfigEnvReader::parse("/tmp/config.env", "").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        let err = runner
+            .run(SettingsCommand::Get("tv.ip".to_string()), &mut output)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SettingsError::MissingRequiredSetting {
+                key: "tv.ip".to_string()
+            }
+        );
         assert!(output.is_empty());
     }
 
@@ -2250,6 +2472,50 @@ screen_restore_policy=aggressive
     }
 
     #[test]
+    fn settings_runner_sets_tv_value_to_canonical_storage_without_restart() {
+        let path = unique_test_path("tv-set");
+        fs::write(
+            &path,
+            "\
+tv_ip=192.0.2.42
+tv_mac=aa:bb:cc:dd:ee:ff
+input=HDMI_2
+",
+        )
+        .unwrap();
+        let store = SettingsStore::load(&path).unwrap();
+        let fake_service = FakeServiceController::active_or_enabled();
+        let restarts = fake_service.restarts.clone();
+        let runner = SettingsCommandRunner::with_applier(store, SettingsApplier::new(fake_service));
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: "tv.ip".to_string(),
+                    value: "192.0.2.43".to_string(),
+                },
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\
+tv_mac=aa:bb:cc:dd:ee:ff
+input=HDMI_2
+tvs_primary_ip=192.0.2.43
+"
+        );
+        assert_eq!(restarts.get(), 0);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("tv.ip=192.0.2.43 (saved to "));
+        assert!(output.contains("apply: no runtime apply action required\n"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn settings_runner_creates_parent_directory_for_valid_write() {
         let root = unique_test_path("parent").with_extension("");
         let path = root.join("nested").join("config.env");
@@ -2354,20 +2620,70 @@ screen_restore_policy=aggressive
         .into_store();
 
         let backend = store.effective_by_name("screen.backend").unwrap();
-        assert_eq!(backend.value(), SettingValue::Enum("gnome"));
+        assert_eq!(backend.value(), Some(SettingValue::Enum("gnome")));
         assert_eq!(backend.source(), SettingSource::ConfigEnv);
 
         let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
-        assert_eq!(idle_timeout.value(), SettingValue::Integer(450));
+        assert_eq!(idle_timeout.value(), Some(SettingValue::Integer(450)));
         assert_eq!(idle_timeout.source(), SettingSource::ConfigEnv);
 
         let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
-        assert_eq!(restore_policy.value(), SettingValue::Enum("aggressive"));
+        assert_eq!(
+            restore_policy.value(),
+            Some(SettingValue::Enum("aggressive"))
+        );
         assert_eq!(restore_policy.source(), SettingSource::ConfigEnv);
 
         let sleep_policy = store.effective_by_name("system.sleep_wake_policy").unwrap();
-        assert_eq!(sleep_policy.value(), SettingValue::Enum("disabled"));
+        assert_eq!(sleep_policy.value(), Some(SettingValue::Enum("disabled")));
         assert_eq!(sleep_policy.source(), SettingSource::ConfigEnv);
+    }
+
+    #[test]
+    fn settings_store_reads_tv_values_from_canonical_and_legacy_storage() {
+        let canonical = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            tvs_primary_ip=192.0.2.43
+            tvs_primary_mac=11:22:33:44:55:66
+            tvs_primary_input=HDMI_3
+            ",
+        )
+        .into_store();
+
+        assert_eq!(
+            canonical.effective_by_name("tv.ip").unwrap().value(),
+            Some(SettingValue::Ipv4("192.0.2.43".parse().unwrap()))
+        );
+        assert_eq!(
+            canonical.effective_by_name("tv.mac").unwrap().value(),
+            Some(SettingValue::MacAddress(
+                "11:22:33:44:55:66".parse().unwrap()
+            ))
+        );
+        assert_eq!(
+            canonical.effective_by_name("tv.input").unwrap().value(),
+            Some(SettingValue::Enum("HDMI_3"))
+        );
+
+        let legacy = ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "\
+            tv_ip=192.0.2.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_2
+            ",
+        )
+        .into_store();
+
+        assert_eq!(
+            legacy.effective_by_name("tv.ip").unwrap().value(),
+            Some(SettingValue::Ipv4("192.0.2.42".parse().unwrap()))
+        );
+        assert_eq!(
+            legacy.effective_by_name("tv.ip").unwrap().source(),
+            SettingSource::LegacyConfigEnv
+        );
     }
 
     #[test]
@@ -2376,7 +2692,7 @@ screen_restore_policy=aggressive
 
         let effective = store.effective_by_name("screen.idle_timeout").unwrap();
 
-        assert_eq!(effective.value(), SettingValue::Integer(300));
+        assert_eq!(effective.value(), Some(SettingValue::Integer(300)));
         assert_eq!(effective.source(), SettingSource::Default);
     }
 
@@ -2393,15 +2709,18 @@ screen_restore_policy=aggressive
         .into_store();
 
         let backend = store.effective_by_name("screen.backend").unwrap();
-        assert_eq!(backend.value(), SettingValue::Enum("auto"));
+        assert_eq!(backend.value(), Some(SettingValue::Enum("auto")));
         assert_eq!(backend.source(), SettingSource::Default);
 
         let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
-        assert_eq!(idle_timeout.value(), SettingValue::Integer(300));
+        assert_eq!(idle_timeout.value(), Some(SettingValue::Integer(300)));
         assert_eq!(idle_timeout.source(), SettingSource::Default);
 
         let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
-        assert_eq!(restore_policy.value(), SettingValue::Enum("conservative"));
+        assert_eq!(
+            restore_policy.value(),
+            Some(SettingValue::Enum("conservative"))
+        );
         assert_eq!(restore_policy.source(), SettingSource::Default);
     }
 
@@ -2413,7 +2732,10 @@ screen_restore_policy=aggressive
 
         let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
 
-        assert_eq!(restore_policy.value(), SettingValue::Enum("conservative"));
+        assert_eq!(
+            restore_policy.value(),
+            Some(SettingValue::Enum("conservative"))
+        );
         assert_eq!(restore_policy.source(), SettingSource::ConfigEnv);
     }
 
@@ -2431,7 +2753,7 @@ screen_restore_policy=aggressive
                 .effective_by_name("screen.idle_timeout")
                 .unwrap()
                 .value(),
-            SettingValue::Integer(123)
+            Some(SettingValue::Integer(123))
         );
 
         let _ = fs::remove_file(path);
@@ -2447,7 +2769,7 @@ screen_restore_policy=aggressive
         assert_eq!(store.path(), path.as_path());
         assert_eq!(
             store.effective_by_name("screen.backend").unwrap().value(),
-            SettingValue::Enum("auto")
+            Some(SettingValue::Enum("auto"))
         );
         assert_eq!(
             store.effective_by_name("screen.backend").unwrap().source(),
@@ -2470,23 +2792,40 @@ screen_restore_policy=aggressive
         let keys: Vec<&str> = settings.iter().map(|setting| setting.key_name()).collect();
         let values: Vec<String> = settings
             .iter()
-            .map(|setting| setting.value().to_string())
+            .map(|setting| format_effective_value(*setting))
             .collect();
         let sources: Vec<SettingSource> = settings.iter().map(|setting| setting.source()).collect();
 
         assert_eq!(
             keys,
             vec![
+                "tv.ip",
+                "tv.mac",
+                "tv.input",
                 "screen.backend",
                 "screen.idle_timeout",
                 "screen.restore_policy",
                 "system.sleep_wake_policy",
             ]
         );
-        assert_eq!(values, vec!["gnome", "300", "conservative", "disabled"]);
+        assert_eq!(
+            values,
+            vec![
+                "<missing>",
+                "<missing>",
+                "<missing>",
+                "gnome",
+                "300",
+                "conservative",
+                "disabled",
+            ]
+        );
         assert_eq!(
             sources,
             vec![
+                SettingSource::Missing,
+                SettingSource::Missing,
+                SettingSource::Missing,
                 SettingSource::ConfigEnv,
                 SettingSource::Default,
                 SettingSource::Default,
@@ -2536,7 +2875,7 @@ screen_restore_policy=aggressive
 
         assert_eq!(definition.key_name(), "screen.idle_timeout");
         assert_eq!(definition.storage_key(), "screen_idle_timeout");
-        assert_eq!(definition.default_value(), SettingValue::Integer(300));
+        assert_eq!(definition.default_value(), Some(SettingValue::Integer(300)));
         assert_eq!(definition.mutability(), SettingMutability::ReadWrite);
     }
 
@@ -2558,6 +2897,41 @@ screen_restore_policy=aggressive
 
         assert!(matches!(
             definition.parse_value("kde"),
+            Err(SettingsError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn tv_values_are_validated() {
+        let ip = SETTINGS_REGISTRY.get_by_name("tv.ip").unwrap();
+        assert_eq!(
+            ip.parse_value("192.0.2.42"),
+            Ok(SettingValue::Ipv4("192.0.2.42".parse().unwrap()))
+        );
+        assert!(matches!(
+            ip.parse_value("not-an-ip"),
+            Err(SettingsError::InvalidValue { .. })
+        ));
+
+        let mac = SETTINGS_REGISTRY.get_by_name("tv.mac").unwrap();
+        assert_eq!(
+            mac.parse_value("AA:BB:CC:DD:EE:FF"),
+            Ok(SettingValue::MacAddress(
+                "AA:BB:CC:DD:EE:FF".parse().unwrap()
+            ))
+        );
+        assert!(matches!(
+            mac.parse_value("not-a-mac"),
+            Err(SettingsError::InvalidValue { .. })
+        ));
+
+        let input = SETTINGS_REGISTRY.get_by_name("tv.input").unwrap();
+        assert_eq!(
+            input.parse_value("HDMI_1"),
+            Ok(SettingValue::Enum("HDMI_1"))
+        );
+        assert!(matches!(
+            input.parse_value("AV_1"),
             Err(SettingsError::InvalidValue { .. })
         ));
     }
