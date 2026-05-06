@@ -211,6 +211,9 @@ printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
 
 "$INSTALLED_BINARY" settings set screen.backend gnome
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
+"$INSTALLED_BINARY" settings set screen.idle_timeout 90000
+grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.restore_policy aggressive
 "$INSTALLED_BINARY" settings set tv.ip 192.168.1.12
 "$INSTALLED_BINARY" settings set tv.mac 22:33:44:55:66:77

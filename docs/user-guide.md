@@ -195,6 +195,7 @@ are required, so `unset` is not supported.
 
 `screen_idle_timeout` is the inactivity threshold in seconds used by the session monitor.
 LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
+Values above 86400 seconds are capped at 86400 seconds.
 
 `screen_restore_policy` controls how aggressively LG Buddy reclaims the display on wake and user activity:
 

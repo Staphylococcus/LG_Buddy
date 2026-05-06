@@ -17,7 +17,8 @@ use crate::backend::{
 };
 use crate::commands::run_system_resume;
 use crate::config::{
-    load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+    load_config, normalize_idle_timeout_secs, parse_idle_timeout_secs,
+    resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
 use crate::lifecycle::LifecycleEvent;
@@ -592,27 +593,20 @@ fn resolve_idle_timeout_secs() -> u64 {
     normalize_idle_timeout_secs(
         std::env::var("LG_BUDDY_IDLE_TIMEOUT")
             .ok()
-            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| parse_idle_timeout_secs(&value))
             .or_else(|| {
                 let path = resolve_config_path_from_env().ok()?;
                 load_config(&path)
                     .ok()
                     .map(|config| config.screen_idle_timeout)
             })
-            .unwrap_or(DEFAULT_IDLE_TIMEOUT),
+            .map(u128::from)
+            .unwrap_or(u128::from(DEFAULT_IDLE_TIMEOUT)),
     )
 }
 
 fn resolve_idle_timeout_ms() -> u64 {
     resolve_idle_timeout_secs().saturating_mul(1000)
-}
-
-fn normalize_idle_timeout_secs(idle_timeout_secs: u64) -> u64 {
-    if idle_timeout_secs == 0 {
-        DEFAULT_IDLE_TIMEOUT
-    } else {
-        idle_timeout_secs
-    }
 }
 
 fn resolve_gnome_monitor_test_timeout() -> Option<Duration> {
@@ -1741,6 +1735,10 @@ system_sleep_wake_policy={policy}
             crate::config::DEFAULT_IDLE_TIMEOUT
         );
         assert_eq!(normalize_idle_timeout_secs(180), 180);
+        assert_eq!(
+            normalize_idle_timeout_secs(u128::from(crate::config::MAX_IDLE_TIMEOUT) + 1),
+            crate::config::MAX_IDLE_TIMEOUT
+        );
     }
 
     #[test]

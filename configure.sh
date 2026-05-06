@@ -65,7 +65,7 @@ validate_system_sleep_wake_policy() {
 }
 
 validate_idle_timeout() {
-    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+    lg_buddy_validate_idle_timeout "$1"
 }
 
 normalize_restore_policy() {
@@ -135,6 +135,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
         echo "LG_BUDDY_SCREEN_IDLE_TIMEOUT must be a positive integer."
         exit 1
     }
+    screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"
     validate_system_sleep_wake_policy "$system_sleep_wake_policy" || {
         echo "LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY must be one of enabled or disabled."
         exit 1
@@ -253,6 +254,7 @@ else
     while true; do
         screen_idle_timeout="$(prompt_with_default "Enter idle timeout in seconds" "$current_screen_idle_timeout")"
         if validate_idle_timeout "$screen_idle_timeout"; then
+            screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"
             break
         fi
         echo "  Please enter a positive number of seconds."

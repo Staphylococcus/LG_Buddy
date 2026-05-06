@@ -11,6 +11,21 @@ const CONFIG_DIR_NAME: &str = "lg-buddy";
 const CONFIG_FILE_NAME: &str = "config.env";
 const INSTALL_CONFIG_POINTER_FILE: &str = "/usr/lib/lg-buddy/config-path";
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;
+pub const MAX_IDLE_TIMEOUT: u64 = 86_400;
+
+pub fn parse_idle_timeout_secs(value: &str) -> Option<u64> {
+    value.parse::<u128>().ok().map(normalize_idle_timeout_secs)
+}
+
+pub fn normalize_idle_timeout_secs(idle_timeout_secs: u128) -> u64 {
+    if idle_timeout_secs == 0 {
+        DEFAULT_IDLE_TIMEOUT
+    } else if idle_timeout_secs > u128::from(MAX_IDLE_TIMEOUT) {
+        MAX_IDLE_TIMEOUT
+    } else {
+        idle_timeout_secs as u64
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigPathSources<'a> {
@@ -410,7 +425,7 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
 
     let screen_idle_timeout = entries
         .get("screen_idle_timeout")
-        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| parse_idle_timeout_secs(value))
         .unwrap_or(DEFAULT_IDLE_TIMEOUT);
 
     let screen_restore_policy = entries
@@ -479,7 +494,7 @@ mod tests {
     use super::{
         parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
         ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, ScreenRestorePolicy,
-        SystemSleepWakePolicy, DEFAULT_IDLE_TIMEOUT,
+        SystemSleepWakePolicy, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -598,6 +613,33 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             config.system_sleep_wake_policy,
             SystemSleepWakePolicy::Disabled
         );
+    }
+
+    #[test]
+    fn parse_clamps_idle_timeout_to_max() {
+        let config = parse_config(
+            "\
+            tvs_primary_ip=192.168.1.42
+            tvs_primary_mac=aa:bb:cc:dd:ee:ff
+            tvs_primary_input=HDMI_2
+            screen_idle_timeout=86401
+            ",
+        )
+        .expect("parse config with capped timeout");
+
+        assert_eq!(config.screen_idle_timeout, MAX_IDLE_TIMEOUT);
+
+        let config = parse_config(
+            "\
+            tvs_primary_ip=192.168.1.42
+            tvs_primary_mac=aa:bb:cc:dd:ee:ff
+            tvs_primary_input=HDMI_2
+            screen_idle_timeout=18446744073709551615
+            ",
+        )
+        .expect("parse config with u64-max timeout");
+
+        assert_eq!(config.screen_idle_timeout, MAX_IDLE_TIMEOUT);
     }
 
     #[test]

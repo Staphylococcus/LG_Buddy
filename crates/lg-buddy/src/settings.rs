@@ -9,7 +9,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathError,
-    ConfigPathSources, MacAddress, DEFAULT_IDLE_TIMEOUT,
+    ConfigPathSources, MacAddress, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
 };
 
 const SETTINGS_SUBCOMMANDS: &[&str] = &["list", "describe", "get", "set", "unset"];
@@ -98,7 +98,7 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
         fallback_storage_keys: EMPTY_STORAGE_KEYS,
         value_type: SettingType::Integer(IntegerSettingType {
             min: 1,
-            max: 86_400,
+            max: MAX_IDLE_TIMEOUT as i64,
         }),
         default_value: Some(SettingValue::Integer(DEFAULT_IDLE_TIMEOUT as i64)),
         mutability: SettingMutability::ReadWrite,
@@ -1436,8 +1436,10 @@ impl SettingType {
                     value: value.to_string(),
                     expected: enum_type.expected(),
                 }),
-            Self::Integer(integer_type) => match value.parse::<i64>() {
-                Ok(parsed) if integer_type.contains(parsed) => Ok(SettingValue::Integer(parsed)),
+            Self::Integer(integer_type) => match value.parse::<i128>() {
+                Ok(parsed) if integer_type.accepts(parsed) => {
+                    Ok(SettingValue::Integer(integer_type.coerce(parsed)))
+                }
                 _ => Err(SettingsError::InvalidValue {
                     key: key.to_string(),
                     value: value.to_string(),
@@ -1640,6 +1642,18 @@ impl IntegerSettingType {
 
     pub fn contains(self, value: i64) -> bool {
         value >= self.min && value <= self.max
+    }
+
+    fn accepts(self, value: i128) -> bool {
+        value >= i128::from(self.min)
+    }
+
+    fn coerce(self, value: i128) -> i64 {
+        if value > i128::from(self.max) {
+            self.max
+        } else {
+            value as i64
+        }
     }
 
     fn expected(self) -> String {
@@ -2024,7 +2038,7 @@ mod tests {
         SettingType, SettingValue, SettingsApplier, SettingsCommand, SettingsCommandRunner,
         SettingsError, SettingsParseError, SettingsStore, UserServiceState, SETTINGS_REGISTRY,
     };
-    use crate::config::ConfigPathSources;
+    use crate::config::{ConfigPathSources, MAX_IDLE_TIMEOUT};
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2307,6 +2321,37 @@ screen_idle_timeout=300
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("screen.backend=gnome (saved to "));
         assert!(output.contains("apply: restarted LG_Buddy_screen.service\n"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn settings_runner_clamps_idle_timeout_above_max_when_setting() {
+        let path = unique_test_path("set-clamped-idle-timeout");
+        fs::write(&path, "screen_idle_timeout=300\n").unwrap();
+        let store = SettingsStore::load(&path).unwrap();
+        let runner = SettingsCommandRunner::with_applier(
+            store,
+            SettingsApplier::new(FakeServiceController::missing()),
+        );
+        let mut output = Vec::new();
+
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: "screen.idle_timeout".to_string(),
+                    value: "86401".to_string(),
+                },
+                &mut output,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("screen_idle_timeout={MAX_IDLE_TIMEOUT}\n")
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(&format!("screen.idle_timeout={MAX_IDLE_TIMEOUT} ")));
 
         let _ = fs::remove_file(path);
     }
@@ -2725,6 +2770,20 @@ tvs_primary_ip=192.0.2.43
     }
 
     #[test]
+    fn settings_store_clamps_idle_timeout_above_max() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "screen_idle_timeout=86401\n").into_store();
+
+        let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
+
+        assert_eq!(
+            idle_timeout.value(),
+            Some(SettingValue::Integer(MAX_IDLE_TIMEOUT as i64))
+        );
+        assert_eq!(idle_timeout.source(), SettingSource::ConfigEnv);
+    }
+
+    #[test]
     fn settings_store_canonicalizes_valid_alias_values_from_config_env() {
         let store =
             ConfigEnvReader::parse("/tmp/config.env", "screen_restore_policy=marker_only\n")
@@ -2967,8 +3026,16 @@ tvs_primary_ip=192.0.2.43
             definition.parse_value("86400"),
             Ok(SettingValue::Integer(86_400))
         );
+        assert_eq!(
+            definition.parse_value("86401"),
+            Ok(SettingValue::Integer(86_400))
+        );
+        assert_eq!(
+            definition.parse_value("18446744073709551615"),
+            Ok(SettingValue::Integer(86_400))
+        );
 
-        for value in ["0", "86401", "-1", "abc"] {
+        for value in ["0", "-1", "abc"] {
             assert!(
                 matches!(
                     definition.parse_value(value),
