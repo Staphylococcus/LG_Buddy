@@ -1380,7 +1380,7 @@ mod tests {
 
     impl WakeOnLanSender for RecordingWakeOnLanSender {
         fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
-            self.calls.borrow_mut().push((mac.clone(), None));
+            self.calls.borrow_mut().push((*mac, None));
             Ok(())
         }
 
@@ -1389,7 +1389,7 @@ mod tests {
             mac: &MacAddress,
             target_ip: Ipv4Addr,
         ) -> Result<(), WakeOnLanError> {
-            self.calls.borrow_mut().push((mac.clone(), Some(target_ip)));
+            self.calls.borrow_mut().push((*mac, Some(target_ip)));
             Ok(())
         }
     }
