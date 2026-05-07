@@ -16,6 +16,21 @@ fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);
 }
 
+#[given("the current config is remembered")]
+fn current_config_is_remembered(world: &mut LgBuddyWorld) {
+    world.remember_config_contents();
+}
+
+#[given("systemd apply actions are skipped")]
+fn systemd_apply_actions_are_skipped(world: &mut LgBuddyWorld) {
+    world.skip_systemd_apply_actions();
+}
+
+#[given("the user screen service is active")]
+fn user_screen_service_is_active(world: &mut LgBuddyWorld) {
+    world.install_active_user_screen_service_stub();
+}
+
 #[given("LG Buddy session runtime is isolated")]
 fn isolated_runtime(world: &mut LgBuddyWorld) {
     world.create_runtime();
@@ -286,6 +301,15 @@ fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
     );
 }
 
+#[then(regex = r#"stdout does not contain "([^"]+)""#)]
+fn stdout_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
+    assert!(
+        !world.command_result().stdout.contains(&unexpected),
+        "stdout was: {}",
+        world.command_result().stdout
+    );
+}
+
 #[then(regex = r#"stderr contains "([^"]+)""#)]
 fn stderr_contains(world: &mut LgBuddyWorld, expected: String) {
     assert!(
@@ -293,6 +317,26 @@ fn stderr_contains(world: &mut LgBuddyWorld, expected: String) {
         "stderr was: {}",
         world.command_result().stderr
     );
+}
+
+#[then(regex = r#"config\.env contains "([^"]+)""#)]
+fn config_env_contains(world: &mut LgBuddyWorld, expected: String) {
+    world.assert_config_contains(&expected);
+}
+
+#[then(regex = r#"config\.env does not contain "([^"]+)""#)]
+fn config_env_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
+    world.assert_config_does_not_contain(&unexpected);
+}
+
+#[then("config.env is unchanged")]
+fn config_env_is_unchanged(world: &mut LgBuddyWorld) {
+    world.assert_config_unchanged();
+}
+
+#[then(regex = r#"systemctl was invoked with "([^"]+)""#)]
+fn systemctl_was_invoked_with(world: &mut LgBuddyWorld, expected: String) {
+    world.assert_systemctl_invoked_with(&expected);
 }
 
 #[then(regex = r#"nm-online was invoked with "([^"]+)""#)]

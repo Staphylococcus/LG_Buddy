@@ -1616,7 +1616,7 @@ mod tests {
 
     impl WakeOnLanSender for RecordingWakeOnLanSender {
         fn send_magic_packet(&self, mac: &MacAddress) -> Result<(), WakeOnLanError> {
-            self.calls.borrow_mut().push(mac.clone());
+            self.calls.borrow_mut().push(*mac);
             Ok(())
         }
     }

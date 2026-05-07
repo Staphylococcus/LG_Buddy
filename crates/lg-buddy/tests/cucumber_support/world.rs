@@ -5,7 +5,8 @@ use crate::support::{
 use cucumber::World;
 use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
 use std::fmt;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 #[derive(World, Default)]
@@ -18,6 +19,8 @@ pub struct LgBuddyWorld {
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
+    config_snapshot: Option<String>,
+    systemctl_log_path: Option<PathBuf>,
     command_result: Option<CommandExecution>,
 }
 
@@ -41,6 +44,8 @@ impl fmt::Debug for LgBuddyWorld {
             .field("nm_online", &self.nm_online.is_some())
             .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
+            .field("config_snapshot", &self.config_snapshot.is_some())
+            .field("systemctl_log_path", &self.systemctl_log_path)
             .field("command_result", &self.command_result)
             .finish()
     }
@@ -51,6 +56,8 @@ impl LgBuddyWorld {
         let config = TestConfigFile::new("cucumber-config");
         config.write_sample(input);
         self.ensure_env().set("LG_BUDDY_CONFIG", config.path());
+        self.ensure_env()
+            .set("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled");
         self.config = Some(config);
     }
 
@@ -64,6 +71,85 @@ impl LgBuddyWorld {
     pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
         self.ensure_env()
             .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
+    }
+
+    pub fn remember_config_contents(&mut self) {
+        self.config_snapshot = Some(self.read_config_contents());
+    }
+
+    pub fn assert_config_unchanged(&self) {
+        assert_eq!(
+            self.read_config_contents(),
+            self.config_snapshot
+                .as_ref()
+                .expect("config contents should be remembered")
+                .as_str()
+        );
+    }
+
+    pub fn assert_config_contains(&self, expected: &str) {
+        let contents = self.read_config_contents();
+        assert!(
+            contents.contains(expected),
+            "expected config to contain `{expected}`\nconfig was:\n{contents}"
+        );
+    }
+
+    pub fn assert_config_does_not_contain(&self, unexpected: &str) {
+        let contents = self.read_config_contents();
+        assert!(
+            !contents.contains(unexpected),
+            "expected config not to contain `{unexpected}`\nconfig was:\n{contents}"
+        );
+    }
+
+    pub fn skip_systemd_apply_actions(&mut self) {
+        self.ensure_env().set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+    }
+
+    pub fn install_active_user_screen_service_stub(&mut self) {
+        let log_path = self.config().path().with_file_name("systemctl.log");
+        let body = format!(
+            "#!/bin/sh\n\
+log_path={}\n\
+printf '%s\\n' \"$*\" >> \"$log_path\"\n\
+if [ \"$1\" = \"--user\" ]; then\n\
+  case \"$2\" in\n\
+    cat)\n\
+      cat <<'EOF'\n\
+# /home/test/.config/systemd/user/LG_Buddy_screen.service\n\
+[Unit]\n\
+Description=LG Buddy Screen Monitor Service\n\
+EOF\n\
+      exit 0\n\
+      ;;\n\
+    is-active|is-enabled|restart) exit 0 ;;\n\
+  esac\n\
+fi\n\
+exit 1\n",
+            shell_quote_path(&log_path)
+        );
+        let script = ExecutableScript::new(
+            "cucumber-settings-systemctl",
+            "mock-settings-systemctl",
+            &body,
+        );
+        self.ensure_env().set("LG_BUDDY_SYSTEMCTL", script.path());
+        self.ensure_env().remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+        self.systemctl_log_path = Some(log_path);
+        self.path_scripts.push(script);
+    }
+
+    pub fn assert_systemctl_invoked_with(&self, expected: &str) {
+        let log_path = self
+            .systemctl_log_path
+            .as_ref()
+            .expect("settings systemctl log should be configured");
+        let contents = fs::read_to_string(log_path).unwrap_or_default();
+        assert!(
+            contents.lines().any(|line| line == expected),
+            "expected systemctl invocation `{expected}`\nsystemctl log was:\n{contents}"
+        );
     }
 
     pub fn create_runtime(&mut self) {
@@ -263,6 +349,8 @@ impl LgBuddyWorld {
     }
 
     pub fn gamepad_activity_occurs_after_secs(&mut self, seconds: f64) {
+        self.ensure_env()
+            .set("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "synthetic");
         self.ensure_env().set(
             "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS",
             seconds.to_string(),
@@ -420,4 +508,13 @@ impl LgBuddyWorld {
             .as_mut()
             .expect("mock session-bus idle monitor configured")
     }
+
+    fn read_config_contents(&self) -> String {
+        fs::read_to_string(self.config().path()).expect("read temporary config")
+    }
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

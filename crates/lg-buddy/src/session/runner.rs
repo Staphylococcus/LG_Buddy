@@ -17,7 +17,8 @@ use crate::backend::{
 };
 use crate::commands::run_system_resume;
 use crate::config::{
-    load_config, resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+    load_config, normalize_idle_timeout_secs, parse_idle_timeout_secs,
+    resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
 use crate::lifecycle::LifecycleEvent;
@@ -51,7 +52,12 @@ const GAMEPAD_ACTIVITY_REFRESH_RETRY_INTERVAL: Duration = Duration::from_secs(2)
 const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const LOGIND_LIFECYCLE_PROCESS_INTERVAL: Duration = Duration::from_secs(5);
+const LOGIND_LIFECYCLE_TEST_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
+const LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS_ENV: &str =
+    "LG_BUDDY_LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS";
+const LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV: &str = "LG_BUDDY_LIFECYCLE_MONITOR_TEST_EVENT_LIMIT";
+const GAMEPAD_ACTIVITY_SOURCE_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE";
 const GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV: &str = "LG_BUDDY_GAMEPAD_ACTIVITY_TEST_AFTER_SECS";
 
 pub trait SessionActionExecutor {
@@ -293,15 +299,6 @@ pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_lifecycle_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    if !config.system_sleep_wake_policy.is_enabled() {
-        writeln!(
-            writer,
-            "LG Buddy Lifecycle: system sleep/wake handling is disabled by config."
-        )?;
-        return Ok(());
-    }
-
     run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor, &config_path).map_err(
         |err| match err {
             SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
@@ -340,44 +337,71 @@ fn run_lifecycle_monitor_with_bus<W: Write, E: SessionActionExecutor>(
         "LG Buddy Lifecycle: Using logind system lifecycle source."
     )?;
 
+    let started = Instant::now();
+    let test_timeout = resolve_lifecycle_monitor_test_timeout();
+    let test_event_limit = resolve_lifecycle_monitor_test_event_limit();
+    let mut lifecycle_events_seen = 0usize;
+
     loop {
-        if !lifecycle_policy_enabled_from_config(config_path)? {
-            writeln!(
-                writer,
-                "LG Buddy Lifecycle: system sleep/wake handling is disabled by config; stopping lifecycle monitor."
-            )?;
-            return Ok(());
+        if let Some(timeout) = test_timeout {
+            if started.elapsed() >= timeout {
+                return Ok(());
+            }
         }
 
-        let Some(signal) = bus
-            .process(LOGIND_LIFECYCLE_PROCESS_INTERVAL)
-            .map_err(|err| SessionRunnerError::Failed {
-                backend: ScreenBackend::Auto,
-                message: format!("logind lifecycle bus processing failed: {err}"),
-            })?
+        let mut process_timeout = LOGIND_LIFECYCLE_PROCESS_INTERVAL;
+        if let Some(timeout) = test_timeout {
+            process_timeout = process_timeout
+                .min(LOGIND_LIFECYCLE_TEST_PROCESS_INTERVAL)
+                .min(timeout.saturating_sub(started.elapsed()));
+        }
+
+        let Some(signal) =
+            bus.process(process_timeout)
+                .map_err(|err| SessionRunnerError::Failed {
+                    backend: ScreenBackend::Auto,
+                    message: format!("logind lifecycle bus processing failed: {err}"),
+                })?
         else {
             continue;
         };
 
-        match map_prepare_for_sleep_signal(&signal) {
-            Some(event)
-                if LifecycleEvent::from_runtime_event(event)
-                    == Some(LifecycleEvent::MachineResumed) =>
-            {
-                if !lifecycle_policy_enabled_from_config(config_path)? {
+        let Some(event) = map_prepare_for_sleep_signal(&signal) else {
+            continue;
+        };
+
+        if !lifecycle_policy_enabled_from_config(config_path)? {
+            writeln!(
+                writer,
+                "LG Buddy Lifecycle: system sleep/wake handling is disabled by config; skipping lifecycle event."
+            )?;
+            lifecycle_events_seen += 1;
+            if test_event_limit.is_some_and(|limit| lifecycle_events_seen >= limit) {
+                return Ok(());
+            }
+            continue;
+        }
+
+        match LifecycleEvent::from_runtime_event(event) {
+            Some(LifecycleEvent::MachineResumed) => {
+                if lifecycle_policy_enabled_from_config(config_path)? {
+                    dispatcher.dispatch_lifecycle_event(writer, event)?;
+                } else {
                     writeln!(
                         writer,
-                        "LG Buddy Lifecycle: system sleep/wake handling is disabled by config; stopping lifecycle monitor."
+                        "LG Buddy Lifecycle: system sleep/wake handling is disabled by config; skipping lifecycle event."
                     )?;
-                    return Ok(());
                 }
-
-                dispatcher.dispatch_lifecycle_event(writer, event)?;
             }
-            Some(event) => {
+            Some(_) => {
                 dispatcher.dispatch_lifecycle_event(writer, event)?;
             }
             None => {}
+        }
+
+        lifecycle_events_seen += 1;
+        if test_event_limit.is_some_and(|limit| lifecycle_events_seen >= limit) {
+            return Ok(());
         }
     }
 }
@@ -569,27 +593,20 @@ fn resolve_idle_timeout_secs() -> u64 {
     normalize_idle_timeout_secs(
         std::env::var("LG_BUDDY_IDLE_TIMEOUT")
             .ok()
-            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| parse_idle_timeout_secs(&value))
             .or_else(|| {
                 let path = resolve_config_path_from_env().ok()?;
                 load_config(&path)
                     .ok()
                     .map(|config| config.screen_idle_timeout)
             })
-            .unwrap_or(DEFAULT_IDLE_TIMEOUT),
+            .map(u128::from)
+            .unwrap_or(u128::from(DEFAULT_IDLE_TIMEOUT)),
     )
 }
 
 fn resolve_idle_timeout_ms() -> u64 {
     resolve_idle_timeout_secs().saturating_mul(1000)
-}
-
-fn normalize_idle_timeout_secs(idle_timeout_secs: u64) -> u64 {
-    if idle_timeout_secs == 0 {
-        DEFAULT_IDLE_TIMEOUT
-    } else {
-        idle_timeout_secs
-    }
 }
 
 fn resolve_gnome_monitor_test_timeout() -> Option<Duration> {
@@ -598,6 +615,21 @@ fn resolve_gnome_monitor_test_timeout() -> Option<Duration> {
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
         .and_then(|value| Duration::try_from_secs_f64(value).ok())
+}
+
+fn resolve_lifecycle_monitor_test_timeout() -> Option<Duration> {
+    std::env::var(LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .and_then(|value| Duration::try_from_secs_f64(value).ok())
+}
+
+fn resolve_lifecycle_monitor_test_event_limit() -> Option<usize> {
+    std::env::var(LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn spawn_gnome_monitor_thread(
@@ -610,19 +642,44 @@ fn spawn_gnome_monitor_thread(
     })
 }
 
-fn spawn_gamepad_activity_thread(sender: mpsc::Sender<RunnerMessage>) -> GamepadActivityThread {
+fn spawn_gamepad_activity_thread(
+    sender: mpsc::Sender<RunnerMessage>,
+) -> Option<GamepadActivityThread> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let handle = match resolve_gamepad_activity_test_delay() {
-        Some(delay) => thread::spawn(move || {
+    let handle = match resolve_gamepad_activity_source_mode() {
+        GamepadActivitySourceMode::Disabled => return None,
+        GamepadActivitySourceMode::Synthetic(delay) => thread::spawn(move || {
             run_synthetic_gamepad_activity_process(sender, thread_stop, delay)
         }),
-        None => thread::spawn(move || run_gamepad_activity_process(sender, thread_stop)),
+        GamepadActivitySourceMode::System => {
+            thread::spawn(move || run_gamepad_activity_process(sender, thread_stop))
+        }
     };
 
-    GamepadActivityThread {
+    Some(GamepadActivityThread {
         stop,
         handle: Some(handle),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GamepadActivitySourceMode {
+    System,
+    Synthetic(Duration),
+    Disabled,
+}
+
+fn resolve_gamepad_activity_source_mode() -> GamepadActivitySourceMode {
+    match std::env::var(GAMEPAD_ACTIVITY_SOURCE_ENV).ok().as_deref() {
+        Some("disabled" | "none" | "off") => GamepadActivitySourceMode::Disabled,
+        Some("synthetic" | "test") => GamepadActivitySourceMode::Synthetic(
+            resolve_gamepad_activity_test_delay().unwrap_or(Duration::ZERO),
+        ),
+        Some("system" | "real") => GamepadActivitySourceMode::System,
+        Some(_) | None => resolve_gamepad_activity_test_delay()
+            .map(GamepadActivitySourceMode::Synthetic)
+            .unwrap_or(GamepadActivitySourceMode::System),
     }
 }
 
@@ -1432,9 +1489,9 @@ mod tests {
             path,
             format!(
                 "\
-tv_ip=192.168.1.42
-tv_mac=aa:bb:cc:dd:ee:ff
-input=HDMI_1
+tvs_primary_ip=192.168.1.42
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_1
 system_sleep_wake_policy={policy}
 "
             ),
@@ -1540,6 +1597,11 @@ system_sleep_wake_policy={policy}
 
     #[test]
     fn lifecycle_monitor_treats_logind_sleep_as_diagnostic_and_dispatches_resume() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(super::LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV, "2");
+
         let config_path = unique_config_path("lifecycle-monitor");
         write_lifecycle_config(&config_path, "enabled");
         let executor = FakeActionExecutor {
@@ -1558,7 +1620,7 @@ system_sleep_wake_policy={policy}
         let mut output = Vec::new();
 
         run_lifecycle_monitor_with_bus(&mut output, executor, &config_path, &mut bus)
-            .expect("lifecycle loop exits cleanly after config disables it");
+            .expect("lifecycle loop exits cleanly after test timeout");
 
         let output = String::from_utf8(output).expect("utf8");
         assert!(output.contains("Using logind system lifecycle source"));
@@ -1566,10 +1628,44 @@ system_sleep_wake_policy={policy}
         assert!(output.contains("diagnostic only"));
         assert!(output.contains("System resumed from sleep"));
         assert!(output.contains("after-resume output"));
-        assert!(output.contains("stopping lifecycle monitor"));
+        assert!(!output.contains("stopping lifecycle monitor"));
         assert_eq!(bus.signal_match_count, 1);
-        assert_eq!(bus.disable_config_after_signals, None);
+        assert!(bus.disable_config_after_signals.is_some());
         fs::remove_file(config_path).expect("remove lifecycle test config");
+        std::env::remove_var(super::LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV);
+    }
+
+    #[test]
+    fn lifecycle_monitor_skips_events_while_policy_is_disabled() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(super::LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV, "1");
+
+        let config_path = unique_config_path("lifecycle-disabled");
+        write_lifecycle_config(&config_path, "disabled");
+        let executor = FakeActionExecutor {
+            after_resume_output: "after-resume output\n".to_string(),
+            ..FakeActionExecutor::default()
+        };
+        let mut bus = FakeLifecycleBus {
+            signals: VecDeque::from([prepare_for_sleep_signal(false)]),
+            signal_match_count: 0,
+            disable_config_after_signals: None,
+        };
+        let mut output = Vec::new();
+
+        run_lifecycle_monitor_with_bus(&mut output, executor, &config_path, &mut bus)
+            .expect("lifecycle loop exits cleanly after test event limit");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert!(output.contains("Using logind system lifecycle source"));
+        assert!(output.contains("skipping lifecycle event"));
+        assert!(!output.contains("System resumed from sleep"));
+        assert!(!output.contains("after-resume output"));
+        assert_eq!(bus.signal_match_count, 1);
+        fs::remove_file(config_path).expect("remove lifecycle test config");
+        std::env::remove_var(super::LIFECYCLE_MONITOR_TEST_EVENT_LIMIT_ENV);
     }
 
     #[test]
@@ -1639,6 +1735,10 @@ system_sleep_wake_policy={policy}
             crate::config::DEFAULT_IDLE_TIMEOUT
         );
         assert_eq!(normalize_idle_timeout_secs(180), 180);
+        assert_eq!(
+            normalize_idle_timeout_secs(u128::from(crate::config::MAX_IDLE_TIMEOUT) + 1),
+            crate::config::MAX_IDLE_TIMEOUT
+        );
     }
 
     #[test]
@@ -1666,6 +1766,47 @@ system_sleep_wake_policy={policy}
         assert_eq!(super::resolve_gnome_monitor_test_timeout(), None);
 
         std::env::remove_var(super::GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV);
+    }
+
+    #[test]
+    fn gamepad_activity_source_mode_is_explicitly_selectable() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV);
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::System
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV, "0.25");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Synthetic(Duration::from_millis(250))
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "disabled");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Disabled
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "synthetic");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::Synthetic(Duration::from_millis(250))
+        );
+
+        std::env::set_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV, "system");
+        assert_eq!(
+            super::resolve_gamepad_activity_source_mode(),
+            super::GamepadActivitySourceMode::System
+        );
+
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        std::env::remove_var(super::GAMEPAD_ACTIVITY_TEST_AFTER_SECS_ENV);
     }
 
     #[test]

@@ -121,6 +121,8 @@ assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
 
 HELP_OUTPUT="$("$BUNDLE_DIR/lg-buddy" 2>&1 || true)"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
+printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
+printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -160,6 +162,10 @@ DESKTOP_ENTRY="$INSTALL_ROOT/usr/share/applications/LG_Buddy_Brightness.desktop"
 NM_SLEEP_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep"
 NM_LIFECYCLE_HOOK="$INSTALL_ROOT/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle"
 
+# The installed Rust binary does not know about LG_BUDDY_INSTALL_ROOT, so pin
+# CLI config operations to the smoke-test sandbox instead of any host install.
+export LG_BUDDY_CONFIG="$CONFIG_FILE"
+
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_VENV_PIP"
@@ -187,9 +193,9 @@ if grep -q 'LG_BUDDY_CONFIG' "$NM_LIFECYCLE_HOOK"; then
     exit 1
 fi
 
-grep -q '^tv_ip=192.168.1.10$' "$CONFIG_FILE"
-grep -q '^tv_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
-grep -q '^input=HDMI_2$' "$CONFIG_FILE"
+grep -q '^tvs_primary_ip=192.168.1.10$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
@@ -200,6 +206,44 @@ fi
 
 INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
+printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
+printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
+
+"$INSTALLED_BINARY" settings set screen.backend gnome
+"$INSTALLED_BINARY" settings set screen.idle_timeout 900
+"$INSTALLED_BINARY" settings set screen.idle_timeout 90000
+grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings set screen.idle_timeout 900
+"$INSTALLED_BINARY" settings set screen.restore_policy aggressive
+"$INSTALLED_BINARY" settings set tv.ip 192.168.1.12
+"$INSTALLED_BINARY" settings set tv.mac 22:33:44:55:66:77
+"$INSTALLED_BINARY" settings set tv.input HDMI_4
+grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
+grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
+grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=22:33:44:55:66:77$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
+
+(
+    unset LG_BUDDY_SCREEN_BACKEND
+    unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
+    unset LG_BUDDY_SCREEN_RESTORE_POLICY
+    unset LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY
+    export LG_BUDDY_TV_IP="192.168.1.11"
+    export LG_BUDDY_TV_MAC="11:22:33:44:55:66"
+    export LG_BUDDY_INPUT="HDMI_3"
+    cd "$BUNDLE_DIR"
+    ./configure.sh
+)
+
+grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
+grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
+grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
+grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
+grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
+grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 
 export LG_BUDDY_REMOVE_CONFIG="1"
 (
@@ -258,11 +302,8 @@ export LG_BUDDY_SKIP_PIP_INSTALL="1"
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
 assert_file "$SYSTEM_SERVICE"
+assert_file "$LIFECYCLE_SERVICE"
 assert_file "$USER_SCREEN_SERVICE"
-[ ! -e "$LIFECYCLE_SERVICE" ] || {
-    echo "Lifecycle service installed despite disabled policy: $LIFECYCLE_SERVICE"
-    exit 1
-}
 [ ! -e "$LEGACY_SLEEP_SERVICE" ] || {
     echo "Legacy sleep service installed unexpectedly: $LEGACY_SLEEP_SERVICE"
     exit 1
@@ -275,10 +316,8 @@ assert_file "$USER_SCREEN_SERVICE"
     echo "NetworkManager sleep hook installed unexpectedly: $NM_SLEEP_HOOK"
     exit 1
 }
-[ ! -e "$NM_LIFECYCLE_HOOK" ] || {
-    echo "NetworkManager lifecycle hook installed despite disabled policy: $NM_LIFECYCLE_HOOK"
-    exit 1
-}
+assert_executable "$NM_LIFECYCLE_HOOK"
+grep -q 'lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
 grep -q '^system_sleep_wake_policy=disabled$' "$CONFIG_FILE"
 
 (

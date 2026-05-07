@@ -71,6 +71,7 @@ This is the place for integration tests and contract tests.
 ### What belongs here
 
 - runtime entrypoints loading a real temporary `config.env`
+- settings CLI writes feeding normal runtime config loading and apply behavior
 - command flows using real env overrides
 - runtime state directories and marker files
 - subprocess contracts to external tools

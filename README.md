@@ -85,17 +85,45 @@ On first use, you may need to accept a pairing prompt on the TV:
 
 LG Buddy is mostly automatic after installation.
 
-- To change settings later, run `./configure.sh`
+- To inspect settings, run `lg-buddy settings list`
+- To change supported settings, use `lg-buddy settings set <key> <value>`
+- To rerun full setup for TV IP, MAC address, or HDMI input, run `./configure.sh`
 - To check the screen monitor, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`
 
-Advanced session restore behavior can be tuned in `config.env`:
+The settings CLI is a structured layer over `config.env`. These examples write
+the same file that manual editing and `configure.sh` use:
+
+```bash
+lg-buddy settings describe tv.input
+lg-buddy settings set tv.input HDMI_2
+lg-buddy settings describe screen.restore_policy
+lg-buddy settings set screen.idle_timeout 600
+lg-buddy settings set screen.restore_policy aggressive
+lg-buddy settings set system.sleep_wake_policy disabled
+lg-buddy settings unset screen.restore_policy
+```
+
+Settings can also be edited directly in `config.env`:
 
 ```ini
+tvs_primary_ip=192.168.1.100
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
 screen_idle_timeout=300
 screen_restore_policy=conservative
 system_sleep_wake_policy=enabled
 ```
+
+`tv_ip`, `tv_mac`, and `input` are still accepted as legacy single-TV keys, but
+new writes use the `tvs_primary_*` shape so the storage can grow later without
+changing the current single-TV settings interface.
+
+If a direct `config.env` edit leaves a value malformed, `lg-buddy settings list`
+and `describe` show it as invalid instead of silently treating it as default or
+missing. `lg-buddy settings get <key>` fails with the validation error so the
+bad entry can be fixed with `settings set`, `settings unset` when supported, or
+by editing `config.env`.
 
 `screen_restore_policy=conservative` is the default. LG Buddy only restores when a matching LG Buddy marker says it previously blanked or powered off the TV.
 
@@ -104,8 +132,9 @@ Set `screen_restore_policy=aggressive` to let session wake/activity and system w
 `marker_only` is still accepted as a legacy alias for `conservative`.
 
 `system_sleep_wake_policy=enabled` is the default. Set
-`system_sleep_wake_policy=disabled` in `config.env` and rerun `./install.sh` if
-you do not want LG Buddy to control the TV around system sleep and wake.
+`system_sleep_wake_policy=disabled` if you do not want LG Buddy to control the
+TV around system sleep and wake. The lifecycle service and NetworkManager
+pre-down hook stay installed and no-op while the policy is disabled.
 
 ## More Help
 

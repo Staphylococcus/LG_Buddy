@@ -1043,9 +1043,9 @@ impl TestConfigFile {
 #[allow(dead_code)]
 pub fn sample_config_contents(input: &str) -> String {
     format!(
-        "tv_ip=192.0.2.42\n\
-tv_mac=aa:bb:cc:dd:ee:ff\n\
-input={input}\n\
+        "tvs_primary_ip=192.0.2.42\n\
+tvs_primary_mac=aa:bb:cc:dd:ee:ff\n\
+tvs_primary_input={input}\n\
 screen_backend=auto\n\
 screen_idle_timeout=300\n"
     )

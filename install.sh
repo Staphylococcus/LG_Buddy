@@ -386,32 +386,19 @@ SYSTEM_CONFIG_OVERRIDE_TMP=""
 
 cleanup_legacy_sleep_wake_handlers
 
-if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
-    run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
-    run_privileged install -d "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR"
-    SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
-    write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
-    run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
-    rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
-    SYSTEM_CONFIG_OVERRIDE_TMP=""
-    run_privileged install -d "$NM_PRE_DOWN_DIR"
-    NM_HOOK_TMP="$(mktemp)"
-    write_nm_pre_down_hook "$NM_HOOK_TMP"
-    run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
-    rm -f "$NM_HOOK_TMP"
-    NM_HOOK_TMP=""
-else
-    if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
-        echo "Skipping lifecycle service disable because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
-    else
-        run_privileged systemctl disable LG_Buddy_lifecycle.service 2>/dev/null || true
-        run_privileged systemctl stop LG_Buddy_lifecycle.service 2>/dev/null || true
-    fi
-    run_privileged rm -f "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
-    run_privileged rm -f "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
-    run_privileged rmdir "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR" 2>/dev/null || true
-    run_privileged rm -f "$NM_LIFECYCLE_HOOK_PATH"
-fi
+run_privileged cp "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
+run_privileged install -d "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR"
+SYSTEM_CONFIG_OVERRIDE_TMP="$(mktemp)"
+write_config_override "$SYSTEM_CONFIG_OVERRIDE_TMP" "$CONFIG_FILE"
+run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
+rm -f "$SYSTEM_CONFIG_OVERRIDE_TMP"
+SYSTEM_CONFIG_OVERRIDE_TMP=""
+run_privileged install -d "$NM_PRE_DOWN_DIR"
+NM_HOOK_TMP="$(mktemp)"
+write_nm_pre_down_hook "$NM_HOOK_TMP"
+run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
+rm -f "$NM_HOOK_TMP"
+NM_HOOK_TMP=""
 
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
     echo "Skipping systemd tmpfiles and enable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
@@ -419,10 +406,8 @@ else
     run_privileged systemd-tmpfiles --create "$TMPFILES_CONF_PATH"
     run_privileged systemctl daemon-reload
     run_privileged systemctl enable LG_Buddy.service
-    if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
-        run_privileged systemctl enable LG_Buddy_lifecycle.service
-        run_privileged systemctl restart LG_Buddy_lifecycle.service
-    fi
+    run_privileged systemctl enable LG_Buddy_lifecycle.service
+    run_privileged systemctl restart LG_Buddy_lifecycle.service
 fi
 echo "Done."
 
@@ -479,7 +464,7 @@ fi
 if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
 else
-    echo "System sleep/wake TV control disabled by config. Startup/shutdown will still work."
+    echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
 fi
 
 echo "Installation complete!"
