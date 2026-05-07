@@ -89,6 +89,7 @@ LG Buddy is mostly automatic after installation.
 - To change supported settings, use `lg-buddy settings set <key> <value>`
 - To inspect TV brightness, run `lg-buddy brightness get`
 - To set TV brightness directly, run `lg-buddy brightness set <0-100>`
+- To inspect the installed runtime version, run `lg-buddy --version`
 - To rerun full setup for TV IP, MAC address, or HDMI input, run `./configure.sh`
 - To check the screen monitor, run `systemctl --user status LG_Buddy_screen.service`
 - To remove LG Buddy, run `./uninstall.sh`

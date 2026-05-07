@@ -124,6 +124,12 @@ printf '%s\n' "$HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "settings list"
 printf '%s\n' "$HELP_OUTPUT" | grep -q "settings set <key> <value>"
 
+VERSION_OUTPUT="$("$BUNDLE_DIR/lg-buddy" --version)"
+printf '%s\n' "$VERSION_OUTPUT" | grep -q "^lg-buddy "
+printf '%s\n' "$VERSION_OUTPUT" | grep -q "^version: "
+printf '%s\n' "$VERSION_OUTPUT" | grep -q "^channel: "
+printf '%s\n' "$VERSION_OUTPUT" | grep -q "^commit: "
+
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
 export LG_BUDDY_INSTALL_ROOT="$INSTALL_ROOT"
@@ -208,6 +214,12 @@ INSTALLED_HELP_OUTPUT="$("$INSTALLED_BINARY" 2>&1 || true)"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "lg-buddy"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings list"
 printf '%s\n' "$INSTALLED_HELP_OUTPUT" | grep -q "settings set <key> <value>"
+
+INSTALLED_VERSION_OUTPUT="$("$INSTALLED_BINARY" --version)"
+printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^lg-buddy "
+printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^version: "
+printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^channel: "
+printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
 
 "$INSTALLED_BINARY" settings set screen.backend gnome
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900

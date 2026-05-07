@@ -75,7 +75,9 @@ jobs:
           echo "LG_BUDDY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Build lg-buddy
-        run: cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
+        env:
+          LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
+        run: LG_BUDDY_RELEASE_VERSION="$LG_BUDDY_RELEASE_VERSION" cargo build --release -p lg-buddy --target x86_64-unknown-linux-musl
 
       - name: Create release bundle
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --version "$LG_BUDDY_RELEASE_VERSION" --output-dir dist

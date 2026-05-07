@@ -36,6 +36,7 @@ lg-buddy monitor
 lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
+lg-buddy --version
 ```
 
 In normal use, systemd starts the relevant commands automatically. Most users
@@ -43,6 +44,8 @@ only need `brightness`, `settings`, or `configure.sh`.
 
 `brightness` opens the desktop brightness dialog. `brightness get` prints the
 current TV OLED brightness, and `brightness set <0-100>` updates it directly.
+`--version` prints the installed runtime version, release channel, and commit
+metadata when the binary was built as an official release artifact.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for

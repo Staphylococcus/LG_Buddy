@@ -13,6 +13,7 @@ pub mod settings;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod version;
 pub mod wol;
 
 pub use sources::desktop::{gnome, swayidle};
@@ -87,6 +88,7 @@ impl StartupMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseOutcome {
     Help,
+    Version,
     Command(Command),
 }
 
@@ -228,6 +230,7 @@ LG Buddy Rust runtime
 Usage:
   {program} <command>
   {program} --help
+  {program} --version, -V
 
 Commands:
   startup [mode]  Start or restore the TV output
@@ -274,6 +277,9 @@ where
     let first = first.as_ref();
     if matches!(first, "-h" | "--help" | "help") {
         return Ok(ParseOutcome::Help);
+    }
+    if matches!(first, "-V" | "--version") {
+        return Ok(ParseOutcome::Version);
     }
 
     let command = match first {
@@ -416,6 +422,12 @@ mod tests {
         assert_eq!(parse_args(["--help"]), Ok(ParseOutcome::Help));
         assert_eq!(parse_args(["-h"]), Ok(ParseOutcome::Help));
         assert_eq!(parse_args(["help"]), Ok(ParseOutcome::Help));
+    }
+
+    #[test]
+    fn explicit_version_prints_version() {
+        assert_eq!(parse_args(["--version"]), Ok(ParseOutcome::Version));
+        assert_eq!(parse_args(["-V"]), Ok(ParseOutcome::Version));
     }
 
     #[test]
@@ -647,6 +659,7 @@ mod tests {
         }
 
         for command in [
+            "--version, -V",
             "settings list",
             "settings describe [key]",
             "settings get <key>",

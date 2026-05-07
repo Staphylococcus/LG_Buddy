@@ -1,7 +1,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use lg_buddy::{parse_args, run_command, usage, ParseOutcome};
+use lg_buddy::{parse_args, run_command, usage, version, ParseOutcome};
 
 fn main() -> ExitCode {
     let program = env::args().next().unwrap_or_else(|| "lg-buddy".to_string());
@@ -9,6 +9,10 @@ fn main() -> ExitCode {
     match parse_args(env::args().skip(1)) {
         Ok(ParseOutcome::Help) => {
             print!("{}", usage(&program));
+            ExitCode::SUCCESS
+        }
+        Ok(ParseOutcome::Version) => {
+            print!("{}", version::version_text());
             ExitCode::SUCCESS
         }
         Ok(ParseOutcome::Command(command)) => match run_command(command, &mut std::io::stdout()) {

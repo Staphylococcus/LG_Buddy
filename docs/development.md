@@ -38,6 +38,16 @@ Build the runtime from source with:
 cargo build --release -p lg-buddy
 ```
 
+Official release builds inject version identity into the binary:
+
+```bash
+LG_BUDDY_RELEASE_VERSION=1.1.0 LG_BUDDY_BUILD_COMMIT="$(git rev-parse HEAD)" cargo build --release -p lg-buddy
+```
+
+Without those environment variables, `lg-buddy --version` reports the Cargo
+package version with `channel: dev` and `commit: unknown`.
+Supported channel values are `dev`, `prerelease`, and `stable`.
+
 The resulting binary will be at:
 
 ```text
