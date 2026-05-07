@@ -42,6 +42,12 @@ the existing `config.env` key `screen_restore_policy`. This keeps manual config
 editing, `configure.sh`, installer preservation, and `lg-buddy settings` on one
 durable source of truth.
 
+The settings CLI should not hide malformed durable config. If a raw
+`config.env` value fails validation, `settings list` and `settings describe`
+should show it as invalid, and `settings get <key>` should return the validation
+error. Mutation commands may still overwrite or unset the bad value so users can
+repair the file through the structured interface.
+
 The current public settings interface exposes one TV through `tv.ip`, `tv.mac`,
 and `tv.input`. New writes store those values as `tvs_primary_ip`,
 `tvs_primary_mac`, and `tvs_primary_input`. The profile-shaped storage is only an

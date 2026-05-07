@@ -176,6 +176,13 @@ Current config keys:
 Legacy single-TV keys `tv_ip`, `tv_mac`, and `input` are still read as fallback
 values for existing installs. New writes use `tvs_primary_*` storage keys.
 
+If a direct edit leaves a malformed value in `config.env`, `settings list` and
+`settings describe` show the raw value as invalid with an `invalid config.env`
+source. `settings get <key>` fails with the validation error instead of
+pretending the value is missing or defaulted. Repair the entry with
+`settings set <key> <value>`, `settings unset <key>` when supported, or a manual
+config edit.
+
 Current structured settings:
 
 | Setting key | `config.env` key | Operations |

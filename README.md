@@ -119,6 +119,12 @@ system_sleep_wake_policy=enabled
 new writes use the `tvs_primary_*` shape so the storage can grow later without
 changing the current single-TV settings interface.
 
+If a direct `config.env` edit leaves a value malformed, `lg-buddy settings list`
+and `describe` show it as invalid instead of silently treating it as default or
+missing. `lg-buddy settings get <key>` fails with the validation error so the
+bad entry can be fixed with `settings set`, `settings unset` when supported, or
+by editing `config.env`.
+
 `screen_restore_policy=conservative` is the default. LG Buddy only restores when a matching LG Buddy marker says it previously blanked or powered off the TV.
 
 Set `screen_restore_policy=aggressive` to let session wake/activity and system wake restore the TV even when no LG Buddy marker exists. This is intentionally more aggressive and can turn the TV on in cases where another device or a manual action powered it off.

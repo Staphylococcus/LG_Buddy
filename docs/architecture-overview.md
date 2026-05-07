@@ -371,7 +371,8 @@ power-off is owned by the NetworkManager pre-down gate.
 
 Flow:
 
-1. Load config and exit successfully if `system_sleep_wake_policy=disabled`.
+1. Load config and suppress lifecycle TV actions while
+   `system_sleep_wake_policy=disabled`.
 2. Open the system bus.
 3. Subscribe to logind `PrepareForSleep` signals.
 4. On `PrepareForSleep(true)`:
