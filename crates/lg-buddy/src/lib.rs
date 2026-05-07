@@ -31,6 +31,7 @@ use crate::config::{ConfigError, ConfigPathError};
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
 use crate::state::StateDirError;
+use crate::tv::{OledBrightness, OledBrightnessParseError};
 use std::fmt;
 use std::io::{self, Write};
 
@@ -41,13 +42,20 @@ pub enum Command {
     SleepPre,
     Sleep,
     NetworkManagerPreDown,
-    Brightness,
+    Brightness(BrightnessCommand),
     ScreenOff,
     ScreenOn,
     Monitor,
     Lifecycle,
     DetectBackend,
     Settings(SettingsCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrightnessCommand {
+    Prompt,
+    Get,
+    Set(OledBrightness),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +94,9 @@ pub enum ParseOutcome {
 pub enum ParseError {
     UnknownCommand(String),
     UnknownStartupMode(String),
+    UnknownBrightnessCommand(String),
+    MissingBrightnessValue,
+    InvalidBrightnessValue(OledBrightnessParseError),
     Settings(SettingsParseError),
     UnexpectedArguments {
         command: Command,
@@ -102,6 +113,13 @@ impl fmt::Display for ParseError {
             Self::UnknownStartupMode(mode) => {
                 write!(f, "unknown startup mode `{mode}`")
             }
+            Self::UnknownBrightnessCommand(command) => {
+                write!(f, "unknown brightness command `{command}`")
+            }
+            Self::MissingBrightnessValue => {
+                write!(f, "missing brightness value for `brightness set`")
+            }
+            Self::InvalidBrightnessValue(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
@@ -174,7 +192,7 @@ impl Command {
             Self::SleepPre => "sleep-pre",
             Self::Sleep => "sleep",
             Self::NetworkManagerPreDown => "nm-pre-down",
-            Self::Brightness => "brightness",
+            Self::Brightness(_) => "brightness",
             Self::ScreenOff => "screen-off",
             Self::ScreenOn => "screen-on",
             Self::Monitor => "monitor",
@@ -191,7 +209,7 @@ impl Command {
             Self::SleepPre => "TODO: implemented via command handler",
             Self::Sleep => "TODO: implemented via command handler",
             Self::NetworkManagerPreDown => "TODO: implemented via command handler",
-            Self::Brightness => "TODO: implemented via command handler",
+            Self::Brightness(_) => "TODO: implemented via command handler",
             Self::ScreenOff => "TODO: implemented via command handler",
             Self::ScreenOn => "TODO: implemented via command handler",
             Self::Monitor => "TODO: implemented via command handler",
@@ -218,6 +236,9 @@ Commands:
   sleep           Handle the NetworkManager pre-down sleep hook
   nm-pre-down     Handle NetworkManager pre-down system sleep gate
   brightness      Open the TV brightness control dialog
+  brightness get  Print the current TV OLED brightness
+  brightness set <0-100>
+                  Set the TV OLED brightness
   screen-off      Blank the configured TV output if active
   screen-on       Restore the TV output after an LG Buddy screen-off
   monitor         Run the user-session monitor loop
@@ -281,11 +302,11 @@ where
                 .map(|command| ParseOutcome::Command(Command::Settings(command)))
                 .map_err(ParseError::Settings);
         }
+        "brightness" => return parse_brightness_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
         "sleep" => Command::Sleep,
         "nm-pre-down" => Command::NetworkManagerPreDown,
-        "brightness" => Command::Brightness,
         "screen-off" => Command::ScreenOff,
         "screen-on" => Command::ScreenOn,
         "monitor" => Command::Monitor,
@@ -312,7 +333,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::SleepPre => run_sleep_pre(writer),
         Command::Sleep => run_sleep(writer),
         Command::NetworkManagerPreDown => run_nm_pre_down(writer),
-        Command::Brightness => run_brightness(writer),
+        Command::Brightness(command) => run_brightness(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
         Command::ScreenOff => run_screen_off(writer),
         Command::ScreenOn => run_screen_on(writer),
@@ -321,6 +342,51 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Settings(command) => {
             run_settings_command(command, writer).map_err(RunError::Settings)
         }
+    }
+}
+
+fn parse_brightness_command<I, S>(args: I) -> Result<ParseOutcome, ParseError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    let Some(subcommand) = args.next() else {
+        return Ok(ParseOutcome::Command(Command::Brightness(
+            BrightnessCommand::Prompt,
+        )));
+    };
+
+    match subcommand.as_ref() {
+        "get" => {
+            let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
+            if extra_args.is_empty() {
+                Ok(ParseOutcome::Command(Command::Brightness(
+                    BrightnessCommand::Get,
+                )))
+            } else {
+                Err(ParseError::UnexpectedArguments {
+                    command: Command::Brightness(BrightnessCommand::Get),
+                    arguments: extra_args,
+                })
+            }
+        }
+        "set" => {
+            let value = args.next().ok_or(ParseError::MissingBrightnessValue)?;
+            let brightness = OledBrightness::parse(value.as_ref())
+                .map_err(ParseError::InvalidBrightnessValue)?;
+            let extra_args: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
+            let command = BrightnessCommand::Set(brightness);
+            if extra_args.is_empty() {
+                Ok(ParseOutcome::Command(Command::Brightness(command)))
+            } else {
+                Err(ParseError::UnexpectedArguments {
+                    command: Command::Brightness(command),
+                    arguments: extra_args,
+                })
+            }
+        }
+        other => Err(ParseError::UnknownBrightnessCommand(other.to_string())),
     }
 }
 
@@ -334,8 +400,11 @@ fn run_detect_backend<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, usage, Command, ParseError, ParseOutcome, StartupMode};
+    use super::{
+        parse_args, usage, BrightnessCommand, Command, ParseError, ParseOutcome, StartupMode,
+    };
     use crate::settings::{SettingsCommand, SettingsParseError};
+    use crate::tv::OledBrightness;
 
     #[test]
     fn no_args_prints_help() {
@@ -381,7 +450,21 @@ mod tests {
         );
         assert_eq!(
             parse_args(["brightness"]),
-            Ok(ParseOutcome::Command(Command::Brightness))
+            Ok(ParseOutcome::Command(Command::Brightness(
+                BrightnessCommand::Prompt
+            )))
+        );
+        assert_eq!(
+            parse_args(["brightness", "get"]),
+            Ok(ParseOutcome::Command(Command::Brightness(
+                BrightnessCommand::Get
+            )))
+        );
+        assert_eq!(
+            parse_args(["brightness", "set", "65"]),
+            Ok(ParseOutcome::Command(Command::Brightness(
+                BrightnessCommand::Set(brightness(65))
+            )))
         );
         assert_eq!(
             parse_args(["screen-off"]),
@@ -472,6 +555,33 @@ mod tests {
     }
 
     #[test]
+    fn invalid_brightness_command_is_rejected() {
+        assert_eq!(
+            parse_args(["brightness", "show"]),
+            Err(ParseError::UnknownBrightnessCommand("show".to_string()))
+        );
+        assert_eq!(
+            parse_args(["brightness", "set"]),
+            Err(ParseError::MissingBrightnessValue)
+        );
+        assert!(matches!(
+            parse_args(["brightness", "set", "101"]),
+            Err(ParseError::InvalidBrightnessValue(_))
+        ));
+        assert!(matches!(
+            parse_args(["brightness", "set", "abc"]),
+            Err(ParseError::InvalidBrightnessValue(_))
+        ));
+        assert_eq!(
+            parse_args(["brightness", "get", "extra"]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::Brightness(BrightnessCommand::Get),
+                arguments: vec!["extra".to_string()],
+            })
+        );
+    }
+
+    #[test]
     fn invalid_settings_command_is_rejected() {
         assert_eq!(
             parse_args(["settings"]),
@@ -532,6 +642,10 @@ mod tests {
     fn usage_mentions_settings_commands_without_reserved_notice() {
         let help = usage("lg-buddy");
 
+        for command in ["brightness get", "brightness set <0-100>"] {
+            assert!(help.contains(command), "missing `{command}` from help");
+        }
+
         for command in [
             "settings list",
             "settings describe [key]",
@@ -542,5 +656,9 @@ mod tests {
             assert!(help.contains(command), "missing `{command}` from help");
         }
         assert!(!help.contains("Reserved for write support"));
+    }
+
+    fn brightness(value: u8) -> OledBrightness {
+        OledBrightness::new(value).expect("test brightness should be valid")
     }
 }

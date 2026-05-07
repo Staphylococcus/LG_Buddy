@@ -1,7 +1,7 @@
 mod support;
 
 use lg_buddy::config::HdmiInput;
-use lg_buddy::tv::{BscpylgtvCommandClient, TvClient, TvError};
+use lg_buddy::tv::{BscpylgtvCommandClient, OledBrightness, TvClient, TvError};
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
 
@@ -57,7 +57,7 @@ fn mock_set_settings_updates_backlight() {
     let client = mock_client(&mock);
 
     let output = client
-        .set_oled_brightness(ip("10.0.0.39"), 70)
+        .set_oled_brightness(ip("10.0.0.39"), brightness(70))
         .expect("mock set_oled_brightness should succeed");
 
     assert_eq!(output.stdout(), "{'returnValue': True}\n");
@@ -74,7 +74,7 @@ fn mock_get_picture_settings_includes_backlight() {
         .get_oled_brightness(ip("10.0.0.39"))
         .expect("mock get_oled_brightness should succeed");
 
-    assert_eq!(brightness, 62);
+    assert_eq!(brightness.as_percent(), 62);
 }
 
 #[test]
@@ -180,4 +180,8 @@ fn mock_client(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
 
 fn ip(value: &str) -> Ipv4Addr {
     value.parse().expect("parse IPv4 address")
+}
+
+fn brightness(value: u8) -> OledBrightness {
+    OledBrightness::new(value).expect("test brightness should be valid")
 }

@@ -49,9 +49,19 @@ main.rs
 
 ## System Diagram
 
-The current runtime can be visualized as desktop and system event paths into the
-Rust runtime, and then one control path from policy code into the TV transport
+The current runtime can be visualized as several consumer paths into the Rust
+runtime, and then one control path from policy code into the TV transport
 boundary.
+
+The main runtime consumers are:
+
+- system lifecycle and service integrations, including systemd,
+  NetworkManager, and logind
+- desktop environment and session integrations, including GNOME, `swayidle`,
+  and Linux input activity sources
+- TTY users invoking the CLI directly
+- frontend surfaces, currently the zenity brightness dialog, which delegate
+  back through the CLI/API command surface
 
 ```mermaid
 flowchart LR
@@ -64,6 +74,14 @@ flowchart LR
     subgraph SystemLifecycle["System Lifecycle"]
         LOGIND["logind system bus<br/>PrepareForSleep"]
         NM["NetworkManager dispatcher<br/>pre-down"]
+    end
+
+    subgraph TTY["TTY / CLI"]
+        TERMINAL["terminal commands<br/>settings / brightness / manual actions"]
+    end
+
+    subgraph Frontend["Frontend"]
+        ZENITY["zenity brightness dialog<br/>interactive prompt"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -117,6 +135,8 @@ flowchart LR
     BUS --> LOGINDADAPTER
     LOGINDADAPTER -->|"RuntimeEvent"| EVENTS
     NM --> MAIN
+    TERMINAL --> MAIN
+    ZENITY --> MAIN
     MAIN --> COMMANDS
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE
@@ -277,16 +297,23 @@ The binary currently supports these commands:
 - `sleep`
 - `nm-pre-down`
 - `brightness`
+- `brightness get`
+- `brightness set <0-100>`
 - `screen-off`
 - `screen-on`
 - `monitor`
 - `lifecycle`
 - `detect-backend`
+- `settings`
 
 `lib.rs` parses the command line into a typed command enum and dispatches into
 the runtime command handlers in `commands.rs` and `session/runner.rs`.
 `commands.rs` then delegates screen and lifecycle decisions to their domain
 modules and delegates platform ingestion to `sources/`.
+The `brightness get` and `brightness set` commands use the TV picture
+abstraction in `tv.rs` for typed OLED brightness validation and live TV
+read/write operations. The interactive brightness dialog delegates its TV
+operations back through those CLI commands.
 
 This keeps CLI parsing separate from operational behavior.
 

@@ -18,6 +18,8 @@ Available commands:
 - `sleep`
 - `nm-pre-down`
 - `brightness`
+- `brightness get`
+- `brightness set <0-100>`
 - `screen-off`
 - `screen-on`
 - `monitor`
@@ -32,10 +34,15 @@ lg-buddy detect-backend
 lg-buddy settings list
 lg-buddy monitor
 lg-buddy brightness
+lg-buddy brightness get
+lg-buddy brightness set 65
 ```
 
 In normal use, systemd starts the relevant commands automatically. Most users
 only need `brightness`, `settings`, or `configure.sh`.
+
+`brightness` opens the desktop brightness dialog. `brightness get` prints the
+current TV OLED brightness, and `brightness set <0-100>` updates it directly.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for

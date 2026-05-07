@@ -15,6 +15,8 @@ use crate::config::{HdmiInput, MacAddress};
 use crate::wol::{WakeOnLanError, WakeOnLanSender};
 
 pub const DEFAULT_BSCPYLGTV_COMMAND_PATH: &str = "/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand";
+pub const OLED_BRIGHTNESS_MIN: u8 = 0;
+pub const OLED_BRIGHTNESS_MAX: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
@@ -126,14 +128,76 @@ impl TvError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OledBrightnessParseError {
+    value: String,
+}
+
+impl OledBrightnessParseError {
+    fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+        }
+    }
+}
+
+impl fmt::Display for OledBrightnessParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid OLED brightness `{}`; expected an integer from {} to {}",
+            self.value, OLED_BRIGHTNESS_MIN, OLED_BRIGHTNESS_MAX
+        )
+    }
+}
+
+impl Error for OledBrightnessParseError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OledBrightness(u8);
+
+impl OledBrightness {
+    pub const DEFAULT: Self = Self(50);
+
+    pub fn new(value: u8) -> Result<Self, OledBrightnessParseError> {
+        if value <= OLED_BRIGHTNESS_MAX {
+            Ok(Self(value))
+        } else {
+            Err(OledBrightnessParseError::new(value.to_string()))
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, OledBrightnessParseError> {
+        match value.parse::<i64>() {
+            Ok(parsed)
+                if parsed >= i64::from(OLED_BRIGHTNESS_MIN)
+                    && parsed <= i64::from(OLED_BRIGHTNESS_MAX) =>
+            {
+                Ok(Self(parsed as u8))
+            }
+            _ => Err(OledBrightnessParseError::new(value)),
+        }
+    }
+
+    pub fn as_percent(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for OledBrightness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 pub trait TvClient {
     fn get_input(&self, tv_ip: Ipv4Addr) -> Result<String, TvError>;
-    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<u8, TvError>;
+    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<OledBrightness, TvError>;
     fn set_input(&self, tv_ip: Ipv4Addr, input: HdmiInput) -> Result<CommandOutput, TvError>;
     fn set_oled_brightness(
         &self,
         tv_ip: Ipv4Addr,
-        brightness: u8,
+        brightness: OledBrightness,
     ) -> Result<CommandOutput, TvError>;
     fn power_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
     fn turn_screen_off(&self, tv_ip: Ipv4Addr) -> Result<CommandOutput, TvError>;
@@ -251,11 +315,14 @@ pub struct TvPicture<'a, C> {
 }
 
 impl<'a, C: TvClient> TvPicture<'a, C> {
-    pub fn oled_brightness(&self) -> Result<u8, TvError> {
+    pub fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
         self.client.get_oled_brightness(self.tv_ip)
     }
 
-    pub fn set_oled_brightness(&self, brightness: u8) -> Result<CommandOutput, TvError> {
+    pub fn set_oled_brightness(
+        &self,
+        brightness: OledBrightness,
+    ) -> Result<CommandOutput, TvError> {
         self.client.set_oled_brightness(self.tv_ip, brightness)
     }
 }
@@ -687,7 +754,7 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
         })
     }
 
-    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<u8, TvError> {
+    fn get_oled_brightness(&self, tv_ip: Ipv4Addr) -> Result<OledBrightness, TvError> {
         let output = self.run_command(tv_ip, "get_picture_settings", &[])?;
         parse_backlight(output.stdout()).ok_or(TvError::InvalidOutput {
             command: "get_picture_settings",
@@ -703,7 +770,7 @@ impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
     fn set_oled_brightness(
         &self,
         tv_ip: Ipv4Addr,
-        brightness: u8,
+        brightness: OledBrightness,
     ) -> Result<CommandOutput, TvError> {
         let backlight = format!("{{\"backlight\": {brightness}}}");
         self.run_command(tv_ip, "set_settings", &["picture", backlight.as_str()])
@@ -730,7 +797,7 @@ fn last_non_empty_line(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_backlight(output: &str) -> Option<u8> {
+fn parse_backlight(output: &str) -> Option<OledBrightness> {
     for token in output.split([',', '{', '}', '\n']) {
         let token = token.trim();
         if !(token.starts_with("'backlight'") || token.starts_with("\"backlight\"")) {
@@ -742,11 +809,9 @@ fn parse_backlight(output: &str) -> Option<u8> {
             .trim()
             .trim_matches('\'')
             .trim_matches('"')
-            .parse::<u16>()
+            .parse::<u8>()
             .ok()?;
-        if parsed <= 100 {
-            return Some(parsed as u8);
-        }
+        return OledBrightness::new(parsed).ok();
     }
 
     None
@@ -761,8 +826,8 @@ mod tests {
     use super::{
         build_user_scoped_launch_plan, current_euid, BscpylgtvCommandClient,
         BscpylgtvCommandLauncher, BscpylgtvInvocation, BscpylgtvLaunchResult, CommandOutput,
-        CurrentInput, TvClient, TvDevice, TvError, UserScopedBscpylgtvCommandLauncher,
-        UserScopedLaunchPlan, DEFAULT_BSCPYLGTV_COMMAND_PATH,
+        CurrentInput, OledBrightness, TvClient, TvDevice, TvError,
+        UserScopedBscpylgtvCommandLauncher, UserScopedLaunchPlan, DEFAULT_BSCPYLGTV_COMMAND_PATH,
     };
     use crate::auth::{BscpylgtvAuthContext, SystemUser};
     use crate::config::{HdmiInput, MacAddress};
@@ -774,6 +839,29 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
     use support::{ExecutableScript, MockBscpylgtv};
+
+    #[test]
+    fn oled_brightness_accepts_boundary_values() {
+        let minimum = OledBrightness::parse("0").expect("minimum brightness should parse");
+        let maximum = OledBrightness::parse("100").expect("maximum brightness should parse");
+
+        assert_eq!(minimum.as_percent(), 0);
+        assert_eq!(maximum.as_percent(), 100);
+        assert_eq!(minimum.to_string(), "0");
+        assert_eq!(OledBrightness::DEFAULT.as_percent(), 50);
+    }
+
+    #[test]
+    fn oled_brightness_rejects_invalid_values() {
+        for value in ["-1", "101", "abc", "50.5"] {
+            let err = OledBrightness::parse(value).expect_err("invalid brightness should fail");
+            assert!(err
+                .to_string()
+                .contains("expected an integer from 0 to 100"));
+        }
+
+        assert!(OledBrightness::new(101).is_err());
+    }
 
     #[test]
     fn default_client_uses_expected_command_path() {
@@ -863,7 +951,7 @@ mod tests {
         let mock = MockBscpylgtv::new("tv-set-brightness");
         let client = client_for_mock(&mock);
         client
-            .set_oled_brightness(ip("10.0.0.5"), 65)
+            .set_oled_brightness(ip("10.0.0.5"), brightness(65))
             .expect("set_oled_brightness should succeed");
 
         assert_eq!(
@@ -890,7 +978,7 @@ mod tests {
             .get_oled_brightness(ip("10.0.0.5"))
             .expect("get_oled_brightness should succeed");
 
-        assert_eq!(brightness, 72);
+        assert_eq!(brightness.as_percent(), 72);
         assert_eq!(
             mock.calls()
                 .into_iter()
@@ -978,7 +1066,7 @@ mod tests {
         let client = client_for_mock(&mock);
         let tv = TvDevice::new(&client, ip("10.0.0.12"));
         tv.picture()
-            .set_oled_brightness(40)
+            .set_oled_brightness(brightness(40))
             .expect("brightness set should succeed");
 
         assert_eq!(
@@ -1006,7 +1094,7 @@ mod tests {
             .oled_brightness()
             .expect("brightness read should succeed");
 
-        assert_eq!(brightness, 33);
+        assert_eq!(brightness.as_percent(), 33);
         assert_eq!(
             mock.calls()
                 .into_iter()
@@ -1357,6 +1445,10 @@ mod tests {
 
     fn ip(value: &str) -> Ipv4Addr {
         value.parse().expect("parse IPv4 address")
+    }
+
+    fn brightness(value: u8) -> OledBrightness {
+        OledBrightness::new(value).expect("test brightness should be valid")
     }
 
     fn parse_mac(value: &str) -> MacAddress {

@@ -93,7 +93,7 @@ impl RuntimeEventKind {
                     machine_sleep_pending: None,
                 })
             }
-            Command::Brightness => Some(Self::BrightnessRequested),
+            Command::Brightness(_) => Some(Self::BrightnessRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
             Command::ScreenOn => Some(Self::ScreenRestoreRequested),
             Command::Monitor
@@ -143,7 +143,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            RuntimeEvent::from_command(Command::Brightness),
+            RuntimeEvent::from_command(Command::Brightness(crate::BrightnessCommand::Prompt)),
             Some(RuntimeEvent::new(
                 EventSource::CliApi,
                 RuntimeEventKind::BrightnessRequested
