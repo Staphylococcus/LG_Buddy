@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io;
+use std::time::Duration;
 
 use semver::Version;
 use serde::Deserialize;
@@ -11,6 +12,8 @@ const GITHUB_RELEASES_API_BASE: &str =
     "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
+const GITHUB_CONNECT_TIMEOUT_SECONDS: u64 = 5;
+const GITHUB_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 const PRERELEASE_PAGE_SIZE: u8 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,12 +312,17 @@ impl ReleaseEndpoint {
 
 struct UreqGitHubReleasesClient {
     base_url: &'static str,
+    agent: ureq::Agent,
 }
 
 impl Default for UreqGitHubReleasesClient {
     fn default() -> Self {
         Self {
             base_url: GITHUB_RELEASES_API_BASE,
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECONDS))
+                .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECONDS))
+                .build(),
         }
     }
 }
@@ -322,7 +330,9 @@ impl Default for UreqGitHubReleasesClient {
 impl GitHubReleasesClient for UreqGitHubReleasesClient {
     fn get(&self, endpoint: ReleaseEndpoint, user_agent: &str) -> Result<String, UpdatesError> {
         let url = endpoint.url(self.base_url);
-        let result = ureq::get(&url)
+        let result = self
+            .agent
+            .get(&url)
             .set("Accept", GITHUB_ACCEPT)
             .set("User-Agent", user_agent)
             .set("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -373,13 +383,13 @@ fn check_updates<C: GitHubReleasesClient>(
     match command {
         UpdatesCommand::Check { channel } => {
             let channel = channel.unwrap_or_else(|| UpdateChannel::default_for(current));
-            let latest = fetch_latest_release(channel, current, client)?;
             let current_version = Version::parse(current.version()).map_err(|source| {
                 UpdatesError::InvalidLocalVersion {
                     version: current.version().to_string(),
                     source,
                 }
             })?;
+            let latest = fetch_latest_release(channel, current, client)?;
 
             Ok(UpdateCheckResult {
                 current_version,
@@ -745,7 +755,7 @@ mod tests {
 
     #[test]
     fn invalid_local_version_is_reported() {
-        let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.0"))]);
+        let client = MockGitHubReleasesClient::new(vec![]);
 
         let err = check_updates(
             UpdatesCommand::Check {
@@ -757,6 +767,7 @@ mod tests {
         .expect_err("invalid local version should fail update check");
 
         assert!(matches!(err, UpdatesError::InvalidLocalVersion { .. }));
+        assert!(client.requests().is_empty());
     }
 
     #[test]
