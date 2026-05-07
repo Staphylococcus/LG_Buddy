@@ -2,7 +2,7 @@ use std::env;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, ExitStatus};
 use std::thread;
 use std::time::Duration;
 
@@ -115,18 +115,22 @@ impl NetworkWaiter for NmOnlineNetworkWaiter {
             .args(["-q", "-t", "60"])
             .output()?;
 
-        if !output.status.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("nm-online exited with {}", output.status),
-            ));
-        }
-
-        Ok(())
+        nm_online_status_result(output.status)
     }
 
     fn wait_for_route_to(&self, target: Ipv4Addr) -> io::Result<()> {
         wait_for_route_to_target(target)
+    }
+}
+
+fn nm_online_status_result(status: ExitStatus) -> io::Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("nm-online exited with {status}"),
+        ))
     }
 }
 
@@ -1555,12 +1559,12 @@ mod tests {
         decide_restore_after_system_sleep_start, decide_shutdown_after_input,
         decide_shutdown_after_reboot, decide_startup_route, decide_system_sleep_after_input,
         decide_system_sleep_attempt_start, decide_system_sleep_power_off_result,
-        handle_network_teardown_with_outcome, restore_after_system_sleep_with_outcome,
-        run_shutdown_with_outcome, run_startup_with_outcome, LifecycleEvent, NetworkTeardownDeps,
-        NetworkTeardownNext, NetworkTeardownPolicyInput, NetworkWaiter, NmOnlineNetworkWaiter,
-        RebootDetector, RebootObservation, RestoreNext, ShutdownNext, Sleeper, StartupDeps,
-        StartupRoute, SystemSleepAttemptNext, SystemSleepNext, SystemSleepPowerOffContext,
-        TvEffectObservation, TvInputObservation,
+        handle_network_teardown_with_outcome, nm_online_status_result,
+        restore_after_system_sleep_with_outcome, run_shutdown_with_outcome,
+        run_startup_with_outcome, LifecycleEvent, NetworkTeardownDeps, NetworkTeardownNext,
+        NetworkTeardownPolicyInput, NetworkWaiter, RebootDetector, RebootObservation, RestoreNext,
+        ShutdownNext, Sleeper, StartupDeps, StartupRoute, SystemSleepAttemptNext, SystemSleepNext,
+        SystemSleepPowerOffContext, TvEffectObservation, TvInputObservation,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
@@ -1578,10 +1582,8 @@ mod tests {
     use std::fs;
     use std::io;
     use std::net::Ipv4Addr;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::process;
+    use std::process::{self, ExitStatus};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, UNIX_EPOCH};
     use support::MockBscpylgtv;
@@ -1791,13 +1793,10 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn nm_online_waiter_reports_nonzero_status() {
-        let temp_dir = TestDir::new("nm-online-nonzero-status");
-        let command_path = executable_script(temp_dir.path(), "nm-online", "#!/bin/sh\nexit 1\n");
-        let waiter = NmOnlineNetworkWaiter { command_path };
+    fn nm_online_status_result_reports_nonzero_status() {
+        use std::os::unix::process::ExitStatusExt;
 
-        let err = waiter
-            .wait_for_network()
+        let err = nm_online_status_result(ExitStatus::from_raw(1 << 8))
             .expect_err("nonzero nm-online status should fail the wait");
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
@@ -2336,16 +2335,6 @@ mod tests {
 
     fn ip(value: &str) -> Ipv4Addr {
         value.parse().expect("parse ipv4")
-    }
-
-    #[cfg(unix)]
-    fn executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(&path, body).expect("write executable script");
-        let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).expect("set executable bit");
-        path
     }
 
     fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
