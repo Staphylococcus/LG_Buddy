@@ -2132,6 +2132,28 @@ mod tests {
     }
 
     #[test]
+    fn registry_public_contract_is_pinned() {
+        let contracts: Vec<String> = SETTINGS_REGISTRY
+            .all()
+            .iter()
+            .map(setting_definition_contract)
+            .collect();
+
+        assert_eq!(
+            contracts,
+            vec![
+                "tv.ip | storage=tvs_primary_ip | fallbacks=tv_ip | type=ipv4 | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=IPv4 address of the primary configured TV.",
+                "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
+                "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
+                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
+                "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle timeout in seconds before LG Buddy blanks the configured screen.",
+                "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
+                "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=System sleep and wake policy for lifecycle hooks.",
+            ]
+        );
+    }
+
+    #[test]
     fn settings_command_parser_accepts_supported_commands() {
         assert_eq!(SettingsCommand::parse(["list"]), Ok(SettingsCommand::List));
         assert_eq!(
@@ -2275,11 +2297,93 @@ system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set
             .unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("screen.backend\n"));
-        assert!(output.contains("screen.idle_timeout\n"));
-        assert!(output.contains("  range: 1..=86400\n"));
-        assert!(output.contains("system.sleep_wake_policy\n"));
-        assert!(output.contains("  supported operations: get, describe, set, unset\n"));
+        assert_eq!(
+            output,
+            "\
+tv.ip
+  storage key: tvs_primary_ip
+  type: ipv4
+  current: <missing>
+  source: missing
+  default: required
+  mutability: read-write
+  supported operations: get, describe, set
+  apply: no-runtime-apply-required
+  description: IPv4 address of the primary configured TV.
+
+tv.mac
+  storage key: tvs_primary_mac
+  type: mac-address
+  current: <missing>
+  source: missing
+  default: required
+  mutability: read-write
+  supported operations: get, describe, set
+  apply: no-runtime-apply-required
+  description: MAC address of the primary configured TV for Wake-on-LAN.
+
+tv.input
+  storage key: tvs_primary_input
+  type: enum
+  current: <missing>
+  source: missing
+  default: required
+  mutability: read-write
+  supported operations: get, describe, set
+  allowed values: HDMI_1, HDMI_2, HDMI_3, HDMI_4
+  apply: no-runtime-apply-required
+  description: HDMI input used by the primary configured TV.
+
+screen.backend
+  storage key: screen_backend
+  type: enum
+  current: auto
+  source: default
+  default: auto
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: auto, gnome, swayidle
+  apply: restart-user-screen-service
+  description: Screen backend selection for user-session blanking and restore behavior.
+
+screen.idle_timeout
+  storage key: screen_idle_timeout
+  type: integer
+  current: 300
+  source: default
+  default: 300
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  range: 1..=86400
+  apply: restart-user-screen-service
+  description: Idle timeout in seconds before LG Buddy blanks the configured screen.
+
+screen.restore_policy
+  storage key: screen_restore_policy
+  type: enum
+  current: conservative
+  source: default
+  default: conservative
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: conservative, aggressive
+  aliases: marker_only -> conservative
+  apply: restart-user-screen-service
+  description: Screen restore policy after LG Buddy blanks the configured screen.
+
+system.sleep_wake_policy
+  storage key: system_sleep_wake_policy
+  type: enum
+  current: enabled
+  source: default
+  default: enabled
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: enabled, disabled
+  apply: runtime-policy-only
+  description: System sleep and wake policy for lifecycle hooks.
+"
+        );
     }
 
     #[test]
@@ -3200,6 +3304,68 @@ tvs_primary_ip=192.0.2.43
             "lg-buddy-settings-{name}-{}-{nanos}.env",
             std::process::id()
         ))
+    }
+
+    fn setting_definition_contract(definition: &super::SettingDefinition) -> String {
+        format!(
+            "{} | storage={} | fallbacks={} | type={} | default={} | mutability={} | ops={} | apply={} | description={}",
+            definition.key_name(),
+            definition.storage_key(),
+            format_fallback_storage_keys(definition.fallback_storage_keys()),
+            setting_type_contract(definition.value_type()),
+            definition.default_value_label(),
+            definition.mutability().as_str(),
+            format_operation_contract(definition.supported_operations()),
+            definition.apply_strategy().as_str(),
+            definition.description()
+        )
+    }
+
+    fn format_fallback_storage_keys(fallbacks: &[&str]) -> String {
+        if fallbacks.is_empty() {
+            "(none)".to_string()
+        } else {
+            fallbacks.join(",")
+        }
+    }
+
+    fn setting_type_contract(value_type: SettingType) -> String {
+        match value_type {
+            SettingType::Enum(enum_type) => format!(
+                "enum values={} aliases={}",
+                enum_type.values().join(","),
+                format_alias_contract(enum_type.aliases())
+            ),
+            SettingType::Integer(integer_type) => {
+                format!(
+                    "integer range={}..={}",
+                    integer_type.min(),
+                    integer_type.max()
+                )
+            }
+            SettingType::Ipv4 => "ipv4".to_string(),
+            SettingType::MacAddress => "mac-address".to_string(),
+        }
+    }
+
+    fn format_alias_contract(aliases: &[super::SettingAlias]) -> String {
+        if aliases.is_empty() {
+            "(none)".to_string()
+        } else {
+            aliases
+                .iter()
+                .map(|alias| format!("{}->{}", alias.from(), alias.to()))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+    }
+
+    fn format_operation_contract(operations: &[SettingOperation]) -> String {
+        operations
+            .iter()
+            .map(|operation| operation.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     #[derive(Debug, Clone)]
