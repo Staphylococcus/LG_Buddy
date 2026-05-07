@@ -26,6 +26,7 @@ Available commands:
 - `lifecycle`
 - `detect-backend`
 - `settings`
+- `updates`
 
 Examples:
 
@@ -37,6 +38,7 @@ lg-buddy brightness
 lg-buddy brightness get
 lg-buddy brightness set 65
 lg-buddy --version
+lg-buddy updates check
 ```
 
 In normal use, systemd starts the relevant commands automatically. Most users
@@ -46,6 +48,11 @@ only need `brightness`, `settings`, or `configure.sh`.
 current TV OLED brightness, and `brightness set <0-100>` updates it directly.
 `--version` prints the installed runtime version, release channel, and commit
 metadata when the binary was built as an official release artifact.
+`updates check` queries GitHub releases on demand and reports whether a newer
+release is available. Stable builds check stable releases by default, while
+prerelease builds check the prerelease channel, which includes both prerelease
+and stable releases. Use `--channel stable` or `--channel prerelease` to choose
+the channel explicitly.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for
