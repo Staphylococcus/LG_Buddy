@@ -13,6 +13,7 @@ pub mod settings;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod updates;
 pub mod version;
 pub mod wol;
 
@@ -33,6 +34,7 @@ use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
 use crate::state::StateDirError;
 use crate::tv::{OledBrightness, OledBrightnessParseError};
+use crate::updates::{run_updates_command, UpdatesCommand, UpdatesError, UpdatesParseError};
 use std::fmt;
 use std::io::{self, Write};
 
@@ -50,6 +52,7 @@ pub enum Command {
     Lifecycle,
     DetectBackend,
     Settings(SettingsCommand),
+    Updates(UpdatesCommand),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +103,7 @@ pub enum ParseError {
     MissingBrightnessValue,
     InvalidBrightnessValue(OledBrightnessParseError),
     Settings(SettingsParseError),
+    Updates(UpdatesParseError),
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -123,6 +127,7 @@ impl fmt::Display for ParseError {
             }
             Self::InvalidBrightnessValue(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
+            Self::Updates(err) => write!(f, "{err}"),
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
                     f,
@@ -146,6 +151,7 @@ pub enum RunError {
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
     Settings(SettingsError),
+    Updates(UpdatesError),
 }
 
 impl fmt::Display for RunError {
@@ -160,6 +166,7 @@ impl fmt::Display for RunError {
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
+            Self::Updates(err) => write!(f, "{err}"),
         }
     }
 }
@@ -176,6 +183,7 @@ impl std::error::Error for RunError {
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
             Self::Settings(err) => Some(err),
+            Self::Updates(err) => Some(err),
         }
     }
 }
@@ -201,6 +209,7 @@ impl Command {
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
             Self::Settings(_) => "settings",
+            Self::Updates(_) => "updates",
         }
     }
 
@@ -218,6 +227,7 @@ impl Command {
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
             Self::Settings(_) => "TODO: implemented via command handler",
+            Self::Updates(_) => "TODO: implemented via command handler",
         }
     }
 }
@@ -248,6 +258,7 @@ Commands:
   lifecycle       Run the system lifecycle monitor loop
   detect-backend  Detect the active screen backend
   settings        Inspect and edit structured LG Buddy settings
+  updates         Check GitHub releases on demand
 
 Startup modes:
   auto            Restore on wake when LG Buddy owns the system marker, otherwise boot
@@ -260,6 +271,9 @@ Settings:
   settings get <key>
   settings set <key> <value>
   settings unset <key>
+
+Updates:
+  updates check [--channel stable|prerelease]
 "
     )
 }
@@ -308,6 +322,11 @@ where
                 .map(|command| ParseOutcome::Command(Command::Settings(command)))
                 .map_err(ParseError::Settings);
         }
+        "updates" => {
+            return UpdatesCommand::parse(args)
+                .map(|command| ParseOutcome::Command(Command::Updates(command)))
+                .map_err(ParseError::Updates);
+        }
         "brightness" => return parse_brightness_command(args),
         "shutdown" => Command::Shutdown,
         "sleep-pre" => Command::SleepPre,
@@ -347,6 +366,9 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Lifecycle => run_lifecycle_monitor(writer),
         Command::Settings(command) => {
             run_settings_command(command, writer).map_err(RunError::Settings)
+        }
+        Command::Updates(command) => {
+            run_updates_command(command, writer).map_err(RunError::Updates)
         }
     }
 }
@@ -411,6 +433,7 @@ mod tests {
     };
     use crate::settings::{SettingsCommand, SettingsParseError};
     use crate::tv::OledBrightness;
+    use crate::updates::{UpdateChannel, UpdatesCommand, UpdatesParseError};
 
     #[test]
     fn no_args_prints_help() {
@@ -537,6 +560,28 @@ mod tests {
                 SettingsCommand::Unset("screen.backend".to_string())
             )))
         );
+        assert_eq!(
+            parse_args(["updates", "check"]),
+            Ok(ParseOutcome::Command(Command::Updates(
+                UpdatesCommand::Check { channel: None }
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--channel", "stable"]),
+            Ok(ParseOutcome::Command(Command::Updates(
+                UpdatesCommand::Check {
+                    channel: Some(UpdateChannel::Stable)
+                }
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--channel", "prerelease"]),
+            Ok(ParseOutcome::Command(Command::Updates(
+                UpdatesCommand::Check {
+                    channel: Some(UpdateChannel::Prerelease)
+                }
+            )))
+        );
     }
 
     #[test]
@@ -617,6 +662,39 @@ mod tests {
     }
 
     #[test]
+    fn invalid_updates_command_is_rejected() {
+        assert_eq!(
+            parse_args(["updates"]),
+            Err(ParseError::Updates(UpdatesParseError::MissingSubcommand))
+        );
+        assert_eq!(
+            parse_args(["updates", "latest"]),
+            Err(ParseError::Updates(UpdatesParseError::UnknownSubcommand(
+                "latest".to_string()
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--channel"]),
+            Err(ParseError::Updates(UpdatesParseError::MissingChannelValue))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "--channel", "nightly"]),
+            Err(ParseError::Updates(UpdatesParseError::UnknownChannel(
+                "nightly".to_string()
+            )))
+        );
+        assert_eq!(
+            parse_args(["updates", "check", "extra"]),
+            Err(ParseError::Updates(
+                UpdatesParseError::UnexpectedArguments {
+                    subcommand: "check",
+                    arguments: vec!["extra".to_string()]
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn usage_mentions_all_commands() {
         let help = usage("lg-buddy");
 
@@ -633,6 +711,7 @@ mod tests {
             "lifecycle",
             "detect-backend",
             "settings",
+            "updates",
         ] {
             assert!(
                 help.contains(command),
@@ -665,6 +744,7 @@ mod tests {
             "settings get <key>",
             "settings set <key> <value>",
             "settings unset <key>",
+            "updates check [--channel stable|prerelease]",
         ] {
             assert!(help.contains(command), "missing `{command}` from help");
         }

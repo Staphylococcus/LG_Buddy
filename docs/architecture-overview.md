@@ -77,7 +77,7 @@ flowchart LR
     end
 
     subgraph TTY["TTY / CLI"]
-        TERMINAL["terminal commands<br/>settings / brightness / manual actions"]
+        TERMINAL["terminal commands<br/>settings / brightness / updates / manual actions"]
     end
 
     subgraph Frontend["Frontend"]
@@ -305,11 +305,14 @@ The binary currently supports these commands:
 - `lifecycle`
 - `detect-backend`
 - `settings`
+- `updates check [--channel stable|prerelease]`
 
 `lib.rs` parses the command line into a typed command enum and dispatches into
 the runtime command handlers in `commands.rs` and `session/runner.rs`.
 `commands.rs` then delegates screen and lifecycle decisions to their domain
-modules and delegates platform ingestion to `sources/`.
+modules and delegates platform ingestion to `sources/`. The on-demand
+`updates check` command consumes the GitHub Releases API without entering the
+screen, lifecycle, settings, notification, or scheduling paths.
 The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive brightness dialog delegates its TV

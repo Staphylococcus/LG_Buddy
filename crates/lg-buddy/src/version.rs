@@ -41,6 +41,19 @@ impl VersionInfo {
             self.commit().unwrap_or("unknown")
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_testing(
+        version: &'static str,
+        channel: ReleaseChannel,
+        commit: Option<&'static str>,
+    ) -> Self {
+        Self {
+            version,
+            channel,
+            commit,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -99,7 +99,8 @@ impl RuntimeEventKind {
             Command::Monitor
             | Command::Lifecycle
             | Command::DetectBackend
-            | Command::Settings(_) => None,
+            | Command::Settings(_)
+            | Command::Updates(_) => None,
         }
     }
 }
@@ -181,6 +182,12 @@ mod tests {
         assert_eq!(RuntimeEvent::from_command(Command::DetectBackend), None);
         assert_eq!(
             RuntimeEvent::from_command(Command::Settings(crate::settings::SettingsCommand::List)),
+            None
+        );
+        assert_eq!(
+            RuntimeEvent::from_command(Command::Updates(crate::updates::UpdatesCommand::Check {
+                channel: None,
+            })),
             None
         );
     }
