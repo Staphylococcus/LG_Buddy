@@ -290,8 +290,10 @@ The binary currently supports these commands:
 the runtime command handlers in `commands.rs` and `session/runner.rs`.
 `commands.rs` then delegates screen and lifecycle decisions to their domain
 modules and delegates platform ingestion to `sources/`.
-The brightness command uses the TV picture abstraction in `tv.rs` for typed
-OLED brightness validation and live TV read/write operations.
+The `brightness get` and `brightness set` commands use the TV picture
+abstraction in `tv.rs` for typed OLED brightness validation and live TV
+read/write operations. The interactive brightness dialog delegates its TV
+operations back through those CLI commands.
 
 This keeps CLI parsing separate from operational behavior.
 
