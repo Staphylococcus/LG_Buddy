@@ -207,7 +207,7 @@ impl fmt::Display for UpdatesError {
             Self::NoMatchingRelease { channel } => {
                 write!(
                     f,
-                    "GitHub releases API returned no matching {} release",
+                    "GitHub releases API returned no matching release for {} channel",
                     channel.as_str()
                 )
             }
@@ -450,13 +450,18 @@ fn release_info_from_api_release(
 
     match channel {
         UpdateChannel::Stable if release.prerelease => return None,
-        UpdateChannel::Prerelease if !release.prerelease => return None,
         UpdateChannel::Stable | UpdateChannel::Prerelease => {}
     }
 
+    let release_channel = if release.prerelease {
+        UpdateChannel::Prerelease
+    } else {
+        UpdateChannel::Stable
+    };
+
     parse_release_version(&release.tag_name).map(|version| ReleaseInfo {
         version,
-        channel,
+        channel: release_channel,
         url: release.html_url,
     })
 }
@@ -613,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_channel_ignores_drafts_stable_releases_and_invalid_tags() {
+    fn prerelease_channel_includes_stable_releases_and_picks_highest_semver() {
         let client = MockGitHubReleasesClient::new(vec![Ok(format!(
             "[{},{},{},{}]",
             draft_prerelease("v1.3.0-beta.1"),
@@ -634,7 +639,7 @@ mod tests {
         assert!(result.update_available());
         assert_eq!(
             result.render(),
-            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0-beta.2 (prerelease)\nurl: https://github.test/releases/tag/v1.2.0-beta.2\n"
+            "status: update available\ncurrent: 1.2.0-beta.1 (prerelease)\nlatest: 1.2.0 (stable)\nurl: https://github.test/releases/tag/v1.2.0\n"
         );
     }
 
@@ -729,10 +734,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_prerelease_candidate_is_reported() {
+    fn missing_release_candidate_for_prerelease_channel_is_reported() {
         let client = MockGitHubReleasesClient::new(vec![Ok(format!(
             "[{},{}]",
-            stable_release("v1.1.0"),
+            prerelease("release-0.6"),
             draft_prerelease("v1.2.0-beta.1")
         ))]);
 
