@@ -324,7 +324,7 @@ impl SettingsFormatter {
                 writer,
                 "{}={} ({}, {}, ops: {})",
                 setting.key_name(),
-                format_effective_value(*setting),
+                format_effective_value(setting),
                 setting.source().as_str(),
                 setting.definition().mutability().as_str(),
                 format_operations(setting.definition().supported_operations(), ",")
@@ -345,7 +345,7 @@ impl SettingsFormatter {
                 writeln!(writer).map_err(output_error)?;
             }
 
-            self.write_single_description(writer, *setting)?;
+            self.write_single_description(writer, setting)?;
         }
 
         Ok(())
@@ -411,7 +411,7 @@ impl SettingsFormatter {
     fn write_single_description<W: io::Write>(
         &self,
         writer: &mut W,
-        setting: EffectiveSetting,
+        setting: &EffectiveSetting,
     ) -> Result<(), SettingsError> {
         let definition = setting.definition();
 
@@ -993,28 +993,36 @@ impl SettingsStore {
 
     pub fn effective_definition(&self, definition: &'static SettingDefinition) -> EffectiveSetting {
         let raw_value = self.reader.raw_setting_value(definition);
-        let parsed_value = raw_value.and_then(|(value, source)| {
-            definition
-                .parse_value(value)
-                .ok()
-                .map(|value| (value, source))
-        });
 
-        match (parsed_value, definition.default_value()) {
-            (Some((value, source)), _) => EffectiveSetting {
-                definition,
-                value: Some(value),
-                source,
-            },
-            (None, Some(value)) => EffectiveSetting {
+        if let Some((raw_value, source)) = raw_value {
+            return match definition.parse_value(raw_value) {
+                Ok(value) => EffectiveSetting {
+                    definition,
+                    value: Some(value),
+                    source,
+                    invalid_value: None,
+                },
+                Err(_) => EffectiveSetting {
+                    definition,
+                    value: None,
+                    source: source.invalid(),
+                    invalid_value: Some(raw_value.to_string()),
+                },
+            };
+        }
+
+        match definition.default_value() {
+            Some(value) => EffectiveSetting {
                 definition,
                 value: Some(value),
                 source: SettingSource::Default,
+                invalid_value: None,
             },
-            (None, None) => EffectiveSetting {
+            None => EffectiveSetting {
                 definition,
                 value: None,
                 source: SettingSource::Missing,
+                invalid_value: None,
             },
         }
     }
@@ -1105,43 +1113,56 @@ impl ConfigPathResolver {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EffectiveSetting {
     definition: &'static SettingDefinition,
     value: Option<SettingValue>,
     source: SettingSource,
+    invalid_value: Option<String>,
 }
 
 impl EffectiveSetting {
-    pub fn definition(self) -> &'static SettingDefinition {
+    pub fn definition(&self) -> &'static SettingDefinition {
         self.definition
     }
 
-    pub fn key(self) -> SettingKey<'static> {
+    pub fn key(&self) -> SettingKey<'static> {
         self.definition.key()
     }
 
-    pub fn key_name(self) -> &'static str {
+    pub fn key_name(&self) -> &'static str {
         self.definition.key_name()
     }
 
-    pub fn storage_key(self) -> &'static str {
+    pub fn storage_key(&self) -> &'static str {
         self.definition.storage_key()
     }
 
-    pub fn value(self) -> Option<SettingValue> {
+    pub fn value(&self) -> Option<SettingValue> {
         self.value
     }
 
-    pub fn required_value(self) -> Result<SettingValue, SettingsError> {
+    pub fn required_value(&self) -> Result<SettingValue, SettingsError> {
+        if let Some(value) = self.invalid_value() {
+            return Err(SettingsError::InvalidValue {
+                key: self.key_name().to_string(),
+                value: value.to_string(),
+                expected: self.definition.value_type().expected(),
+            });
+        }
+
         self.value
             .ok_or_else(|| SettingsError::MissingRequiredSetting {
                 key: self.key_name().to_string(),
             })
     }
 
-    pub fn source(self) -> SettingSource {
+    pub fn source(&self) -> SettingSource {
         self.source
+    }
+
+    pub fn invalid_value(&self) -> Option<&str> {
+        self.invalid_value.as_deref()
     }
 }
 
@@ -1150,6 +1171,8 @@ pub enum SettingSource {
     Default,
     ConfigEnv,
     LegacyConfigEnv,
+    InvalidConfigEnv,
+    InvalidLegacyConfigEnv,
     Missing,
 }
 
@@ -1159,7 +1182,17 @@ impl SettingSource {
             Self::Default => "default",
             Self::ConfigEnv => "config.env",
             Self::LegacyConfigEnv => "legacy config.env",
+            Self::InvalidConfigEnv => "invalid config.env",
+            Self::InvalidLegacyConfigEnv => "invalid legacy config.env",
             Self::Missing => "missing",
+        }
+    }
+
+    fn invalid(self) -> Self {
+        match self {
+            Self::ConfigEnv => Self::InvalidConfigEnv,
+            Self::LegacyConfigEnv => Self::InvalidLegacyConfigEnv,
+            other => other,
         }
     }
 }
@@ -1894,7 +1927,11 @@ fn format_operations(operations: &[SettingOperation], separator: &str) -> String
         .join(separator)
 }
 
-fn format_effective_value(setting: EffectiveSetting) -> String {
+fn format_effective_value(setting: &EffectiveSetting) -> String {
+    if let Some(value) = setting.invalid_value() {
+        return format!("<invalid: {value}>");
+    }
+
     setting
         .value()
         .map(|value| value.to_string())
@@ -2279,6 +2316,41 @@ system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set
             }
         );
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn settings_runner_rejects_invalid_config_value_on_get() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "tvs_primary_ip=not-an-ip\n").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        let err = runner
+            .run(SettingsCommand::Get("tv.ip".to_string()), &mut output)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SettingsError::InvalidValue {
+                key: "tv.ip".to_string(),
+                value: "not-an-ip".to_string(),
+                expected: "an IPv4 address".to_string(),
+            }
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn settings_runner_lists_invalid_values_from_config() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "tvs_primary_ip=not-an-ip\n").into_store();
+        let runner = SettingsCommandRunner::new(store);
+        let mut output = Vec::new();
+
+        runner.run(SettingsCommand::List, &mut output).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("tv.ip=<invalid: not-an-ip> (invalid config.env"));
     }
 
     #[test]
@@ -2742,7 +2814,7 @@ tvs_primary_ip=192.0.2.43
     }
 
     #[test]
-    fn settings_store_uses_defaults_for_invalid_optional_values() {
+    fn settings_store_preserves_invalid_optional_values() {
         let store = ConfigEnvReader::parse(
             "/tmp/config.env",
             "\
@@ -2754,19 +2826,39 @@ tvs_primary_ip=192.0.2.43
         .into_store();
 
         let backend = store.effective_by_name("screen.backend").unwrap();
-        assert_eq!(backend.value(), Some(SettingValue::Enum("auto")));
-        assert_eq!(backend.source(), SettingSource::Default);
+        assert_eq!(backend.value(), None);
+        assert_eq!(backend.source(), SettingSource::InvalidConfigEnv);
+        assert_eq!(backend.invalid_value(), Some("not-a-backend"));
 
         let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
-        assert_eq!(idle_timeout.value(), Some(SettingValue::Integer(300)));
-        assert_eq!(idle_timeout.source(), SettingSource::Default);
+        assert_eq!(idle_timeout.value(), None);
+        assert_eq!(idle_timeout.source(), SettingSource::InvalidConfigEnv);
+        assert_eq!(idle_timeout.invalid_value(), Some("not-a-number"));
 
         let restore_policy = store.effective_by_name("screen.restore_policy").unwrap();
+        assert_eq!(restore_policy.value(), None);
+        assert_eq!(restore_policy.source(), SettingSource::InvalidConfigEnv);
+        assert_eq!(restore_policy.invalid_value(), Some("not-a-policy"));
+    }
+
+    #[test]
+    fn settings_store_preserves_invalid_required_values() {
+        let store =
+            ConfigEnvReader::parse("/tmp/config.env", "tvs_primary_ip=not-an-ip\n").into_store();
+
+        let tv_ip = store.effective_by_name("tv.ip").unwrap();
+
+        assert_eq!(tv_ip.value(), None);
+        assert_eq!(tv_ip.source(), SettingSource::InvalidConfigEnv);
+        assert_eq!(tv_ip.invalid_value(), Some("not-an-ip"));
         assert_eq!(
-            restore_policy.value(),
-            Some(SettingValue::Enum("conservative"))
+            tv_ip.required_value().unwrap_err(),
+            SettingsError::InvalidValue {
+                key: "tv.ip".to_string(),
+                value: "not-an-ip".to_string(),
+                expected: "an IPv4 address".to_string(),
+            }
         );
-        assert_eq!(restore_policy.source(), SettingSource::Default);
     }
 
     #[test]
@@ -2849,10 +2941,7 @@ tvs_primary_ip=192.0.2.43
 
         let settings = store.all_effective();
         let keys: Vec<&str> = settings.iter().map(|setting| setting.key_name()).collect();
-        let values: Vec<String> = settings
-            .iter()
-            .map(|setting| format_effective_value(*setting))
-            .collect();
+        let values: Vec<String> = settings.iter().map(format_effective_value).collect();
         let sources: Vec<SettingSource> = settings.iter().map(|setting| setting.source()).collect();
 
         assert_eq!(
