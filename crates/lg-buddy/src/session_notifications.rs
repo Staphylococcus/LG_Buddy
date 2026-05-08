@@ -21,9 +21,12 @@ use semver::Version;
 use crate::notifications::{
     parse_notification_signal, FreedesktopNotifier, Notification, NotificationAction,
     NotificationError, NotificationId, NotificationSignal, Notifier, NOTIFICATION_INTERFACE,
-    NOTIFICATION_PATH,
+    NOTIFICATION_PATH, NOTIFICATION_SERVICE,
 };
-use crate::session_bus::{bus_signal_from_dbus_message, SessionBusError};
+use crate::session_bus::{
+    bus_signal_from_dbus_message, SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH,
+    DBUS_SERVICE_NAME,
+};
 use crate::updates::UpdateChannel;
 use crate::version::ReleaseChannel;
 
@@ -35,6 +38,7 @@ pub(crate) const VIEW_RELEASE_ACTION_KEY: &str = "view-release";
 
 const SESSION_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
 const SESSION_START_TIMEOUT: Duration = Duration::from_secs(2);
+const NOTIFICATION_OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpdateNotificationRequest {
@@ -487,7 +491,21 @@ where
         }
     });
 
-    match ready_receiver.recv_timeout(SESSION_START_TIMEOUT) {
+    wait_for_session_notification_service_start_with_timeout(
+        stop,
+        handle,
+        ready_receiver,
+        SESSION_START_TIMEOUT,
+    )
+}
+
+fn wait_for_session_notification_service_start_with_timeout(
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+    ready_receiver: mpsc::Receiver<Result<(), SessionServiceError>>,
+    timeout: Duration,
+) -> Result<SessionNotificationServiceThread, SessionServiceError> {
+    match ready_receiver.recv_timeout(timeout) {
         Ok(Ok(())) => Ok(SessionNotificationServiceThread {
             stop,
             handle: Some(handle),
@@ -499,7 +517,7 @@ where
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             stop.store(true, Ordering::SeqCst);
-            let _ = handle.join();
+            drop(handle);
             Err(SessionServiceError::StartupTimeout)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -656,8 +674,8 @@ where
 
     connection.start_receive(
         signal_rule,
-        Box::new(move |message, _| {
-            let signal = match bus_signal_from_dbus_message(message) {
+        Box::new(move |message, conn| {
+            let bus_signal = match bus_signal_from_dbus_message(message) {
                 Ok(signal) => signal,
                 Err(err) => {
                     eprintln!("LG Buddy Session: notification signal parse failed: {err}");
@@ -665,14 +683,27 @@ where
                 }
             };
 
-            let Some(signal) = parse_notification_signal(&signal) else {
+            let Some(notification_signal) = parse_notification_signal(&bus_signal) else {
                 return true;
             };
+
+            let notification_service_owner = match current_notification_service_owner(conn) {
+                Ok(owner) => owner,
+                Err(err) => {
+                    eprintln!("LG Buddy Session: notification signal owner check failed: {err}");
+                    return true;
+                }
+            };
+            if !notification_signal_sender_matches_owner(&bus_signal, &notification_service_owner) {
+                return true;
+            }
 
             let result = dispatcher
                 .lock()
                 .map_err(|_| UpdateNotificationError::Session(SessionServiceError::Poisoned))
-                .and_then(|mut dispatcher| dispatcher.handle_notification_signal(signal));
+                .and_then(|mut dispatcher| {
+                    dispatcher.handle_notification_signal(notification_signal)
+                });
 
             if let Err(err) = result {
                 eprintln!("LG Buddy Session: update notification action failed: {err}");
@@ -685,20 +716,55 @@ where
     Ok(())
 }
 
+fn current_notification_service_owner(
+    connection: &DbusConnection,
+) -> Result<String, SessionServiceError> {
+    let proxy = connection.with_proxy(
+        DBUS_SERVICE_NAME,
+        DBUS_OBJECT_PATH,
+        NOTIFICATION_OWNER_LOOKUP_TIMEOUT,
+    );
+    let (owner,): (String,) = proxy
+        .method_call(DBUS_INTERFACE, "GetNameOwner", (NOTIFICATION_SERVICE,))
+        .map_err(|err| {
+            SessionServiceError::Transport(format!(
+                "could not resolve `{NOTIFICATION_SERVICE}` owner: {err}"
+            ))
+        })?;
+
+    Ok(owner)
+}
+
+fn notification_signal_sender_matches_owner(
+    signal: &crate::session_bus::BusSignal,
+    owner: &str,
+) -> bool {
+    signal.sender.as_deref() == Some(owner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ReleaseOpener, SessionUpdateNotificationDispatcher, UpdateNotificationError,
+        notification_signal_sender_matches_owner,
+        wait_for_session_notification_service_start_with_timeout, ReleaseOpener,
+        SessionServiceError, SessionUpdateNotificationDispatcher, UpdateNotificationError,
         UpdateNotificationOutcome, UpdateNotificationRequest, VIEW_RELEASE_ACTION_KEY,
     };
     use crate::notifications::{
         Notification, NotificationCapabilities, NotificationError, NotificationId,
-        NotificationSignal, Notifier,
+        NotificationSignal, Notifier, NOTIFICATION_INTERFACE, NOTIFICATION_PATH,
     };
+    use crate::session_bus::BusSignal;
     use crate::updates::UpdateChannel;
     use crate::version::ReleaseChannel;
     use semver::Version;
     use std::cell::RefCell;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    };
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[derive(Debug)]
     struct RecordingNotifier {
@@ -872,6 +938,45 @@ mod tests {
             .expect_err("notification should fail");
 
         assert_eq!(dispatcher.pending_len(), 0);
+    }
+
+    #[test]
+    fn startup_timeout_does_not_join_blocked_worker() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _ready_sender = ready_sender;
+            let _ = release_receiver.recv_timeout(Duration::from_secs(5));
+        });
+
+        let started = Instant::now();
+        let result = wait_for_session_notification_service_start_with_timeout(
+            Arc::clone(&stop),
+            handle,
+            ready_receiver,
+            Duration::from_millis(20),
+        );
+
+        assert!(matches!(result, Err(SessionServiceError::StartupTimeout)));
+        assert!(stop.load(Ordering::SeqCst));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        release_sender
+            .send(())
+            .expect("blocked worker should still be releasable");
+    }
+
+    #[test]
+    fn notification_signal_sender_must_match_notification_daemon_owner() {
+        let signal = BusSignal::new(NOTIFICATION_PATH, NOTIFICATION_INTERFACE, "ActionInvoked")
+            .with_sender(":1.42");
+
+        assert!(notification_signal_sender_matches_owner(&signal, ":1.42"));
+        assert!(!notification_signal_sender_matches_owner(&signal, ":1.99"));
+        assert!(!notification_signal_sender_matches_owner(
+            &BusSignal::new(NOTIFICATION_PATH, NOTIFICATION_INTERFACE, "ActionInvoked"),
+            ":1.42",
+        ));
     }
 
     #[test]
