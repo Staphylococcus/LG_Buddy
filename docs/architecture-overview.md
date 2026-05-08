@@ -321,7 +321,10 @@ the runtime command handlers in `commands.rs` and `session/runner.rs`.
 modules and delegates platform ingestion to `sources/`. The on-demand
 `updates check` command consumes the GitHub Releases API without entering the
 screen, lifecycle, settings, or scheduling paths. It enters notification
-dispatch only when `--notify` is passed and an update is available.
+dispatch only when `--notify` is passed and an update is available. It owns an
+operational cache under the user cache directory for GitHub ETag and latest
+release metadata; that cache is not user configuration and is not part of the
+settings API.
 The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive brightness dialog delegates its TV

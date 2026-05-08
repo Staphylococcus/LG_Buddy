@@ -53,7 +53,8 @@ metadata when the binary was built as an official release artifact.
 release is available. Stable builds check stable releases by default, while
 prerelease builds check the prerelease channel, which includes both prerelease
 and stable releases. Use `--channel stable` or `--channel prerelease` to choose
-the channel explicitly. Add `--notify` to send a desktop notification when the
+the channel explicitly. The command may cache GitHub response metadata to reduce
+repeated API downloads. Add `--notify` to send a desktop notification when the
 check finds an available update.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
