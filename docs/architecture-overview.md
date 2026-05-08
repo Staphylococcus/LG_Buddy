@@ -91,6 +91,7 @@ flowchart LR
         EVENTS["events.rs<br/>canonical runtime events"]
         POLICY["policy.rs<br/>action / no-action / state trail"]
         NOTIFICATIONS["notifications.rs<br/>native desktop notifications"]
+        SESSIONNOTIFY["session_notifications.rs<br/>session D-Bus surface / update notifications"]
         SCREEN["screen.rs<br/>session screen policy"]
         LIFECYCLE["lifecycle.rs<br/>machine lifecycle policy"]
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
@@ -143,6 +144,7 @@ flowchart LR
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE
     COMMANDS --> NOTIFICATIONS
+    COMMANDS --> SESSIONNOTIFY
     COMMANDS --> SCREEN
     COMMANDS --> LIFECYCLE
     SCREEN --> POLICY
@@ -155,6 +157,9 @@ flowchart LR
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
+    SESSIONNOTIFY --> FDO_NOTIFY
+    SESSIONNOTIFY --> BUS
+    RUNNER --> SESSIONNOTIFY
     SESSIONMODEL --> RUNNER
 
     RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity"| SCREEN
@@ -190,7 +195,12 @@ The intended split is:
 - `notifications.rs`
   - native desktop notification dispatch through
     `org.freedesktop.Notifications`
-  - passive notification delivery for brightness and explicit update checks
+  - passive notification delivery for brightness
+- `session_notifications.rs`
+  - LG Buddy-owned user-session D-Bus surface for update notification handoff
+  - session-owned update notification dispatch through
+    `org.freedesktop.Notifications`
+  - update notification action handling for `View Release`
 - `screen.rs`
   - pure session screen blank and restore policy decisions over already-read
     observations
@@ -320,11 +330,13 @@ the runtime command handlers in `commands.rs` and `session/runner.rs`.
 `commands.rs` then delegates screen and lifecycle decisions to their domain
 modules and delegates platform ingestion to `sources/`. The on-demand
 `updates check` command consumes the GitHub Releases API without entering the
-screen, lifecycle, settings, or scheduling paths. It enters notification
-dispatch only when `--notify` is passed and an update is available. It owns an
-operational cache under the user cache directory for GitHub ETag and latest
-release metadata; that cache is not user configuration and is not part of the
-settings API.
+screen, lifecycle, settings, or scheduling paths. When `--notify` is passed and
+an update is available, the one-shot CLI process hands the resolved update facts
+to the LG Buddy-owned user-session D-Bus surface. The running session process
+then owns desktop notification dispatch, notification ids, and the `View
+Release` action. `updates check` owns an operational cache under the user cache
+directory for GitHub ETag and latest release metadata; that cache is not user
+configuration and is not part of the settings API.
 The `brightness get` and `brightness set` commands use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive brightness dialog delegates its TV

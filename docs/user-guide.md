@@ -55,7 +55,12 @@ prerelease builds check the prerelease channel, which includes both prerelease
 and stable releases. Use `--channel stable` or `--channel prerelease` to choose
 the channel explicitly. The command may cache GitHub response metadata to reduce
 repeated API downloads. Add `--notify` to send a desktop notification when the
-check finds an available update.
+check finds an available update. Notification delivery is handled by the
+running user-session LG Buddy process; if that process is not running,
+`--notify` reports a notification failure after printing the update result. When
+the desktop notification service supports actions, the notification includes a
+`View Release` button that opens the GitHub release page through the system
+opener.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for

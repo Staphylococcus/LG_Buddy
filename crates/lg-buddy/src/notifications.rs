@@ -1,11 +1,12 @@
+use crate::session_bus::{BusSignal, BusValue};
 use dbus::arg::PropMap;
 use dbus::blocking::Connection as DbusConnection;
 use std::fmt;
 use std::time::Duration;
 
-const NOTIFICATION_SERVICE: &str = "org.freedesktop.Notifications";
-const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
-const NOTIFICATION_INTERFACE: &str = "org.freedesktop.Notifications";
+pub(crate) const NOTIFICATION_SERVICE: &str = "org.freedesktop.Notifications";
+pub(crate) const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
+pub(crate) const NOTIFICATION_INTERFACE: &str = "org.freedesktop.Notifications";
 const METHOD_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_APP_NAME: &str = "LG Buddy";
 const DEFAULT_EXPIRE_TIMEOUT_MS: i32 = -1;
@@ -50,8 +51,71 @@ impl NotificationCapabilities {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NotificationId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotificationSignal {
+    ActionInvoked {
+        id: NotificationId,
+        action_key: String,
+    },
+    Closed {
+        id: NotificationId,
+        reason: NotificationCloseReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationCloseReason {
+    Expired,
+    Dismissed,
+    ClosedByCall,
+    Undefined,
+    Other(u32),
+}
+
+impl NotificationCloseReason {
+    fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::Expired,
+            2 => Self::Dismissed,
+            3 => Self::ClosedByCall,
+            4 => Self::Undefined,
+            other => Self::Other(other),
+        }
+    }
+}
+
+pub(crate) fn parse_notification_signal(signal: &BusSignal) -> Option<NotificationSignal> {
+    if signal.path != NOTIFICATION_PATH || signal.interface != NOTIFICATION_INTERFACE {
+        return None;
+    }
+
+    match signal.member.as_str() {
+        "ActionInvoked" => {
+            let [BusValue::U32(id), BusValue::String(action_key)] = signal.body.as_slice() else {
+                return None;
+            };
+
+            Some(NotificationSignal::ActionInvoked {
+                id: NotificationId(*id),
+                action_key: action_key.clone(),
+            })
+        }
+        "NotificationClosed" => {
+            let [BusValue::U32(id), BusValue::U32(reason)] = signal.body.as_slice() else {
+                return None;
+            };
+
+            Some(NotificationSignal::Closed {
+                id: NotificationId(*id),
+                reason: NotificationCloseReason::from_raw(*reason),
+            })
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationError {
@@ -199,9 +263,12 @@ impl NotificationTransport for DbusNotificationTransport {
 #[cfg(test)]
 mod tests {
     use super::{
-        Notification, NotificationAction, NotificationDispatcher, NotificationError,
-        NotificationId, NotificationRequest, NotificationTransport, Notifier,
+        parse_notification_signal, Notification, NotificationAction, NotificationCloseReason,
+        NotificationDispatcher, NotificationError, NotificationId, NotificationRequest,
+        NotificationSignal, NotificationTransport, Notifier, NOTIFICATION_INTERFACE,
+        NOTIFICATION_PATH,
     };
+    use crate::session_bus::{BusSignal, BusValue};
     use std::cell::RefCell;
 
     #[derive(Debug)]
@@ -345,6 +412,52 @@ mod tests {
             err.to_string(),
             "desktop notification service error: bus unavailable"
         );
+    }
+
+    #[test]
+    fn action_invoked_signal_decodes_notification_id_and_action_key() {
+        let signal = BusSignal::new(NOTIFICATION_PATH, NOTIFICATION_INTERFACE, "ActionInvoked")
+            .with_body(vec![
+                BusValue::U32(7),
+                BusValue::String("view-release".to_string()),
+            ]);
+
+        assert_eq!(
+            parse_notification_signal(&signal),
+            Some(NotificationSignal::ActionInvoked {
+                id: NotificationId(7),
+                action_key: "view-release".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn notification_closed_signal_decodes_notification_id_and_reason() {
+        let signal = BusSignal::new(
+            NOTIFICATION_PATH,
+            NOTIFICATION_INTERFACE,
+            "NotificationClosed",
+        )
+        .with_body(vec![BusValue::U32(7), BusValue::U32(2)]);
+
+        assert_eq!(
+            parse_notification_signal(&signal),
+            Some(NotificationSignal::Closed {
+                id: NotificationId(7),
+                reason: NotificationCloseReason::Dismissed,
+            })
+        );
+    }
+
+    #[test]
+    fn notification_signal_parser_ignores_unrelated_or_malformed_signals() {
+        let unrelated = BusSignal::new("/elsewhere", NOTIFICATION_INTERFACE, "ActionInvoked")
+            .with_body(vec![BusValue::U32(7), BusValue::String("open".to_string())]);
+        let malformed = BusSignal::new(NOTIFICATION_PATH, NOTIFICATION_INTERFACE, "ActionInvoked")
+            .with_body(vec![BusValue::U32(7)]);
+
+        assert_eq!(parse_notification_signal(&unrelated), None);
+        assert_eq!(parse_notification_signal(&malformed), None);
     }
 
     impl<T: NotificationTransport> NotificationTransport for &T {

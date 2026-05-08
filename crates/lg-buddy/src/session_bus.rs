@@ -58,6 +58,7 @@ impl std::error::Error for SessionBusError {}
 pub enum BusValue {
     Bool(bool),
     UnixFd(RawFd),
+    U32(u32),
     U64(u64),
     String(String),
     Variant(Box<BusValue>),
@@ -68,6 +69,7 @@ impl BusValue {
         match self {
             Self::Bool(_) => "bool",
             Self::UnixFd(_) => "fd",
+            Self::U32(_) => "u32",
             Self::U64(_) => "u64",
             Self::String(_) => "string",
             Self::Variant(_) => "variant",
@@ -115,6 +117,20 @@ impl BusReply {
             }),
             _ => Err(SessionBusError::UnexpectedReplyShape {
                 expected: "single u64",
+                actual: "multiple values",
+            }),
+        }
+    }
+
+    pub fn single_u32(&self) -> Result<u32, SessionBusError> {
+        match self.body.as_slice() {
+            [BusValue::U32(value)] => Ok(*value),
+            [value] => Err(SessionBusError::UnexpectedReplyShape {
+                expected: "single u32",
+                actual: value.kind(),
+            }),
+            _ => Err(SessionBusError::UnexpectedReplyShape {
+                expected: "single u32",
                 actual: "multiple values",
             }),
         }
@@ -548,6 +564,7 @@ fn append_dbus_message_value(
             let fd = unsafe { dbus::arg::OwnedFd::from_raw_fd(value) };
             Ok(message.append1(fd))
         }
+        BusValue::U32(value) => Ok(message.append1(value)),
         BusValue::U64(value) => Ok(message.append1(value)),
         BusValue::String(value) => Ok(message.append1(value)),
         BusValue::Variant(_) => Err(SessionBusError::UnsupportedMessageBody {
@@ -561,19 +578,22 @@ fn bus_value_from_dbus_message_item(item: DbusMessageItem) -> Result<BusValue, S
     match item {
         DbusMessageItem::Bool(value) => Ok(BusValue::Bool(value)),
         DbusMessageItem::UnixFd(value) => Ok(BusValue::UnixFd(value.into_raw_fd())),
+        DbusMessageItem::UInt32(value) => Ok(BusValue::U32(value)),
         DbusMessageItem::UInt64(value) => Ok(BusValue::U64(value)),
         DbusMessageItem::Str(value) => Ok(BusValue::String(value)),
         DbusMessageItem::Variant(value) => {
             bus_value_from_dbus_message_item(*value).map(|value| BusValue::Variant(Box::new(value)))
         }
         other => Err(SessionBusError::UnexpectedReplyShape {
-            expected: "bool/u64/string/fd/variant",
+            expected: "bool/u32/u64/string/fd/variant",
             actual: dbus_message_item_kind(&other),
         }),
     }
 }
 
-fn bus_signal_from_dbus_message(message: DbusMessage) -> Result<BusSignal, SessionBusError> {
+pub(crate) fn bus_signal_from_dbus_message(
+    message: DbusMessage,
+) -> Result<BusSignal, SessionBusError> {
     let path = message
         .path()
         .ok_or_else(|| SessionBusError::Transport("signal missing object path".to_string()))?

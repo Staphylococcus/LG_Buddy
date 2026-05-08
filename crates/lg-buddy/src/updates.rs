@@ -9,7 +9,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
+use crate::session_notifications::{
+    SessionBusUpdateNotificationHandoff, UpdateNotificationError, UpdateNotificationHandoff,
+    UpdateNotificationRequest,
+};
 use crate::version::{ReleaseChannel, VersionInfo};
 
 const GITHUB_RELEASES_API_BASE: &str =
@@ -265,21 +268,21 @@ pub enum UpdatesError {
     },
     CacheEncode(serde_json::Error),
     DeferredFailures(Vec<UpdatesDeferredFailure>),
-    Notification(NotificationError),
+    Notification(UpdateNotificationError),
     Io(io::Error),
 }
 
 #[derive(Debug)]
 pub enum UpdatesDeferredFailure {
     Cache(Box<UpdatesError>),
-    Notification(NotificationError),
+    Notification(UpdateNotificationError),
 }
 
 impl fmt::Display for UpdatesDeferredFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cache(err) => write!(f, "update cache failed: {err}"),
-            Self::Notification(err) => write!(f, "desktop notification failed: {err}"),
+            Self::Notification(err) => write!(f, "update notification handoff failed: {err}"),
         }
     }
 }
@@ -361,7 +364,7 @@ impl fmt::Display for UpdatesError {
 
                 Ok(())
             }
-            Self::Notification(err) => write!(f, "could not send update notification: {err}"),
+            Self::Notification(err) => write!(f, "could not request update notification: {err}"),
             Self::Io(err) => write!(f, "{err}"),
         }
     }
@@ -472,6 +475,7 @@ struct CachedReleaseInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCheckResult {
+    check_channel: UpdateChannel,
     current_version: Version,
     current_channel: ReleaseChannel,
     latest: ReleaseInfo,
@@ -499,17 +503,14 @@ impl UpdateCheckResult {
         )
     }
 
-    fn notification(&self) -> Notification {
-        Notification::new(
-            "LG Buddy update available",
-            format!(
-                "LG Buddy {} ({}) is available.\nCurrent: {} ({})\n{}",
-                self.latest.version(),
-                self.latest.channel().as_str(),
-                self.current_version,
-                self.current_channel.as_str(),
-                self.latest.url()
-            ),
+    fn notification_request(&self) -> Result<UpdateNotificationRequest, UpdateNotificationError> {
+        UpdateNotificationRequest::new(
+            self.check_channel,
+            self.current_version.clone(),
+            self.current_channel,
+            self.latest.version().clone(),
+            self.latest.channel(),
+            self.latest.url().to_string(),
         )
     }
 }
@@ -591,6 +592,10 @@ impl GitHubReleasesClient for UreqGitHubReleasesClient {
 
         match result {
             Ok(response) => {
+                if response.status() == 304 {
+                    return Ok(GitHubReleaseResponse::NotModified);
+                }
+
                 let etag = response.header("ETag").map(str::to_string);
                 response
                     .into_string()
@@ -748,7 +753,7 @@ pub fn run_updates_command<W: io::Write>(
 ) -> Result<(), UpdatesError> {
     let client = UreqGitHubReleasesClient::default();
     let version = VersionInfo::current();
-    let notifier = FreedesktopNotifier;
+    let notification_handoff = SessionBusUpdateNotificationHandoff;
     let cache_store = DefaultUpdateCacheStore::from_env();
 
     run_updates_command_with(
@@ -756,7 +761,7 @@ pub fn run_updates_command<W: io::Write>(
         writer,
         version,
         &client,
-        &notifier,
+        &notification_handoff,
         &cache_store,
         current_unix_seconds(),
     )
@@ -765,7 +770,7 @@ pub fn run_updates_command<W: io::Write>(
 fn run_updates_command_with<
     W: io::Write,
     C: GitHubReleasesClient,
-    N: Notifier,
+    N: UpdateNotificationHandoff,
     S: UpdateCacheStore,
 >(
     command: UpdatesCommand,
@@ -789,7 +794,10 @@ fn run_updates_command_with<
 
     writer.write_all(result.render().as_bytes())?;
     if notify && result.update_available() {
-        if let Err(err) = notifier.notify(&result.notification()) {
+        let notification_result = result
+            .notification_request()
+            .and_then(|request| notifier.show_update_notification(&request));
+        if let Err(err) = notification_result {
             deferred_failures.push(UpdatesDeferredFailure::Notification(err));
         }
     }
@@ -833,6 +841,7 @@ fn check_updates_with_cache<C: GitHubReleasesClient>(
             let latest = fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
 
             Ok(UpdateCheckResult {
+                check_channel: channel,
                 current_version,
                 current_channel: current.channel(),
                 latest,
@@ -972,20 +981,25 @@ mod tests {
         DefaultUpdateCacheStore, FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient,
         ReleaseEndpoint, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore,
         UpdateChannel, UpdateCheckCache, UpdatesCommand, UpdatesDeferredFailure, UpdatesError,
+        UreqGitHubReleasesClient, PRERELEASE_PAGE_SIZE,
     };
-    use crate::notifications::{
-        Notification, NotificationCapabilities, NotificationError, NotificationId, Notifier,
+    use crate::session_notifications::{
+        UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
+        UpdateNotificationRequest,
     };
     use crate::version::{ReleaseChannel, VersionInfo};
     use std::cell::RefCell;
     use std::fs;
-    use std::io;
+    use std::io::{self, Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::process;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
     };
+    use std::thread;
+    use std::time::Duration;
 
     const TEST_NOW: u64 = 1_778_234_400;
 
@@ -1094,19 +1108,19 @@ mod tests {
     }
 
     struct RecordingNotifier {
-        notifications: RefCell<Vec<Notification>>,
-        result: Result<NotificationId, NotificationError>,
+        notifications: RefCell<Vec<UpdateNotificationRequest>>,
+        result: Result<UpdateNotificationOutcome, UpdateNotificationError>,
     }
 
     impl RecordingNotifier {
         fn failing(message: &str) -> Self {
             Self {
                 notifications: RefCell::new(Vec::new()),
-                result: Err(NotificationError::Transport(message.to_string())),
+                result: Err(UpdateNotificationError::Transport(message.to_string())),
             }
         }
 
-        fn notifications(&self) -> Vec<Notification> {
+        fn notifications(&self) -> Vec<UpdateNotificationRequest> {
             self.notifications.borrow().clone()
         }
     }
@@ -1115,18 +1129,17 @@ mod tests {
         fn default() -> Self {
             Self {
                 notifications: RefCell::new(Vec::new()),
-                result: Ok(NotificationId(1)),
+                result: Ok(UpdateNotificationOutcome::Sent),
             }
         }
     }
 
-    impl Notifier for RecordingNotifier {
-        fn capabilities(&self) -> Result<NotificationCapabilities, NotificationError> {
-            Ok(NotificationCapabilities { actions: true })
-        }
-
-        fn notify(&self, notification: &Notification) -> Result<NotificationId, NotificationError> {
-            self.notifications.borrow_mut().push(notification.clone());
+    impl UpdateNotificationHandoff for RecordingNotifier {
+        fn show_update_notification(
+            &self,
+            request: &UpdateNotificationRequest,
+        ) -> Result<UpdateNotificationOutcome, UpdateNotificationError> {
+            self.notifications.borrow_mut().push(request.clone());
             self.result.clone()
         }
     }
@@ -1412,6 +1425,47 @@ mod tests {
         assert_eq!(entry.etag.as_deref(), Some("\"next-etag\""));
         assert_eq!(entry.last_checked_at_unix_seconds, TEST_NOW);
         assert_eq!(entry.latest.version, "1.2.0");
+    }
+
+    #[test]
+    fn ureq_client_maps_not_modified_status_to_cached_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut buffer = [0; 2048];
+            let length = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..length]);
+
+            assert!(request.starts_with("GET /releases?per_page=20 "));
+            assert!(request.contains("If-None-Match: \"cached-etag\""));
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 304 Not Modified\r\nETag: \"cached-etag\"\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write response");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+
+        let response = client
+            .get(
+                ReleaseEndpoint::ReleasesList {
+                    per_page: PRERELEASE_PAGE_SIZE,
+                },
+                "lg-buddy/1.1.0-alpha.0",
+                Some("\"cached-etag\""),
+            )
+            .expect("304 response should succeed");
+
+        assert_eq!(response, GitHubReleaseResponse::NotModified);
+        server.join().expect("server thread should finish");
     }
 
     #[test]
@@ -1923,10 +1977,16 @@ mod tests {
         assert!(rendered(&output).contains("status: update available"));
         let notifications = notifier.notifications();
         assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].summary, "LG Buddy update available");
         assert_eq!(
-            notifications[0].body,
-            "LG Buddy 1.1.1 (stable) is available.\nCurrent: 1.1.0 (stable)\nhttps://github.test/releases/tag/v1.1.1"
+            notifications[0].to_dbus_fields(),
+            (
+                "stable".to_string(),
+                "1.1.0".to_string(),
+                "stable".to_string(),
+                "1.1.1".to_string(),
+                "stable".to_string(),
+                "https://github.test/releases/tag/v1.1.1".to_string()
+            )
         );
     }
 
@@ -1982,7 +2042,7 @@ mod tests {
         ));
         assert_eq!(
             err.to_string(),
-            "update check completed with deferred failure: desktop notification failed: desktop notification service error: bus unavailable"
+            "update check completed with deferred failure: update notification handoff failed: could not request update notification from LG Buddy session service: bus unavailable"
         );
     }
 

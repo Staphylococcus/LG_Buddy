@@ -34,6 +34,7 @@ use crate::session_bus::{
     new_session_bus_client, new_system_bus_client, BusSignal, BusSignalMatch, SessionBusClient,
     DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
 };
+use crate::session_notifications::spawn_session_notification_service;
 use crate::sources::desktop::gnome::{
     current_idle_monitor_idletime_ms, map_screen_saver_signal, resolve_screen_saver_owner,
     screen_saver_owner_changed, GnomeBackend, SystemGnomeProbe, GNOME_SCREEN_SAVER_INTERFACE,
@@ -423,6 +424,16 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     let backend =
         detect_backend_from_system(configured).map_err(SessionRunnerError::BackendDetection)?;
     let mut dispatcher = SessionEventDispatcher::new(executor);
+    let _session_service = match spawn_session_notification_service() {
+        Ok(service) => Some(service),
+        Err(err) => {
+            writeln!(
+                writer,
+                "LG Buddy Monitor: session notification service unavailable: {err}"
+            )?;
+            None
+        }
+    };
 
     match backend {
         ScreenBackend::Gnome => run_gnome_monitor(writer, &mut dispatcher),
