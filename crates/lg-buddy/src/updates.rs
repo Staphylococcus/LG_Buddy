@@ -259,6 +259,10 @@ pub enum UpdatesError {
         channel: UpdateChannel,
     },
     CachePath(UpdateCachePathError),
+    CacheDecode {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     CacheEncode(serde_json::Error),
     DeferredFailures(Vec<UpdatesDeferredFailure>),
     Notification(NotificationError),
@@ -333,6 +337,13 @@ impl fmt::Display for UpdatesError {
                 )
             }
             Self::CachePath(err) => write!(f, "{err}"),
+            Self::CacheDecode { path, source } => {
+                write!(
+                    f,
+                    "could not parse update check cache `{}`: {source}",
+                    path.display()
+                )
+            }
             Self::CacheEncode(err) => write!(f, "could not encode update check cache: {err}"),
             Self::DeferredFailures(failures) => {
                 write!(f, "update check completed with deferred failure")?;
@@ -362,6 +373,7 @@ impl Error for UpdatesError {
             Self::ApiShape { source, .. } => Some(source),
             Self::InvalidLocalVersion { source, .. } => Some(source),
             Self::CachePath(err) => Some(err),
+            Self::CacheDecode { source, .. } => Some(source),
             Self::CacheEncode(err) => Some(err),
             Self::DeferredFailures(failures) => {
                 failures.iter().find_map(|failure| failure.source())
@@ -650,7 +662,12 @@ impl UpdateCacheStore for DefaultUpdateCacheStore {
 impl UpdateCacheStore for FileUpdateCacheStore {
     fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
         match fs::read_to_string(&self.path) {
-            Ok(contents) => Ok(serde_json::from_str(&contents).unwrap_or_default()),
+            Ok(contents) => {
+                serde_json::from_str(&contents).map_err(|source| UpdatesError::CacheDecode {
+                    path: self.path.clone(),
+                    source,
+                })
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(UpdateCheckCache::default()),
             Err(err) => Err(UpdatesError::Io(err)),
         }
@@ -1258,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_malformed_cache_load_as_empty() {
+    fn missing_cache_loads_as_empty_and_malformed_cache_reports_decode_error() {
         let dir = unique_temp_dir("malformed-cache");
         let path = dir.join("lg-buddy").join("update-check.json");
         let store = FileUpdateCacheStore::new(path.clone());
@@ -1271,9 +1288,12 @@ mod tests {
         fs::create_dir_all(path.parent().expect("cache path parent")).expect("create cache dir");
         fs::write(&path, "{").expect("write malformed cache");
 
-        assert_eq!(
-            store.load().expect("malformed cache should load"),
-            UpdateCheckCache::default()
+        let err = store
+            .load()
+            .expect_err("malformed cache should report decode error");
+
+        assert!(
+            matches!(err, UpdatesError::CacheDecode { path: error_path, .. } if error_path == path)
         );
 
         fs::remove_dir_all(dir).expect("remove test temp dir");
@@ -1598,6 +1618,63 @@ mod tests {
             UpdatesDeferredFailure::Cache(cache_err)
                 if matches!(cache_err.as_ref(), UpdatesError::CachePath(UpdateCachePathError::NotConfigured))
         ));
+    }
+
+    #[test]
+    fn malformed_cache_does_not_block_update_check_but_fails_after_result() {
+        let dir = unique_temp_dir("malformed-cache-command");
+        let path = dir.join("lg-buddy").join("update-check.json");
+        fs::create_dir_all(path.parent().expect("cache path parent")).expect("create cache dir");
+        fs::write(&path, "{").expect("write malformed cache");
+
+        let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
+        let notifier = RecordingNotifier::default();
+        let cache_store = FileUpdateCacheStore::new(path.clone());
+        let mut output = Vec::new();
+
+        let err = run_updates_command_with(
+            check(Some(UpdateChannel::Stable)),
+            &mut output,
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &notifier,
+            &cache_store,
+            TEST_NOW,
+        )
+        .expect_err("malformed cache should be reported after update check");
+
+        assert!(rendered(&output).contains("status: update available"));
+        assert_eq!(
+            client.requests_with_etags(),
+            vec![(
+                "https://api.example.test/releases/latest".to_string(),
+                "lg-buddy/1.1.0".to_string(),
+                None
+            )]
+        );
+        assert!(notifier.notifications().is_empty());
+        let UpdatesError::DeferredFailures(failures) = err else {
+            panic!("expected deferred cache decode failure");
+        };
+        assert_eq!(failures.len(), 1);
+        assert!(matches!(
+            &failures[0],
+            UpdatesDeferredFailure::Cache(cache_err)
+                if matches!(cache_err.as_ref(), UpdatesError::CacheDecode { path: error_path, .. } if error_path == &path)
+        ));
+        assert_eq!(
+            cache_store
+                .load()
+                .expect("successful check should replace malformed cache")
+                .entry(UpdateChannel::Stable)
+                .expect("stable cache entry")
+                .latest
+                .version
+                .as_str(),
+            "1.1.1"
+        );
+
+        fs::remove_dir_all(dir).expect("remove test temp dir");
     }
 
     #[test]
