@@ -282,7 +282,7 @@ impl fmt::Display for UpdatesDeferredFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cache(err) => write!(f, "update cache failed: {err}"),
-            Self::Notification(err) => write!(f, "desktop notification failed: {err}"),
+            Self::Notification(err) => write!(f, "update notification handoff failed: {err}"),
         }
     }
 }
@@ -364,7 +364,7 @@ impl fmt::Display for UpdatesError {
 
                 Ok(())
             }
-            Self::Notification(err) => write!(f, "could not send update notification: {err}"),
+            Self::Notification(err) => write!(f, "could not request update notification: {err}"),
             Self::Io(err) => write!(f, "{err}"),
         }
     }
@@ -2042,7 +2042,7 @@ mod tests {
         ));
         assert_eq!(
             err.to_string(),
-            "update check completed with deferred failure: desktop notification failed: could not request update notification from LG Buddy session service: bus unavailable"
+            "update check completed with deferred failure: update notification handoff failed: could not request update notification from LG Buddy session service: bus unavailable"
         );
     }
 

@@ -540,12 +540,24 @@ where
     N: Notifier + Send + 'static,
     O: ReleaseOpener + Send + 'static,
 {
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
+
     let connection = DbusConnection::new_session()
         .map_err(|err| SessionServiceError::Transport(err.to_string()))?;
-    match connection
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
+
+    let name_reply = connection
         .request_name(SESSION_BUS_NAME, false, false, true)
-        .map_err(|err| SessionServiceError::Transport(err.to_string()))?
-    {
+        .map_err(|err| SessionServiceError::Transport(err.to_string()))?;
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
+
+    match name_reply {
         RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
         reply => {
             return Err(SessionServiceError::NameUnavailable {
@@ -556,8 +568,17 @@ where
     }
 
     let dispatcher = Arc::new(Mutex::new(dispatcher));
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
     register_session_methods(&connection, Arc::clone(&dispatcher))?;
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
     register_notification_signal_handler(&connection, dispatcher)?;
+    if session_service_startup_stopped(&stop) {
+        return Ok(());
+    }
     if ready.send(Ok(())).is_err() {
         return Ok(());
     }
@@ -570,6 +591,10 @@ where
     }
 
     Ok(())
+}
+
+fn session_service_startup_stopped(stop: &AtomicBool) -> bool {
+    stop.load(Ordering::SeqCst)
 }
 
 fn register_session_methods<N, O>(
