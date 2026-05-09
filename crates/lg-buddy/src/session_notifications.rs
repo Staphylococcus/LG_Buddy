@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{
@@ -46,6 +47,7 @@ const SESSION_START_TIMEOUT: Duration = Duration::from_secs(2);
 const NOTIFICATION_OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 const RECENTLY_CLOSED_NOTIFICATION_LIMIT: usize = 16;
 const GNOME_SHELL_BUS_NAME: &str = "org.gnome.Shell";
+const GNOME_SHELL_PROCESS_NAME: &str = "gnome-shell";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpdateNotificationRequest {
@@ -910,13 +912,37 @@ where
 fn trusted_notification_signal_senders(
     connection: &DbusConnection,
 ) -> Result<Vec<String>, SessionServiceError> {
-    let mut owners = vec![current_bus_name_owner(connection, NOTIFICATION_SERVICE)?];
-    if let Ok(owner) = current_bus_name_owner(connection, GNOME_SHELL_BUS_NAME) {
-        if !owners.contains(&owner) {
+    let notification_owner = current_bus_name_owner(connection, NOTIFICATION_SERVICE)?;
+    let gnome_shell_owner = match current_bus_name_owner(connection, GNOME_SHELL_BUS_NAME) {
+        Ok(owner) => match current_bus_name_owner_process_identity(connection, &owner) {
+            Ok(identity) => Some((owner, identity)),
+            Err(err) => {
+                eprintln!(
+                    "LG Buddy Session: could not verify `{GNOME_SHELL_BUS_NAME}` owner as gnome-shell: {err}"
+                );
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
+    Ok(trusted_notification_signal_senders_from_candidates(
+        notification_owner,
+        gnome_shell_owner,
+    ))
+}
+
+fn trusted_notification_signal_senders_from_candidates(
+    notification_owner: String,
+    gnome_shell_owner: Option<(String, BusProcessIdentity)>,
+) -> Vec<String> {
+    let mut owners = vec![notification_owner];
+    if let Some((owner, identity)) = gnome_shell_owner {
+        if !owners.contains(&owner) && process_identity_is_gnome_shell(&identity) {
             owners.push(owner);
         }
     }
-    Ok(owners)
+    owners
 }
 
 fn current_bus_name_owner(
@@ -935,6 +961,51 @@ fn current_bus_name_owner(
         })?;
 
     Ok(owner)
+}
+
+fn current_bus_name_owner_process_identity(
+    connection: &DbusConnection,
+    owner: &str,
+) -> Result<BusProcessIdentity, SessionServiceError> {
+    let proxy = connection.with_proxy(
+        DBUS_SERVICE_NAME,
+        DBUS_OBJECT_PATH,
+        NOTIFICATION_OWNER_LOOKUP_TIMEOUT,
+    );
+    let (pid,): (u32,) = proxy
+        .method_call(DBUS_INTERFACE, "GetConnectionUnixProcessID", (owner,))
+        .map_err(|err| {
+            SessionServiceError::Transport(format!("could not resolve `{owner}` process id: {err}"))
+        })?;
+
+    Ok(read_bus_process_identity(pid))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BusProcessIdentity {
+    comm: Option<String>,
+    exe_name: Option<String>,
+}
+
+fn read_bus_process_identity(pid: u32) -> BusProcessIdentity {
+    let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let exe_name = fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|value| !value.is_empty());
+
+    BusProcessIdentity { comm, exe_name }
+}
+
+fn process_identity_is_gnome_shell(identity: &BusProcessIdentity) -> bool {
+    identity.comm.as_deref() == Some(GNOME_SHELL_PROCESS_NAME)
+        && identity.exe_name.as_deref() == Some(GNOME_SHELL_PROCESS_NAME)
 }
 
 fn notification_signal_sender_is_trusted(
@@ -987,12 +1058,13 @@ where
 mod tests {
     use super::{
         handle_notification_bus_signal, notification_signal_sender_is_trusted,
-        show_update_notification_over_session_bus,
-        wait_for_session_notification_service_start_with_timeout, ReleaseOpener,
-        SessionNotificationEvent, SessionServiceError, SessionUpdateNotificationDispatcher,
-        UpdateNotificationError, UpdateNotificationOutcome, UpdateNotificationPreferences,
-        UpdateNotificationRequest, DISABLE_UPDATE_CHECKS_ACTION_KEY, SESSION_BUS_NAME,
-        SESSION_INTERFACE, SESSION_OBJECT_PATH, SHOW_UPDATE_NOTIFICATION_METHOD,
+        process_identity_is_gnome_shell, show_update_notification_over_session_bus,
+        trusted_notification_signal_senders_from_candidates,
+        wait_for_session_notification_service_start_with_timeout, BusProcessIdentity,
+        ReleaseOpener, SessionNotificationEvent, SessionServiceError,
+        SessionUpdateNotificationDispatcher, UpdateNotificationError, UpdateNotificationOutcome,
+        UpdateNotificationPreferences, UpdateNotificationRequest, DISABLE_UPDATE_CHECKS_ACTION_KEY,
+        SESSION_BUS_NAME, SESSION_INTERFACE, SESSION_OBJECT_PATH, SHOW_UPDATE_NOTIFICATION_METHOD,
         VIEW_RELEASE_ACTION_KEY,
     };
     use crate::notifications::{
@@ -1396,6 +1468,55 @@ mod tests {
             &BusSignal::new(NOTIFICATION_PATH, NOTIFICATION_INTERFACE, "ActionInvoked"),
             &trusted_senders,
         ));
+    }
+
+    #[test]
+    fn gnome_shell_sender_requires_gnome_shell_process_identity() {
+        assert!(process_identity_is_gnome_shell(&BusProcessIdentity {
+            comm: Some("gnome-shell".to_string()),
+            exe_name: Some("gnome-shell".to_string()),
+        }));
+        assert!(!process_identity_is_gnome_shell(&BusProcessIdentity {
+            comm: Some("gnome-shell".to_string()),
+            exe_name: Some("not-gnome-shell".to_string()),
+        }));
+        assert!(!process_identity_is_gnome_shell(&BusProcessIdentity {
+            comm: Some("not-gnome-shell".to_string()),
+            exe_name: Some("gnome-shell".to_string()),
+        }));
+        assert!(!process_identity_is_gnome_shell(&BusProcessIdentity {
+            comm: None,
+            exe_name: Some("gnome-shell".to_string()),
+        }));
+    }
+
+    #[test]
+    fn trusted_senders_only_include_verified_gnome_shell_owner() {
+        let senders = trusted_notification_signal_senders_from_candidates(
+            ":1.42".to_string(),
+            Some((
+                ":1.24".to_string(),
+                BusProcessIdentity {
+                    comm: Some("gnome-shell".to_string()),
+                    exe_name: Some("gnome-shell".to_string()),
+                },
+            )),
+        );
+
+        assert_eq!(senders, vec![":1.42".to_string(), ":1.24".to_string()]);
+
+        let senders = trusted_notification_signal_senders_from_candidates(
+            ":1.42".to_string(),
+            Some((
+                ":1.99".to_string(),
+                BusProcessIdentity {
+                    comm: Some("spoofed-shell".to_string()),
+                    exe_name: Some("spoofed-shell".to_string()),
+                },
+            )),
+        );
+
+        assert_eq!(senders, vec![":1.42".to_string()]);
     }
 
     #[test]
