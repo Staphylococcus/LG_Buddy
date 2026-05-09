@@ -43,7 +43,7 @@ const SCREEN_IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
 const SCREEN_RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
 const SYSTEM_SLEEP_WAKE_POLICY_VALUES: &[&str] = &["enabled", "disabled"];
 const UPDATE_AUTO_CHECK_VALUES: &[&str] = &["enabled", "disabled"];
-const UPDATE_CHANNEL_VALUES: &[&str] = &["auto", "stable", "prerelease"];
+const UPDATE_CHANNEL_VALUES: &[&str] = &["stable", "prerelease"];
 
 const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     SettingDefinition {
@@ -174,7 +174,7 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
             values: UPDATE_CHANNEL_VALUES,
             aliases: EMPTY_ALIASES,
         }),
-        default_value: Some(SettingValue::Enum("auto")),
+        default_value: Some(SettingValue::Enum("stable")),
         mutability: SettingMutability::ReadWrite,
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RuntimePolicyOnly,
@@ -2311,7 +2311,7 @@ mod tests {
                 "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
                 "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=System sleep and wake policy for lifecycle hooks.",
                 "updates.auto_check | storage=updates_auto_check | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=manage-update-check-timer | description=Automatic background update checks and update notifications.",
-                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=auto,stable,prerelease aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Release channel used by automatic background update checks.",
+                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=stable,prerelease aliases=(none) | default=stable | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Release channel used by automatic background update checks.",
             ]
         );
     }
@@ -2401,7 +2401,7 @@ screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
 screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)
 system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set,unset)
 updates.auto_check=enabled (default, read-write, ops: get,describe,set,unset)
-updates.channel=auto (default, read-write, ops: get,describe,set,unset)
+updates.channel=stable (default, read-write, ops: get,describe,set,unset)
 "
         );
     }
@@ -2576,12 +2576,12 @@ updates.auto_check
 updates.channel
   storage key: updates_channel
   type: enum
-  current: auto
+  current: stable
   source: default
-  default: auto
+  default: stable
   mutability: read-write
   supported operations: get, describe, set, unset
-  allowed values: auto, stable, prerelease
+  allowed values: stable, prerelease
   apply: runtime-policy-only
   description: Release channel used by automatic background update checks.
 "
@@ -3449,7 +3449,7 @@ tvs_primary_ip=192.0.2.43
                 "conservative",
                 "disabled",
                 "enabled",
-                "auto",
+                "stable",
             ]
         );
         assert_eq!(

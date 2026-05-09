@@ -126,7 +126,7 @@ screen_idle_timeout=300
 screen_restore_policy=conservative
 system_sleep_wake_policy=enabled
 updates_auto_check=enabled
-updates_channel=auto
+updates_channel=stable
 ```
 
 `tv_ip`, `tv_mac`, and `input` are still accepted as legacy single-TV keys, but
@@ -159,8 +159,8 @@ pre-down hook stay installed and no-op while the policy is disabled.
 `updates_auto_check=disabled` if you do not want the installed user timer to
 check for updates and notify you when a release is available. Manual
 `lg-buddy updates check` commands still work when automatic checks are disabled.
-`updates_channel=auto` follows the installed build channel; set it to `stable`
-or `prerelease` to control the scheduled check channel.
+`updates_channel=stable` is the default for scheduled checks. Set it to
+`prerelease` to opt in to prerelease update notifications.
 
 ## More Help
 

@@ -80,7 +80,7 @@ screen_restore_policy=conservative
 screen_idle_blank=enabled
 system_sleep_wake_policy=enabled
 updates_auto_check=enabled
-updates_channel=auto
+updates_channel=stable
 ```
 
 Avoid adding installer-only state for product behavior. Environment variables
@@ -148,7 +148,7 @@ choice.
 `updates_channel` keeps scheduled update checks configurable without changing
 manual diagnostics:
 
-- `auto` is the default and follows the installed build channel
-- `stable` and `prerelease` are explicit scheduled-check choices
+- `stable` is the default scheduled-check channel
+- `prerelease` is an explicit opt-in scheduled-check channel
 - manual `lg-buddy updates check --channel ...` still overrides channel for
   that invocation only

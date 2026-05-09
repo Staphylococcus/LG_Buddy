@@ -296,10 +296,9 @@ disabled.
 
 `updates_channel` controls the channel used by automatic background checks:
 
-- `auto`: default behavior, stable/dev builds check stable releases and
-  prerelease builds check the prerelease channel
-- `stable`: only consider stable releases
-- `prerelease`: consider prereleases and stable releases
+- `stable`: default behavior, only consider stable releases
+- `prerelease`: opt in to prerelease update notifications; consider
+  prereleases and stable releases
 
 Example:
 
@@ -313,7 +312,7 @@ screen_idle_timeout=300
 screen_restore_policy=aggressive
 system_sleep_wake_policy=enabled
 updates_auto_check=enabled
-updates_channel=auto
+updates_channel=stable
 ```
 
 Installed services receive the resolved config path through `LG_BUDDY_CONFIG`.

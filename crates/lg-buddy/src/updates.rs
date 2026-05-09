@@ -211,70 +211,59 @@ impl UpdateChannel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundUpdateAutoCheck {
-    Enabled,
-    Disabled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackgroundUpdateChannel {
-    Auto,
     Stable,
     Prerelease,
 }
 
 impl BackgroundUpdateChannel {
-    fn check_channel(self) -> Option<UpdateChannel> {
+    fn update_channel(self) -> UpdateChannel {
         match self {
-            Self::Auto => None,
-            Self::Stable => Some(UpdateChannel::Stable),
-            Self::Prerelease => Some(UpdateChannel::Prerelease),
+            Self::Stable => UpdateChannel::Stable,
+            Self::Prerelease => UpdateChannel::Prerelease,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BackgroundUpdateCheckPolicy {
-    auto_check: BackgroundUpdateAutoCheck,
-    channel: BackgroundUpdateChannel,
+enum BackgroundUpdateCheckPolicy {
+    Disabled,
+    Enabled { channel: BackgroundUpdateChannel },
 }
 
 impl BackgroundUpdateCheckPolicy {
     fn from_settings(store: &SettingsStore) -> Result<Self, UpdatesError> {
-        let auto_check = match required_enum_setting(store, "updates.auto_check")? {
-            "enabled" => BackgroundUpdateAutoCheck::Enabled,
-            "disabled" => BackgroundUpdateAutoCheck::Disabled,
-            _ => {
-                return Err(UpdatesError::SettingsInvariant(
-                    "updates.auto_check resolved to an unsupported value".to_string(),
-                ));
-            }
-        };
-        let channel = match required_enum_setting(store, "updates.channel")? {
-            "auto" => BackgroundUpdateChannel::Auto,
-            "stable" => BackgroundUpdateChannel::Stable,
-            "prerelease" => BackgroundUpdateChannel::Prerelease,
-            _ => {
-                return Err(UpdatesError::SettingsInvariant(
-                    "updates.channel resolved to an unsupported value".to_string(),
-                ));
-            }
-        };
-
-        Ok(Self {
-            auto_check,
-            channel,
-        })
+        match required_enum_setting(store, "updates.auto_check")? {
+            "disabled" => Ok(Self::Disabled),
+            "enabled" => Ok(Self::Enabled {
+                channel: parse_background_update_channel(store)?,
+            }),
+            _ => Err(UpdatesError::SettingsInvariant(
+                "updates.auto_check resolved to an unsupported value".to_string(),
+            )),
+        }
     }
 
     fn check_command(self) -> Option<UpdatesCommand> {
-        match self.auto_check {
-            BackgroundUpdateAutoCheck::Disabled => None,
-            BackgroundUpdateAutoCheck::Enabled => Some(UpdatesCommand::Check {
-                channel: self.channel.check_channel(),
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { channel } => Some(UpdatesCommand::Check {
+                channel: Some(channel.update_channel()),
                 notify: true,
             }),
         }
+    }
+}
+
+fn parse_background_update_channel(
+    store: &SettingsStore,
+) -> Result<BackgroundUpdateChannel, UpdatesError> {
+    match required_enum_setting(store, "updates.channel")? {
+        "stable" => Ok(BackgroundUpdateChannel::Stable),
+        "prerelease" => Ok(BackgroundUpdateChannel::Prerelease),
+        _ => Err(UpdatesError::SettingsInvariant(
+            "updates.channel resolved to an unsupported value".to_string(),
+        )),
     }
 }
 
@@ -1337,19 +1326,20 @@ mod tests {
         atomic_write_file, check_updates, check_updates_with_cache,
         evaluate_update_notification_policy, parse_release_version, resolve_update_cache_path,
         run_updates_command_with, run_updates_command_with_background_settings,
-        BackgroundUpdateAutoCheck, BackgroundUpdateChannel, BackgroundUpdateCheckPolicy,
-        BackgroundUpdateSettings, CachedReleaseInfo, CachedUpdateCheck, CachedUpdateNotification,
-        DefaultUpdateCacheStore, FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient,
-        ReleaseEndpoint, ReleaseInfo, UpdateCachePathError, UpdateCachePathSources,
-        UpdateCacheStore, UpdateChannel, UpdateCheckCache, UpdateNotificationDecision,
-        UpdateNotificationPolicyInput, UpdateNotificationReason, UpdateNotificationSkipReason,
-        UpdatesCommand, UpdatesDeferredFailure, UpdatesError, UpdatesRunContext,
-        UreqGitHubReleasesClient, PRERELEASE_PAGE_SIZE,
+        BackgroundUpdateChannel, BackgroundUpdateCheckPolicy, BackgroundUpdateSettings,
+        CachedReleaseInfo, CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore,
+        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
+        ReleaseInfo, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore, UpdateChannel,
+        UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
+        UpdateNotificationReason, UpdateNotificationSkipReason, UpdatesCommand,
+        UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
+        PRERELEASE_PAGE_SIZE,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
         UpdateNotificationRequest,
     };
+    use crate::settings::{ConfigEnvReader, SettingsStore};
     use crate::version::{ReleaseChannel, VersionInfo};
     use semver::Version;
     use std::cell::RefCell;
@@ -1516,19 +1506,13 @@ mod tests {
     impl StaticBackgroundUpdateSettings {
         fn enabled(channel: BackgroundUpdateChannel) -> Self {
             Self {
-                policy: BackgroundUpdateCheckPolicy {
-                    auto_check: BackgroundUpdateAutoCheck::Enabled,
-                    channel,
-                },
+                policy: BackgroundUpdateCheckPolicy::Enabled { channel },
             }
         }
 
         fn disabled() -> Self {
             Self {
-                policy: BackgroundUpdateCheckPolicy {
-                    auto_check: BackgroundUpdateAutoCheck::Disabled,
-                    channel: BackgroundUpdateChannel::Auto,
-                },
+                policy: BackgroundUpdateCheckPolicy::Disabled,
             }
         }
     }
@@ -2260,12 +2244,12 @@ mod tests {
     }
 
     #[test]
-    fn background_update_check_uses_auto_channel_and_notifies() {
+    fn background_update_check_uses_default_stable_channel_and_notifies() {
         let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
         let notifier = RecordingNotifier::default();
         let cache_store = MemoryUpdateCacheStore::default();
         let background_settings =
-            StaticBackgroundUpdateSettings::enabled(BackgroundUpdateChannel::Auto);
+            StaticBackgroundUpdateSettings::enabled(BackgroundUpdateChannel::Stable);
         let mut output = Vec::new();
 
         run_updates_command_with_background_settings(
@@ -2291,6 +2275,38 @@ mod tests {
                 "https://api.example.test/releases/latest".to_string(),
                 "lg-buddy/1.1.0".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn disabled_background_update_check_ignores_invalid_channel_setting() {
+        let store = SettingsStore::from_reader(ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "updates_auto_check=disabled\nupdates_channel=bogus\n",
+        ));
+
+        let policy = BackgroundUpdateCheckPolicy::from_settings(&store)
+            .expect("disabled background checks should not parse the channel setting");
+
+        assert_eq!(policy.check_command(), None);
+    }
+
+    #[test]
+    fn enabled_background_update_check_defaults_to_stable_channel() {
+        let store = SettingsStore::from_reader(ConfigEnvReader::parse(
+            "/tmp/config.env",
+            "updates_auto_check=enabled\n",
+        ));
+
+        let policy = BackgroundUpdateCheckPolicy::from_settings(&store)
+            .expect("enabled background checks should use the settings default channel");
+
+        assert_eq!(
+            policy.check_command(),
+            Some(UpdatesCommand::Check {
+                channel: Some(UpdateChannel::Stable),
+                notify: true,
+            })
         );
     }
 

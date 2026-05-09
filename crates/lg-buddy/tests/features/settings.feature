@@ -13,7 +13,7 @@ Feature: Settings CLI
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "system.sleep_wake_policy=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "updates.auto_check=enabled (default, read-write, ops: get,describe,set,unset)"
-    And stdout contains "updates.channel=auto (default, read-write, ops: get,describe,set,unset)"
+    And stdout contains "updates.channel=stable (default, read-write, ops: get,describe,set,unset)"
 
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2

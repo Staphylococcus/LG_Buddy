@@ -15,7 +15,7 @@ LG_BUDDY_MAX_IDLE_TIMEOUT=86400
 LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY="conservative"
 LG_BUDDY_DEFAULT_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 LG_BUDDY_DEFAULT_UPDATE_AUTO_CHECK="enabled"
-LG_BUDDY_DEFAULT_UPDATE_CHANNEL="auto"
+LG_BUDDY_DEFAULT_UPDATE_CHANNEL="stable"
 
 lg_buddy_user_config_path() {
     if [ -n "${LG_BUDDY_CONFIG:-}" ]; then
@@ -178,7 +178,7 @@ lg_buddy_load_config() {
     screen_restore_policy="$(lg_buddy_config_get_valid "screen_restore_policy" '^(marker_only|conservative|aggressive)$' "$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY" "$LG_BUDDY_CONFIG_FILE")"
     system_sleep_wake_policy="$(lg_buddy_config_get_valid "system_sleep_wake_policy" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_SYSTEM_SLEEP_WAKE_POLICY" "$LG_BUDDY_CONFIG_FILE")"
     updates_auto_check="$(lg_buddy_config_get_valid "updates_auto_check" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_UPDATE_AUTO_CHECK" "$LG_BUDDY_CONFIG_FILE")"
-    updates_channel="$(lg_buddy_config_get_valid "updates_channel" '^(auto|stable|prerelease)$' "$LG_BUDDY_DEFAULT_UPDATE_CHANNEL" "$LG_BUDDY_CONFIG_FILE")"
+    updates_channel="$(lg_buddy_config_get_valid "updates_channel" '^(stable|prerelease)$' "$LG_BUDDY_DEFAULT_UPDATE_CHANNEL" "$LG_BUDDY_CONFIG_FILE")"
 
     if [ -z "$tv_ip" ] || [ -z "$tv_mac" ] || [ -z "$input" ]; then
         echo "LG Buddy: config file is missing required TV settings."
