@@ -465,8 +465,13 @@ else
     fi
 
     if [ "$UPDATE_AUTO_CHECK" = "enabled" ]; then
-        systemctl --user enable --now LG_Buddy_update_check.timer
-        echo "LG_Buddy_update_check.timer enabled and started."
+        systemctl --user enable LG_Buddy_update_check.timer
+        if systemctl --user is-active --quiet graphical-session.target; then
+            systemctl --user start LG_Buddy_update_check.timer
+            echo "LG_Buddy_update_check.timer enabled and started."
+        else
+            echo "LG_Buddy_update_check.timer enabled; it will start with the graphical session."
+        fi
     else
         systemctl --user disable --now LG_Buddy_update_check.timer 2>/dev/null || true
         echo "LG_Buddy_update_check.timer installed but disabled by config."

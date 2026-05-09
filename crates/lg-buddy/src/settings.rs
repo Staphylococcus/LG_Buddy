@@ -703,6 +703,7 @@ impl SettingsChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsApplyOutcome {
     Restarted { service: &'static str },
+    Enabled { unit: &'static str },
     EnabledStarted { unit: &'static str },
     DisabledStopped { unit: &'static str },
     NotInstalled { service: &'static str },
@@ -715,6 +716,7 @@ impl fmt::Display for SettingsApplyOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Restarted { service } => write!(f, "restarted {service}"),
+            Self::Enabled { unit } => write!(f, "enabled {unit}"),
             Self::EnabledStarted { unit } => write!(f, "enabled and started {unit}"),
             Self::DisabledStopped { unit } => write!(f, "disabled and stopped {unit}"),
             Self::NotInstalled { service } => {
@@ -740,6 +742,12 @@ pub enum UserServiceState {
     ActiveOrEnabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserUnitEnableOutcome {
+    Enabled,
+    EnabledStarted,
+}
+
 pub trait ServiceController {
     fn systemd_actions_disabled(&self) -> bool {
         false
@@ -749,7 +757,7 @@ pub trait ServiceController {
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError>;
 
-    fn enable_start_user_unit(&self, unit: &str) -> Result<(), SettingsError>;
+    fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError>;
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError>;
 }
@@ -840,8 +848,17 @@ impl ServiceController for SystemdUserServiceController {
         self.run_user_systemctl(&["restart", service])
     }
 
-    fn enable_start_user_unit(&self, unit: &str) -> Result<(), SettingsError> {
-        self.run_user_systemctl(&["enable", "--now", unit])
+    fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError> {
+        self.run_user_systemctl(&["enable", unit])?;
+        if self
+            .user_systemctl_status(&["is-active", "--quiet", "graphical-session.target"])
+            .unwrap_or(false)
+        {
+            self.run_user_systemctl(&["start", unit])?;
+            Ok(UserUnitEnableOutcome::EnabledStarted)
+        } else {
+            Ok(UserUnitEnableOutcome::Enabled)
+        }
     }
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError> {
@@ -933,11 +950,10 @@ impl<C: ServiceController> SettingsApplier<C> {
             }),
             UserServiceState::InactiveDisabled => {
                 if enabled {
-                    self.service_controller
+                    let outcome = self
+                        .service_controller
                         .enable_start_user_unit(UPDATE_CHECK_TIMER_NAME)?;
-                    Ok(SettingsApplyOutcome::EnabledStarted {
-                        unit: UPDATE_CHECK_TIMER_NAME,
-                    })
+                    Ok(settings_enable_outcome(UPDATE_CHECK_TIMER_NAME, outcome))
                 } else {
                     self.service_controller
                         .disable_stop_user_unit(UPDATE_CHECK_TIMER_NAME)?;
@@ -948,11 +964,10 @@ impl<C: ServiceController> SettingsApplier<C> {
             }
             UserServiceState::ActiveOrEnabled => {
                 if enabled {
-                    self.service_controller
+                    let outcome = self
+                        .service_controller
                         .enable_start_user_unit(UPDATE_CHECK_TIMER_NAME)?;
-                    Ok(SettingsApplyOutcome::EnabledStarted {
-                        unit: UPDATE_CHECK_TIMER_NAME,
-                    })
+                    Ok(settings_enable_outcome(UPDATE_CHECK_TIMER_NAME, outcome))
                 } else {
                     self.service_controller
                         .disable_stop_user_unit(UPDATE_CHECK_TIMER_NAME)?;
@@ -962,6 +977,16 @@ impl<C: ServiceController> SettingsApplier<C> {
                 }
             }
         }
+    }
+}
+
+fn settings_enable_outcome(
+    unit: &'static str,
+    outcome: UserUnitEnableOutcome,
+) -> SettingsApplyOutcome {
+    match outcome {
+        UserUnitEnableOutcome::Enabled => SettingsApplyOutcome::Enabled { unit },
+        UserUnitEnableOutcome::EnabledStarted => SettingsApplyOutcome::EnabledStarted { unit },
     }
 }
 
@@ -2201,7 +2226,8 @@ mod tests {
         format_effective_value, ApplyStrategy, ConfigEnvReader, ConfigPathResolver,
         ServiceController, SettingKey, SettingMutability, SettingOperation, SettingSource,
         SettingType, SettingValue, SettingsApplier, SettingsCommand, SettingsCommandRunner,
-        SettingsError, SettingsParseError, SettingsStore, UserServiceState, SETTINGS_REGISTRY,
+        SettingsError, SettingsParseError, SettingsStore, UserServiceState, UserUnitEnableOutcome,
+        SETTINGS_REGISTRY,
     };
     use crate::config::{ConfigPathSources, MAX_IDLE_TIMEOUT};
     use std::cell::Cell;
@@ -3837,7 +3863,10 @@ tvs_primary_ip=192.0.2.43
             }
         }
 
-        fn enable_start_user_unit(&self, _unit: &str) -> Result<(), SettingsError> {
+        fn enable_start_user_unit(
+            &self,
+            _unit: &str,
+        ) -> Result<UserUnitEnableOutcome, SettingsError> {
             self.enables.set(self.enables.get() + 1);
 
             if let Some(message) = self.unit_action_error {
@@ -3845,7 +3874,7 @@ tvs_primary_ip=192.0.2.43
                     message: message.to_string(),
                 })
             } else {
-                Ok(())
+                Ok(UserUnitEnableOutcome::EnabledStarted)
             }
         }
 

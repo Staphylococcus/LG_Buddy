@@ -137,6 +137,8 @@ choice.
 `updates_auto_check` follows the same opt-out model:
 
 - automatic update checks should default to enabled
+- background checks should be low-frequency, currently weekly with randomized
+  delay
 - the installer should not ask every user whether update checks should run
 - users who do not want background checks should opt out through `config.env` or
   `lg-buddy settings set updates.auto_check disabled`

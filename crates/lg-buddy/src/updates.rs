@@ -66,6 +66,13 @@ impl UpdatesCommand {
             Self::BackgroundCheck => true,
         }
     }
+
+    fn check_channel(&self) -> Option<UpdateChannel> {
+        match self {
+            Self::Check { channel, .. } => *channel,
+            Self::BackgroundCheck => None,
+        }
+    }
 }
 
 fn parse_background_check_args<I, S>(args: I) -> Result<UpdatesCommand, UpdatesParseError>
@@ -1102,7 +1109,7 @@ fn run_updates_command_with_background_settings<
         }
     };
     let result = check_updates_with_cache(
-        command,
+        command.check_channel(),
         context.version,
         context.client,
         &mut cache,
@@ -1165,45 +1172,36 @@ fn check_updates<C: GitHubReleasesClient>(
     client: &C,
 ) -> Result<UpdateCheckResult, UpdatesError> {
     let mut cache = UpdateCheckCache::default();
-    check_updates_with_cache(command, current, client, &mut cache, current_unix_seconds())
+    check_updates_with_cache(
+        command.check_channel(),
+        current,
+        client,
+        &mut cache,
+        current_unix_seconds(),
+    )
 }
 
 fn check_updates_with_cache<C: GitHubReleasesClient>(
-    command: UpdatesCommand,
+    channel: Option<UpdateChannel>,
     current: VersionInfo,
     client: &C,
     cache: &mut UpdateCheckCache,
     now_unix_seconds: u64,
 ) -> Result<UpdateCheckResult, UpdatesError> {
-    match command {
-        UpdatesCommand::Check { channel, .. } => {
-            let channel = channel.unwrap_or_else(|| UpdateChannel::default_for(current));
-            let current_version = Version::parse(current.version()).map_err(|source| {
-                UpdatesError::InvalidLocalVersion {
-                    version: current.version().to_string(),
-                    source,
-                }
-            })?;
-            let latest = fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
+    let channel = channel.unwrap_or_else(|| UpdateChannel::default_for(current));
+    let current_version =
+        Version::parse(current.version()).map_err(|source| UpdatesError::InvalidLocalVersion {
+            version: current.version().to_string(),
+            source,
+        })?;
+    let latest = fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
 
-            Ok(UpdateCheckResult {
-                check_channel: channel,
-                current_version,
-                current_channel: current.channel(),
-                latest,
-            })
-        }
-        UpdatesCommand::BackgroundCheck => check_updates_with_cache(
-            UpdatesCommand::Check {
-                channel: None,
-                notify: true,
-            },
-            current,
-            client,
-            cache,
-            now_unix_seconds,
-        ),
-    }
+    Ok(UpdateCheckResult {
+        check_channel: channel,
+        current_version,
+        current_channel: current.channel(),
+        latest,
+    })
 }
 
 fn fetch_latest_release<C: GitHubReleasesClient>(
@@ -1997,7 +1995,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            check(Some(UpdateChannel::Stable)),
+            Some(UpdateChannel::Stable),
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,
@@ -2080,7 +2078,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            check(Some(UpdateChannel::Stable)),
+            Some(UpdateChannel::Stable),
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,
@@ -2125,7 +2123,7 @@ mod tests {
         );
 
         let result = check_updates_with_cache(
-            check(Some(UpdateChannel::Prerelease)),
+            Some(UpdateChannel::Prerelease),
             version_info("1.2.0-beta.1", ReleaseChannel::Prerelease),
             &client,
             &mut cache,
@@ -2152,7 +2150,7 @@ mod tests {
         let mut cache = UpdateCheckCache::default();
 
         let err = check_updates_with_cache(
-            check(Some(UpdateChannel::Stable)),
+            Some(UpdateChannel::Stable),
             version_info("1.1.0", ReleaseChannel::Stable),
             &client,
             &mut cache,

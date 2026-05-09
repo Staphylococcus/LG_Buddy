@@ -188,6 +188,8 @@ assert_file "$USER_SCREEN_SERVICE"
 assert_file "$USER_UPDATE_CHECK_SERVICE"
 assert_file "$USER_UPDATE_CHECK_TIMER"
 assert_file "$USER_UPDATE_CHECK_OVERRIDE"
+grep -q '^OnCalendar=weekly$' "$USER_UPDATE_CHECK_TIMER"
+grep -q '^WantedBy=graphical-session.target$' "$USER_UPDATE_CHECK_TIMER"
 assert_file "$DESKTOP_ENTRY"
 [ ! -e "$LEGACY_SLEEP_SERVICE" ] || {
     echo "Legacy sleep service installed unexpectedly: $LEGACY_SLEEP_SERVICE"
@@ -353,6 +355,8 @@ assert_file "$USER_SCREEN_SERVICE"
 assert_file "$USER_UPDATE_CHECK_SERVICE"
 assert_file "$USER_UPDATE_CHECK_TIMER"
 assert_file "$USER_UPDATE_CHECK_OVERRIDE"
+grep -q '^OnCalendar=weekly$' "$USER_UPDATE_CHECK_TIMER"
+grep -q '^WantedBy=graphical-session.target$' "$USER_UPDATE_CHECK_TIMER"
 [ ! -e "$LEGACY_SLEEP_SERVICE" ] || {
     echo "Legacy sleep service installed unexpectedly: $LEGACY_SLEEP_SERVICE"
     exit 1

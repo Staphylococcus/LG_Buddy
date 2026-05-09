@@ -287,7 +287,7 @@ runtime policy without reinstalling services.
 `updates_auto_check` controls automatic background update checks:
 
 - `enabled`: default behavior, let the installed user timer periodically check
-  GitHub releases and notify when an update is available
+  GitHub releases about weekly and notify when an update is available
 - `disabled`: leave the timer units installed, but disable the timer and skip
   background update work
 

@@ -1,10 +1,12 @@
 [Unit]
 Description=LG Buddy background update check timer
+After=graphical-session.target
+PartOf=graphical-session.target
 
 [Timer]
-OnCalendar=daily
-RandomizedDelaySec=6h
+OnCalendar=weekly
+RandomizedDelaySec=12h
 Persistent=true
 
 [Install]
-WantedBy=timers.target
+WantedBy=graphical-session.target
