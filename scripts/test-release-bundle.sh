@@ -144,7 +144,6 @@ export LG_BUDDY_TV_IP="192.168.1.10"
 export LG_BUDDY_TV_MAC="aa:bb:cc:dd:ee:ff"
 export LG_BUDDY_INPUT="HDMI_2"
 export LG_BUDDY_SCREEN_BACKEND="auto"
-export LG_BUDDY_ENABLE_SCREEN_MONITOR="0"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 export PIP_DISABLE_PIP_VERSION_CHECK="1"
 export PIP_NO_PYTHON_VERSION_WARNING="1"
@@ -212,6 +211,7 @@ fi
 grep -q '^tvs_primary_ip=192.168.1.10$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
+grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
@@ -239,6 +239,7 @@ printf '%s\n' "$INSTALLED_VERSION_OUTPUT" | grep -q "^commit: "
 grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.restore_policy aggressive
+"$INSTALLED_BINARY" settings set screen.idle_blank disabled
 "$INSTALLED_BINARY" settings set tv.ip 192.168.1.12
 "$INSTALLED_BINARY" settings set tv.mac 22:33:44:55:66:77
 "$INSTALLED_BINARY" settings set tv.input HDMI_4
@@ -246,6 +247,7 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings set updates.auto_check disabled
 "$INSTALLED_BINARY" settings set updates.channel prerelease
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
@@ -270,6 +272,7 @@ grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
 grep -q '^screen_backend=gnome$' "$CONFIG_FILE"
+grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
@@ -364,6 +367,7 @@ assert_file "$USER_UPDATE_CHECK_OVERRIDE"
 }
 assert_executable "$NM_LIFECYCLE_HOOK"
 grep -q 'lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
+grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=disabled$' "$CONFIG_FILE"
 
 (

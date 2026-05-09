@@ -39,6 +39,7 @@ const SCREEN_RESTORE_POLICY_ALIASES: &[SettingAlias] = &[SettingAlias {
 
 const TV_INPUT_VALUES: &[&str] = &["HDMI_1", "HDMI_2", "HDMI_3", "HDMI_4"];
 const SCREEN_BACKEND_VALUES: &[&str] = &["auto", "gnome", "swayidle"];
+const SCREEN_IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
 const SCREEN_RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
 const SYSTEM_SLEEP_WAKE_POLICY_VALUES: &[&str] = &["enabled", "disabled"];
 const UPDATE_AUTO_CHECK_VALUES: &[&str] = &["enabled", "disabled"];
@@ -94,6 +95,20 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
         operations: READ_WRITE_OPERATIONS,
         apply_strategy: ApplyStrategy::RestartUserScreenService,
         description: "Screen backend selection for user-session blanking and restore behavior.",
+    },
+    SettingDefinition {
+        key: "screen.idle_blank",
+        storage_key: "screen_idle_blank",
+        fallback_storage_keys: EMPTY_STORAGE_KEYS,
+        value_type: SettingType::Enum(EnumSettingType {
+            values: SCREEN_IDLE_BLANK_VALUES,
+            aliases: EMPTY_ALIASES,
+        }),
+        default_value: Some(SettingValue::Enum("enabled")),
+        mutability: SettingMutability::ReadWrite,
+        operations: READ_WRITE_OPERATIONS,
+        apply_strategy: ApplyStrategy::RestartUserScreenService,
+        description: "Idle-driven blanking and restore behavior for the configured screen.",
     },
     SettingDefinition {
         key: "screen.idle_timeout",
@@ -2215,6 +2230,7 @@ mod tests {
                 "tv.mac",
                 "tv.input",
                 "screen.backend",
+                "screen.idle_blank",
                 "screen.idle_timeout",
                 "screen.restore_policy",
                 "system.sleep_wake_policy",
@@ -2239,6 +2255,7 @@ mod tests {
                 ("tv.mac", "tvs_primary_mac"),
                 ("tv.input", "tvs_primary_input"),
                 ("screen.backend", "screen_backend"),
+                ("screen.idle_blank", "screen_idle_blank"),
                 ("screen.idle_timeout", "screen_idle_timeout"),
                 ("screen.restore_policy", "screen_restore_policy"),
                 ("system.sleep_wake_policy", "system_sleep_wake_policy"),
@@ -2263,6 +2280,7 @@ mod tests {
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
                 "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
+                "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle-driven blanking and restore behavior for the configured screen.",
                 "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle timeout in seconds before LG Buddy blanks the configured screen.",
                 "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
                 "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=System sleep and wake policy for lifecycle hooks.",
@@ -2352,6 +2370,7 @@ tv.ip=<missing> (missing, read-write, ops: get,describe,set)
 tv.mac=<missing> (missing, read-write, ops: get,describe,set)
 tv.input=<missing> (missing, read-write, ops: get,describe,set)
 screen.backend=gnome (config.env, read-write, ops: get,describe,set,unset)
+screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)
 screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
 screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)
 system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set,unset)
@@ -2466,6 +2485,18 @@ screen.backend
   allowed values: auto, gnome, swayidle
   apply: restart-user-screen-service
   description: Screen backend selection for user-session blanking and restore behavior.
+
+screen.idle_blank
+  storage key: screen_idle_blank
+  type: enum
+  current: enabled
+  source: default
+  default: enabled
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: enabled, disabled
+  apply: restart-user-screen-service
+  description: Idle-driven blanking and restore behavior for the configured screen.
 
 screen.idle_timeout
   storage key: screen_idle_timeout
@@ -3139,6 +3170,7 @@ tvs_primary_ip=192.0.2.43
             "/tmp/config.env",
             "\
             screen_backend=gnome
+            screen_idle_blank=disabled
             screen_idle_timeout=450
             screen_restore_policy=aggressive
             system_sleep_wake_policy=disabled
@@ -3149,6 +3181,10 @@ tvs_primary_ip=192.0.2.43
         let backend = store.effective_by_name("screen.backend").unwrap();
         assert_eq!(backend.value(), Some(SettingValue::Enum("gnome")));
         assert_eq!(backend.source(), SettingSource::ConfigEnv);
+
+        let idle_blank = store.effective_by_name("screen.idle_blank").unwrap();
+        assert_eq!(idle_blank.value(), Some(SettingValue::Enum("disabled")));
+        assert_eq!(idle_blank.source(), SettingSource::ConfigEnv);
 
         let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
         assert_eq!(idle_timeout.value(), Some(SettingValue::Integer(450)));
@@ -3229,6 +3265,7 @@ tvs_primary_ip=192.0.2.43
             "/tmp/config.env",
             "\
             screen_backend=not-a-backend
+            screen_idle_blank=not-a-policy
             screen_idle_timeout=not-a-number
             screen_restore_policy=not-a-policy
             ",
@@ -3239,6 +3276,11 @@ tvs_primary_ip=192.0.2.43
         assert_eq!(backend.value(), None);
         assert_eq!(backend.source(), SettingSource::InvalidConfigEnv);
         assert_eq!(backend.invalid_value(), Some("not-a-backend"));
+
+        let idle_blank = store.effective_by_name("screen.idle_blank").unwrap();
+        assert_eq!(idle_blank.value(), None);
+        assert_eq!(idle_blank.source(), SettingSource::InvalidConfigEnv);
+        assert_eq!(idle_blank.invalid_value(), Some("not-a-policy"));
 
         let idle_timeout = store.effective_by_name("screen.idle_timeout").unwrap();
         assert_eq!(idle_timeout.value(), None);
@@ -3361,6 +3403,7 @@ tvs_primary_ip=192.0.2.43
                 "tv.mac",
                 "tv.input",
                 "screen.backend",
+                "screen.idle_blank",
                 "screen.idle_timeout",
                 "screen.restore_policy",
                 "system.sleep_wake_policy",
@@ -3375,6 +3418,7 @@ tvs_primary_ip=192.0.2.43
                 "<missing>",
                 "<missing>",
                 "gnome",
+                "enabled",
                 "300",
                 "conservative",
                 "disabled",
@@ -3391,6 +3435,7 @@ tvs_primary_ip=192.0.2.43
                 SettingSource::ConfigEnv,
                 SettingSource::Default,
                 SettingSource::Default,
+                SettingSource::Default,
                 SettingSource::ConfigEnv,
                 SettingSource::Default,
                 SettingSource::Default,
@@ -3402,8 +3447,12 @@ tvs_primary_ip=192.0.2.43
     fn key_parser_accepts_supported_dotted_names() {
         for key in [
             "screen.backend",
+            "screen.idle_blank",
             "screen.idle_timeout",
+            "screen.restore_policy",
             "system.sleep_wake_policy",
+            "updates.auto_check",
+            "updates.channel",
         ] {
             assert_eq!(SettingKey::parse(key).unwrap().as_str(), key);
         }

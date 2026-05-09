@@ -1131,7 +1131,8 @@ mod tests {
         ScreenOnNext, Sleeper, SystemLifecycleStatusProvider,
     };
     use crate::config::{
-        Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
+        Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
+        SystemSleepWakePolicy,
     };
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::policy::{
@@ -1632,6 +1633,7 @@ mod tests {
                 .expect("parse mac"),
             input,
             screen_backend: ScreenBackend::Auto,
+            screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,

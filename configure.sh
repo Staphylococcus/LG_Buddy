@@ -50,6 +50,13 @@ validate_backend() {
     esac
 }
 
+validate_screen_idle_blank() {
+    case "$1" in
+        enabled|disabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 validate_restore_policy() {
     case "$1" in
         marker_only|conservative|aggressive) return 0 ;;
@@ -80,6 +87,7 @@ current_tv_ip=""
 current_tv_mac=""
 current_input="HDMI_1"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
+current_screen_idle_blank="$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
 current_screen_restore_policy="$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY"
 current_system_sleep_wake_policy="$LG_BUDDY_DEFAULT_SYSTEM_SLEEP_WAKE_POLICY"
@@ -91,6 +99,7 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_tv_mac="$tv_mac"
     current_input="$input"
     current_screen_backend="$screen_backend"
+    current_screen_idle_blank="$screen_idle_blank"
     current_screen_idle_timeout="$screen_idle_timeout"
     current_screen_restore_policy="$(normalize_restore_policy "$screen_restore_policy")"
     current_system_sleep_wake_policy="$system_sleep_wake_policy"
@@ -104,6 +113,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     tv_mac="${LG_BUDDY_TV_MAC:-$current_tv_mac}"
     input="${LG_BUDDY_INPUT:-$current_input}"
     screen_backend="${LG_BUDDY_SCREEN_BACKEND:-$current_screen_backend}"
+    screen_idle_blank="$current_screen_idle_blank"
     screen_idle_timeout="${LG_BUDDY_SCREEN_IDLE_TIMEOUT:-$current_screen_idle_timeout}"
     screen_restore_policy="${LG_BUDDY_SCREEN_RESTORE_POLICY:-$current_screen_restore_policy}"
     system_sleep_wake_policy="${LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY:-$current_system_sleep_wake_policy}"
@@ -130,6 +140,10 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     }
     validate_backend "$screen_backend" || {
         echo "LG_BUDDY_SCREEN_BACKEND must be one of auto, gnome, or swayidle."
+        exit 1
+    }
+    validate_screen_idle_blank "$screen_idle_blank" || {
+        echo "screen_idle_blank must be one of enabled or disabled."
         exit 1
     }
     validate_restore_policy "$screen_restore_policy" || {
@@ -235,55 +249,76 @@ else
         esac
     done
 
-    echo "Choose the screen idle backend:"
-    echo "  1) auto"
-    echo "  2) gnome"
-    echo "  3) swayidle"
-
-    case "$current_screen_backend" in
-        auto) default_backend_choice="1" ;;
-        gnome) default_backend_choice="2" ;;
-        swayidle) default_backend_choice="3" ;;
-        *) default_backend_choice="1" ;;
+    case "$current_screen_idle_blank" in
+        enabled) default_idle_blank_choice="Y" ;;
+        disabled) default_idle_blank_choice="n" ;;
+        *) default_idle_blank_choice="Y" ;;
     esac
 
     while true; do
-        BACKEND_CHOICE="$(prompt_with_default "Enter number (1-3)" "$default_backend_choice")"
-        case "$BACKEND_CHOICE" in
-            1) screen_backend="auto"; break ;;
-            2) screen_backend="gnome"; break ;;
-            3) screen_backend="swayidle"; break ;;
-            *) echo "  Please enter a number between 1 and 3." ;;
+        IDLE_BLANK_CHOICE="$(prompt_with_default "Enable automatic idle blank/restore? (Y/n)" "$default_idle_blank_choice")"
+        case "$IDLE_BLANK_CHOICE" in
+            ""|[Yy]*|1|true|TRUE|True|yes|YES|Yes) screen_idle_blank="enabled"; break ;;
+            [Nn]*|0|false|FALSE|False|no|NO|No) screen_idle_blank="disabled"; break ;;
+            *) echo "  Please answer yes or no." ;;
         esac
     done
 
-    while true; do
-        screen_idle_timeout="$(prompt_with_default "Enter idle timeout in seconds" "$current_screen_idle_timeout")"
-        if validate_idle_timeout "$screen_idle_timeout"; then
-            screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"
-            break
-        fi
-        echo "  Please enter a positive number of seconds."
-    done
+    if [ "$screen_idle_blank" = "enabled" ]; then
+        echo "Choose the screen idle backend:"
+        echo "  1) auto"
+        echo "  2) gnome"
+        echo "  3) swayidle"
 
-    echo "Choose how aggressively LG Buddy should restore the display:"
-    echo "  1) conservative  (only restore when LG Buddy knows it blanked or powered off the TV)"
-    echo "  2) aggressive    (restore on wake/activity even without prior LG Buddy ownership)"
-
-    case "$current_screen_restore_policy" in
-        conservative|marker_only) default_restore_policy_choice="1" ;;
-        aggressive) default_restore_policy_choice="2" ;;
-        *) default_restore_policy_choice="1" ;;
-    esac
-
-    while true; do
-        RESTORE_POLICY_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_restore_policy_choice")"
-        case "$RESTORE_POLICY_CHOICE" in
-            1) screen_restore_policy="conservative"; break ;;
-            2) screen_restore_policy="aggressive"; break ;;
-            *) echo "  Please enter a number between 1 and 2." ;;
+        case "$current_screen_backend" in
+            auto) default_backend_choice="1" ;;
+            gnome) default_backend_choice="2" ;;
+            swayidle) default_backend_choice="3" ;;
+            *) default_backend_choice="1" ;;
         esac
-    done
+
+        while true; do
+            BACKEND_CHOICE="$(prompt_with_default "Enter number (1-3)" "$default_backend_choice")"
+            case "$BACKEND_CHOICE" in
+                1) screen_backend="auto"; break ;;
+                2) screen_backend="gnome"; break ;;
+                3) screen_backend="swayidle"; break ;;
+                *) echo "  Please enter a number between 1 and 3." ;;
+            esac
+        done
+
+        while true; do
+            screen_idle_timeout="$(prompt_with_default "Enter idle timeout in seconds" "$current_screen_idle_timeout")"
+            if validate_idle_timeout "$screen_idle_timeout"; then
+                screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"
+                break
+            fi
+            echo "  Please enter a positive number of seconds."
+        done
+
+        echo "Choose how aggressively LG Buddy should restore the display:"
+        echo "  1) conservative  (only restore when LG Buddy knows it blanked or powered off the TV)"
+        echo "  2) aggressive    (restore on wake/activity even without prior LG Buddy ownership)"
+
+        case "$current_screen_restore_policy" in
+            conservative|marker_only) default_restore_policy_choice="1" ;;
+            aggressive) default_restore_policy_choice="2" ;;
+            *) default_restore_policy_choice="1" ;;
+        esac
+
+        while true; do
+            RESTORE_POLICY_CHOICE="$(prompt_with_default "Enter number (1-2)" "$default_restore_policy_choice")"
+            case "$RESTORE_POLICY_CHOICE" in
+                1) screen_restore_policy="conservative"; break ;;
+                2) screen_restore_policy="aggressive"; break ;;
+                *) echo "  Please enter a number between 1 and 2." ;;
+            esac
+        done
+    else
+        screen_backend="$current_screen_backend"
+        screen_idle_timeout="$current_screen_idle_timeout"
+        screen_restore_policy="$current_screen_restore_policy"
+    fi
 
     system_sleep_wake_policy="$current_system_sleep_wake_policy"
     update_auto_check="$current_update_auto_check"
@@ -295,6 +330,7 @@ echo "Configuration to apply:"
 echo "  TV IP:               $tv_ip"
 echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
+echo "  Screen Idle Blank:   $screen_idle_blank"
 echo "  Screen Backend:      $screen_backend"
 echo "  Screen Idle Timeout: $screen_idle_timeout"
 echo "  Screen Restore:      $screen_restore_policy"
@@ -322,6 +358,7 @@ cat >"$CONFIG_FILE" <<EOF
 tvs_primary_ip=$tv_ip
 tvs_primary_mac=$tv_mac
 tvs_primary_input=$input
+screen_idle_blank=$screen_idle_blank
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout
 screen_restore_policy=$screen_restore_policy

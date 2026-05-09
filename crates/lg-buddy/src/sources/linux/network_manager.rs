@@ -71,7 +71,8 @@ mod tests {
 
     use super::{handle_pre_down_with, network_teardown_event_from_logind_property};
     use crate::config::{
-        Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
+        Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
+        SystemSleepWakePolicy,
     };
     use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
     use crate::lifecycle::Sleeper;
@@ -359,6 +360,7 @@ mod tests {
                 .expect("parse mac"),
             input: HdmiInput::Hdmi2,
             screen_backend: ScreenBackend::Auto,
+            screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
             system_sleep_wake_policy,

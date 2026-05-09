@@ -67,7 +67,9 @@ policy decision; a newer release can notify again.
 `updates background-check` is the service-owned path used by the installed user
 timer. It reads update settings, skips all update work when automatic checks are
 disabled, and otherwise uses the same release API, cache, notification handoff,
-and repeat-notification policy as `updates check --notify`.
+and repeat-notification policy as `updates check --notify`. The notification
+handoff expects the installed user-session service,
+`LG_Buddy_screen.service`, to be running.
 
 `lifecycle`, `nm-pre-down`, `sleep-pre`, and `startup wake` are normally
 service-owned system lifecycle commands. They are documented for
@@ -79,6 +81,14 @@ LG Buddy supports two session backends:
 
 - `gnome`
 - `swayidle`
+
+`LG_Buddy_screen.service` is the user-session service. It owns the LG Buddy
+session D-Bus surface used by update notifications and, when idle blanking is
+enabled, it also runs screen idle/restore monitoring.
+
+`screen_idle_blank=enabled` turns on automatic idle blank/restore behavior.
+`screen_idle_blank=disabled` keeps the user-session service running for
+notifications but makes idle blank/restore behavior passive.
 
 `screen_backend=auto` prefers GNOME when the current session satisfies the full GNOME contract, then falls back to `swayidle` if installed.
 
@@ -170,6 +180,7 @@ To change supported settings:
 
 ```bash
 lg-buddy settings set tv.input HDMI_2
+lg-buddy settings set screen.idle_blank disabled
 lg-buddy settings set screen.idle_timeout 600
 lg-buddy settings set screen.restore_policy aggressive
 lg-buddy settings set updates.auto_check disabled
@@ -178,7 +189,7 @@ lg-buddy settings unset screen.restore_policy
 ```
 
 `set` and `unset` write `config.env` and then apply the setting when an explicit
-runtime apply step is needed. Screen-monitor settings restart
+runtime apply step is needed. User-session screen settings restart
 `LG_Buddy_screen.service` when the user service is installed and active or
 enabled. `updates.auto_check` enables or disables the installed user timer for
 background update checks. TV identity, system sleep/wake policy, and update
@@ -204,6 +215,7 @@ Current config keys:
 - `tvs_primary_ip`
 - `tvs_primary_mac`
 - `tvs_primary_input`
+- `screen_idle_blank`
 - `screen_backend`
 - `screen_idle_timeout`
 - `screen_restore_policy`
@@ -229,6 +241,7 @@ Current structured settings:
 | `tv.mac` | `tvs_primary_mac` | `get`, `describe`, `set` |
 | `tv.input` | `tvs_primary_input` | `get`, `describe`, `set` |
 | `screen.backend` | `screen_backend` | `get`, `describe`, `set`, `unset` |
+| `screen.idle_blank` | `screen_idle_blank` | `get`, `describe`, `set`, `unset` |
 | `screen.idle_timeout` | `screen_idle_timeout` | `get`, `describe`, `set`, `unset` |
 | `screen.restore_policy` | `screen_restore_policy` | `get`, `describe`, `set`, `unset` |
 | `system.sleep_wake_policy` | `system_sleep_wake_policy` | `get`, `describe`, `set`, `unset` |
@@ -239,6 +252,14 @@ The `tv.*` settings expose the single supported TV in the public API. Their
 storage keys are profile-shaped only to leave room for future storage growth;
 this version does not expose multiple TVs or TV profile selection. These values
 are required, so `unset` is not supported.
+
+`screen_idle_blank` controls whether the user-session service performs automatic
+idle-driven blank/restore behavior:
+
+- `enabled`: default behavior, run the configured screen backend and control
+  the TV around session idle/activity
+- `disabled`: keep the user-session service running for notification handling,
+  but skip idle-driven TV blank/restore behavior
 
 `screen_idle_timeout` is the inactivity threshold in seconds used by the session monitor.
 LG Buddy currently uses that timeout for both the GNOME and `swayidle` backends.
@@ -286,6 +307,8 @@ Example:
 tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
+screen_idle_blank=enabled
+screen_backend=auto
 screen_idle_timeout=300
 screen_restore_policy=aggressive
 system_sleep_wake_policy=enabled

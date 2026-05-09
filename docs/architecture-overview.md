@@ -202,6 +202,7 @@ The intended split is:
   - session-owned update notification dispatch through
     `org.freedesktop.Notifications`
   - update notification action handling for `View Release`
+  - hosted by the user-session `monitor` process
 - `screen.rs`
   - pure session screen blank and restore policy decisions over already-read
     observations
@@ -261,6 +262,9 @@ The intended split is:
   - system-bus use for the logind lifecycle runtime
 - `session/runner.rs`
   - backend-neutral monitor and lifecycle runners
+  - starts the user-session notification surface before screen backend work
+  - keeps the user-session process alive when idle blanking is disabled or a
+    screen backend is temporarily unavailable
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
   - runs delegated `swayidle` by invoking the current executable's
@@ -297,6 +301,8 @@ The session-facing pieces should be read as one subsystem:
   - see [gamepad-subsystem.md](gamepad-subsystem.md) for adapter and lifecycle details
 - `session/runner.rs`
   - consumes normalized session events and idletime observations and dispatches runtime policy
+  - treats `screen_idle_blank=disabled` as a passive user-session mode that
+    preserves update notification handoff without TV idle blank/restore actions
   - treats delegated `swayidle` as a CLI/API client for timeout/resume actions
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`

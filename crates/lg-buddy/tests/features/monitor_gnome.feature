@@ -1,6 +1,20 @@
 Feature: GNOME monitor
   LG Buddy should translate GNOME session signals and idle-monitor activity into TV behavior.
 
+  Scenario: disabled idle blanking keeps the session agent passive
+    Given a temporary LG Buddy config using input HDMI_2
+    And screen idle blanking is "disabled"
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the executable PATH is isolated
+    And GNOME monitor stays open for 0.1 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "screen idle blanking is disabled by config"
+    And the TV client did not receive "get_input"
+    And the TV client did not receive "turn_screen_off"
+
   Scenario: GNOME ScreenSaver idle still blanks the configured TV input
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated

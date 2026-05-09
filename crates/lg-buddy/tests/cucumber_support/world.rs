@@ -68,6 +68,13 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_restore_policy={policy}"));
     }
 
+    pub fn set_screen_idle_blank(&self, policy: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_idle_blank={policy}"));
+    }
+
     pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
         self.ensure_env()
             .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());

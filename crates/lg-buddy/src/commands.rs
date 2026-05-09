@@ -548,7 +548,8 @@ mod tests {
         BrightnessDialogDeps, BrightnessUi, ReachabilityChecker,
     };
     use crate::config::{
-        Config, HdmiInput, MacAddress, ScreenBackend, ScreenRestorePolicy, SystemSleepWakePolicy,
+        Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
+        SystemSleepWakePolicy,
     };
     use crate::lifecycle::{
         run_shutdown_with, run_startup_with, NetworkWaiter, RebootDetector, SleepRequestDetector,
@@ -1784,6 +1785,7 @@ mod tests {
                 .expect("parse mac"),
             input,
             screen_backend: ScreenBackend::Auto,
+            screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
             screen_restore_policy,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,

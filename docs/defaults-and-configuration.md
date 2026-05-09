@@ -77,6 +77,7 @@ tvs_primary_ip=192.168.1.100
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
 screen_restore_policy=conservative
+screen_idle_blank=enabled
 system_sleep_wake_policy=enabled
 updates_auto_check=enabled
 updates_channel=auto
@@ -112,6 +113,15 @@ choice.
 - the choice lives in `config.env`
 - it is writeable through `lg-buddy settings set screen.restore_policy <value>`
   because the command can apply screen-monitor changes
+
+`screen_idle_blank` follows the same policy model:
+
+- automatic session idle blank/restore defaults to enabled
+- users who want update notifications without idle-driven TV control can set
+  `screen_idle_blank=disabled`
+- the installed user-session service still runs so notification handoff remains
+  available
+- the supported values are `enabled` and `disabled`
 
 `system_sleep_wake_policy` follows the same model:
 

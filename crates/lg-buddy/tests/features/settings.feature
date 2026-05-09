@@ -9,6 +9,7 @@ Feature: Settings CLI
     And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "screen.backend=auto (config.env, read-write, ops: get,describe,set,unset)"
+    And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "system.sleep_wake_policy=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "updates.auto_check=enabled (default, read-write, ops: get,describe,set,unset)"
@@ -30,6 +31,15 @@ Feature: Settings CLI
     And stdout contains "system.sleep_wake_policy"
     And stdout contains "mutability: read-write"
     And stdout contains "supported operations: get, describe, set, unset"
+
+  Scenario: settings describe shows idle blank policy operations
+    Given a temporary LG Buddy config using input HDMI_2
+    When I run the command "settings describe screen.idle_blank"
+    Then the command succeeds
+    And stdout contains "screen.idle_blank"
+    And stdout contains "storage key: screen_idle_blank"
+    And stdout contains "allowed values: enabled, disabled"
+    And stdout contains "apply: restart-user-screen-service"
 
   Scenario: settings describe shows update check operations
     Given a temporary LG Buddy config using input HDMI_2

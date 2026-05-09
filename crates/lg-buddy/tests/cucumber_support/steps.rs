@@ -11,6 +11,11 @@ fn screen_restore_policy(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_restore_policy(&policy);
 }
 
+#[given(regex = r#"screen idle blanking is "(enabled|disabled)""#)]
+fn screen_idle_blanking(world: &mut LgBuddyWorld, policy: String) {
+    world.set_screen_idle_blank(&policy);
+}
+
 #[given(regex = r#"the idle timeout is (\d+) seconds"#)]
 fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command as ProcessCommand;
@@ -17,8 +18,9 @@ use crate::backend::{
 };
 use crate::commands::run_system_resume;
 use crate::config::{
-    load_config, normalize_idle_timeout_secs, parse_idle_timeout_secs,
-    resolve_config_path_from_env, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
+    load_config, normalize_idle_timeout_secs, parse_config_entries, parse_idle_timeout_secs,
+    resolve_config_path_from_env, ConfigPathError, ScreenBackend, ScreenIdleBlankPolicy,
+    DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
 use crate::lifecycle::LifecycleEvent;
@@ -54,6 +56,7 @@ const GAMEPAD_ACTIVITY_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
 const GAMEPAD_ACTIVITY_SEND_INTERVAL: Duration = Duration::from_millis(500);
 const LOGIND_LIFECYCLE_PROCESS_INTERVAL: Duration = Duration::from_secs(5);
 const LOGIND_LIFECYCLE_TEST_PROCESS_INTERVAL: Duration = Duration::from_millis(50);
+const SESSION_AGENT_BACKEND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV: &str = "LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS";
 const LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS_ENV: &str =
     "LG_BUDDY_LIFECYCLE_MONITOR_TEST_TIMEOUT_SECS";
@@ -419,11 +422,6 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     executor: E,
 ) -> Result<(), SessionRunnerError> {
-    let configured =
-        configured_backend_from_env_or_config().map_err(SessionRunnerError::BackendSelection)?;
-    let backend =
-        detect_backend_from_system(configured).map_err(SessionRunnerError::BackendDetection)?;
-    let mut dispatcher = SessionEventDispatcher::new(executor);
     let _session_service = match spawn_session_notification_service() {
         Ok(service) => Some(service),
         Err(err) => {
@@ -435,14 +433,108 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
         }
     };
 
-    match backend {
-        ScreenBackend::Gnome => run_gnome_monitor(writer, &mut dispatcher),
-        ScreenBackend::Swayidle => run_swayidle_monitor(writer),
-        ScreenBackend::Auto => Err(SessionRunnerError::Failed {
-            backend,
-            message: "auto backend should be resolved before starting the runner".to_string(),
-        }),
+    if !screen_idle_blank_enabled_from_config()? {
+        writeln!(
+            writer,
+            "LG Buddy Monitor: screen idle blanking is disabled by config."
+        )?;
+        return run_passive_session_agent(writer);
     }
+
+    let mut executor = Some(executor);
+    let started = Instant::now();
+    let test_timeout = resolve_gnome_monitor_test_timeout();
+
+    loop {
+        if test_timeout_reached(started, test_timeout) {
+            return Ok(());
+        }
+
+        let configured = configured_backend_from_env_or_config()
+            .map_err(SessionRunnerError::BackendSelection)?;
+
+        match detect_backend_from_system(configured) {
+            Ok(ScreenBackend::Gnome) => {
+                let mut dispatcher =
+                    SessionEventDispatcher::new(executor.take().expect("executor available"));
+                return run_gnome_monitor(writer, &mut dispatcher);
+            }
+            Ok(ScreenBackend::Swayidle) => return run_swayidle_monitor(writer),
+            Ok(ScreenBackend::Auto) => {
+                return Err(SessionRunnerError::Failed {
+                    backend: ScreenBackend::Auto,
+                    message: "auto backend should be resolved before starting the runner"
+                        .to_string(),
+                });
+            }
+            Err(err) => {
+                writeln!(
+                    writer,
+                    "LG Buddy Monitor: screen idle backend unavailable: {err}"
+                )?;
+                wait_for_backend_retry_or_test_timeout(started, test_timeout);
+            }
+        }
+    }
+}
+
+fn screen_idle_blank_enabled_from_config() -> Result<bool, SessionRunnerError> {
+    let config_path = match resolve_config_path_from_env() {
+        Ok(path) => path,
+        Err(ConfigPathError::NotConfigured) => return Ok(true),
+    };
+    let contents = fs::read_to_string(&config_path).map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Auto,
+        message: format!(
+            "failed to load screen idle blank config from {}: {err}",
+            config_path.display()
+        ),
+    })?;
+    let entries = parse_config_entries(&contents);
+    let policy = entries
+        .get("screen_idle_blank")
+        .and_then(|value| value.parse::<ScreenIdleBlankPolicy>().ok())
+        .unwrap_or(ScreenIdleBlankPolicy::Enabled);
+
+    Ok(policy.is_enabled())
+}
+
+fn run_passive_session_agent<W: Write>(_writer: &mut W) -> Result<(), SessionRunnerError> {
+    let started = Instant::now();
+    let test_timeout = resolve_gnome_monitor_test_timeout();
+
+    loop {
+        if test_timeout_reached(started, test_timeout) {
+            return Ok(());
+        }
+
+        thread::sleep(passive_sleep_duration(started, test_timeout));
+    }
+}
+
+fn wait_for_backend_retry_or_test_timeout(started: Instant, test_timeout: Option<Duration>) {
+    if test_timeout_reached(started, test_timeout) {
+        return;
+    }
+
+    thread::sleep(passive_sleep_duration(started, test_timeout));
+}
+
+fn passive_sleep_duration(started: Instant, test_timeout: Option<Duration>) -> Duration {
+    let mut sleep_for = SESSION_AGENT_BACKEND_RETRY_INTERVAL;
+    if let Some(timeout) = test_timeout {
+        sleep_for = sleep_for.min(timeout.saturating_sub(started.elapsed()));
+    }
+
+    if sleep_for.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        sleep_for
+    }
+}
+
+fn test_timeout_reached(started: Instant, test_timeout: Option<Duration>) -> bool {
+    test_timeout.is_some_and(|timeout| started.elapsed() >= timeout)
 }
 
 fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
