@@ -161,6 +161,7 @@ CONFIG_FILE="$XDG_CONFIG_HOME/lg-buddy/config.env"
 INSTALLED_BINARY="$INSTALL_ROOT/usr/bin/lg-buddy"
 INSTALLED_VENV_PIP="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/pip"
 INSTALLED_BSCPYLGTV="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
+STALE_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/lib/python-old/site-packages/stale-marker"
 INSTALLED_POINTER="$INSTALL_ROOT/usr/lib/lg-buddy/config-path"
 SYSTEM_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy.service"
 LIFECYCLE_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_lifecycle.service"
@@ -342,6 +343,8 @@ export LG_BUDDY_REMOVE_CONFIG="1"
 
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="disabled"
 export LG_BUDDY_SKIP_PIP_INSTALL="1"
+mkdir -p "$(dirname "$STALE_VENV_MARKER")"
+touch "$STALE_VENV_MARKER"
 (
     cd "$BUNDLE_DIR"
     ./install.sh
@@ -349,6 +352,10 @@ export LG_BUDDY_SKIP_PIP_INSTALL="1"
 
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
+[ ! -e "$STALE_VENV_MARKER" ] || {
+    echo "Installer left stale virtualenv contents in place: $STALE_VENV_MARKER"
+    exit 1
+}
 assert_file "$SYSTEM_SERVICE"
 assert_file "$LIFECYCLE_SERVICE"
 assert_file "$USER_SCREEN_SERVICE"

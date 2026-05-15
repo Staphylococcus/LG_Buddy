@@ -354,7 +354,10 @@ fi
 
 # 4. CREATE VIRTUAL ENVIRONMENT
 echo "Creating Python virtual environment at $VENV_DIR..."
-run_privileged python3 -m venv "$VENV_DIR"
+# Recreate the helper venv so OS Python minor-version upgrades do not leave
+# bscpylgtv installed under an interpreter-specific site-packages directory
+# that the new `/usr/bin/python3` no longer reads.
+run_privileged python3 -m venv --clear "$VENV_DIR"
 echo "Done."
 
 # 5. INSTALL BSCPYLGTV
