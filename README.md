@@ -6,14 +6,29 @@ It can:
 
 - turn the TV on at boot and wake
 - turn the TV off at shutdown and before system sleep
-- blank and restore the panel on desktop idle and activity, including gamepad activity on GNOME
+- blank and restore the panel on supported desktop idle backends
+- keep the panel awake from gamepad activity on GNOME
 - adjust OLED pixel brightness with a small desktop dialog or CLI command
 
-LG Buddy supports GNOME and `swayidle`-based sessions. Official release bundles include a prebuilt `lg-buddy` binary, so normal installation does not require a Rust toolchain.
+GNOME is not required. Official release bundles include a prebuilt `lg-buddy`
+binary, so normal installation does not require a Rust toolchain.
 
 If you build `lg-buddy` from source instead of using a release bundle, `cargo`
 now also needs a working C toolchain because the vendored `libdbus` runtime is
 compiled as part of the build.
+
+## Desktop Compatibility
+
+| Functionality | GNOME | Non-GNOME Wayland with `swayidle` | Other Linux sessions | Notes |
+| --- | --- | --- | --- | --- |
+| Turn TV on at boot and wake | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
+| Turn TV off at shutdown and before system sleep | ✅ | ✅ | ✅ | Desktop-independent Linux lifecycle integration |
+| Blank and restore on desktop idle/activity | ✅ | ✅ | ❌ | `screen_backend=auto` prefers GNOME, then falls back to `swayidle` when installed |
+| Keep the panel awake from gamepad activity | ✅ | ❌ | ❌ | Implemented in the GNOME monitor runtime |
+| OLED brightness CLI | ✅ | ✅ | ✅ | Desktop-independent runtime command |
+| OLED brightness desktop dialog | ✅ | ✅ | ✅ | Requires `zenity` |
+| Settings CLI | ✅ | ✅ | ✅ | Desktop-independent runtime command |
+| Manual and background update checks | ✅ | ✅ | ✅ | Desktop notifications depend on the session notification service and desktop notification support |
 
 ## Before You Install
 
@@ -25,7 +40,8 @@ Install prerequisites:
 
 Backend-specific:
 
-- `swayidle` for the `swayidle` backend
+- GNOME backend: compatible GNOME Shell session
+- Non-GNOME Wayland backend: `swayidle`
 
 The GNOME backend requires a compatible GNOME session with:
 
@@ -46,16 +62,22 @@ Typical package installs:
 **Debian/Ubuntu/Pop!_OS**
 ```bash
 sudo apt install python3-venv python3-pip zenity
+# Optional for non-GNOME Wayland sessions:
+sudo apt install swayidle
 ```
 
 **Fedora**
 ```bash
 sudo dnf install python3 python3-pip python3-virtualenv zenity
+# Optional for non-GNOME Wayland sessions:
+sudo dnf install swayidle
 ```
 
 **Arch**
 ```bash
 sudo pacman -S python python-pip python-virtualenv zenity
+# Optional for non-GNOME Wayland sessions:
+sudo pacman -S swayidle
 ```
 
 For source builds, also install a C toolchain:
@@ -87,6 +109,7 @@ LG Buddy is mostly automatic after installation.
 
 - To inspect settings, run `lg-buddy settings list`
 - To change supported settings, use `lg-buddy settings set <key> <value>`
+- To see the active desktop idle backend, run `lg-buddy detect-backend`
 - To inspect TV brightness, run `lg-buddy brightness get`
 - To set TV brightness directly, run `lg-buddy brightness set <0-100>`
 - To inspect the installed runtime version, run `lg-buddy --version`
