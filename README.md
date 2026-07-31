@@ -97,6 +97,11 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
+An experimental Nix package and declarative integration are also available for
+evaluation. Their scope and current limitations are documented in
+[docs/nix-integration.md](docs/nix-integration.md). The release-bundle installer
+above remains the primary installation path.
+
 The installer will prompt for your TV IP, MAC address, HDMI input, and session idle blanking details, then install the required services. System sleep/wake handling uses the lifecycle service plus NetworkManager pre-down gate as cooperating suspend sources unless you opt out in `config.env`.
 
 On first use, you may need to accept a pairing prompt on the TV:
