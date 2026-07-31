@@ -37,7 +37,10 @@ jobs:
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
 
       - name: Validate shell scripts
-        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh scripts/promote-nix-release-channels.sh scripts/test-promote-nix-release-channels.sh
+
+      - name: Test release-channel promotion helper
+        run: ./scripts/test-promote-nix-release-channels.sh
 
   bundle-smoke-test:
     runs-on: ubuntu-latest

@@ -78,7 +78,8 @@ Useful checks during development:
 cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
-bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh scripts/promote-nix-release-channels.sh scripts/test-promote-nix-release-channels.sh
+./scripts/test-promote-nix-release-channels.sh
 ```
 
 Optional hardware smoke for gamepad activity:
@@ -127,6 +128,16 @@ Dry-run the GitHub release publish step with:
 GH_RELEASE_DRY_RUN=1 ./scripts/publish-release-assets.sh --dist-dir ./dist --tag v0.0.0-dev
 ```
 
+Validate and classify a release-channel tag without touching Git:
+
+```bash
+./scripts/promote-nix-release-channels.sh --tag v1.2.3-beta.1 --validate-only
+```
+
+The promotion helper's local bare-remote test covers first creation,
+fast-forward updates, stable/prerelease classification, atomic stable
+promotion, downgrade refusal, and divergent-history refusal.
+
 For the tagged GitHub release process, see [release-process.md](release-process.md).
 
 ## Repository Layout
@@ -156,6 +167,8 @@ For the tagged GitHub release process, see [release-process.md](release-process.
 | `scripts/build-release-bundle.sh` | Release bundle builder |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
 | `scripts/publish-release-assets.sh` | GitHub release publish helper |
+| `scripts/promote-nix-release-channels.sh` | Fast-forward-only release-channel ref promotion |
+| `scripts/test-promote-nix-release-channels.sh` | Local bare-remote promotion tests |
 | `.github/workflows/ci.yml` | CI validation workflow |
 | `.github/workflows/release.yml` | Tagged GitHub release workflow |
 | `bin/LG_Buddy_Common` | Shared shell config helper used by setup scripts |

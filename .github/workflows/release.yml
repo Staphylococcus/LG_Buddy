@@ -33,7 +33,10 @@ jobs:
         run: cargo clippy -p lg-buddy --all-targets --all-features -- -D warnings
 
       - name: Validate shell scripts
-        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh
+        run: bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-release-bundle.sh scripts/publish-release-assets.sh scripts/promote-nix-release-channels.sh scripts/test-promote-nix-release-channels.sh
+
+      - name: Test release-channel promotion helper
+        run: ./scripts/test-promote-nix-release-channels.sh
 
   build-release-bundle:
     runs-on: ubuntu-latest
@@ -42,6 +45,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -58,20 +63,11 @@ jobs:
 
       - name: Validate release tag
         run: |
-          case "$GITHUB_REF_NAME" in
-              v[0-9]*) ;;
-              *)
-                  echo "Release tag must start with v followed by a digit, for example v1.0.0."
-                  exit 1
-                  ;;
-          esac
+          ./scripts/promote-nix-release-channels.sh \
+              --tag "$GITHUB_REF_NAME" \
+              --validate-only
 
           version="${GITHUB_REF_NAME#v}"
-          if [ -z "$version" ]; then
-              echo "Release tag must include a version after v."
-              exit 1
-          fi
-
           echo "LG_BUDDY_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Build lg-buddy
@@ -107,3 +103,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/publish-release-assets.sh --dist-dir dist
+
+      - name: Promote Nix release-channel refs
+        run: |
+          ./scripts/promote-nix-release-channels.sh \
+              --tag "$GITHUB_REF_NAME" \
+              --expected-commit "$GITHUB_SHA"
