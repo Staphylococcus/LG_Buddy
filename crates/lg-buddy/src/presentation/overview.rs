@@ -1,7 +1,7 @@
 use crate::audio::AudioOperation;
 use crate::tv::{CurrentVolume, VolumeLevel, VOLUME_MAX, VOLUME_MIN};
 
-use super::brightness::{BrightnessPresentation, UserFacingError};
+use super::brightness::{BrightnessIntent, BrightnessPresentation, UserFacingError};
 use crate::overview::{OverviewIntent, OverviewTvIdentity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +108,18 @@ impl OverviewPresentation {
     }
     pub fn brightness(&self) -> &BrightnessPresentation {
         &self.brightness
+    }
+    pub fn brightness_retry_action(&self) -> Option<OverviewAction> {
+        self.brightness
+            .primary_action()
+            .filter(|action| action.intent() == BrightnessIntent::Retry)
+            .map(|action| {
+                OverviewAction::new(
+                    &format!("{} {}", action.label(), self.brightness.heading()),
+                    action.enabled(),
+                    OverviewIntent::RetryBrightness,
+                )
+            })
     }
     pub fn audio(&self) -> &AudioPresentation {
         &self.audio
@@ -325,7 +337,7 @@ impl MuteControl {
 }
 
 impl OverviewAction {
-    pub(crate) fn new(label: &str, enabled: bool, intent: OverviewIntent) -> Self {
+    pub fn new(label: &str, enabled: bool, intent: OverviewIntent) -> Self {
         Self {
             label: label.to_string(),
             enabled,
@@ -348,5 +360,49 @@ fn audio_message(volume: CurrentVolume, muted: bool) -> String {
         format!("Muted · volume {volume}")
     } else {
         format!("Volume {volume}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tv::OledBrightness;
+
+    #[test]
+    fn brightness_retry_uses_the_declared_action_and_availability() {
+        let current = OledBrightness::new(50).unwrap();
+        let overview = |brightness| {
+            OverviewPresentation::new(
+                TvSummaryPresentation::loading(),
+                brightness,
+                AudioPresentation::loading(),
+            )
+        };
+        for brightness in [
+            BrightnessPresentation::loading(),
+            BrightnessPresentation::overview_ready(current, current),
+            BrightnessPresentation::overview_applying(current, current),
+            BrightnessPresentation::ready(current, current),
+        ] {
+            assert!(overview(brightness).brightness_retry_action().is_none());
+        }
+
+        let error = UserFacingError::new("Could not change brightness.", "Retry the operation.");
+        for (brightness, enabled) in [
+            (BrightnessPresentation::read_failed(error.clone()), true),
+            (
+                BrightnessPresentation::write_failed(current, current, error.clone()),
+                false,
+            ),
+            (
+                BrightnessPresentation::overview_write_failed(current, current, error),
+                true,
+            ),
+        ] {
+            let action = overview(brightness).brightness_retry_action().unwrap();
+            assert_eq!(action.label(), "Retry OLED Pixel Brightness");
+            assert_eq!(action.enabled(), enabled);
+            assert_eq!(action.intent(), OverviewIntent::RetryBrightness);
+        }
     }
 }

@@ -143,7 +143,7 @@ def audio_contract(accessibles: list[object], args: argparse.Namespace) -> bool:
     try:
         if args.require_audio_retry and not any(
             role(item) == pyatspi.ROLE_PUSH_BUTTON
-            and normalized_name(item) == "Retry TV Volume"
+            and normalized_name(item) == "Retry Audio"
             and item.getState().contains(pyatspi.STATE_SENSITIVE)
             for item in accessibles
         ):

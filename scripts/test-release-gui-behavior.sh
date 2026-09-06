@@ -289,7 +289,7 @@ observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" Right
 wait_for_calls set_mute 1
 observe_gui_state --expected-volume 21 --expected-muted true --require-audio-retry
-observe_gui_state --activate-control "Retry TV Volume"
+observe_gui_state --activate-control "Retry Audio"
 wait_for_calls set_mute 2
 observe_gui_state --expected-volume 21 --expected-muted false
 send_closing_mnemonic Escape

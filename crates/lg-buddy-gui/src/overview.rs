@@ -5,7 +5,7 @@ use gtk::prelude::*;
 use lg_buddy::overview::OverviewIntent;
 use lg_buddy::presentation::brightness::{BrightnessStatus, UserFacingError};
 use lg_buddy::presentation::overview::{
-    AudioStatus, OverviewPresentation, TvConnectionState, TvSummaryStatus,
+    AudioStatus, OverviewAction, OverviewPresentation, TvConnectionState, TvSummaryStatus,
 };
 
 pub(crate) type IntentHandler = Rc<dyn Fn(OverviewIntent)>;
@@ -14,7 +14,7 @@ pub(crate) struct OverviewWindow {
     window: adw::ApplicationWindow,
     summary: gtk::Label,
     connection: gtk::Label,
-    summary_retry: gtk::Button,
+    summary_retry: RetryButton,
     brightness: SliderRow,
     volume: SliderRow,
     mute: gtk::ToggleButton,
@@ -29,14 +29,13 @@ struct SliderRow {
     root: gtk::Box,
     scale: gtk::Scale,
     status: gtk::Label,
-    retry: gtk::Button,
+    retry: RetryButton,
 }
 
 impl SliderRow {
     fn new(
         icon: &impl IsA<gtk::Widget>,
         label: &str,
-        retry_intent: OverviewIntent,
         changed: fn(u8) -> OverviewIntent,
         suppress: &Rc<Cell<bool>>,
         on_intent: &IntentHandler,
@@ -67,9 +66,9 @@ impl SliderRow {
             .wrap(true)
             .hexpand(true)
             .build();
-        let retry = retry_button(&format!("Retry {label}"), retry_intent, on_intent);
+        let retry = RetryButton::new(on_intent);
         feedback.append(&status);
-        feedback.append(&retry);
+        feedback.append(&retry.button);
         content.append(&feedback);
         root.append(&content);
         Self {
@@ -93,7 +92,12 @@ impl SliderRow {
             .update_property(&[gtk::accessible::Property::Description(description)]);
     }
 
-    fn feedback(&self, loading: Option<&str>, error: Option<&UserFacingError>, retry: bool) {
+    fn feedback(
+        &self,
+        loading: Option<&str>,
+        error: Option<&UserFacingError>,
+        retry: Option<&OverviewAction>,
+    ) {
         let message = error.map(error_text).or_else(|| loading.map(str::to_owned));
         self.status.set_text(message.as_deref().unwrap_or(""));
         self.status.set_visible(message.is_some());
@@ -102,7 +106,7 @@ impl SliderRow {
         } else {
             gtk::AccessibleRole::Status
         });
-        self.retry.set_visible(retry);
+        self.retry.render(retry);
     }
 }
 
@@ -116,7 +120,6 @@ impl OverviewWindow {
         let brightness = SliderRow::new(
             &brightness_icon,
             "OLED Pixel Brightness",
-            OverviewIntent::RetryBrightness,
             OverviewIntent::SetBrightness,
             &suppress,
             &on_intent,
@@ -139,7 +142,6 @@ impl OverviewWindow {
         let volume = SliderRow::new(
             &mute,
             "TV Volume",
-            OverviewIntent::RetryAudio,
             OverviewIntent::SetVolume,
             &suppress,
             &on_intent,
@@ -157,17 +159,13 @@ impl OverviewWindow {
         let summary_text = gtk::Box::new(gtk::Orientation::Vertical, 0);
         summary_text.append(&summary);
         summary_text.append(&connection);
-        let summary_retry = retry_button(
-            "Retry TV configuration",
-            OverviewIntent::RetrySummary,
-            &on_intent,
-        );
+        let summary_retry = RetryButton::new(&on_intent);
         let summary_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         // Match the visible icon edge inside the native controls' hit areas.
         summary_row.set_margin_start(8);
         summary_row.set_margin_end(12);
         summary_row.append(&summary_text);
-        summary_row.append(&summary_retry);
+        summary_row.append(&summary_retry.button);
 
         let body = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -244,7 +242,7 @@ impl OverviewWindow {
                 TvSummaryStatus::Failed(error) => error_text(error),
             });
         self.summary_retry
-            .set_visible(presentation.summary().retry_action().is_some());
+            .render(presentation.summary().retry_action());
         let connection = presentation.summary().connection_state();
         self.connection
             .set_text(&format!("● {}", connection.label()));
@@ -280,7 +278,11 @@ impl OverviewWindow {
             }),
             &description,
         );
-        self.brightness.feedback(loading, error, error.is_some());
+        self.brightness.feedback(
+            loading,
+            error,
+            presentation.brightness_retry_action().as_ref(),
+        );
         let audio = presentation.audio();
         let (loading, error, description) = match audio.status() {
             AudioStatus::Loading { message } => (Some(message.as_str()), None, message.clone()),
@@ -306,7 +308,7 @@ impl OverviewWindow {
                 (audio.volume().is_none() && error.is_none()).then_some(description.as_str())
             }),
             error,
-            audio.retry_action().is_some(),
+            audio.retry_action(),
         );
         let muted = audio.mute().is_some_and(|mute| mute.proposed());
         self.mute.set_active(muted);
@@ -348,18 +350,48 @@ impl OverviewWindow {
     }
 }
 
-fn retry_button(label: &str, intent: OverviewIntent, on_intent: &IntentHandler) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name("view-refresh-symbolic")
-        .tooltip_text(label)
-        .build();
-    button.add_css_class("flat");
-    button.update_property(&[gtk::accessible::Property::Label(label)]);
-    button.connect_clicked({
-        let on_intent = Rc::clone(on_intent);
-        move |_| on_intent(intent)
-    });
-    button
+struct RetryButton {
+    button: gtk::Button,
+    intent: Rc<Cell<Option<OverviewIntent>>>,
+}
+
+impl RetryButton {
+    fn new(on_intent: &IntentHandler) -> Self {
+        let button = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .visible(false)
+            .sensitive(false)
+            .build();
+        button.add_css_class("flat");
+        let intent = Rc::new(Cell::new(None));
+        button.connect_clicked({
+            let on_intent = Rc::clone(on_intent);
+            let intent = Rc::clone(&intent);
+            move |_| {
+                if let Some(intent) = intent.get() {
+                    on_intent(intent);
+                }
+            }
+        });
+        Self { button, intent }
+    }
+
+    fn render(&self, action: Option<&OverviewAction>) {
+        self.intent.set(
+            action
+                .filter(|action| action.enabled())
+                .map(OverviewAction::intent),
+        );
+        self.button.set_visible(action.is_some());
+        self.button
+            .set_sensitive(action.is_some_and(OverviewAction::enabled));
+        self.button
+            .set_tooltip_text(action.map(OverviewAction::label));
+        self.button
+            .update_property(&[gtk::accessible::Property::Label(
+                action.map_or("", OverviewAction::label),
+            )]);
+    }
 }
 
 fn error_text(error: &UserFacingError) -> String {
@@ -380,9 +412,51 @@ mod tests {
         view.render(presentation);
     }
 
+    fn retry_button_follows_the_latest_declaration() {
+        let intents = Rc::new(RefCell::new(Vec::new()));
+        let on_intent: IntentHandler = Rc::new({
+            let intents = Rc::clone(&intents);
+            move |intent| intents.borrow_mut().push(intent)
+        });
+        let retry = RetryButton::new(&on_intent);
+        for (label, intent) in [
+            ("Retry brightness read", OverviewIntent::RetryBrightness),
+            ("Retry unmuting", OverviewIntent::RetryAudio),
+        ] {
+            retry.render(Some(&OverviewAction::new(label, true, intent)));
+            assert!(retry.button.is_visible());
+            assert!(retry.button.is_sensitive());
+            assert_eq!(retry.button.tooltip_text().as_deref(), Some(label));
+            retry.button.emit_clicked();
+        }
+        retry.render(Some(&OverviewAction::new(
+            "Retry unavailable",
+            false,
+            OverviewIntent::RetrySummary,
+        )));
+        assert!(retry.button.is_visible());
+        assert!(!retry.button.is_sensitive());
+        retry.button.emit_clicked();
+        retry.render(Some(&OverviewAction::new(
+            "Retry configuration",
+            true,
+            OverviewIntent::RetrySummary,
+        )));
+        retry.render(None);
+        assert!(!retry.button.is_visible());
+        assert!(retry.button.tooltip_text().is_none());
+        retry.button.emit_clicked();
+        assert_eq!(
+            *intents.borrow(),
+            [OverviewIntent::RetryBrightness, OverviewIntent::RetryAudio],
+            "disabled and absent actions must not retain a callback"
+        );
+    }
+
     #[test]
     fn compact_controls_submit_and_keep_focus_without_render_feedback() {
         gtk::init().expect("GTK display required");
+        retry_button_follows_the_latest_declaration();
         let application = adw::Application::builder()
             .application_id(format!(
                 "{}.RendererTest{}",
@@ -454,8 +528,8 @@ mod tests {
         assert!(!view.volume.scale.draws_value());
         assert!(!view.brightness.status.is_visible());
         assert!(!view.volume.status.is_visible());
-        assert!(!view.brightness.retry.is_visible());
-        assert!(!view.volume.retry.is_visible());
+        assert!(!view.brightness.retry.button.is_visible());
+        assert!(!view.volume.retry.button.is_visible());
         assert_eq!(
             view.mute.icon_name().as_deref(),
             Some("audio-volume-muted-symbolic")
@@ -522,6 +596,62 @@ mod tests {
         );
         assert_eq!(view.connection.text(), "● Disconnected");
         assert!(view.connection.has_css_class("error"));
+        let OverviewOperation::ReadBrightness(op) = opening.operations()[1] else {
+            unreachable!()
+        };
+        render(
+            &view,
+            disconnected
+                .complete_brightness_read(
+                    op,
+                    Err(lg_buddy::brightness::BrightnessReadError::new(
+                        lg_buddy::brightness::BrightnessReadFailure::Internal,
+                        "planned read failure",
+                    )),
+                )
+                .unwrap(),
+        );
+        let OverviewOperation::ReadAudio(op) = opening.operations()[2] else {
+            unreachable!()
+        };
+        let failed = disconnected
+            .complete_audio_read(
+                op,
+                Err(lg_buddy::overview::AudioReadError::new(
+                    lg_buddy::overview::AudioReadFailure::Internal,
+                    "planned read failure",
+                )),
+            )
+            .unwrap();
+        let OverviewFrontendUpdate::Present(presentation) = failed.update() else {
+            unreachable!()
+        };
+        view.render(presentation);
+        intents.borrow_mut().clear();
+        for (retry, action) in [
+            (
+                &view.summary_retry,
+                presentation.summary().retry_action().unwrap().clone(),
+            ),
+            (
+                &view.brightness.retry,
+                presentation.brightness_retry_action().unwrap(),
+            ),
+            (
+                &view.volume.retry,
+                presentation.audio().retry_action().unwrap().clone(),
+            ),
+        ] {
+            assert!(retry.button.is_visible());
+            assert_eq!(retry.button.is_sensitive(), action.enabled());
+            assert_eq!(retry.button.tooltip_text().as_deref(), Some(action.label()));
+            retry.button.emit_clicked();
+            assert_eq!(intents.borrow().last(), Some(&action.intent()));
+        }
+        let retry = presentation.brightness_retry_action().unwrap().intent();
+        render(&view, disconnected.handle_intent(retry).unwrap());
+        assert!(!view.brightness.retry.button.is_visible());
+        assert!(view.volume.retry.button.is_visible());
         view.close();
         crate::controller_test_support::run_scenario();
     }
