@@ -518,6 +518,43 @@ and compatibility paths green. The Zenity implementation remains available in
 the v1.5.0 slice; removing it is tracked separately by
 [#130](https://github.com/Staphylococcus/LG_Buddy/issues/130).
 
+## Overview Increment
+
+[#172](https://github.com/Staphylococcus/LG_Buddy/issues/172) replaces the
+brightness-specific root with an application-owned `OverviewPresentation`.
+Overview is a single view showing the primary TV summary, brightness, volume,
+and mute. Navigation, pairing, profile management, and behavior settings belong
+to later slices; this increment adds no hidden navigation shell.
+
+The stable `lg-buddy brightness` path opens Overview focused on brightness.
+Two compact rows contain a brightness icon and slider, and a mute button and
+volume slider. Moving a slider submits its value; the sound icon toggles mute
+and reflects mute state. There are no Apply buttons or duplicate value labels.
+Changes keep the window open. Volume changes use the same set-then-unmute
+operation as the headless command. If unmuting fails after the volume changed,
+the presentation retains the changed level and offers recovery
+for the remaining mute operation.
+
+The core owns capability-specific loading, busy, success, and failure state.
+One failed read cannot remove controls whose state is already available.
+Unknown numeric volume is represented explicitly while mute remains usable.
+The TV summary shows a dot and connection label: green Connected, yellow
+Connecting while reads are pending, or red Disconnected. Individual control
+errors retain their own recovery feedback. Native reads and writes use stored
+credentials without opening pairing prompts.
+
+Configuration and TV work run on workers. Sliders stay adjustable while writes
+are pending, with the latest requested value retained for the next write.
+The core accepts a completion only for its active operation; closing or
+shutting down invalidates pending results.
+Closing does not undo a write already dispatched, and the GUI host lets that
+write finish without reopening the view.
+
+Headless tests own operation and recovery policy. GTK tests cover the expanded
+mapping and main-loop bridge; installed-GUI smoke exercises keyboard control,
+independent errors, the open-after-success behavior, and accessibility. CLI and
+service paths remain GTK-free.
+
 ## Evolution Rules
 
 Later GUI areas follow the same method:

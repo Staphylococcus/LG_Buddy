@@ -102,7 +102,7 @@ impl BrightnessWriteOutcome {
         Self::Applied
     }
 
-    fn diagnostic(&self) -> Option<&str> {
+    pub(crate) fn diagnostic(&self) -> Option<&str> {
         match self {
             Self::Applied => None,
             Self::AppliedWithoutNotification { diagnostic } => Some(diagnostic),
@@ -261,6 +261,12 @@ fn write_brightness_and_notify_with<C: TvClient, N: Notifier>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrightnessReadOperation(u64);
 
+impl BrightnessReadOperation {
+    pub(crate) fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrightnessWriteOperation {
     id: u64,
@@ -268,6 +274,10 @@ pub struct BrightnessWriteOperation {
 }
 
 impl BrightnessWriteOperation {
+    pub(crate) fn new(id: u64, brightness: OledBrightness) -> Self {
+        Self { id, brightness }
+    }
+
     pub fn brightness(self) -> OledBrightness {
         self.brightness
     }
@@ -533,7 +543,7 @@ impl BrightnessApplication {
     }
 }
 
-fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFacingError {
+pub(crate) fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFacingError {
     let (summary, detail) = match failure {
         BrightnessReadFailure::NotConfigured => (
             "LG Buddy is not configured.",
@@ -571,7 +581,7 @@ fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFacingError {
     UserFacingError::new(summary, detail)
 }
 
-fn user_facing_write_error(failure: BrightnessWriteFailure) -> UserFacingError {
+pub(crate) fn user_facing_write_error(failure: BrightnessWriteFailure) -> UserFacingError {
     let (summary, detail) = match failure {
         BrightnessWriteFailure::NotConfigured => (
             "LG Buddy is not configured.",

@@ -8,6 +8,7 @@ use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
 
+use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
 use crate::brightness::{
     notify_brightness_success_with, read_current_brightness_with, write_brightness_with,
 };
@@ -751,9 +752,7 @@ enum VolumeChange {
 }
 
 fn read_audio_status<C: TvClient>(config: &Config, tv_client: &C) -> Result<AudioStatus, RunError> {
-    TvDevice::new(tv_client, config.tv_ip)
-        .audio()
-        .status()
+    read_audio_status_with(config, tv_client)
         .map_err(|err| RunError::Policy(format!("failed to read volume: {err}")))
 }
 
@@ -762,13 +761,13 @@ fn set_volume_and_unmute<C: TvClient>(
     tv_client: &C,
     volume: VolumeLevel,
 ) -> Result<(), RunError> {
-    let audio = TvDevice::new(tv_client, config.tv_ip).audio();
-    audio
-        .set_volume(volume)
-        .map_err(|err| RunError::Policy(format!("failed to set volume: {err}")))?;
-    audio
-        .set_muted(false)
-        .map_err(|err| RunError::Policy(format!("volume was changed, but unmuting failed: {err}")))
+    apply_audio_operation_with(
+        config,
+        tv_client,
+        AudioOperation::SetVolumeAndUnmute(volume),
+    )
+    .map(|_| ())
+    .map_err(|err| RunError::Policy(err.to_string()))
 }
 
 fn change_volume_and_unmute<C: TvClient>(
@@ -788,10 +787,9 @@ fn change_volume_and_unmute<C: TvClient>(
 }
 
 fn set_muted<C: TvClient>(config: &Config, tv_client: &C, muted: bool) -> Result<(), RunError> {
-    TvDevice::new(tv_client, config.tv_ip)
-        .audio()
-        .set_muted(muted)
-        .map_err(|err| RunError::Policy(format!("failed to set mute: {err}")))
+    apply_audio_operation_with(config, tv_client, AudioOperation::SetMuted(muted))
+        .map(|_| ())
+        .map_err(|err| RunError::Policy(err.to_string()))
 }
 
 fn run_brightness_prompt_with<

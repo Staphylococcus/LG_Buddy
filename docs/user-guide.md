@@ -39,7 +39,12 @@ syntax.
   is pending.
 - `screen off` blanks the TV output while remembering that LG Buddy blanked it.
 - `screen on` restores the output according to the configured restore policy.
-- `brightness` opens the GTK brightness window. If the GUI executable is absent
+- `brightness` opens LG Buddy Overview focused on brightness. Overview shows the
+  primary TV, brightness, volume, and mute with separate loading and failure
+  feedback. Move either slider to apply its value; click the sound icon to
+  toggle mute. Changes keep Overview open, and changing volume also unmutes
+  the TV, just like the volume command. Passive reads use stored native
+  credentials and never open a pairing prompt. If the GUI executable is absent
   from a transitional installation, LG Buddy uses the retained Zenity dialog.
   `brightness get` and `brightness set <0-100>` remain headless and read or
   change OLED brightness directly.

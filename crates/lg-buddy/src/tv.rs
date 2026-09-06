@@ -303,7 +303,7 @@ pub struct AudioStatus {
 }
 
 impl AudioStatus {
-    pub(crate) fn new(volume: CurrentVolume, muted: bool) -> Self {
+    pub fn new(volume: CurrentVolume, muted: bool) -> Self {
         Self { volume, muted }
     }
 

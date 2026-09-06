@@ -149,6 +149,29 @@ impl BrightnessPresentation {
         )
     }
 
+    pub(crate) fn overview_ready(current: OledBrightness, proposed: OledBrightness) -> Self {
+        let mut presentation = Self::ready(current, proposed);
+        presentation.primary_action = None;
+        presentation
+    }
+
+    pub(crate) fn overview_applying(current: OledBrightness, proposed: OledBrightness) -> Self {
+        let mut presentation = Self::applying(current, proposed);
+        presentation.control.as_mut().unwrap().enabled = true;
+        presentation.primary_action = None;
+        presentation
+    }
+
+    pub(crate) fn overview_write_failed(
+        current: OledBrightness,
+        proposed: OledBrightness,
+        error: UserFacingError,
+    ) -> Self {
+        let mut presentation = Self::write_failed(current, proposed, error);
+        presentation.primary_action.as_mut().unwrap().enabled = true;
+        presentation
+    }
+
     fn new(
         status: BrightnessStatus,
         control: Option<BrightnessControl>,
