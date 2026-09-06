@@ -875,7 +875,8 @@ impl OverviewApplication {
                     current_muted,
                     PendingAudio {
                         volume: pending.volume,
-                        muted: (muted != current_muted).then_some(muted),
+                        // The queued volume will unmute, even if mute is unchanged now.
+                        muted: pending.volume.map(|_| muted),
                     },
                     AudioOperation::SetMuted(muted),
                 );
@@ -1426,6 +1427,55 @@ mod tests {
             panic!("queued mute operation")
         };
         assert_eq!(third_op.operation(), AudioOperation::SetMuted(true));
+    }
+
+    #[test]
+    fn explicit_mute_after_failure_survives_the_queued_volume() {
+        let mut app = ready_application();
+        let first = app.handle_intent(OverviewIntent::SetVolume(30)).unwrap();
+        let OverviewOperation::WriteAudio(first_op) = first.operations()[0] else {
+            panic!("first volume operation")
+        };
+        app.handle_intent(OverviewIntent::SetVolume(55)).unwrap();
+        app.complete_audio_write(
+            first_op,
+            Err(AudioWriteError::new(
+                AudioWriteFailure::SetVolume,
+                "planned failure".to_string(),
+                None,
+            )),
+        )
+        .unwrap();
+
+        let mut transition = app.handle_intent(OverviewIntent::SetMuted(true)).unwrap();
+        for expected in [
+            AudioOperation::SetMuted(true),
+            AudioOperation::SetVolumeAndUnmute(VolumeLevel::new(55).unwrap()),
+            AudioOperation::SetMuted(true),
+        ] {
+            assert!(present(&transition).audio().mute().unwrap().proposed());
+            let OverviewOperation::WriteAudio(operation) = transition.operations()[0] else {
+                panic!("audio recovery operation")
+            };
+            assert_eq!(operation.operation(), expected);
+            let outcome = match expected {
+                AudioOperation::SetMuted(muted) => AudioWriteOutcome::Applied {
+                    volume: None,
+                    muted: Some(muted),
+                },
+                AudioOperation::SetVolumeAndUnmute(volume) => AudioWriteOutcome::Applied {
+                    volume: Some(volume),
+                    muted: Some(false),
+                },
+            };
+            transition = app.complete_audio_write(operation, Ok(outcome)).unwrap();
+        }
+        assert!(transition.operations().is_empty());
+        assert!(present(&transition).audio().mute().unwrap().current());
+        assert_eq!(
+            present(&transition).audio().volume().unwrap().current(),
+            CurrentVolume::Level(VolumeLevel::new(55).unwrap())
+        );
     }
 
     #[test]

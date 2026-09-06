@@ -12,6 +12,7 @@ pub(crate) type IntentHandler = Rc<dyn Fn(OverviewIntent)>;
 
 pub(crate) struct OverviewWindow {
     window: adw::ApplicationWindow,
+    body: gtk::Box,
     summary: gtk::Label,
     connection: gtk::Label,
     summary_retry: RetryButton,
@@ -218,6 +219,7 @@ impl OverviewWindow {
         });
         Self {
             window,
+            body,
             summary,
             connection,
             summary_retry,
@@ -324,11 +326,21 @@ impl OverviewWindow {
         self.mute
             .update_property(&[gtk::accessible::Property::Label(action)]);
         self.suppress.set(false);
-        if self.initial_brightness_focus.get() && brightness.control().is_some() {
+        if matches!(brightness.status(), BrightnessStatus::Failed(_)) {
+            self.initial_brightness_focus.set(false);
+        } else if self.initial_brightness_focus.get() && brightness.control().is_some() {
             self.initial_brightness_focus.set(false);
             let scale = self.brightness.scale.clone();
+            let body = self.body.clone();
+            let window = self.window.clone();
             gtk::glib::idle_add_local_once(move || {
-                scale.grab_focus();
+                // Keep native control focus, including changes since this was queued.
+                if window.is_visible()
+                    && gtk::prelude::GtkWindowExt::focus(&window)
+                        .is_none_or(|focus| !focus.is_ancestor(&body))
+                {
+                    scale.grab_focus();
+                }
             });
         }
     }
@@ -451,6 +463,85 @@ mod tests {
             [OverviewIntent::RetryBrightness, OverviewIntent::RetryAudio],
             "disabled and absent actions must not retain a callback"
         );
+    }
+
+    fn late_brightness_respects_focus(application: &adw::Application) {
+        // Keep the default deep-link focus unless another control was chosen,
+        // including during a retry or after the idle callback was queued.
+        for (retry_read, focus_after_render) in [
+            (false, None),
+            (false, Some(false)),
+            (true, Some(false)),
+            (false, Some(true)),
+        ] {
+            let view = OverviewWindow::new(application, Rc::new(|_| {}));
+            let (mut app, opening) = OverviewApplication::open();
+            render(&view, opening.clone());
+            view.present();
+            let OverviewOperation::ReadAudio(audio_op) = opening.operations()[2] else {
+                unreachable!()
+            };
+            render(
+                &view,
+                app.complete_audio_read(
+                    audio_op,
+                    Ok(AudioStatus::new(
+                        CurrentVolume::Level(VolumeLevel::new(20).unwrap()),
+                        false,
+                    )),
+                )
+                .unwrap(),
+            );
+            let OverviewOperation::ReadBrightness(mut brightness_op) = opening.operations()[1]
+            else {
+                unreachable!()
+            };
+            if retry_read {
+                render(
+                    &view,
+                    app.complete_brightness_read(
+                        brightness_op,
+                        Err(lg_buddy::brightness::BrightnessReadError::new(
+                            lg_buddy::brightness::BrightnessReadFailure::Unreachable,
+                            "planned read failure",
+                        )),
+                    )
+                    .unwrap(),
+                );
+                let retry = app.handle_intent(OverviewIntent::RetryBrightness).unwrap();
+                let OverviewOperation::ReadBrightness(op) = retry.operations()[0] else {
+                    unreachable!()
+                };
+                brightness_op = op;
+                render(&view, retry);
+            }
+            while gtk::glib::MainContext::default().pending() {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            if focus_after_render == Some(false) {
+                assert!(view.volume.scale.grab_focus());
+            }
+            render(
+                &view,
+                app.complete_brightness_read(brightness_op, Ok(OledBrightness::new(50).unwrap()))
+                    .unwrap(),
+            );
+            if focus_after_render == Some(true) {
+                assert!(view.volume.scale.grab_focus());
+            }
+            while gtk::glib::MainContext::default().pending() {
+                gtk::glib::MainContext::default().iteration(false);
+            }
+            if focus_after_render.is_some() {
+                assert!(view.volume.scale.has_focus(), "brightness stole volume focus: retry={retry_read}, focus_after_render={focus_after_render:?}");
+            } else {
+                assert!(
+                    view.brightness.scale.has_focus(),
+                    "initial brightness focus was lost"
+                );
+            }
+            view.close();
+        }
     }
 
     #[test]
@@ -653,6 +744,7 @@ mod tests {
         assert!(!view.brightness.retry.button.is_visible());
         assert!(view.volume.retry.button.is_visible());
         view.close();
+        late_brightness_respects_focus(&application);
         crate::controller_test_support::run_scenario();
     }
 }
