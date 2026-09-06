@@ -126,7 +126,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
-        GTK["lg-buddy-gui<br/>libadwaita / GTK brightness window"]
+        GTK["lg-buddy-gui<br/>libadwaita / GTK Overview"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -476,12 +476,16 @@ process is returned directly without a second prompt. The `brightness get` and
 `brightness set` commands never enter that launcher and use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive Zenity brightness dialog delegates its
-TV operations back through those direct CLI commands. The GTK brightness window
-uses the same typed picture capabilities through the core brightness
-application flow. Workers keep blocking TV operations off the GTK main loop;
-the application permits one write at a time, and opaque operation identity
-prevents late results from replacing newer or closed presentation state.
-Successful GTK writes retain the existing brightness success notification.
+TV operations back through those direct CLI commands. The GTK entrypoint opens
+one Overview focused on brightness, alongside the primary TV summary, volume,
+and mute. Two icon-and-slider rows submit changes as the sliders move; the
+sound icon toggles mute. The core Overview application owns its declarations and semantic
+intents; GTK renders them without adding TV or configuration policy. Workers
+keep blocking operations off the GTK main loop. Capability state is independent,
+and opaque operation identity prevents late results from replacing newer or
+closed presentation state. Successful changes keep Overview open; brightness
+writes retain the existing success notification. Passive native operations use
+stored credentials without opening pairing prompts.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

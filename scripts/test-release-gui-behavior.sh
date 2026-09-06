@@ -14,7 +14,7 @@ REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="$(mktemp -d)"
 STATE_FILE="$WORK_DIR/tv-state.json"
 MOCK_COMMAND="$WORK_DIR/bscpylgtvcommand"
-WINDOW_TITLE="LG TV Brightness"
+WINDOW_TITLE="LG Buddy"
 GUI_PID=""
 WINDOW_ID=""
 ACCESSIBILITY_BUS_PID=""
@@ -48,6 +48,7 @@ trap cleanup EXIT
 [ -n "${DISPLAY:-}" ] || fail "DISPLAY is required for GUI behavior smoke."
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || fail "A D-Bus session is required for GUI behavior smoke."
 command -v xdotool >/dev/null || fail "xdotool is required for GUI behavior smoke."
+command -v flock >/dev/null || fail "flock is required to serialize the state-file mock."
 
 cp "$CONFIG_FILE" "$WORK_DIR/config.env"
 CONFIG_FILE="$WORK_DIR/config.env"
@@ -59,7 +60,7 @@ fi
 
 cat >"$MOCK_COMMAND" <<EOF
 #!/bin/sh
-exec python3 "$REPOSITORY_ROOT/tools/mock_bscpylgtvcommand.py" --state "$STATE_FILE" "\$@"
+exec flock "$STATE_FILE.lock" python3 "$REPOSITORY_ROOT/tools/mock_bscpylgtvcommand.py" --state "$STATE_FILE" "\$@"
 EOF
 chmod 755 "$MOCK_COMMAND"
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
@@ -128,9 +129,9 @@ finish_gui() {
     done
     if kill -0 "$GUI_PID" 2>/dev/null; then
         if xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" >/dev/null 2>&1; then
-            echo "Brightness window remained visible; the closing action was not observed." >&2
+            echo "Overview remained visible; the closing action was not observed." >&2
         else
-            echo "Brightness window closed, but the GUI process remained alive." >&2
+            echo "Overview closed, but the GUI process remained alive." >&2
         fi
         if [ -s "$WORK_DIR/gui.output" ]; then
             echo "GUI output for $scenario:" >&2
@@ -202,20 +203,32 @@ observe_gui_state() {
         --timeout 30 "$@"
 }
 
-# Read current state, reach the slider through the focus chain, edit it through
-# the keyboard, and apply it through its mnemonic.
-printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
+# Read current state, edit the initially focused brightness slider through the
+# keyboard. Movement submits automatically and keeps Overview open.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' >"$STATE_FILE"
 start_accessibility_bus
 start_gui enabled
 wait_for_calls get_picture_settings 1
-observe_gui_state --expected-state ready --expected-slider-value 50
 xdotool windowfocus --sync "$WINDOW_ID"
-for _ in 1 2 3; do
-    xdotool key --window "$WINDOW_ID" Tab Right
-done
-send_closing_mnemonic alt+a
+observe_gui_state --expected-state ready --expected-slider-value 50 \
+    --expected-volume 20 --expected-muted true --require-brightness-focus
+xdotool key --window "$WINDOW_ID" Right
 wait_for_calls set_settings 1
-finish_gui "successful apply"
+observe_gui_state --expected-state ready --expected-slider-value 55
+# Volume uses the CLI's set-then-unmute behavior. Mute remains independently
+# available, and both audio operations leave the brightness control usable.
+observe_gui_state --expected-volume 20 --expected-muted true
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_volume 1
+wait_for_calls set_mute 1
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted false
+observe_gui_state --activate-control "Mute TV"
+wait_for_calls set_mute 2
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
+xdotool windowfocus --sync "$WINDOW_ID"
+send_closing_mnemonic Escape
+finish_gui "cancellation after successful apply"
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -223,6 +236,28 @@ import sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 assert state["backlight"] != 50, state
 assert any(call.get("command") == "set_settings" for call in state["calls"]), state
+assert state["volume"] == 21 and state["muted"] is True, state
+audio_calls = [call["command"] for call in state["calls"] if call["command"] in ("set_volume", "set_mute")]
+assert audio_calls == ["set_volume", "set_mute", "set_mute"], audio_calls
+PY
+
+# A slow write must not disable the slider or discard subsequent movement.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' >"$STATE_FILE"
+start_gui enabled
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --expected-slider-value 50 --expected-volume 20 --require-brightness-focus
+xdotool key --window "$WINDOW_ID" --repeat 5 --delay 20 Right
+observe_gui_state --expected-slider-value 75
+wait_for_calls set_settings 2
+send_closing_mnemonic Escape
+finish_gui "rapid slider movement"
+python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["backlight"] == 75, state
+assert sum(call["command"] == "set_settings" for call in state["calls"]) == 2, state
 PY
 
 # A failed read stays visible and Retry performs a fresh read. Observe each
@@ -230,21 +265,53 @@ PY
 printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' >"$STATE_FILE"
 start_gui enabled
 wait_for_calls get_picture_settings 1
-observe_gui_state --expected-state read-failed
+observe_gui_state --expected-state read-failed --expected-volume 20 --expected-muted false
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key --window "$WINDOW_ID" alt+r
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_volume 1
+observe_gui_state --expected-state read-failed --expected-volume 21 --expected-muted false
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --activate-control "Retry OLED Pixel Brightness"
 wait_for_calls get_picture_settings 2
 observe_gui_state --expected-state ready --expected-slider-value 64
 xdotool windowfocus --sync "$WINDOW_ID"
-send_closing_mnemonic alt+c
+send_closing_mnemonic Escape
 finish_gui "read-failure cancellation"
+
+# Volume succeeded but unmuting failed: show the changed level and recover the
+# remaining mute operation without repeating the successful volume write.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"set_mute":[{"result":"error","status":1,"stderr":"planned unmute failure"}]}}' >"$STATE_FILE"
+start_gui enabled
+observe_gui_state --expected-volume 20 --expected-muted true
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_mute 1
+observe_gui_state --expected-volume 21 --expected-muted true --require-audio-retry
+observe_gui_state --activate-control "Retry Audio"
+wait_for_calls set_mute 2
+observe_gui_state --expected-volume 21 --expected-muted false
+send_closing_mnemonic Escape
+finish_gui "audio recovery cancellation"
+python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["volume"] == 21 and state["muted"] is False, state
+assert sum(call["command"] == "set_volume" for call in state["calls"]) == 1, state
+PY
 
 # Cancelling the loading window never writes a value.
 printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
-send_closing_mnemonic alt+c
+send_closing_mnemonic Escape
 finish_gui "loading cancellation"
+# The read-only subprocess may finish after its window closes. Let this mock
+# finish before reusing its state file for the next scenario.
+wait_for_calls get_picture_settings 1
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -277,7 +344,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         PLATFORM_MEAN="$(python3 "$SCRIPT_DIR/xwd_mean.py" "$screenshot")"
 
         xdotool windowfocus --sync "$WINDOW_ID"
-        send_closing_mnemonic alt+c
+        send_closing_mnemonic Escape
         finish_gui "$label platform-state cancellation"
     }
 

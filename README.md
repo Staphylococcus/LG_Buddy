@@ -26,7 +26,7 @@ binary, so normal installation does not require a Rust toolchain.
 | Idle blank and activity restore | ✅ | ✅ | ✅ | ❌ |
 | Gamepad activity keeps the panel awake | ✅ | ✅ | ❌ | ❌ |
 | Brightness, volume, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
-| Brightness desktop dialog | ✅ | ✅ | ✅ | ✅ |
+| Overview with brightness, volume, and mute | ✅ | ✅ | ✅ | ✅ |
 
 The default `auto` backend prefers a complete GNOME session, then native
 Wayland when the compositor provides `ext_idle_notifier_v1` version 2 or newer
