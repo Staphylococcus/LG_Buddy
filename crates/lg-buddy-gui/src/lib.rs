@@ -38,6 +38,14 @@ use lg_buddy::tvs::{
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
 pub const APPLICATION_NAME: &str = "LG Buddy";
 
+fn register_resources() {
+    static RESOURCES: std::sync::Once = std::sync::Once::new();
+    RESOURCES.call_once(|| {
+        gtk::gio::resources_register_include!("lg-buddy-gui.gresource")
+            .expect("bundled GUI resources must be valid");
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiCommand {
     Brightness,
