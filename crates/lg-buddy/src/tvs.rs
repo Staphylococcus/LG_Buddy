@@ -5,6 +5,11 @@
 //! and adaptive multi-TV layouts without adding a second-TV storage format or
 //! a second-TV pairing workflow to production.
 
+mod management;
+pub use management::{
+    TvsManagementAction, TvsManagementError, TvsManagementOperation, TvsManagementOutcome,
+};
+
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -136,6 +141,10 @@ impl TvProfile {
         self.mac
     }
 
+    pub(crate) fn set_input(&mut self, input: HdmiInput) {
+        self.input = input;
+    }
+
     pub fn input(&self) -> HdmiInput {
         self.input
     }
@@ -217,6 +226,11 @@ pub enum TvsIntent {
     Select(TvId),
     Retry,
     PairTv,
+    SetInput(HdmiInput),
+    UnpairTv,
+    ConfirmUnpair,
+    CancelUnpair,
+    RetryInputApply,
     Pairing(PairingIntent),
 }
 
@@ -250,7 +264,8 @@ pub struct TvsTransition {
     read_operation: Option<TvsReadOperation>,
     model_read_operation: Option<TvsModelReadOperation>,
     pairing_operation: Option<PairingOperation>,
-    profile_created: bool,
+    profile_changed: bool,
+    management_operation: Option<TvsManagementOperation>,
     toast_message: Option<String>,
     diagnostic: Option<String>,
 }
@@ -277,8 +292,12 @@ impl TvsTransition {
     }
 
     /// The durable profile changed, so other application views can reload it.
-    pub(crate) fn profile_created(&self) -> bool {
-        self.profile_created
+    pub(crate) fn profile_changed(&self) -> bool {
+        self.profile_changed
+    }
+
+    pub fn management_operation(&self) -> Option<&TvsManagementOperation> {
+        self.management_operation.as_ref()
     }
 
     /// One-time feedback for this transition, separate from persistent view state.
@@ -335,6 +354,12 @@ impl Error for TvsReadError {}
 pub trait TvsBackend: Send + Sync + 'static {
     fn read_profiles(&self) -> Result<Vec<TvProfile>, TvsReadError>;
     fn read_model_name(&self, profile: &TvProfile) -> Result<String, TvsReadError>;
+    fn manage(
+        &self,
+        _operation: &TvsManagementOperation,
+    ) -> Result<TvsManagementOutcome, TvsManagementError> {
+        Err(TvsManagementError::stopped())
+    }
 }
 
 /// Production reader for the existing primary profile.
@@ -347,6 +372,13 @@ pub trait TvsBackend: Send + Sync + 'static {
 pub struct EnvironmentTvsBackend;
 
 impl TvsBackend for EnvironmentTvsBackend {
+    fn manage(
+        &self,
+        operation: &TvsManagementOperation,
+    ) -> Result<TvsManagementOutcome, TvsManagementError> {
+        management::manage(operation)
+    }
+
     fn read_profiles(&self) -> Result<Vec<TvProfile>, TvsReadError> {
         let config_path = ConfigPathResolver::resolve_from_env()
             .map_err(|error| TvsReadError::new(TvsReadFailure::NotConfigured, error.to_string()))?;
@@ -420,6 +452,11 @@ pub struct TvsApplication {
     next_operation_id: u64,
     pending_model: Option<TvsModelReadOperation>,
     pairing: Option<PairingApplication>,
+    management: Option<TvsManagementOperation>,
+    confirming_unpair: bool,
+    controls_available: bool,
+    management_error: Option<UserFacingError>,
+    input_apply_failed: bool,
 }
 
 impl TvsApplication {
@@ -430,6 +467,11 @@ impl TvsApplication {
             next_operation_id: 1,
             pending_model: None,
             pairing: None,
+            management: None,
+            confirming_unpair: false,
+            controls_available: true,
+            management_error: None,
+            input_apply_failed: false,
         };
         let transition = application.transition(Some(operation), None);
         (application, transition)
@@ -437,6 +479,44 @@ impl TvsApplication {
 
     pub fn handle_intent(&mut self, intent: TvsIntent) -> Option<TvsTransition> {
         match intent {
+            TvsIntent::SetInput(input) => {
+                if !self.can_manage() || self.confirming_unpair {
+                    return None;
+                }
+                let profile = self.selected_profile()?;
+                if profile.input() == input {
+                    return None;
+                }
+                self.start_management(TvsManagementAction::SetInput(input))
+            }
+            TvsIntent::RetryInputApply => {
+                if !self.can_manage() || !self.input_apply_failed || self.confirming_unpair {
+                    return None;
+                }
+                self.start_management(TvsManagementAction::RetryInputApply)
+            }
+            TvsIntent::UnpairTv => {
+                if !self.can_manage() || self.confirming_unpair {
+                    return None;
+                }
+                self.confirming_unpair = true;
+                self.management_error = None;
+                Some(self.transition(None, None))
+            }
+            TvsIntent::ConfirmUnpair => {
+                if !self.can_manage() || !self.confirming_unpair {
+                    return None;
+                }
+                self.confirming_unpair = false;
+                self.start_management(TvsManagementAction::Unpair)
+            }
+            TvsIntent::CancelUnpair => {
+                if !self.confirming_unpair {
+                    return None;
+                }
+                self.confirming_unpair = false;
+                Some(self.transition(None, None))
+            }
             TvsIntent::PairTv => {
                 if !matches!(self.state, TvsState::Empty) || self.pairing.is_some() {
                     return None;
@@ -471,6 +551,9 @@ impl TvsApplication {
                 Some(self.transition(Some(operation), None))
             }
             TvsIntent::Select(id) => {
+                if self.is_managing() || self.confirming_unpair {
+                    return None;
+                }
                 let TvsState::Ready {
                     profiles,
                     selected_id,
@@ -550,6 +633,8 @@ impl TvsApplication {
             pairing.shutdown();
         }
         self.pairing = None;
+        self.management = None;
+        self.confirming_unpair = false;
         self.state = TvsState::Closed;
         self.pending_model = None;
     }
@@ -581,7 +666,7 @@ impl TvsApplication {
                     profiles: vec![profile],
                 };
                 let mut transition = self.transition_with_model_read();
-                transition.profile_created = true;
+                transition.profile_changed = true;
                 transition.toast_message = Some("TV paired successfully".into());
                 Some(transition)
             }
@@ -602,6 +687,96 @@ impl TvsApplication {
 
     pub fn is_pairing(&self) -> bool {
         self.pairing.is_some()
+    }
+
+    fn selected_profile(&self) -> Option<&TvProfile> {
+        match &self.state {
+            TvsState::Ready {
+                profiles,
+                selected_id,
+            } => profiles.iter().find(|p| p.id() == selected_id),
+            _ => None,
+        }
+    }
+
+    fn can_manage(&self) -> bool {
+        self.controls_available
+            && self.management.is_none()
+            && self.pairing.is_none()
+            && self.selected_profile().is_some()
+    }
+
+    pub fn is_managing(&self) -> bool {
+        self.management.is_some()
+    }
+
+    pub(crate) fn set_controls_available(&mut self, available: bool) -> Option<TvsTransition> {
+        if self.controls_available == available {
+            return None;
+        }
+        self.controls_available = available;
+        Some(self.transition(None, None))
+    }
+
+    fn start_management(&mut self, action: TvsManagementAction) -> Option<TvsTransition> {
+        let operation = TvsManagementOperation {
+            id: self.next_operation_id,
+            profile: self.selected_profile()?.clone(),
+            action,
+        };
+        self.next_operation_id += 1;
+        self.pending_model = None;
+        self.management_error = None;
+        self.management = Some(operation.clone());
+        let mut transition = self.transition(None, None);
+        transition.management_operation = Some(operation);
+        Some(transition)
+    }
+
+    pub fn complete_management(
+        &mut self,
+        operation: &TvsManagementOperation,
+        result: Result<TvsManagementOutcome, TvsManagementError>,
+    ) -> Option<TvsTransition> {
+        if self.management.as_ref() != Some(operation) {
+            return None;
+        }
+        self.management = None;
+        let toast = match result {
+            Ok(TvsManagementOutcome::Unpaired) => {
+                self.state = TvsState::Empty;
+                self.input_apply_failed = false;
+                Some("TV unpaired".to_string())
+            }
+            Ok(TvsManagementOutcome::InputChanged(profile)) => {
+                self.state = TvsState::Ready {
+                    selected_id: profile.id().clone(),
+                    profiles: vec![profile],
+                };
+                self.input_apply_failed = false;
+                Some("HDMI input updated".to_string())
+            }
+            Ok(TvsManagementOutcome::InputApplyFailed(profile)) => {
+                self.state = TvsState::Ready {
+                    selected_id: profile.id().clone(),
+                    profiles: vec![profile],
+                };
+                self.input_apply_failed = true;
+                self.management_error = Some(UserFacingError::new(
+                    "HDMI input saved",
+                    "The selection was saved, but could not be applied. Retry applying it.",
+                ));
+                None
+            }
+            Err(error) => {
+                self.management_error = Some(error.presentation().clone());
+                None
+            }
+        };
+        let mut transition = self.transition(None, None);
+        transition.profile_changed = true;
+        transition.toast_message = toast;
+        Some(transition)
     }
 
     fn transition_with_model_read(&mut self) -> TvsTransition {
@@ -639,7 +814,8 @@ impl TvsApplication {
             read_operation,
             model_read_operation: None,
             pairing_operation: None,
-            profile_created: false,
+            profile_changed: false,
+            management_operation: None,
             toast_message: None,
             diagnostic,
         }
@@ -656,6 +832,18 @@ impl TvsApplication {
             TvsState::Failed(error) => TvsPresentation::failed(error.clone()),
             TvsState::Closed => TvsPresentation::loading(),
         };
+        if let Some(operation) = &self.management {
+            if let TvsManagementAction::SetInput(input) = operation.action {
+                presentation.set_input(input);
+            }
+        }
+        presentation.set_management(
+            self.can_manage() && !self.confirming_unpair,
+            self.confirming_unpair,
+            self.controls_available,
+            self.management_error.clone(),
+            self.input_apply_failed,
+        );
         if let Some(pairing) = &self.pairing {
             presentation.set_pairing(pairing.presentation());
         }
@@ -1118,6 +1306,149 @@ mod tests {
         app.shutdown();
         assert!(app
             .complete_read(retry_operation, Ok(vec![profile("late", "192.0.2.8")]))
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::*;
+
+    fn configured() -> (TvsApplication, TvsTransition) {
+        let (mut app, opening) = TvsApplication::open();
+        let profile = TvProfile::new(
+            TvId::primary(),
+            "TV",
+            "192.0.2.10".parse().unwrap(),
+            "02:11:22:33:44:55".parse().unwrap(),
+            HdmiInput::Hdmi1,
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        );
+        let ready = app
+            .complete_read(opening.read_operation().unwrap(), Ok(vec![profile]))
+            .unwrap();
+        (app, ready)
+    }
+
+    #[test]
+    fn unpair_requires_confirmation_and_cancellation_keeps_profile() {
+        let (mut app, ready) = configured();
+        assert!(app.handle_intent(TvsIntent::ConfirmUnpair).is_none());
+        let confirmation = app.handle_intent(TvsIntent::UnpairTv).unwrap();
+        assert!(confirmation.presentation().unpair_confirmation().is_some());
+        assert!(confirmation.management_operation().is_none());
+        assert!(!confirmation.presentation().input_enabled());
+        let cancelled = app.handle_intent(TvsIntent::CancelUnpair).unwrap();
+        assert_eq!(
+            cancelled.presentation().profiles(),
+            ready.presentation().profiles()
+        );
+        assert!(cancelled.presentation().unpair_confirmation().is_none());
+        assert!(cancelled.management_operation().is_none());
+    }
+
+    #[test]
+    fn failed_unpair_preserves_profile_and_success_reuses_empty_pairing() {
+        let (mut app, ready) = configured();
+        app.handle_intent(TvsIntent::UnpairTv).unwrap();
+        let started = app.handle_intent(TvsIntent::ConfirmUnpair).unwrap();
+        let operation = started.management_operation().unwrap();
+        assert!(app.handle_intent(TvsIntent::ConfirmUnpair).is_none());
+        let failed = app
+            .complete_management(operation, Err(TvsManagementError::stopped()))
+            .unwrap();
+        assert_eq!(
+            failed.presentation().profiles(),
+            ready.presentation().profiles()
+        );
+        assert!(failed.presentation().management_error().is_some());
+        app.handle_intent(TvsIntent::UnpairTv).unwrap();
+        let started = app.handle_intent(TvsIntent::ConfirmUnpair).unwrap();
+        let operation = started.management_operation().unwrap();
+        let success = app
+            .complete_management(operation, Ok(TvsManagementOutcome::Unpaired))
+            .unwrap();
+        assert!(success.presentation().profiles().is_empty());
+        assert_eq!(
+            success.presentation().pair_action().unwrap().intent(),
+            TvsIntent::PairTv
+        );
+        assert_eq!(success.toast_message(), Some("TV unpaired"));
+        assert!(app
+            .complete_model_read(
+                ready.model_read_operation().unwrap().clone(),
+                Ok("stale TV".into())
+            )
+            .is_none());
+        assert!(app
+            .complete_management(operation, Ok(TvsManagementOutcome::Unpaired))
+            .is_none());
+        assert!(app
+            .handle_intent(TvsIntent::PairTv)
+            .unwrap()
+            .presentation()
+            .pairing()
+            .is_some());
+    }
+
+    #[test]
+    fn input_failure_restores_selection_and_apply_failure_retains_saved_selection() {
+        let (mut app, ready) = configured();
+        let started = app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+            .unwrap();
+        assert_eq!(
+            started.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi3
+        );
+        assert!(!started.presentation().input_enabled());
+        assert!(app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi4))
+            .is_none());
+        assert!(app.handle_intent(TvsIntent::UnpairTv).is_none());
+        let failed = app
+            .complete_management(
+                started.management_operation().unwrap(),
+                Err(TvsManagementError::stopped()),
+            )
+            .unwrap();
+        assert_eq!(
+            failed.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi1
+        );
+        assert!(failed.presentation().input_enabled());
+        let started = app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+            .unwrap();
+        let mut saved = ready.presentation().selected_profile().unwrap().clone();
+        saved.set_input(HdmiInput::Hdmi3);
+        let applied = app
+            .complete_management(
+                started.management_operation().unwrap(),
+                Ok(TvsManagementOutcome::InputApplyFailed(saved)),
+            )
+            .unwrap();
+        assert_eq!(
+            applied.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi3
+        );
+        assert!(applied.presentation().retry_apply_action().is_some());
+        let retry = app.handle_intent(TvsIntent::RetryInputApply).unwrap();
+        assert_eq!(
+            retry.management_operation().unwrap().action(),
+            TvsManagementAction::RetryInputApply
+        );
+        assert_eq!(
+            retry.management_operation().unwrap().profile().input(),
+            HdmiInput::Hdmi3
+        );
+        app.shutdown();
+        assert!(app
+            .complete_management(
+                retry.management_operation().unwrap(),
+                Err(TvsManagementError::stopped())
+            )
             .is_none());
     }
 }

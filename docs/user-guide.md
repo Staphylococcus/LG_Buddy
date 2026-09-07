@@ -28,10 +28,22 @@ appear alongside it.
 ### TVs
 
 The TVs tab shows the configured TV's address, MAC address, HDMI input, control
-platform, and credential status. These details are read-only. A saved credential
+platform, and credential status. In 1.6.0-beta.1 these details are read-only. A saved credential
 does not mean the TV is currently connected; check Overview for connection
 status. When available, the model reported by the TV replaces the generic
 profile heading. If it cannot be read, the saved details remain visible.
+
+Development builds also let you change **HDMI input** directly in TVs. The
+selection saves immediately and changes which input LG Buddy manages; it does
+not switch the TV’s current source. If saving fails, the previous selection is
+restored.
+
+To remove the connection or recover from pairing problems, choose **Unpair
+TV…** and confirm. This removes the saved TV profile and its local native
+credential, while keeping other settings. It does not revoke authorization on
+the TV or remove compatibility credential storage. Cancelling the confirmation
+keeps the connection. Once unpaired, use **Pair a TV** to reconnect through
+native webOS. Cancelling or failing this new pairing leaves no TV configured.
 
 With no TV configured, choose **Pair a TV** to get started.
 

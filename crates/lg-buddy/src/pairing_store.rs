@@ -39,6 +39,13 @@ const TV_KEYS: &[&str] = &[
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) fn unpair_primary(
+    config_path: &Path,
+    expected: &crate::tvs::TvProfile,
+) -> Result<(), PairingStoreError> {
+    PairingStore::unpair_primary(config_path, expected)
+}
+
 /// A prepared, exclusive first-TV pairing transaction.
 ///
 /// Preparing one takes a narrow lock which remains held until this value is
@@ -59,6 +66,61 @@ impl PairingStore {
     /// Prepare a first-primary-TV transaction before starting network pairing.
     pub(crate) fn prepare(config_path: &Path) -> Result<Self, PairingStoreError> {
         prepare_with_euid(config_path, current_euid())
+    }
+
+    /// Remove the configured primary-TV profile and its native credential.
+    ///
+    /// The same lock and snapshots used by pairing are held for the complete
+    /// operation.  The profile is checked again immediately before removing
+    /// the credential, so a stale caller cannot erase a newly selected TV.
+    pub(crate) fn unpair_primary(
+        config_path: &Path,
+        expected: &crate::tvs::TvProfile,
+    ) -> Result<(), PairingStoreError> {
+        let store = prepare_unpair_with_euid(config_path, current_euid())?;
+        store.unpair(expected)
+    }
+
+    fn unpair(self, expected: &crate::tvs::TvProfile) -> Result<(), PairingStoreError> {
+        self.check_unpair_preconditions(expected)?;
+        self.remove_token()?;
+
+        let result = (|| {
+            self.check_unpair_config_preconditions(expected)?;
+            match fs::symlink_metadata(self.token_store.token_path()) {
+                Ok(_) => {
+                    return Err(PairingStoreError::TokenChanged {
+                        path: self.token_store.token_path().to_path_buf(),
+                    });
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(PairingStoreError::TokenRemove {
+                        path: self.token_store.token_path().to_path_buf(),
+                        source,
+                    });
+                }
+            }
+            let original = self.snapshot.as_deref().unwrap_or_default();
+            let contents = remove_primary_config_keys(original);
+            atomic_write_config(
+                &self.config_path,
+                &contents,
+                &self.owner,
+                self.snapshot.is_some(),
+            )
+        })();
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => match self.restore_unpaired_token() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(PairingStoreError::Rollback {
+                    operation: Box::new(error),
+                    rollback: Box::new(rollback),
+                }),
+            },
+        }
     }
 
     /// Persist the verified native webOS pairing result.
@@ -170,6 +232,110 @@ impl PairingStore {
         }
     }
 
+    fn restore_unpaired_token(&self) -> Result<(), PairingStoreError> {
+        let token_path = self.token_store.token_path();
+        match &self.token_before {
+            Some(before) => {
+                ensure_token_path_safe(token_path, &self.owner)?;
+                match read_existing_token(token_path)? {
+                    Some(current) if !same_token_snapshot(Some(before), Some(&current)) => {
+                        Err(PairingStoreError::TokenChanged {
+                            path: token_path.to_path_buf(),
+                        })
+                    }
+                    Some(_) => Ok(()),
+                    None => atomic_write_bytes(token_path, &before.contents, before.mode).map_err(
+                        |source| PairingStoreError::TokenRollback {
+                            path: token_path.to_path_buf(),
+                            source,
+                        },
+                    ),
+                }
+            }
+            None => match fs::symlink_metadata(token_path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    // A credential which appeared while the config was being
+                    // published belongs to whoever created it.  Leave it in
+                    // place instead of deleting a stale concurrent change.
+                    Ok(())
+                }
+                Ok(_) => Err(PairingStoreError::TokenRollback {
+                    path: token_path.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "credential path changed into a non-file",
+                    ),
+                }),
+                Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(PairingStoreError::TokenRollback {
+                    path: token_path.to_path_buf(),
+                    source,
+                }),
+            },
+        }
+    }
+
+    fn check_unpair_preconditions(
+        &self,
+        expected: &crate::tvs::TvProfile,
+    ) -> Result<(), PairingStoreError> {
+        self.check_unpair_config_preconditions(expected)?;
+        ensure_token_path_safe(self.token_store.token_path(), &self.owner)?;
+        let current_token = read_existing_token(self.token_store.token_path())?;
+        if !same_token_snapshot(self.token_before.as_ref(), current_token.as_ref()) {
+            return Err(PairingStoreError::TokenChanged {
+                path: self.token_store.token_path().to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_unpair_config_preconditions(
+        &self,
+        expected: &crate::tvs::TvProfile,
+    ) -> Result<(), PairingStoreError> {
+        let current = read_config_snapshot(&self.config_path)?;
+        if current != self.snapshot {
+            return Err(PairingStoreError::ConfigChanged {
+                path: self.config_path.clone(),
+            });
+        }
+        ensure_config_owner(&self.config_path, &self.owner)?;
+        validate_primary_identity(&self.config_path, current.as_deref(), expected)?;
+        Ok(())
+    }
+
+    fn remove_token(&self) -> Result<(), PairingStoreError> {
+        let path = self.token_store.token_path();
+        ensure_token_path_safe(path, &self.owner)?;
+        let current = read_existing_token(path)?;
+        if !same_token_snapshot(self.token_before.as_ref(), current.as_ref()) {
+            return Err(PairingStoreError::TokenChanged {
+                path: path.to_path_buf(),
+            });
+        }
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(path).map_err(|source| PairingStoreError::TokenRemove {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+            Ok(_) => Err(PairingStoreError::TokenRead {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "credential path is not a regular file",
+                ),
+            }),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(PairingStoreError::TokenRemove {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
     fn cleanup_created_dirs(&self) -> Result<(), PairingStoreError> {
         let token_path = self.token_store.token_path();
         if !self.profile_dir_existed {
@@ -190,6 +356,21 @@ impl PairingStore {
 }
 
 fn prepare_with_euid(config_path: &Path, euid: u32) -> Result<PairingStore, PairingStoreError> {
+    prepare_transaction(config_path, euid, true)
+}
+
+fn prepare_unpair_with_euid(
+    config_path: &Path,
+    euid: u32,
+) -> Result<PairingStore, PairingStoreError> {
+    prepare_transaction(config_path, euid, false)
+}
+
+fn prepare_transaction(
+    config_path: &Path,
+    euid: u32,
+    require_unconfigured: bool,
+) -> Result<PairingStore, PairingStoreError> {
     if euid == 0 {
         return Err(PairingStoreError::RunningAsRoot);
     }
@@ -220,10 +401,12 @@ fn prepare_with_euid(config_path: &Path, euid: u32) -> Result<PairingStore, Pair
             }
         })?;
     let entries = parse_config_entries(config_contents);
-    if let Some(key) = TV_KEYS.iter().find(|key| entries.contains_key(**key)) {
-        return Err(PairingStoreError::PrimaryAlreadyConfigured {
-            key: (*key).to_string(),
-        });
+    if require_unconfigured {
+        if let Some(key) = TV_KEYS.iter().find(|key| entries.contains_key(**key)) {
+            return Err(PairingStoreError::PrimaryAlreadyConfigured {
+                key: (*key).to_string(),
+            });
+        }
     }
 
     let owner = resolve_owner(config_path, snapshot.is_some(), euid)?;
@@ -249,6 +432,10 @@ fn prepare_with_euid(config_path: &Path, euid: u32) -> Result<PairingStore, Pair
     let tvs_dir = profile_dir
         .parent()
         .expect("derived profile path always has a TVs directory");
+
+    if !require_unconfigured {
+        ensure_token_path_safe(&token_path, &owner)?;
+    }
 
     Ok(PairingStore {
         config_path: config_path.to_path_buf(),
@@ -362,6 +549,263 @@ fn read_existing_token(path: &Path) -> Result<Option<TokenBefore>, PairingStoreE
     #[cfg(not(unix))]
     let mode = 0;
     Ok(Some(TokenBefore { contents, mode }))
+}
+
+fn same_token_snapshot(before: Option<&TokenBefore>, current: Option<&TokenBefore>) -> bool {
+    match (before, current) {
+        (None, None) => true,
+        (Some(before), Some(current)) => {
+            before.contents == current.contents && before.mode == current.mode
+        }
+        _ => false,
+    }
+}
+
+fn ensure_config_owner(path: &Path, owner: &SystemUser) -> Result<(), PairingStoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| PairingStoreError::ConfigRead {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(PairingStoreError::ConfigSymlink {
+            path: path.to_path_buf(),
+        });
+    }
+    if !metadata.file_type().is_file() {
+        return Err(PairingStoreError::ConfigRead {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "config path is not a regular file",
+            ),
+        });
+    }
+    #[cfg(unix)]
+    {
+        if metadata.uid() == 0 {
+            return Err(PairingStoreError::ConfigOwnedByRoot {
+                path: path.to_path_buf(),
+            });
+        }
+        if metadata.uid() != owner.uid() {
+            return Err(PairingStoreError::ConfigOwnerMismatch {
+                path: path.to_path_buf(),
+                owner_uid: metadata.uid(),
+                euid: current_euid(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_token_path_safe(token_path: &Path, owner: &SystemUser) -> Result<(), PairingStoreError> {
+    let profile_dir = token_path
+        .parent()
+        .expect("derived token path always has a profile directory");
+    let tvs_dir = profile_dir
+        .parent()
+        .expect("derived profile path always has a TVs directory");
+
+    for directory in [tvs_dir, profile_dir] {
+        let metadata = match fs::symlink_metadata(directory) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(PairingStoreError::TokenRead {
+                    path: directory.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(PairingStoreError::TokenRead {
+                path: directory.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "credential directory is a symlink",
+                ),
+            });
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(PairingStoreError::TokenRead {
+                path: directory.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "credential path is not a directory",
+                ),
+            });
+        }
+        #[cfg(unix)]
+        {
+            if metadata.uid() == 0 {
+                return Err(PairingStoreError::TokenRead {
+                    path: directory.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "credential directory is owned by root",
+                    ),
+                });
+            }
+            if metadata.uid() != owner.uid() {
+                return Err(PairingStoreError::TokenRead {
+                    path: directory.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "credential directory has a different owner",
+                    ),
+                });
+            }
+        }
+    }
+
+    match fs::symlink_metadata(token_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            #[cfg(unix)]
+            {
+                if metadata.uid() == 0 {
+                    return Err(PairingStoreError::TokenRead {
+                        path: token_path.to_path_buf(),
+                        source: io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "credential file is owned by root",
+                        ),
+                    });
+                }
+                if metadata.uid() != owner.uid() {
+                    return Err(PairingStoreError::TokenRead {
+                        path: token_path.to_path_buf(),
+                        source: io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "credential file has a different owner",
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(_) => {
+            return Err(PairingStoreError::TokenRead {
+                path: token_path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "credential path is not a regular file",
+                ),
+            });
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(PairingStoreError::TokenRead {
+                path: token_path.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_primary_identity(
+    config_path: &Path,
+    contents: Option<&[u8]>,
+    expected: &crate::tvs::TvProfile,
+) -> Result<(), PairingStoreError> {
+    let contents = contents.ok_or_else(|| PairingStoreError::PrimaryIdentityMismatch {
+        path: config_path.to_path_buf(),
+        field: "profile",
+    })?;
+    let text = std::str::from_utf8(contents).map_err(|source| PairingStoreError::ConfigRead {
+        path: config_path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, source),
+    })?;
+    let entries = parse_config_entries(text);
+
+    let value = |primary: &str, fallback: &str| {
+        entries
+            .get(primary)
+            .or_else(|| entries.get(fallback))
+            .map(String::as_str)
+    };
+    let address = value("tvs_primary_ip", "tv_ip")
+        .and_then(|value| value.parse::<Ipv4Addr>().ok())
+        .ok_or_else(|| identity_mismatch(config_path, "ip"))?;
+    let mac = value("tvs_primary_mac", "tv_mac")
+        .and_then(|value| value.parse::<MacAddress>().ok())
+        .ok_or_else(|| identity_mismatch(config_path, "mac"))?;
+    let input = value("tvs_primary_input", "input")
+        .and_then(|value| value.parse::<HdmiInput>().ok())
+        .ok_or_else(|| identity_mismatch(config_path, "input"))?;
+    let platform = entries
+        .get("tvs_primary_platform")
+        .map(String::as_str)
+        .unwrap_or(crate::config::TvPlatform::DEFAULT.as_str())
+        .parse::<crate::config::TvPlatform>()
+        .map_err(|_| identity_mismatch(config_path, "platform"))?;
+
+    for (field, matches) in [
+        ("ip", address == expected.address()),
+        ("mac", mac == expected.mac()),
+        ("input", input == expected.input()),
+        ("platform", platform == expected.platform()),
+    ] {
+        if !matches {
+            return Err(identity_mismatch(config_path, field));
+        }
+    }
+    Ok(())
+}
+
+fn identity_mismatch(path: &Path, field: &'static str) -> PairingStoreError {
+    PairingStoreError::PrimaryIdentityMismatch {
+        path: path.to_path_buf(),
+        field,
+    }
+}
+
+fn remove_primary_config_keys(original: &[u8]) -> Vec<u8> {
+    let mut contents = Vec::with_capacity(original.len());
+    let mut start = 0;
+    for (index, byte) in original.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line = &original[start..=index];
+        if !is_primary_config_line(line) {
+            contents.extend_from_slice(line);
+        }
+        start = index + 1;
+    }
+    if start < original.len() {
+        let line = &original[start..];
+        if !is_primary_config_line(line) {
+            contents.extend_from_slice(line);
+        }
+    }
+    contents
+}
+
+fn is_primary_config_line(line: &[u8]) -> bool {
+    let line = trim_ascii_whitespace(line.strip_suffix(b"\n").unwrap_or(line));
+    let line = trim_ascii_whitespace(line.strip_suffix(b"\r").unwrap_or(line));
+    if line.is_empty() || line[0] == b'#' {
+        return false;
+    }
+    let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    let key = trim_ascii_whitespace(&line[..equal]);
+    TV_KEYS.iter().any(|candidate| key == candidate.as_bytes())
+}
+
+fn trim_ascii_whitespace(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map(|index| index + 1)
+        .unwrap_or(start);
+    &value[start..end]
 }
 
 fn remove_empty_dir(path: &Path) -> Result<(), PairingStoreError> {
@@ -631,6 +1075,13 @@ pub(crate) enum PairingStoreError {
     ConfigChanged {
         path: PathBuf,
     },
+    TokenChanged {
+        path: PathBuf,
+    },
+    PrimaryIdentityMismatch {
+        path: PathBuf,
+        field: &'static str,
+    },
     PrimaryAlreadyConfigured {
         key: String,
     },
@@ -654,6 +1105,10 @@ pub(crate) enum PairingStoreError {
     TokenWrite {
         path: PathBuf,
         source: PlatformAccessTokenStoreError,
+    },
+    TokenRemove {
+        path: PathBuf,
+        source: io::Error,
     },
     ConfigWrite {
         path: PathBuf,
@@ -696,6 +1151,18 @@ impl fmt::Display for PairingStoreError {
             Self::ConfigChanged { path } => {
                 write!(f, "config `{}` changed during pairing", path.display())
             }
+            Self::TokenChanged { path } => {
+                write!(
+                    f,
+                    "native credential `{}` changed during unpairing",
+                    path.display()
+                )
+            }
+            Self::PrimaryIdentityMismatch { path, field } => write!(
+                f,
+                "configured primary TV {field} does not match the selected profile in `{}`",
+                path.display()
+            ),
             Self::PrimaryAlreadyConfigured { key } => {
                 write!(f, "primary TV is already configured ({key})")
             }
@@ -728,6 +1195,11 @@ impl fmt::Display for PairingStoreError {
                 "could not write native credential `{}`: {source}",
                 path.display()
             ),
+            Self::TokenRemove { path, source } => write!(
+                f,
+                "could not remove native credential `{}`: {source}",
+                path.display()
+            ),
             Self::ConfigWrite { path, source } => {
                 write!(f, "could not publish config `{}`: {source}", path.display())
             }
@@ -750,6 +1222,7 @@ impl Error for PairingStoreError {
             Self::Lock { source, .. }
             | Self::ConfigRead { source, .. }
             | Self::TokenRead { source, .. }
+            | Self::TokenRemove { source, .. }
             | Self::ConfigWrite { source, .. }
             | Self::TokenRollback { source, .. } => Some(source),
             Self::Owner(source) => Some(source),
@@ -760,6 +1233,8 @@ impl Error for PairingStoreError {
             | Self::ConfigPathHasNoParent { .. }
             | Self::PairingInProgress { .. }
             | Self::ConfigChanged { .. }
+            | Self::TokenChanged { .. }
+            | Self::PrimaryIdentityMismatch { .. }
             | Self::PrimaryAlreadyConfigured { .. }
             | Self::ConfigOwnedByRoot { .. }
             | Self::ConfigOwnerMismatch { .. }
@@ -771,6 +1246,8 @@ impl Error for PairingStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TvPlatform;
+    use crate::tvs::{TvCredentialState, TvId, TvProfile};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -803,6 +1280,27 @@ mod tests {
 
     fn mac() -> MacAddress {
         "aa:bb:cc:dd:ee:ff".parse().unwrap()
+    }
+
+    fn profile(platform: TvPlatform) -> TvProfile {
+        TvProfile::new(
+            TvId::primary(),
+            "Primary TV",
+            "192.0.2.42".parse().unwrap(),
+            mac(),
+            HdmiInput::Hdmi2,
+            platform,
+            TvCredentialState::Stored,
+        )
+    }
+
+    fn native_config() -> &'static str {
+        "# keep this comment\n\
+         screen_backend=gnome\n\
+         tvs_primary_ip=192.0.2.42\n\
+         tvs_primary_mac=aa:bb:cc:dd:ee:ff\n\
+         tvs_primary_input=HDMI_2\n\
+         tvs_primary_platform=lg_webos\n"
     }
 
     #[test]
@@ -1009,5 +1507,153 @@ mod tests {
         fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
         assert_eq!(fs::read(token_path).unwrap(), original);
+    }
+
+    #[test]
+    fn unpair_native_removes_all_primary_keys_and_native_token() {
+        let dir = TestDir::new("unpair-native");
+        fs::write(dir.config(), native_config()).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        fs::write(&token_path, "{\"access_token\":\"native\"}\n").unwrap();
+        let legacy = dir.0.join(".aiopylgtv.sqlite");
+        fs::write(&legacy, b"legacy database").unwrap();
+
+        PairingStore::unpair_primary(&dir.config(), &profile(TvPlatform::LgWebOs)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.config()).unwrap(),
+            "# keep this comment\nscreen_backend=gnome\n"
+        );
+        assert!(!token_path.exists());
+        assert_eq!(fs::read(legacy).unwrap(), b"legacy database");
+    }
+
+    #[test]
+    fn unpair_compatibility_removes_config_but_preserves_missing_native_token() {
+        let dir = TestDir::new("unpair-compatibility");
+        fs::write(
+            dir.config(),
+            "screen_backend=gnome\n\
+             tv_ip=192.0.2.42\n\
+             tv_mac=aa:bb:cc:dd:ee:ff\n\
+             input=HDMI_2\n",
+        )
+        .unwrap();
+        let legacy = dir.0.join(".aiopylgtv.sqlite");
+        fs::write(&legacy, b"legacy database").unwrap();
+
+        PairingStore::unpair_primary(&dir.config(), &profile(TvPlatform::Bscpylgtv)).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.config()).unwrap(),
+            "screen_backend=gnome\n"
+        );
+        assert!(!dir.0.join("tvs/primary/access-token.json").exists());
+        assert_eq!(fs::read(legacy).unwrap(), b"legacy database");
+    }
+
+    #[test]
+    fn dropping_unpair_transaction_is_cancellation_equivalent() {
+        let dir = TestDir::new("unpair-cancel");
+        fs::write(dir.config(), native_config()).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        let original_token = b"malformed token bytes\n";
+        fs::write(&token_path, original_token).unwrap();
+
+        {
+            let _store = prepare_unpair_with_euid(&dir.config(), current_euid()).unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(dir.config()).unwrap(), native_config());
+        assert_eq!(fs::read(token_path).unwrap(), original_token);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpair_config_failure_restores_original_token_and_config() {
+        let dir = TestDir::new("unpair-rollback");
+        let original_config = native_config();
+        fs::write(dir.config(), original_config).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        let original_token = b"malformed token bytes\n";
+        fs::write(&token_path, original_token).unwrap();
+        let store = prepare_unpair_with_euid(&dir.config(), current_euid()).unwrap();
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = store.unpair(&profile(TvPlatform::LgWebOs));
+
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(PairingStoreError::ConfigWrite { .. })));
+        assert_eq!(fs::read_to_string(dir.config()).unwrap(), original_config);
+        assert_eq!(fs::read(token_path).unwrap(), original_token);
+    }
+
+    #[test]
+    fn unpair_refuses_stale_profile_before_removing_token() {
+        let dir = TestDir::new("unpair-stale");
+        fs::write(dir.config(), native_config()).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        fs::write(&token_path, b"token").unwrap();
+
+        let stale = TvProfile::new(
+            TvId::primary(),
+            "Primary TV",
+            "192.0.2.99".parse().unwrap(),
+            mac(),
+            HdmiInput::Hdmi2,
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        );
+        let result = PairingStore::unpair_primary(&dir.config(), &stale);
+
+        assert!(matches!(
+            result,
+            Err(PairingStoreError::PrimaryIdentityMismatch { .. })
+        ));
+        assert_eq!(fs::read_to_string(dir.config()).unwrap(), native_config());
+        assert_eq!(fs::read(token_path).unwrap(), b"token");
+    }
+
+    #[test]
+    fn unpair_removes_malformed_regular_token() {
+        let dir = TestDir::new("unpair-malformed");
+        fs::write(dir.config(), native_config()).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        fs::write(&token_path, b"not json").unwrap();
+
+        PairingStore::unpair_primary(&dir.config(), &profile(TvPlatform::LgWebOs)).unwrap();
+
+        assert!(!token_path.exists());
+        assert_eq!(
+            fs::read_to_string(dir.config()).unwrap(),
+            "# keep this comment\nscreen_backend=gnome\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpair_refuses_unsafe_token_symlink() {
+        let dir = TestDir::new("unpair-token-symlink");
+        fs::write(dir.config(), native_config()).unwrap();
+        let token_path = dir.0.join("tvs/primary/access-token.json");
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        let target = dir.0.join("outside-token");
+        fs::write(&target, b"must survive").unwrap();
+        std::os::unix::fs::symlink(&target, &token_path).unwrap();
+
+        assert!(
+            PairingStore::unpair_primary(&dir.config(), &profile(TvPlatform::LgWebOs)).is_err()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"must survive");
+        assert!(fs::symlink_metadata(token_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(dir.config()).unwrap(), native_config());
     }
 }

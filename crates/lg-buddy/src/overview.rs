@@ -430,9 +430,20 @@ impl OverviewApplication {
         }
     }
 
-    /// Reload after the first primary profile has been saved. Preserve the
-    /// operation sequence so late results from the empty state stay stale.
-    pub(crate) fn profile_created(&mut self) -> Option<OverviewTransition> {
+    pub(crate) fn has_pending_write(&self) -> bool {
+        matches!(self.brightness, BrightnessState::Applying { .. })
+            || matches!(self.audio, AudioState::Applying { .. })
+    }
+
+    /// Invalidate previous reads and disable controls while the profile is changing.
+    pub(crate) fn profile_change_started(&mut self) -> Option<OverviewTransition> {
+        let mut transition = self.profile_changed()?;
+        transition.operations.clear();
+        Some(transition)
+    }
+
+    /// Reload a changed profile without accepting results from its previous configuration.
+    pub(crate) fn profile_changed(&mut self) -> Option<OverviewTransition> {
         if self.is_closed()
             || matches!(self.brightness, BrightnessState::Applying { .. })
             || matches!(self.audio, AudioState::Applying { .. })
@@ -1178,7 +1189,7 @@ mod tests {
     #[test]
     fn first_profile_reload_rejects_results_from_the_empty_state() {
         let (mut app, original) = OverviewApplication::open();
-        let refreshed = app.profile_created().unwrap();
+        let refreshed = app.profile_changed().unwrap();
         assert_eq!(refreshed.operations().len(), 3);
         for operation in original.operations() {
             assert!(!refreshed.operations().contains(operation));

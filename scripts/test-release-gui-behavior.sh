@@ -27,6 +27,10 @@ fail() {
 }
 
 cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -f "$WORK_DIR/gui.output" ]; then
+        cat "$WORK_DIR/gui.output" >&2
+    fi
     if [ -n "$GUI_PID" ] && kill -0 "$GUI_PID" 2>/dev/null; then
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
@@ -232,7 +236,7 @@ observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-mut
 observe_gui_state --activate-control "Mute TV"
 wait_for_calls set_mute 2
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
-# Native tab navigation shows the read-only profile and preserves live controls.
+# Native tab navigation shows the configured profile and preserves live controls.
 observe_gui_state --select-page TVs
 TV_ADDRESS="$(sed -n 's/^tvs_primary_ip=//p' "$CONFIG_FILE" | tail -n1)"
 observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
@@ -252,6 +256,41 @@ assert state["volume"] == 21 and state["muted"] is True, state
 audio_calls = [call["command"] for call in state["calls"] if call["command"] in ("set_volume", "set_mute")]
 assert audio_calls == ["set_volume", "set_mute", "set_mute"], audio_calls
 PY
+
+# TV management uses native controls and the real local persistence backend.
+cp "$CONFIG_FILE" "$WORK_DIR/before-management.env"
+mkdir -p "$WORK_DIR/tvs/primary"
+printf '%s\n' '{"access_token":"management-smoke-token"}' > "$WORK_DIR/tvs/primary/access-token.json"
+chmod 600 "$WORK_DIR/tvs/primary/access-token.json"
+start_gui enabled
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+observe_gui_state --focus-control "HDMI input" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" --delay 60 space Home Down Down Return
+for ((attempt = 0; attempt < 100; attempt++)); do
+    [ "$("$RUNTIME_BINARY" settings get tv.input)" = "HDMI_3" ] && break
+    sleep 0.1
+done
+[ "$("$RUNTIME_BINARY" settings get tv.input)" = "HDMI_3" ] || fail "Input selection was not saved."
+cp "$CONFIG_FILE" "$WORK_DIR/before-unpair.env"
+observe_gui_state --activate-control "Unpair TV…"
+observe_gui_state --expected-tvs-state unpair
+xdotool key --window "$WINDOW_ID" Escape
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+cmp -s "$CONFIG_FILE" "$WORK_DIR/before-unpair.env" || fail "Cancelling Unpair changed the configuration."
+[ -f "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Cancelling Unpair removed the credential."
+observe_gui_state --activate-control "Unpair TV…"
+observe_gui_state --expected-tvs-state unpair
+observe_gui_state --activate-control Unpair
+observe_gui_state --expected-tvs-state empty
+[ ! -e "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Unpair left the native credential."
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+observe_gui_state --activate-control Cancel
+observe_gui_state --expected-tvs-state empty
+send_closing_mnemonic Escape
+finish_gui "input editing and confirmed unpairing"
+cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 
 # An absent profile has a standard empty state and never contacts the TV.
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"

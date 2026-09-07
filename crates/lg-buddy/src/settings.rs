@@ -29,7 +29,7 @@ pub use tv::{PlatformPreflight, WebOsPlatformPreflight};
 
 #[cfg(test)]
 use formatter::format_effective_value;
-use store::persist_settings_mutation;
+pub(crate) use store::persist_settings_mutation;
 
 const READ_WRITE_OPERATIONS: &[SettingOperation] = &[
     SettingOperation::Get,
