@@ -46,7 +46,7 @@ fn environment_backend_reads_primary_profile_and_only_local_token_metadata() {
     assert_eq!(profile.credentials(), TvCredentialState::Stored);
     assert!(TvCredentialState::Stored
         .description()
-        .contains("not verified"));
+        .contains("does not establish current access"));
     assert_eq!(
         fs::read(config.path()).expect("config after read"),
         original

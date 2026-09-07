@@ -1,9 +1,9 @@
-//! Application-owned, read-only TV profile collection.
+//! Application-owned TV profile collection and first-TV pairing entry point.
 //!
 //! The current durable configuration has one `primary` profile.  The
 //! collection shape is intentional: it lets the renderer exercise selection
 //! and adaptive multi-TV layouts without adding a second-TV storage format or
-//! any pairing workflow to production.
+//! a second-TV pairing workflow to production.
 
 use std::error::Error;
 use std::fmt;
@@ -13,6 +13,10 @@ use std::time::Duration;
 
 use crate::auth::{resolve_bscpylgtv_auth_context_from_env, resolve_config_owner};
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
+use crate::pairing::{
+    PairingApplication, PairingError, PairingFailure, PairingIntent, PairingOperation,
+    PairingStage, PairingUpdate,
+};
 use crate::platform_access_token::{PlatformAccessTokenStore, PlatformAccessTokenStoreError};
 use crate::presentation::brightness::UserFacingError;
 use crate::presentation::tvs::TvsPresentation;
@@ -190,7 +194,7 @@ impl TvCredentialState {
     pub fn description(self) -> &'static str {
         match self {
             Self::Stored => {
-                "A native access token is stored locally; pairing and validity are not verified."
+                "A native access token is stored locally; this does not establish current access to the TV."
             }
             Self::Missing => "No local credential was found.",
             Self::LocalFile => {
@@ -212,6 +216,8 @@ impl TvCredentialState {
 pub enum TvsIntent {
     Select(TvId),
     Retry,
+    PairTv,
+    Pairing(PairingIntent),
 }
 
 /// Opaque identity for one asynchronous profile read.
@@ -243,6 +249,9 @@ pub struct TvsTransition {
     presentation: TvsPresentation,
     read_operation: Option<TvsReadOperation>,
     model_read_operation: Option<TvsModelReadOperation>,
+    pairing_operation: Option<PairingOperation>,
+    profile_created: bool,
+    toast_message: Option<String>,
     diagnostic: Option<String>,
 }
 
@@ -261,6 +270,20 @@ impl TvsTransition {
 
     pub fn diagnostic(&self) -> Option<&str> {
         self.diagnostic.as_deref()
+    }
+
+    pub fn pairing_operation(&self) -> Option<&PairingOperation> {
+        self.pairing_operation.as_ref()
+    }
+
+    /// The durable profile changed, so other application views can reload it.
+    pub(crate) fn profile_created(&self) -> bool {
+        self.profile_created
+    }
+
+    /// One-time feedback for this transition, separate from persistent view state.
+    pub fn toast_message(&self) -> Option<&str> {
+        self.toast_message.as_deref()
     }
 }
 
@@ -396,6 +419,7 @@ pub struct TvsApplication {
     state: TvsState,
     next_operation_id: u64,
     pending_model: Option<TvsModelReadOperation>,
+    pairing: Option<PairingApplication>,
 }
 
 impl TvsApplication {
@@ -405,6 +429,7 @@ impl TvsApplication {
             state: TvsState::Loading(operation),
             next_operation_id: 1,
             pending_model: None,
+            pairing: None,
         };
         let transition = application.transition(Some(operation), None);
         (application, transition)
@@ -412,6 +437,32 @@ impl TvsApplication {
 
     pub fn handle_intent(&mut self, intent: TvsIntent) -> Option<TvsTransition> {
         match intent {
+            TvsIntent::PairTv => {
+                if !matches!(self.state, TvsState::Empty) || self.pairing.is_some() {
+                    return None;
+                }
+                self.pairing = Some(PairingApplication::new());
+                Some(self.transition(None, None))
+            }
+            TvsIntent::Pairing(intent) => {
+                let update = self
+                    .pairing
+                    .as_mut()?
+                    .handle_intent(intent, self.next_operation_id)?;
+                match update {
+                    PairingUpdate::Changed => Some(self.transition(None, None)),
+                    PairingUpdate::Cancelled => {
+                        self.pairing = None;
+                        Some(self.transition(None, None))
+                    }
+                    PairingUpdate::Start(operation) => {
+                        self.next_operation_id += 1;
+                        let mut transition = self.transition(None, None);
+                        transition.pairing_operation = Some(operation);
+                        Some(transition)
+                    }
+                }
+            }
             TvsIntent::Retry => {
                 if !matches!(self.state, TvsState::Failed(_)) {
                     return None;
@@ -495,8 +546,62 @@ impl TvsApplication {
     }
 
     pub fn shutdown(&mut self) {
+        if let Some(pairing) = &self.pairing {
+            pairing.shutdown();
+        }
+        self.pairing = None;
         self.state = TvsState::Closed;
         self.pending_model = None;
+    }
+
+    pub fn pairing_progress(
+        &mut self,
+        operation: &PairingOperation,
+        stage: PairingStage,
+    ) -> Option<TvsTransition> {
+        self.pairing
+            .as_mut()?
+            .progress(operation, stage)
+            .then(|| self.transition(None, None))
+    }
+
+    pub fn complete_pairing(
+        &mut self,
+        operation: &PairingOperation,
+        result: Result<TvProfile, PairingError>,
+    ) -> Option<TvsTransition> {
+        if !self.pairing.as_mut()?.complete(operation, &result) {
+            return None;
+        }
+        match result {
+            Ok(profile) => {
+                self.pairing = None;
+                self.state = TvsState::Ready {
+                    selected_id: profile.id().clone(),
+                    profiles: vec![profile],
+                };
+                let mut transition = self.transition_with_model_read();
+                transition.profile_created = true;
+                transition.toast_message = Some("TV paired successfully".into());
+                Some(transition)
+            }
+            Err(error) => {
+                if error.failure() == PairingFailure::Cancelled {
+                    self.pairing = None;
+                }
+                let mut transition = self.transition(None, None);
+                transition.toast_message = transition
+                    .presentation()
+                    .pairing()
+                    .and_then(|pairing| pairing.error())
+                    .map(|error| error.summary().to_owned());
+                Some(transition)
+            }
+        }
+    }
+
+    pub fn is_pairing(&self) -> bool {
+        self.pairing.is_some()
     }
 
     fn transition_with_model_read(&mut self) -> TvsTransition {
@@ -533,12 +638,15 @@ impl TvsApplication {
             presentation: self.presentation(),
             read_operation,
             model_read_operation: None,
+            pairing_operation: None,
+            profile_created: false,
+            toast_message: None,
             diagnostic,
         }
     }
 
     fn presentation(&self) -> TvsPresentation {
-        match &self.state {
+        let mut presentation = match &self.state {
             TvsState::Loading(_) => TvsPresentation::loading(),
             TvsState::Empty => TvsPresentation::empty(),
             TvsState::Ready {
@@ -547,7 +655,11 @@ impl TvsApplication {
             } => TvsPresentation::ready(profiles.clone(), selected_id.clone()),
             TvsState::Failed(error) => TvsPresentation::failed(error.clone()),
             TvsState::Closed => TvsPresentation::loading(),
+        };
+        if let Some(pairing) = &self.pairing {
+            presentation.set_pairing(pairing.presentation());
         }
+        presentation
     }
 }
 
@@ -971,7 +1083,7 @@ mod tests {
         );
         assert!(TvCredentialState::Stored
             .description()
-            .contains("not verified"));
+            .contains("does not establish current access"));
     }
 
     #[test]

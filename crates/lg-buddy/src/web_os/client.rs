@@ -17,6 +17,7 @@ use tungstenite::{client_tls_with_config, Connector, HandshakeError, Message, We
 
 const WEBOS_WS_PORT: u16 = 3000;
 const WEBOS_WSS_PORT: u16 = 3001;
+const PAIRING_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type WebOsSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -84,7 +85,88 @@ pub struct WebOsClient {
     response_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsPairingEvent {
+    WaitingForConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebOsPairingError {
+    Cancelled,
+    Rejected,
+    Timeout,
+    Failed,
+}
+
+/// Failure while a caller performs a cancellable typed read after pairing.
+/// The protocol layer deliberately does not choose which reads constitute
+/// verification; the application owns that policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsPairingReadError {
+    Cancelled,
+    Timeout,
+    Failed,
+}
+
+impl fmt::Display for WebOsPairingReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "webOS pairing read was cancelled"),
+            Self::Timeout => write!(f, "webOS pairing read timed out"),
+            Self::Failed => write!(f, "webOS pairing read failed"),
+        }
+    }
+}
+
+impl Error for WebOsPairingReadError {}
+
+impl fmt::Display for WebOsPairingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "webOS pairing was cancelled"),
+            Self::Rejected => write!(f, "webOS pairing was rejected"),
+            Self::Timeout => write!(f, "webOS pairing timed out"),
+            Self::Failed => write!(f, "webOS pairing failed"),
+        }
+    }
+}
+
+impl Error for WebOsPairingError {}
+
 impl WebOsClient {
+    /// Pairs a fresh native webOS client without reading or writing a token
+    /// store. The returned token is owned by the caller and remains in memory
+    /// until it is explicitly persisted by the surrounding profile workflow.
+    pub fn pair_in_memory(
+        endpoint: WebOsEndpoint,
+        connect_timeout: Duration,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+        on_event: &mut dyn FnMut(WebOsPairingEvent),
+    ) -> Result<(WebOsClient, PlatformAccessToken), WebOsPairingError> {
+        ensure_pairing_uid_not_root(effective_uid())?;
+        if cancelled() {
+            return Err(WebOsPairingError::Cancelled);
+        }
+
+        let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
+            .map_err(|_source| WebOsPairingError::Failed)?;
+        let pairing_deadline = Instant::now()
+            .checked_add(response_timeout)
+            .ok_or(WebOsPairingError::Failed)?;
+
+        let token = client
+            .registration()
+            .register_for_pairing(pairing_deadline, cancelled, on_event)
+            .map_err(pairing_registration_error)?;
+
+        if cancelled() {
+            return Err(WebOsPairingError::Cancelled);
+        }
+
+        Ok((client, token))
+    }
+
     /// Connects and authenticates using the stored token only.
     ///
     /// This is the authentication path for background operations. It loads
@@ -196,6 +278,104 @@ impl WebOsClient {
         WebOsClientRegistration { client: self }
     }
 
+    /// Reads the typed power state for application-owned pairing checks.
+    pub fn power_state_with_cancellation(
+        &mut self,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::power::WebOsPowerState, WebOsPairingReadError> {
+        self.pairing_read(
+            super::power::GET_POWER_STATE_URI,
+            json!({}),
+            response_timeout,
+            cancelled,
+            super::power::parse_power_state_response,
+        )
+    }
+
+    /// Reads the typed audio status for application-owned pairing checks.
+    pub fn audio_status_with_cancellation(
+        &mut self,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::audio::WebOsAudioStatus, WebOsPairingReadError> {
+        self.pairing_read(
+            super::audio::GET_AUDIO_STATUS_URI,
+            json!({}),
+            response_timeout,
+            cancelled,
+            super::audio::parse_audio_status_response,
+        )
+    }
+
+    /// Reads the typed OLED backlight brightness for application-owned
+    /// pairing checks.
+    pub fn backlight_brightness_with_cancellation(
+        &mut self,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::picture::WebOsBacklightBrightness, WebOsPairingReadError> {
+        self.pairing_read(
+            super::picture::GET_SYSTEM_SETTINGS_URI,
+            json!({
+                "category": "picture",
+                "keys": ["backlight"],
+            }),
+            response_timeout,
+            cancelled,
+            super::picture::parse_backlight_brightness_response,
+        )
+    }
+
+    fn pairing_read<T, E>(
+        &mut self,
+        uri: &str,
+        payload: Value,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+        parse: impl FnOnce(&Value) -> Result<T, E>,
+    ) -> Result<T, WebOsPairingReadError> {
+        if cancelled() {
+            return Err(WebOsPairingReadError::Cancelled);
+        }
+        let response = self
+            .send_pairing_request(uri, payload, response_timeout, cancelled)
+            .map_err(pairing_read_transport_error)?;
+        parse(&response).map_err(|_error| WebOsPairingReadError::Failed)
+    }
+
+    fn send_pairing_request(
+        &mut self,
+        uri: &str,
+        payload: Value,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Value, PairingTransportError> {
+        if response_timeout.is_zero() {
+            return Err(PairingTransportError::Failed);
+        }
+        set_write_timeout(&mut self.socket, response_timeout)
+            .map_err(|_source| PairingTransportError::Failed)?;
+        let request_id = self
+            .next_request_id()
+            .map_err(|_source| PairingTransportError::Failed)?;
+        let request = json!({
+            "id": request_id,
+            "type": "request",
+            "uri": uri,
+            "payload": payload,
+        });
+        self.send_message(request)
+            .map_err(|_source| PairingTransportError::Failed)?;
+        let deadline = Instant::now()
+            .checked_add(response_timeout)
+            .ok_or(PairingTransportError::Failed)?;
+        let response = self
+            .receive_correlated_until(&request_id, deadline, cancelled)
+            .map_err(pairing_receive_error)?;
+        validate_response_message(response).map_err(pairing_transport_error_from_client)
+    }
+
     pub(crate) fn send_request(
         &mut self,
         uri: &str,
@@ -295,6 +475,141 @@ impl WebOsClient {
             }
         }
     }
+
+    fn receive_correlated_until(
+        &mut self,
+        request_id: &str,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Value, PairingReceiveError> {
+        loop {
+            if cancelled() {
+                return Err(PairingReceiveError::Cancelled);
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(PairingReceiveError::Timeout)?;
+            if remaining.is_zero() {
+                return Err(PairingReceiveError::Timeout);
+            }
+            set_read_timeout(
+                &mut self.socket,
+                remaining.min(PAIRING_CANCEL_POLL_INTERVAL),
+            )
+            .map_err(|source| {
+                PairingReceiveError::Failed(WebOsClientError::ConfigureSocket { source })
+            })?;
+
+            let message = match self.socket.read() {
+                Ok(message) => message,
+                Err(tungstenite::Error::Io(source))
+                    if matches!(
+                        source.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue
+                }
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    return Err(PairingReceiveError::Failed(
+                        WebOsClientError::ConnectionClosed {
+                            request_id: request_id.to_string(),
+                        },
+                    ))
+                }
+                Err(source) => {
+                    return Err(PairingReceiveError::Failed(WebOsClientError::Receive {
+                        source,
+                    }))
+                }
+            };
+
+            match message {
+                Message::Text(text) => {
+                    if let Some(response) = parse_correlated_frame(request_id, text.as_str())
+                        .map_err(PairingReceiveError::Failed)?
+                    {
+                        return Ok(response);
+                    }
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
+                Message::Close(_) => {
+                    return Err(PairingReceiveError::Failed(
+                        WebOsClientError::ConnectionClosed {
+                            request_id: request_id.to_string(),
+                        },
+                    ))
+                }
+                Message::Binary(_) => {
+                    return Err(PairingReceiveError::Failed(
+                        WebOsClientError::UnexpectedBinaryFrame,
+                    ))
+                }
+                Message::Frame(_) => {
+                    return Err(PairingReceiveError::Failed(
+                        WebOsClientError::UnexpectedRawFrame,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum PairingTransportError {
+    Cancelled,
+    Timeout,
+    Failed,
+}
+
+#[derive(Debug)]
+enum PairingReceiveError {
+    Cancelled,
+    Timeout,
+    Failed(WebOsClientError),
+}
+
+fn pairing_receive_error(error: PairingReceiveError) -> PairingTransportError {
+    match error {
+        PairingReceiveError::Cancelled => PairingTransportError::Cancelled,
+        PairingReceiveError::Timeout => PairingTransportError::Timeout,
+        PairingReceiveError::Failed(_source) => PairingTransportError::Failed,
+    }
+}
+
+fn pairing_transport_error_from_client(source: WebOsClientError) -> PairingTransportError {
+    match source {
+        WebOsClientError::Timeout { .. } => PairingTransportError::Timeout,
+        _ => PairingTransportError::Failed,
+    }
+}
+
+fn pairing_read_transport_error(error: PairingTransportError) -> WebOsPairingReadError {
+    match error {
+        PairingTransportError::Cancelled => WebOsPairingReadError::Cancelled,
+        PairingTransportError::Timeout => WebOsPairingReadError::Timeout,
+        PairingTransportError::Failed => WebOsPairingReadError::Failed,
+    }
+}
+
+fn effective_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and does not mutate process state.
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        1
+    }
+}
+
+fn ensure_pairing_uid_not_root(uid: u32) -> Result<(), WebOsPairingError> {
+    if uid == 0 {
+        Err(WebOsPairingError::Failed)
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +624,52 @@ pub(crate) struct WebOsClientRegistration<'client> {
 }
 
 impl WebOsClientRegistration<'_> {
+    fn register_for_pairing(
+        &mut self,
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+        on_event: &mut dyn FnMut(WebOsPairingEvent),
+    ) -> Result<PlatformAccessToken, PairingRegistrationError> {
+        if cancelled() {
+            return Err(PairingRegistrationError::Cancelled);
+        }
+        let request_id = self
+            .client
+            .next_request_id()
+            .map_err(|_source| PairingRegistrationError::Failed)?;
+        let request = WebOsRegistrationRequest::new(&request_id, None)
+            .map_err(|_source| PairingRegistrationError::Failed)?;
+        self.client
+            .send_message(request.to_json_value())
+            .map_err(|_source| PairingRegistrationError::Failed)?;
+
+        loop {
+            let response = self
+                .client
+                .receive_correlated_until(&request_id, deadline, cancelled)
+                .map_err(|error| match error {
+                    PairingReceiveError::Cancelled => PairingRegistrationError::Cancelled,
+                    PairingReceiveError::Timeout => PairingRegistrationError::Timeout,
+                    PairingReceiveError::Failed(_source) => PairingRegistrationError::Failed,
+                })?;
+            let event = parse_registration_message(&request_id, &response.to_string()).map_err(
+                |source| match source {
+                    WebOsRegistrationError::PairingRejected { .. } => {
+                        PairingRegistrationError::Rejected
+                    }
+                    _ => PairingRegistrationError::Failed,
+                },
+            )?;
+
+            match event {
+                WebOsRegistrationEvent::PairingPrompt => {
+                    on_event(WebOsPairingEvent::WaitingForConfirmation);
+                }
+                WebOsRegistrationEvent::Registered { access_token } => return Ok(access_token),
+            }
+        }
+    }
+
     pub(crate) fn register<F>(
         &mut self,
         access_token: Option<&PlatformAccessToken>,
@@ -349,6 +710,23 @@ impl WebOsClientRegistration<'_> {
                 WebOsRegistrationEvent::Registered { access_token } => return Ok(access_token),
             }
         }
+    }
+}
+
+#[derive(Debug)]
+enum PairingRegistrationError {
+    Cancelled,
+    Rejected,
+    Timeout,
+    Failed,
+}
+
+fn pairing_registration_error(error: PairingRegistrationError) -> WebOsPairingError {
+    match error {
+        PairingRegistrationError::Cancelled => WebOsPairingError::Cancelled,
+        PairingRegistrationError::Rejected => WebOsPairingError::Rejected,
+        PairingRegistrationError::Timeout => WebOsPairingError::Timeout,
+        PairingRegistrationError::Failed => WebOsPairingError::Failed,
     }
 }
 
@@ -564,6 +942,20 @@ fn set_read_timeout(socket: &mut WebOsSocket, timeout: Duration) -> io::Result<(
     stream.set_read_timeout(Some(timeout))
 }
 
+fn set_write_timeout(socket: &mut WebOsSocket, timeout: Duration) -> io::Result<()> {
+    let stream = match socket.get_mut() {
+        MaybeTlsStream::Plain(stream) => stream,
+        MaybeTlsStream::Rustls(stream) => &mut stream.sock,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported webOS TLS stream",
+            ))
+        }
+    };
+    stream.set_write_timeout(Some(timeout))
+}
+
 fn parse_correlated_frame(
     expected_request_id: &str,
     raw_message: &str,
@@ -628,7 +1020,8 @@ fn parse_webos_error(message: &serde_json::Map<String, Value>) -> WebOsClientErr
 mod tests {
     use super::{
         WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
-        WebOsClientRegistrationError, WebOsEndpoint,
+        WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
+        WebOsPairingReadError,
     };
     use crate::auth::SystemUser;
     use crate::platform_access_token::{
@@ -638,13 +1031,15 @@ mod tests {
     use crate::web_os::test_support::{
         WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
     };
-    use crate::web_os::{WebOsPowerStateError, WebOsRegistrationError};
+    use crate::web_os::{WebOsAudioVolume, WebOsPowerStateError, WebOsRegistrationError};
     use serde_json::json;
     use std::fs;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const RESPONSE_TIMEOUT: Duration = Duration::from_millis(200);
@@ -691,6 +1086,231 @@ mod tests {
 
         PlatformAccessTokenStore::for_primary_profile(&dir.path().join("config.env"), owner)
             .expect("derive test token store")
+    }
+
+    fn pairing_error(
+        result: Result<(WebOsClient, PlatformAccessToken), WebOsPairingError>,
+    ) -> WebOsPairingError {
+        match result {
+            Ok(_) => panic!("pairing unexpectedly succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn pair_in_memory_accepts_without_choosing_verification_checks() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let mut events = Vec::new();
+        let (mut client, access_token) = WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| false,
+            &mut |event| events.push(event),
+        )
+        .expect("pair native webOS client");
+
+        assert_eq!(access_token.as_secret_str(), "webos-test-access-token");
+        assert_eq!(events, vec![WebOsPairingEvent::WaitingForConfirmation,]);
+        assert_eq!(
+            server.snapshot().registration_tokens,
+            vec![None],
+            "pairing must register without a stored client key"
+        );
+        assert_eq!(
+            client
+                .power_state_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("returned client remains authenticated"),
+            super::super::WebOsPowerState::Active
+        );
+        assert_eq!(
+            client
+                .audio_status_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("typed audio read")
+                .volume(),
+            WebOsAudioVolume::Known(20)
+        );
+        assert_eq!(
+            client
+                .backlight_brightness_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("typed backlight read")
+                .as_percent(),
+            100
+        );
+        drop(client);
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_does_not_verify_capabilities_before_returning() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let result = WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| false,
+            &mut |_| {},
+        );
+
+        // This scenario rejects the first power read. A successful pair proves
+        // that capability verification starts only when the caller asks.
+        assert!(result.is_ok());
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_reports_rejection_without_exposing_credentials() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PairingRejected,
+        );
+        let error = pairing_error(WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| false,
+            &mut |_| {},
+        ));
+
+        assert_eq!(error, WebOsPairingError::Rejected);
+        assert!(!format!("{error:?}").contains("webos-test-access-token"));
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_times_out_waiting_for_confirmation() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
+        let error = pairing_error(WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            Duration::from_millis(80),
+            &|| false,
+            &mut |_| {},
+        ));
+
+        assert_eq!(error, WebOsPairingError::Timeout);
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_cancellation_interrupts_prompt_wait() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = Arc::clone(&cancelled);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            cancel_after.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let error = pairing_error(WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            Duration::from_secs(2),
+            &|| cancelled.load(Ordering::Acquire),
+            &mut |_| {},
+        ));
+        let elapsed = started.elapsed();
+        setter.join().expect("cancellation setter");
+
+        assert_eq!(error, WebOsPairingError::Cancelled);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "cancel took {elapsed:?}"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn cancelling_during_connection_does_not_send_a_pairing_request() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let checks = std::cell::Cell::new(0);
+        let error = pairing_error(WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| {
+                let previous = checks.get();
+                checks.set(previous + 1);
+                previous > 0
+            },
+            &mut |_| panic!("a cancelled connection must not begin pairing"),
+        ));
+        assert_eq!(error, WebOsPairingError::Cancelled);
+        assert!(server.snapshot().registration_tokens.is_empty());
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_cancellation_from_prompt_event_skips_verification() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_on_prompt = Arc::clone(&cancelled);
+        let mut events = Vec::new();
+        let error = pairing_error(WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| cancelled.load(Ordering::Acquire),
+            &mut |event| {
+                events.push(event);
+                if event == WebOsPairingEvent::WaitingForConfirmation {
+                    cancel_on_prompt.store(true, Ordering::Release);
+                }
+            },
+        ));
+
+        assert_eq!(error, WebOsPairingError::Cancelled);
+        assert_eq!(events, vec![WebOsPairingEvent::WaitingForConfirmation]);
+        server.finish();
+    }
+
+    #[test]
+    fn cancellable_typed_pairing_read_reports_protocol_failure() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let (mut client, _) = WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| false,
+            &mut |_| {},
+        )
+        .expect("pairing should finish before capability checks");
+
+        assert_eq!(
+            client.power_state_with_cancellation(RESPONSE_TIMEOUT, &|| false),
+            Err(WebOsPairingReadError::Failed)
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn pairing_root_guard_rejects_before_network() {
+        assert_eq!(
+            super::ensure_pairing_uid_not_root(0),
+            Err(WebOsPairingError::Failed)
+        );
+        assert!(super::ensure_pairing_uid_not_root(1000).is_ok());
     }
 
     #[test]

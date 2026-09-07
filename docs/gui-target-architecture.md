@@ -140,7 +140,7 @@ The headless binary retains its static `x86_64-unknown-linux-musl` release
 target. The GTK binary is a separate dynamically linked
 `x86_64-unknown-linux-gnu` artifact. Ubuntu 24.04 is the oldest release-bundle
 build and runtime baseline: GTK 4.14, libadwaita 1.5, and GLIBC 2.39. The source
-contract remains limited to GTK 4.10 APIs and libadwaita 1.4, but compatibility
+contract remains limited to GTK 4.10 APIs and libadwaita 1.5, but compatibility
 below the tested bundle baseline is not claimed. Fedora 43 and current Arch
 validate the same built artifact on newer supported userspaces. The release
 manifest and embedded ELF identities verify both artifacts, so the GUI does
@@ -581,7 +581,58 @@ The renderer accepts multi-profile fixtures and shows an adaptive
 `AdwNavigationSplitView` only for more than one presented TV. Selection remains
 an application intent. Production storage still yields zero or one primary
 profile; this increment adds no schema, pairing, repair, or configuration writes.
-Pairing and the empty-state action follow in #174.
+
+## First-TV Pairing Increment
+
+[#174](https://github.com/Staphylococcus/LG_Buddy/issues/174) adds **Pair a TV**
+only to the zero-TV blank state. It opens an adaptive `AdwDialog` with a grouped
+form for the IPv4 address, MAC address, and managed HDMI input; this flow uses
+native webOS. Its action-dialog header contains Cancel, a centered title, and
+Pair; it has no separate close button or footer actions. The dialog keeps
+navigation behind the modal, adapts to smaller windows, and routes Cancel,
+Escape, and native dismissal through the same application intent. Successful
+pairing closes the dialog to reveal TV details and shows a “TV paired successfully”
+toast after verification and saving.
+During pairing, a thin progress bar beneath the header shows completed workflow
+phases: connecting at 0%, TV confirmation at 25%, verification at 50%, and saving
+at 75%. These milestones are not time estimates; success closes the dialog.
+The form and Pair button stay disabled until the attempt ends. General failures
+produce a toast inside the dialog; recovery guidance remains visible in the
+form. Editing, retrying, or dismissing the form clears the failure toast.
+Validation errors remain inline and do not generate toasts.
+The setup guidance marks TV On With Mobile / Wake-on-LAN as required, and a
+static IP address and Always Ready as strongly recommended. The application
+owns field validation, connecting, confirmation guidance, capability verification,
+failure recovery, and cancellation. GTK declares no network or persistence
+policy and never shells out to the CLI.
+
+The foreground application backend pairs into memory, then chooses and sequences
+power, audio, and OLED brightness verification before saving. The webOS client
+provides authentication and cancellable typed reads; it does not decide which
+capabilities the pairing workflow requires. Both pairing and profile persistence refuse
+root execution. The existing `tvs/primary/access-token.json` location is used,
+and the configuration file is published atomically after the token. A failed
+configuration save restores the prior credential state. A process crash between
+the two publications can leave an orphan token, but no partial TV configuration;
+a subsequent pairing attempt replaces that orphan after verification.
+
+Cancellation is accepted until saving begins. Operation identities reject late
+progress and results from cancelled attempts. Once publication starts, dialog
+dismissal is disabled; the worker is allowed to finish on application
+window close. Success shows the new TV details and reloads Overview without
+accepting its earlier empty-state
+results. A toolkit-independent application coordinator owns this cross-view
+refresh and coordinates application close with pairing cancellation. GTK only
+executes declared operations and renders updates. An unexpected worker exit is
+reported to the coordinator as an internal failure, not as a TV connection error.
+No second-TV flow, discovery, legacy-platform pairing, or service setup
+is included.
+
+Headless workflow tests cover validation, confirmation, rejection, timeout,
+verification failure, cancellation, and persistence. Protocol fixtures exercise
+the native webOS exchange; GTK fixtures cover the form and intent mapping, and
+the installed accessibility check covers the blank-state CTA, modal form,
+validation feedback, and dismissal through Escape and the header's Cancel button.
 
 ## Evolution Rules
 

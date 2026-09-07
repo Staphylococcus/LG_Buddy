@@ -13,7 +13,7 @@ mod registration;
 mod screen;
 mod system_info;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod tls;
 
 pub(crate) use adapter::WebOsPairingPolicy;
@@ -22,7 +22,8 @@ pub use audio::{WebOsAudioStatus, WebOsAudioStatusError, WebOsAudioVolume};
 pub(crate) use client::WebOsClientRegistration;
 pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
-    WebOsClientRegistrationError, WebOsEndpoint,
+    WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
+    WebOsPairingReadError,
 };
 pub use control::WebOsControlError;
 pub use input::{WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError};

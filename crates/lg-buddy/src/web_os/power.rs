@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::fmt;
 
-const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
+pub(crate) const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
 const POWER_OFF_URI: &str = "ssap://system/turnOff";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +120,9 @@ impl WebOsClient {
     }
 }
 
-fn parse_power_state_response(response: &Value) -> Result<WebOsPowerState, WebOsPowerStateError> {
+pub(crate) fn parse_power_state_response(
+    response: &Value,
+) -> Result<WebOsPowerState, WebOsPowerStateError> {
     let payload = match response.get("payload") {
         Some(Value::Object(payload)) => payload,
         Some(_) => return Err(WebOsPowerStateError::InvalidPayload),

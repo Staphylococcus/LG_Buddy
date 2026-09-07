@@ -1,5 +1,6 @@
 mod dev;
 
+pub mod application;
 pub mod audio;
 pub mod auth;
 pub mod backend;
@@ -11,6 +12,8 @@ pub mod lifecycle;
 pub mod navigation;
 pub mod notifications;
 pub mod overview;
+pub mod pairing;
+mod pairing_store;
 pub mod platform_access_token;
 pub mod policy;
 pub mod presentation;

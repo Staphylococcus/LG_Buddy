@@ -494,6 +494,19 @@ produces a blank state, one TV opens directly to details, and only multi-profile
 renderer fixtures expose the TV-selection sidebar. Production storage remains
 limited to one primary profile. Tab changes retain pending Overview operations
 and do not initiate TV writes or pairing.
+The zero-TV blank state offers first-TV pairing through a separate foreground
+application workflow. GTK forwards the native webOS form and cancellation
+intents, and worker progress describes connecting, TV confirmation, verification,
+and saving. Validation, protocol authentication, capability checks, and credential
+persistence remain in the core. Pairing is refused as root. The access token
+stays in memory until verification succeeds; the primary profile is published
+last, with credential rollback on a failed save. Accepted cancellation prevents
+publication. Once saving begins, it finishes even if the window closes.
+The toolkit-independent application coordinator opens the new TV details and
+refreshes Overview with fresh operation identities after success. The application
+backend selects the capability checks; the webOS client supplies authentication
+and cancellable reads. GTK forwards unexpected worker termination to the core
+as an internal failure. This does not install or activate services.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

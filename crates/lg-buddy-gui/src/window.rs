@@ -12,6 +12,8 @@ pub(crate) struct ApplicationWindow {
     window: adw::ApplicationWindow,
     overview: crate::overview::OverviewView,
     tvs: crate::tvs::TvsView,
+    pairing: crate::pairing::PairingView,
+    toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
     suppress_navigation: Rc<Cell<bool>>,
     allow_close: Rc<Cell<bool>>,
@@ -35,7 +37,8 @@ impl ApplicationWindow {
             .height_request(240)
             .build();
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
-        let tvs = crate::tvs::TvsView::new(on_tvs);
+        let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
+        let pairing = crate::pairing::PairingView::new(on_tvs);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(false);
@@ -66,7 +69,9 @@ impl ApplicationWindow {
             .build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
-        let toolbar = adw::ToolbarView::builder().content(&stack).build();
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&stack));
+        let toolbar = adw::ToolbarView::builder().content(&toasts).build();
         toolbar.add_top_bar(&header);
         toolbar.add_bottom_bar(&switcher_bar);
         window.set_content(Some(&toolbar));
@@ -106,6 +111,8 @@ impl ApplicationWindow {
             window,
             overview,
             tvs,
+            pairing,
+            toasts,
             stack,
             suppress_navigation,
             allow_close,
@@ -119,6 +126,22 @@ impl ApplicationWindow {
 
     pub(crate) fn render_tvs(&self, presentation: &TvsPresentation) {
         self.tvs.render(presentation);
+        self.pairing.render(&self.window, presentation.pairing());
+    }
+
+    pub(crate) fn dismiss_dialog(&self) -> bool {
+        if let Some(dialog) = self.window.visible_dialog() {
+            dialog.close();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn show_toast(&self, message: &str) {
+        if !self.pairing.show_toast(message) {
+            self.toasts.add_toast(adw::Toast::new(message));
+        }
     }
 
     pub(crate) fn navigate(&self, page: ApplicationPage) {
