@@ -162,6 +162,7 @@ impl PairingView {
             .title("Pair a TV")
             .content_width(480)
             .content_height(480)
+            .accessible_role(gtk::AccessibleRole::Dialog)
             .child(&toolbar)
             // Ask the application before dismissing: a worker may have begun
             // saving before its progress event reaches the main loop.
