@@ -33,6 +33,7 @@ const TEST_CERTIFICATE_DER: &str = "MIIBkzCCATmgAwIBAgIUGCxGaL477t4FECFewoE+24e3
 const TEST_PRIVATE_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRQOBcIAKtXbi9IkKmq6PBMKSMlLega0uR6twK6hSmYmhRANCAARPEPqVcY6xma+aEHzgscgO65ez1cyPVO7pBhKdzyO6/HVg5ZnK0+RnTVVyIY82u8ovWEUY8OujWlgJULHdc8WV";
 
 const GET_FOREGROUND_APP_URI: &str = "ssap://com.webos.applicationManager/getForegroundAppInfo";
+const GET_SYSTEM_INFO_URI: &str = "ssap://system/getSystemInfo";
 const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
 const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
@@ -181,6 +182,18 @@ impl WebOsTestTv {
             .expect("webOS request payload must be present");
 
         match uri {
+            GET_SYSTEM_INFO_URI => {
+                assert_eq!(payload, &json!({}));
+                response(
+                    request_id,
+                    json!({
+                        "features": {"3d": true},
+                        "modelName": "OLED42C2",
+                        "receiverType": "dvb",
+                        "returnValue": true,
+                    }),
+                )
+            }
             GET_POWER_STATE_URI => {
                 require_top_level_permission(permissions, "READ_POWER_STATE", uri);
                 assert_eq!(payload, &json!({}));

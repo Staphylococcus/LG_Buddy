@@ -226,6 +226,12 @@ observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-mut
 observe_gui_state --activate-control "Mute TV"
 wait_for_calls set_mute 2
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
+# Native tab navigation shows the read-only profile and preserves live controls.
+observe_gui_state --select-page TVs
+TV_ADDRESS="$(sed -n 's/^tvs_primary_ip=//p' "$CONFIG_FILE" | tail -n1)"
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+observe_gui_state --select-page Overview
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
 finish_gui "cancellation after successful apply"
@@ -240,6 +246,26 @@ assert state["volume"] == 21 and state["muted"] is True, state
 audio_calls = [call["command"] for call in state["calls"] if call["command"] in ("set_volume", "set_mute")]
 assert audio_calls == ["set_volume", "set_mute", "set_mute"], audio_calls
 PY
+
+# An absent profile has a standard empty state and never contacts the TV.
+export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
+cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
+start_gui enabled
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state empty
+send_closing_mnemonic Escape
+finish_gui "empty TVs view"
+cmp -s "$STATE_FILE" "$WORK_DIR/before-empty.json" || fail "Empty profile performed a TV operation."
+export LG_BUDDY_CONFIG="$CONFIG_FILE"
+
+# A failed optional model read retains the local TV details.
+printf '%s\n' '{"backlight":50,"calls":[],"plan":{"get_system_info":[{"result":"error","status":1,"stderr":"planned model read failure"}]}}' >"$STATE_FILE"
+start_gui enabled
+wait_for_calls get_system_info 1
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS"
+send_closing_mnemonic Escape
+finish_gui "unavailable TV model"
 
 # A slow write must not disable the slider or discard subsequent movement.
 printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' >"$STATE_FILE"

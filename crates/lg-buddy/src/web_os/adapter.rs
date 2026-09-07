@@ -1,8 +1,9 @@
 use super::{
     WebOsAudioStatusError, WebOsAudioVolume, WebOsAuthenticatedClientError,
     WebOsBacklightBrightness, WebOsBacklightBrightnessError, WebOsClient, WebOsClientError,
-    WebOsControlError, WebOsEndpoint, WebOsForegroundAppError, WebOsPowerState,
-    WebOsPowerStateError, WebOsScreenControlError, WebOsSetBacklightBrightnessError,
+    WebOsControlError, WebOsEndpoint, WebOsForegroundAppError, WebOsModelNameError,
+    WebOsPowerState, WebOsPowerStateError, WebOsScreenControlError,
+    WebOsSetBacklightBrightnessError,
 };
 use crate::platform_access_token::{PlatformAccessTokenAcquisitionError, PlatformAccessTokenStore};
 use crate::tv::{
@@ -258,6 +259,12 @@ impl WebOsTvClient {
 }
 
 impl TvClient for WebOsTvClient {
+    fn model_name(&self) -> Result<String, TvError> {
+        self.with_session(TvOperation::ReadModelName, |client| {
+            client.model_name().map_err(model_name_failure)
+        })
+    }
+
     fn current_input(&self) -> Result<CurrentInput, TvError> {
         self.with_session(TvOperation::ReadInput, |client| {
             client
@@ -534,6 +541,25 @@ fn foreground_app_failure(error: WebOsForegroundAppError) -> WebOsAdapterFailure
     }
 }
 
+fn model_name_failure(error: WebOsModelNameError) -> WebOsAdapterFailure {
+    let detail = error.to_string();
+    match error {
+        WebOsModelNameError::Request { source } => client_failure_with_detail(source, detail),
+        WebOsModelNameError::RequestRejected { .. } => {
+            WebOsAdapterFailure::new(TvErrorKind::Rejected, detail, false)
+        }
+        WebOsModelNameError::MissingPayload
+        | WebOsModelNameError::InvalidPayload
+        | WebOsModelNameError::MissingReturnValue
+        | WebOsModelNameError::InvalidReturnValue
+        | WebOsModelNameError::MissingModelName
+        | WebOsModelNameError::InvalidModelName
+        | WebOsModelNameError::EmptyModelName => {
+            WebOsAdapterFailure::new(TvErrorKind::InvalidResponse, detail, false)
+        }
+    }
+}
+
 fn power_state_failure(error: WebOsPowerStateError) -> WebOsAdapterFailure {
     let detail = error.to_string();
     match error {
@@ -702,6 +728,22 @@ mod tests {
         assert_eq!(
             token_fixture.store().load().expect("load acquired token"),
             Some(server.access_token())
+        );
+        assert_eq!(server.snapshot().connection_count, 1);
+        server.finish();
+    }
+
+    #[test]
+    fn model_name_read_uses_one_authenticated_session() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = SelectedTvClient::WebOs(Box::new(client_for_server(&server, &token_fixture)));
+
+        assert_eq!(client.model_name().expect("read model name"), "OLED42C2");
+        assert_eq!(
+            client.model_name().expect("reuse model-name session"),
+            "OLED42C2"
         );
         assert_eq!(server.snapshot().connection_count, 1);
         server.finish();

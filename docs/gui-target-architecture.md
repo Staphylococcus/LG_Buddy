@@ -140,7 +140,7 @@ The headless binary retains its static `x86_64-unknown-linux-musl` release
 target. The GTK binary is a separate dynamically linked
 `x86_64-unknown-linux-gnu` artifact. Ubuntu 24.04 is the oldest release-bundle
 build and runtime baseline: GTK 4.14, libadwaita 1.5, and GLIBC 2.39. The source
-contract remains limited to GTK 4.10 APIs and libadwaita 1, but compatibility
+contract remains limited to GTK 4.10 APIs and libadwaita 1.4, but compatibility
 below the tested bundle baseline is not claimed. Fedora 43 and current Arch
 validate the same built artifact on newer supported userspaces. The release
 manifest and embedded ELF identities verify both artifacts, so the GUI does
@@ -554,6 +554,34 @@ Headless tests own operation and recovery policy. GTK tests cover the expanded
 mapping and main-loop bridge; installed-GUI smoke exercises keyboard control,
 independent errors, the open-after-success behavior, and accessibility. CLI and
 service paths remain GTK-free.
+
+## TVs and Navigation Increment
+
+[#173](https://github.com/Staphylococcus/LG_Buddy/issues/173) adds TVs as the
+second destination alongside Overview. The application owns the available
+destinations, selected destination, TV collection, selected TV, and local
+profile state. GTK maps these to a native `AdwViewSwitcher` and `AdwViewStack`,
+moving navigation to `AdwViewSwitcherBar` at narrow widths. Switching views
+preserves Overview controls and pending operations; late results cannot steal
+focus from TVs.
+
+TVs reads the existing primary profile through the settings and credential
+adapters on a worker. Missing TV configuration produces an explanatory blank
+state with a standard symbolic display icon. Invalid or incomplete configuration
+remains an error. One configured TV opens directly to its details without a
+sidebar or add-TV action. Credential labels describe local observations; a
+stored token or legacy file does not establish authenticated access to a TV.
+After local details are available, a separate bounded read retrieves `modelName`
+from the TV's system information. The application uses it as the display name;
+unavailable or invalid responses retain the profile-name fallback. Late results
+cannot replace a different selection or a closed view. This does not persist a
+new name or turn local credential metadata into a pairing-health check.
+
+The renderer accepts multi-profile fixtures and shows an adaptive
+`AdwNavigationSplitView` only for more than one presented TV. Selection remains
+an application intent. Production storage still yields zero or one primary
+profile; this increment adds no schema, pairing, repair, or configuration writes.
+Pairing and the empty-state action follow in #174.
 
 ## Evolution Rules
 

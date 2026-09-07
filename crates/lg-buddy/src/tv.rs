@@ -55,6 +55,7 @@ impl CommandOutput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TvOperation {
+    ReadModelName,
     ReadInput,
     SetInput,
     ReadOledBrightness,
@@ -72,6 +73,7 @@ pub enum TvOperation {
 impl TvOperation {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ReadModelName => "read model name",
             Self::ReadInput => "read input",
             Self::SetInput => "set input",
             Self::ReadOledBrightness => "read OLED brightness",
@@ -317,6 +319,7 @@ impl AudioStatus {
 }
 
 pub trait TvClient {
+    fn model_name(&self) -> Result<String, TvError>;
     fn current_input(&self) -> Result<CurrentInput, TvError>;
     fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
     fn audio_status(&self) -> Result<AudioStatus, TvError>;
@@ -386,6 +389,13 @@ pub(crate) enum SelectedTvClient {
 }
 
 impl TvClient for SelectedTvClient {
+    fn model_name(&self) -> Result<String, TvError> {
+        match self {
+            Self::Bscpylgtv(client) => client.model_name(),
+            Self::WebOs(client) => client.model_name(),
+        }
+    }
+
     fn current_input(&self) -> Result<CurrentInput, TvError> {
         match self {
             Self::Bscpylgtv(client) => client.current_input(),
@@ -1164,6 +1174,21 @@ impl<L: BscpylgtvCommandLauncher> BscpylgtvCommandClient<L> {
 }
 
 impl<L: BscpylgtvCommandLauncher> TvClient for BscpylgtvCommandClient<L> {
+    fn model_name(&self) -> Result<String, TvError> {
+        let output = self.run_command(TvOperation::ReadModelName, "get_system_info", &["true"])?;
+        parse_model_name(output.stdout()).ok_or_else(|| {
+            TvError::new(
+                TvOperation::ReadModelName,
+                TvErrorKind::InvalidResponse,
+                invalid_command_output_detail(
+                    "get_system_info",
+                    &output,
+                    "expected a non-empty modelName string in JSON stdout",
+                ),
+            )
+        })
+    }
+
     fn current_input(&self) -> Result<CurrentInput, TvError> {
         let output = self.run_command(TvOperation::ReadInput, "get_input", &[])?;
         last_non_empty_line(output.stdout())
@@ -1333,6 +1358,12 @@ fn parse_audio_status(output: &str) -> Option<AudioStatus> {
     let muted = parse_dict_bool(output, "mute")?;
 
     Some(AudioStatus::new(volume, muted))
+}
+
+fn parse_model_name(output: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(output.trim()).ok()?;
+    let model_name = value.get("modelName")?.as_str()?.trim();
+    (!model_name.is_empty()).then(|| model_name.to_string())
 }
 
 fn parse_dict_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {

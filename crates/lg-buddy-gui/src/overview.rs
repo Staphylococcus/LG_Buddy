@@ -10,8 +10,9 @@ use lg_buddy::presentation::overview::{
 
 pub(crate) type IntentHandler = Rc<dyn Fn(OverviewIntent)>;
 
-pub(crate) struct OverviewWindow {
+pub(crate) struct OverviewView {
     window: adw::ApplicationWindow,
+    root: gtk::ScrolledWindow,
     body: gtk::Box,
     summary: gtk::Label,
     connection: gtk::Label,
@@ -20,9 +21,7 @@ pub(crate) struct OverviewWindow {
     volume: SliderRow,
     mute: gtk::ToggleButton,
     suppress: Rc<Cell<bool>>,
-    initial_brightness_focus: Cell<bool>,
-    allow_close: Rc<Cell<bool>>,
-    close_requested: Rc<Cell<bool>>,
+    initial_brightness_focus: Rc<Cell<bool>>,
 }
 
 // ponytail: keep the two native rows alive; rendering only changes their values.
@@ -111,8 +110,8 @@ impl SliderRow {
     }
 }
 
-impl OverviewWindow {
-    pub(crate) fn new(application: &adw::Application, on_intent: IntentHandler) -> Self {
+impl OverviewView {
+    pub(crate) fn new(window: &adw::ApplicationWindow, on_intent: IntentHandler) -> Self {
         let suppress = Rc::new(Cell::new(false));
         let brightness_icon = gtk::Image::from_icon_name("display-brightness-symbolic");
         brightness_icon.set_pixel_size(20);
@@ -188,37 +187,9 @@ impl OverviewWindow {
             .vexpand(true)
             .child(&clamp)
             .build();
-        let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        shell.append(&adw::HeaderBar::new());
-        shell.append(&scroller);
-        let window = adw::ApplicationWindow::builder()
-            .application(application)
-            .icon_name(crate::APPLICATION_ID)
-            .default_width(420)
-            .default_height(240)
-            .content(&shell)
-            .build();
-        let allow_close = Rc::new(Cell::new(false));
-        let close_requested = Rc::new(Cell::new(false));
-        window.connect_close_request({
-            let allow_close = Rc::clone(&allow_close);
-            let close_requested = Rc::clone(&close_requested);
-            move |_| {
-                if allow_close.get() {
-                    return gtk::glib::Propagation::Proceed;
-                }
-                close_requested.set(true);
-                on_intent(OverviewIntent::Cancel);
-                close_requested.set(false);
-                if allow_close.get() {
-                    gtk::glib::Propagation::Proceed
-                } else {
-                    gtk::glib::Propagation::Stop
-                }
-            }
-        });
         Self {
-            window,
+            window: window.clone(),
+            root: scroller,
             body,
             summary,
             connection,
@@ -227,15 +198,12 @@ impl OverviewWindow {
             volume,
             mute,
             suppress,
-            initial_brightness_focus: Cell::new(true),
-            allow_close,
-            close_requested,
+            initial_brightness_focus: Rc::new(Cell::new(true)),
         }
     }
 
     pub(crate) fn render(&self, presentation: &OverviewPresentation) {
         self.suppress.set(true);
-        self.window.set_title(Some(presentation.title()));
         self.summary
             .set_text(&match presentation.summary().status() {
                 TvSummaryStatus::Loading { message } | TvSummaryStatus::Ready { message } => {
@@ -329,13 +297,14 @@ impl OverviewWindow {
         if matches!(brightness.status(), BrightnessStatus::Failed(_)) {
             self.initial_brightness_focus.set(false);
         } else if self.initial_brightness_focus.get() && brightness.control().is_some() {
-            self.initial_brightness_focus.set(false);
+            let requested = Rc::clone(&self.initial_brightness_focus);
             let scale = self.brightness.scale.clone();
             let body = self.body.clone();
             let window = self.window.clone();
             gtk::glib::idle_add_local_once(move || {
                 // Keep native control focus, including changes since this was queued.
-                if window.is_visible()
+                if requested.replace(false)
+                    && window.is_visible()
                     && gtk::prelude::GtkWindowExt::focus(&window)
                         .is_none_or(|focus| !focus.is_ancestor(&body))
                 {
@@ -345,20 +314,12 @@ impl OverviewWindow {
         }
     }
 
-    pub(crate) fn present(&self) {
-        self.window.present();
+    pub(crate) fn widget(&self) -> &gtk::ScrolledWindow {
+        &self.root
     }
 
-    pub(crate) fn close(&self) {
-        self.allow_close.set(true);
-        if !self.close_requested.get() {
-            self.window.close();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn window(&self) -> gtk::Window {
-        self.window.clone().upcast()
+    pub(crate) fn leave(&self) {
+        self.initial_brightness_focus.set(false);
     }
 }
 
@@ -413,11 +374,24 @@ fn error_text(error: &UserFacingError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adw::prelude::AdwApplicationWindowExt;
     use lg_buddy::overview::{OverviewApplication, OverviewFrontendUpdate, OverviewOperation};
     use lg_buddy::tv::{AudioStatus, CurrentVolume, OledBrightness, VolumeLevel};
     use std::cell::RefCell;
 
-    fn render(view: &OverviewWindow, transition: lg_buddy::overview::OverviewTransition) {
+    fn test_view(application: &adw::Application, handler: IntentHandler) -> OverviewView {
+        let window = adw::ApplicationWindow::builder()
+            .application(application)
+            .title("LG Buddy")
+            .default_width(420)
+            .default_height(240)
+            .build();
+        let view = OverviewView::new(&window, handler);
+        window.set_content(Some(view.widget()));
+        view
+    }
+
+    fn render(view: &OverviewView, transition: lg_buddy::overview::OverviewTransition) {
         let OverviewFrontendUpdate::Present(presentation) = transition.update() else {
             panic!("expected presentation")
         };
@@ -474,10 +448,10 @@ mod tests {
             (true, Some(false)),
             (false, Some(true)),
         ] {
-            let view = OverviewWindow::new(application, Rc::new(|_| {}));
+            let view = test_view(application, Rc::new(|_| {}));
             let (mut app, opening) = OverviewApplication::open();
             render(&view, opening.clone());
-            view.present();
+            view.window.present();
             let OverviewOperation::ReadAudio(audio_op) = opening.operations()[2] else {
                 unreachable!()
             };
@@ -540,7 +514,7 @@ mod tests {
                     "initial brightness focus was lost"
                 );
             }
-            view.close();
+            view.window.close();
         }
     }
 
@@ -559,7 +533,7 @@ mod tests {
             .register(None::<&gtk::gio::Cancellable>)
             .unwrap();
         let intents = Rc::new(RefCell::new(Vec::new()));
-        let view = OverviewWindow::new(
+        let view = test_view(
             &application,
             Rc::new({
                 let intents = Rc::clone(&intents);
@@ -570,7 +544,7 @@ mod tests {
         render(&view, opening.clone());
         assert_eq!(view.connection.text(), "● Connecting");
         assert!(view.connection.has_css_class("warning"));
-        view.present();
+        view.window.present();
         for operation in opening.operations() {
             match *operation {
                 OverviewOperation::ReadSummary(op) => render(
@@ -743,8 +717,9 @@ mod tests {
         render(&view, disconnected.handle_intent(retry).unwrap());
         assert!(!view.brightness.retry.button.is_visible());
         assert!(view.volume.retry.button.is_visible());
-        view.close();
+        view.window.close();
         late_brightness_respects_focus(&application);
+        crate::tvs::run_renderer_scenarios(&application);
         crate::controller_test_support::run_scenario();
     }
 }

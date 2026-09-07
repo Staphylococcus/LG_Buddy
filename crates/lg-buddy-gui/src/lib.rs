@@ -1,4 +1,6 @@
 mod overview;
+mod tvs;
+mod window;
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -14,6 +16,7 @@ use lg_buddy::brightness::{
     BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
     BrightnessWriteOutcome,
 };
+use lg_buddy::navigation::{ApplicationPage, Navigation};
 use lg_buddy::overview::{
     EnvironmentOverviewBackend, OverviewApplication, OverviewAudioReadOperation,
     OverviewAudioWriteOperation, OverviewBackend, OverviewBrightnessReadOperation,
@@ -21,6 +24,10 @@ use lg_buddy::overview::{
     OverviewSummaryError, OverviewSummaryOperation, OverviewTransition, OverviewTvIdentity,
 };
 use lg_buddy::tv::{AudioStatus, OledBrightness};
+use lg_buddy::tvs::{
+    EnvironmentTvsBackend, TvsApplication, TvsBackend, TvsIntent, TvsModelReadOperation,
+    TvsReadError, TvsReadOperation, TvsTransition,
+};
 
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
 pub const APPLICATION_NAME: &str = "LG Buddy";
@@ -75,7 +82,7 @@ pub fn help(program: &str) -> String {
 
 pub fn run(command: GuiCommand) -> glib::ExitCode {
     match command {
-        GuiCommand::Brightness => run_overview_application(),
+        GuiCommand::Brightness => run_application(),
         GuiCommand::Version => {
             print!("{}", lg_buddy::version::version_text());
             glib::ExitCode::SUCCESS
@@ -83,31 +90,32 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
     }
 }
 
-fn run_overview_application() -> glib::ExitCode {
+fn run_application() -> glib::ExitCode {
     glib::set_application_name(APPLICATION_NAME);
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
         .build();
-    let controller = Rc::new(RefCell::new(None::<Rc<OverviewController>>));
+    let controller = Rc::new(RefCell::new(None::<Rc<ApplicationController>>));
     install_application_actions(&application, Rc::clone(&controller));
-    connect_overview_application(
+    connect_application(
         &application,
         Rc::clone(&controller),
         Arc::new(EnvironmentOverviewBackend),
+        Arc::new(EnvironmentTvsBackend),
     );
     application.run_with_args(&["lg-buddy-gui"])
 }
 
 fn install_application_actions(
     application: &adw::Application,
-    controller: Rc<RefCell<Option<Rc<OverviewController>>>>,
+    controller: Rc<RefCell<Option<Rc<ApplicationController>>>>,
 ) {
     let quit = gtk::gio::SimpleAction::new("quit", None);
     let application_for_quit = application.clone();
     quit.connect_activate({
         move |_, _| {
             if let Some(controller) = controller.borrow().as_ref() {
-                OverviewController::handle_intent(controller, OverviewIntent::Cancel);
+                ApplicationController::handle_intent(controller, OverviewIntent::Cancel);
             } else {
                 application_for_quit.quit();
             }
@@ -140,20 +148,25 @@ enum WorkerResult {
     ),
 }
 
-struct OverviewController {
+struct ApplicationController {
     application: RefCell<OverviewApplication>,
     gtk_application: adw::Application,
-    window: overview::OverviewWindow,
+    window: window::ApplicationWindow,
+    tvs: RefCell<TvsApplication>,
+    tvs_backend: Arc<dyn TvsBackend>,
+    navigation: RefCell<Navigation>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
 }
 
-impl OverviewController {
+impl ApplicationController {
     fn new(
         gtk_application: &adw::Application,
         backend: Arc<dyn OverviewBackend>,
-    ) -> (Rc<Self>, OverviewTransition) {
+        tvs_backend: Arc<dyn TvsBackend>,
+    ) -> (Rc<Self>, OverviewTransition, TvsTransition) {
         let (application, opening) = OverviewApplication::open();
+        let (tvs, tvs_opening) = TvsApplication::open();
         let controller = Rc::new_cyclic(|controller| {
             let on_intent: overview::IntentHandler = Rc::new({
                 let controller = controller.clone();
@@ -163,15 +176,39 @@ impl OverviewController {
                     }
                 }
             });
+            let on_tvs = Rc::new({
+                let controller = controller.clone();
+                move |intent| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::handle_tvs_intent(&controller, intent);
+                    }
+                }
+            });
+            let on_navigation = Rc::new({
+                let controller = controller.clone();
+                move |page| {
+                    if let Some(controller) = controller.upgrade() {
+                        controller.navigate(page);
+                    }
+                }
+            });
             Self {
+                tvs: RefCell::new(tvs),
+                tvs_backend,
+                navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
-                window: overview::OverviewWindow::new(gtk_application, on_intent),
+                window: window::ApplicationWindow::new(
+                    gtk_application,
+                    on_intent,
+                    on_tvs,
+                    on_navigation,
+                ),
                 backend,
                 closed: Cell::new(false),
             }
         });
-        (controller, opening)
+        (controller, opening, tvs_opening)
     }
 
     fn present(&self) {
@@ -197,12 +234,94 @@ impl OverviewController {
             }
             OverviewFrontendUpdate::Close => {
                 controller.closed.set(true);
+                controller.tvs.borrow_mut().shutdown();
                 controller.window.close();
             }
         }
         for operation in transition.operations() {
             Self::start_operation(controller, *operation);
         }
+    }
+
+    fn navigate(&self, page: ApplicationPage) {
+        if !self.closed.get() {
+            self.navigation.borrow_mut().select(page);
+            self.window.navigate(self.navigation.borrow().selected());
+        }
+    }
+
+    fn handle_tvs_intent(controller: &Rc<Self>, intent: TvsIntent) {
+        let transition = controller.tvs.borrow_mut().handle_intent(intent);
+        if let Some(transition) = transition {
+            Self::apply_tvs_transition(controller, transition);
+        }
+    }
+
+    fn apply_tvs_transition(controller: &Rc<Self>, transition: TvsTransition) {
+        if let Some(diagnostic) = transition.diagnostic() {
+            eprintln!("LG Buddy GUI: {diagnostic}");
+        }
+        controller.window.render_tvs(transition.presentation());
+        if let Some(operation) = transition.read_operation() {
+            Self::start_tvs_read(controller, operation);
+        }
+        if let Some(operation) = transition.model_read_operation() {
+            Self::start_tvs_model_read(controller, operation.clone());
+        }
+    }
+
+    fn start_tvs_model_read(controller: &Rc<Self>, operation: TvsModelReadOperation) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let profile = operation.profile().clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.read_model_name(&profile));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(TvsReadError::internal(
+                    "the TV model operation stopped before returning a result",
+                )),
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller
+                    .tvs
+                    .borrow_mut()
+                    .complete_model_read(operation.clone(), result);
+                if let Some(transition) = transition {
+                    Self::apply_tvs_transition(&controller, transition);
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn start_tvs_read(controller: &Rc<Self>, operation: TvsReadOperation) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.read_profiles());
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(TvsReadError::internal(
+                    "the TV profile operation stopped before returning a result",
+                )),
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller.tvs.borrow_mut().complete_read(operation, result);
+                if let Some(transition) = transition {
+                    Self::apply_tvs_transition(&controller, transition);
+                }
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn start_operation(controller: &Rc<Self>, operation: OverviewOperation) {
@@ -331,25 +450,33 @@ impl OverviewController {
 
     fn shutdown(&self) {
         self.application.borrow_mut().shutdown();
+        self.tvs.borrow_mut().shutdown();
     }
 }
 
-fn connect_overview_application(
+fn connect_application(
     application: &adw::Application,
-    controller: Rc<RefCell<Option<Rc<OverviewController>>>>,
+    controller: Rc<RefCell<Option<Rc<ApplicationController>>>>,
     backend: Arc<dyn OverviewBackend>,
+    tvs_backend: Arc<dyn TvsBackend>,
 ) {
     application.connect_activate({
         let controller = Rc::clone(&controller);
         let backend = Arc::clone(&backend);
+        let tvs_backend = Arc::clone(&tvs_backend);
         move |application| {
             if let Some(controller) = controller.borrow().as_ref() {
                 controller.present();
                 return;
             }
-            let (overview, opening) = OverviewController::new(application, Arc::clone(&backend));
+            let (overview, opening, tvs_opening) = ApplicationController::new(
+                application,
+                Arc::clone(&backend),
+                Arc::clone(&tvs_backend),
+            );
             controller.replace(Some(Rc::clone(&overview)));
-            OverviewController::apply_transition(&overview, opening);
+            ApplicationController::apply_transition(&overview, opening);
+            ApplicationController::apply_tvs_transition(&overview, tvs_opening);
             overview.present();
         }
     });
@@ -409,7 +536,43 @@ pub(crate) mod controller_test_support {
     };
     use lg_buddy::tv::{AudioStatus, CurrentVolume, OledBrightness, VolumeLevel};
 
-    use super::{OverviewController, APPLICATION_ID};
+    use super::{ApplicationController, APPLICATION_ID};
+
+    struct EmptyTvsBackend;
+    impl lg_buddy::tvs::TvsBackend for EmptyTvsBackend {
+        fn read_profiles(
+            &self,
+        ) -> Result<Vec<lg_buddy::tvs::TvProfile>, lg_buddy::tvs::TvsReadError> {
+            Ok(Vec::new())
+        }
+
+        fn read_model_name(
+            &self,
+            _: &lg_buddy::tvs::TvProfile,
+        ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+            panic!("an empty collection must not query a TV model")
+        }
+    }
+
+    struct BlockingTvsBackend {
+        profiles: Mutex<mpsc::Receiver<Vec<lg_buddy::tvs::TvProfile>>>,
+        model: Mutex<mpsc::Receiver<String>>,
+    }
+
+    impl lg_buddy::tvs::TvsBackend for BlockingTvsBackend {
+        fn read_profiles(
+            &self,
+        ) -> Result<Vec<lg_buddy::tvs::TvProfile>, lg_buddy::tvs::TvsReadError> {
+            Ok(self.profiles.lock().unwrap().recv().unwrap())
+        }
+
+        fn read_model_name(
+            &self,
+            _: &lg_buddy::tvs::TvProfile,
+        ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+            Ok(self.model.lock().unwrap().recv().unwrap())
+        }
+    }
 
     type SummaryResult = Result<OverviewTvIdentity, OverviewSummaryError>;
     type BrightnessResult = Result<OledBrightness, BrightnessReadError>;
@@ -615,8 +778,18 @@ pub(crate) mod controller_test_support {
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
-        let (controller, opening) = OverviewController::new(&application, Arc::new(backend));
-        OverviewController::apply_transition(&controller, opening.clone());
+        let (profiles_tx, profiles_rx) = mpsc::channel();
+        let (model_tx, model_rx) = mpsc::channel();
+        let (controller, opening, tvs_opening) = ApplicationController::new(
+            &application,
+            Arc::new(backend),
+            Arc::new(BlockingTvsBackend {
+                profiles: Mutex::new(profiles_rx),
+                model: Mutex::new(model_rx),
+            }),
+        );
+        ApplicationController::apply_transition(&controller, opening.clone());
+        ApplicationController::apply_tvs_transition(&controller, tvs_opening);
         let native_window = controller.window.window();
         controller.present();
         controller.present();
@@ -643,6 +816,26 @@ pub(crate) mod controller_test_support {
             .expect("summary result receiver");
         pump_until(|| widget_contains_text(&controller.window.window().upcast(), "192.0.2.1"));
 
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        pump_for(Duration::from_millis(30));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Tvs
+        );
+        profiles_tx
+            .send(vec![lg_buddy::tvs::TvProfile::new(
+                "primary",
+                "Primary TV",
+                Ipv4Addr::new(192, 0, 2, 1),
+                "aa:bb:cc:dd:ee:ff".parse().unwrap(),
+                HdmiInput::Hdmi1,
+                TvPlatform::LgWebOs,
+                lg_buddy::tvs::TvCredentialState::Stored,
+            )])
+            .unwrap();
+        pump_until(|| widget_contains_text(&native_window.clone().upcast(), "Primary TV"));
+        let tvs_focus = gtk::prelude::GtkWindowExt::focus(&native_window);
+
         controls
             .brightness
             .send(Ok(OledBrightness::new(50).expect("valid brightness")))
@@ -657,16 +850,43 @@ pub(crate) mod controller_test_support {
             )))
             .expect("audio result receiver");
         pump_until(|| scale_count(&controller.window.window().upcast()) == 2);
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Tvs
+        );
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&native_window),
+            tvs_focus,
+            "background Overview reads must preserve focus on TVs"
+        );
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Overview);
+        model_tx.send("OLED42C2".to_string()).unwrap();
+        pump_until(|| widget_contains_text(&native_window.clone().upcast(), "OLED42C2"));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Overview,
+            "a background model result must not change the active page"
+        );
         assert!(
             heartbeat.get() >= 2,
             "GTK heartbeat must run while reads are pending"
         );
 
-        OverviewController::handle_intent(&controller, OverviewIntent::SetBrightness(55));
+        ApplicationController::handle_intent(&controller, OverviewIntent::SetBrightness(55));
         pump_until(|| controls.write_started.try_recv().is_ok());
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Overview);
+        assert!(
+            controls.write_started.try_recv().is_err(),
+            "navigation must not submit another write"
+        );
 
         let heartbeat_before_close = heartbeat.get();
-        OverviewController::handle_intent(&controller, OverviewIntent::Cancel);
+        ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         assert!(controller.closed.get(), "Cancel closes the view");
         controller.present();
         assert!(controller.closed.get(), "closed view must not reactivate");
@@ -688,8 +908,11 @@ pub(crate) mod controller_test_support {
         heartbeat_source.remove();
 
         let panic_application = test_application("Panic");
-        let (panic_controller, panic_opening) =
-            OverviewController::new(&panic_application, Arc::new(PanicBackend));
+        let (panic_controller, panic_opening, _) = ApplicationController::new(
+            &panic_application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+        );
         let initial = match panic_opening.update() {
             super::OverviewFrontendUpdate::Present(presentation) => presentation.clone(),
             super::OverviewFrontendUpdate::Close => panic!("opening must present"),
@@ -698,7 +921,7 @@ pub(crate) mod controller_test_support {
         let summary_operation = find_operation(panic_opening.operations(), |operation| {
             matches!(operation, OverviewOperation::ReadSummary(_))
         });
-        OverviewController::start_operation(&panic_controller, summary_operation);
+        ApplicationController::start_operation(&panic_controller, summary_operation);
         pump_until(|| {
             widget_contains_text(
                 &panic_controller.window.window().upcast(),
@@ -717,10 +940,11 @@ pub(crate) mod controller_test_support {
         let application = test_application("WriteHold");
         let controller = Rc::new(RefCell::new(None));
         super::install_application_actions(&application, Rc::clone(&controller));
-        super::connect_overview_application(
+        super::connect_application(
             &application,
             Rc::clone(&controller),
             Arc::new(backend),
+            Arc::new(EmptyTvsBackend),
         );
         controls
             .summary
@@ -763,7 +987,7 @@ pub(crate) mod controller_test_support {
                     assert!(Instant::now() < deadline, "write did not start");
                     let controller = controller.borrow().as_ref().unwrap().clone();
                     if !issued && scale_count(&controller.window.window().upcast()) == 1 {
-                        OverviewController::handle_intent(
+                        ApplicationController::handle_intent(
                             &controller,
                             OverviewIntent::SetBrightness(55),
                         );

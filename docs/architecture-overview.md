@@ -486,6 +486,14 @@ and opaque operation identity prevents late results from replacing newer or
 closed presentation state. Successful changes keep Overview open; brightness
 writes retain the existing success notification. Passive native operations use
 stored credentials without opening pairing prompts.
+The TVs tab reads the existing primary profile and local credential state
+through application-owned operations, then enriches the display name with a
+separate optional model read from the TV. The application owns navigation and TV
+selection; GTK supplies the native view switcher and adaptive layout. Zero TVs
+produces a blank state, one TV opens directly to details, and only multi-profile
+renderer fixtures expose the TV-selection sidebar. Production storage remains
+limited to one primary profile. Tab changes retain pending Overview operations
+and do not initiate TV writes or pairing.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

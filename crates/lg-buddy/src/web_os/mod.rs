@@ -11,6 +11,7 @@ mod picture;
 mod power;
 mod registration;
 mod screen;
+mod system_info;
 #[cfg(test)]
 mod test_support;
 mod tls;
@@ -31,6 +32,7 @@ pub use picture::{
 };
 pub use power::{WebOsPowerState, WebOsPowerStateError};
 pub use screen::WebOsScreenControlError;
+pub use system_info::WebOsModelNameError;
 
 pub use registration::{
     parse_registration_message, WebOsRegistrationError, WebOsRegistrationEvent,
