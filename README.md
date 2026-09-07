@@ -1,22 +1,43 @@
-# LG Buddy
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" alt="LG Buddy app icon" width="128" height="128">
+</p>
+<h1 align="center">LG Buddy</h1>
+<p align="center">Make your LG webOS TV feel at home on your Linux desktop.</p>
+<p align="center">
+  <a href="https://github.com/Staphylococcus/LG_Buddy/releases">Download</a> ·
+  <a href="docs/user-guide.md">User guide</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-LG Buddy makes an LG webOS TV behave more like a monitor for a Linux PC.
-It is inspired by
-[LGTV Companion for Windows](https://github.com/JPersson77/LGTVCompanion).
+LG Buddy handles your TV's power and panel alongside your PC, with everyday
+controls close at hand.
 
-LG Buddy can:
+## 1.6 Beta Preview
 
-- turn the TV on at boot and wake
-- turn the TV off at shutdown and before system sleep
-- blank and restore the panel on supported desktop idle backends, then power it
-  off after five additional minutes without activity
-- keep the panel awake when supported gamepads are active
-- adjust OLED pixel brightness from a desktop dialog or the command line
-- control TV volume and mute from the command line
-- manage settings and check for updates from the command line
+**1.6.0-beta.1** introduces Overview, the TVs view, and native first-TV pairing.
+This is an early preview of 1.6; GUI settings and credential repair are still
+being developed. The latest stable 1.5 release does not include this expanded
+interface. See the [beta release notes](docs/releases/1.6.0-beta.1.md) for scope
+and installation details. Screenshots use sample TV data.
 
-GNOME is not required. Official release bundles include a prebuilt `lg-buddy`
-binary, so normal installation does not require a Rust toolchain.
+![LG Buddy Overview with a connected TV, brightness and volume sliders, and connection status](docs/screenshots/overview.png)
+
+Move a slider to apply its value, or click the sound icon to toggle mute.
+[Take the GUI tour →](docs/user-guide.md#desktop-app)
+
+- **Power with your PC.** Turn the TV on at boot and wake, and off at shutdown
+  and before system sleep.
+- **Give the panel a break.** Blank it when you're away, restore it when you
+  return, and power off after five more minutes without activity.
+- **Keep playing.** Supported gamepad activity keeps the panel awake.
+- **Adjust from the desktop.** Change brightness and volume, toggle mute, and
+  see connection status in Overview.
+- **Pair your first TV.** Follow the pairing dialog, then view the TV's model
+  and saved connection details in the TVs tab.
+
+GNOME is not required. Official release bundles include prebuilt binaries, so
+normal installation does not require a Rust toolchain. Settings and updates
+remain available through the command line.
 
 ## Desktop Compatibility
 
@@ -89,7 +110,8 @@ the vendored D-Bus library is compiled during the build. See the
 
 ## Install
 
-1. Download and extract the release archive for your platform.
+1. Download and extract the [release archive](https://github.com/Staphylococcus/LG_Buddy/releases)
+   for your platform.
 2. Run the installer as your regular user:
 
 ```bash
@@ -125,46 +147,29 @@ system locations. First-class NixOS packaging is tracked in
 
 ## Quick Start
 
-LG Buddy's services run automatically after installation. Common commands are:
+LG Buddy's services run automatically after installation. Open **LG Buddy**
+from your app launcher, or run:
 
 ```bash
-lg-buddy power on
-lg-buddy power off
-lg-buddy screen off
-lg-buddy screen on
 lg-buddy brightness
-lg-buddy brightness get
+```
+
+The command line also provides direct controls, settings, and updates:
+
+```bash
 lg-buddy brightness set 65
-lg-buddy volume
 lg-buddy volume 20
-lg-buddy volume up
 lg-buddy volume mute
-lg-buddy settings list
-lg-buddy settings describe screen.backend
+lg-buddy settings set screen.idle_timeout 600
 lg-buddy updates check
 lg-buddy updates install
-lg-buddy --version
-```
-
-Change an individual setting with:
-
-```bash
-lg-buddy settings set <key> <value>
-```
-
-For example:
-
-```bash
-lg-buddy settings set screen.idle_timeout 600
-lg-buddy settings set screen.restore_policy aggressive
-lg-buddy settings set updates.auto_check disabled
 ```
 
 Run `lg-buddy <command> --help` for scoped syntax. To revisit the complete
-interactive setup, run `./configure.sh`.
+interactive setup, run `./configure.sh` from the extracted release archive.
 
-The [user guide](docs/user-guide.md) covers all settings, desktop backends, TV
-platform selection, updates, service checks, and uninstalling.
+The [user guide](docs/user-guide.md) covers the desktop app, commands, settings,
+service checks, and uninstalling.
 
 ## Documentation
 
@@ -181,6 +186,7 @@ platform selection, updates, service checks, and uninstalling.
 ## Credits
 
 - [chros73](https://github.com/chros73) for `bscpylgtv`
-- [JPersson77](https://github.com/JPersson77) for the original inspiration
+- [JPersson77](https://github.com/JPersson77) for
+  [LGTV Companion](https://github.com/JPersson77/LGTVCompanion), the original inspiration
 - [Faceless3882](https://github.com/Faceless3882) for the original shell script
   implementation

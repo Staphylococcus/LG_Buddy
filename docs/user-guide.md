@@ -1,7 +1,73 @@
-# User Guide
+# <img src="../data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" alt="" width="44" height="44"> LG Buddy User Guide
 
 This guide covers day-to-day LG Buddy use after installation. For implementation
 details and package integration, see [Technical references](#technical-references).
+
+[Desktop app](#desktop-app) · [Commands](#common-commands) ·
+[Settings](#configuration) · [Updates](#updates)
+
+## Desktop App
+
+Overview, TVs, and the pairing dialog are included in **1.6.0-beta.1**, an early
+preview of 1.6. They are not included in the stable 1.5 release. See the
+[beta release notes](releases/1.6.0-beta.1.md) for the scope of this preview.
+Screenshots use sample TV data.
+
+Open **LG Buddy** from your app launcher, or run `lg-buddy brightness`.
+
+### Overview
+
+![Overview showing a connected TV with brightness and volume sliders](screenshots/overview.png)
+
+Overview shows the primary TV's address, managed HDMI input, and connection
+state, with controls for OLED pixel brightness, TV volume, and mute. Move a
+slider to apply its value; click the sound icon to toggle mute. Changing volume
+also unmutes the TV. If a control cannot be loaded, its feedback and retry action
+appear alongside it.
+
+### TVs
+
+The TVs tab shows the configured TV's address, MAC address, HDMI input, control
+platform, and credential status. These details are read-only. A saved credential
+does not mean the TV is currently connected; check Overview for connection
+status. When available, the model reported by the TV replaces the generic
+profile heading. If it cannot be read, the saved details remain visible.
+
+With no TV configured, choose **Pair a TV** to get started.
+
+![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
+
+### Pair Your First TV
+
+Open **TVs → Pair a TV**. The dialog pairs your first TV using native webOS.
+
+![Pair a TV dialog with TV setup guidance, address fields, and HDMI input selection](screenshots/pairing.png)
+
+Before starting:
+
+- Turn on the TV and connect it to the same network as the computer.
+- Find the TV's IPv4 address and MAC address in its network settings.
+- Required: enable **TV On With Mobile / Wake-on-LAN**.
+- Strongly recommended: use a static IP address and enable **Always Ready**.
+
+Then pair the TV:
+
+1. Enter the TV's IP and MAC addresses, then select the HDMI input connected to
+   your PC.
+2. Choose **Pair** and approve the request on the TV using its remote.
+3. Wait while LG Buddy checks access and saves the connection. The progress bar
+   tracks each stage. When pairing succeeds, the dialog closes, the TV appears
+   in the app, and a **TV paired successfully** toast confirms the result.
+
+If pairing fails, the dialog shows an actionable error and can be submitted
+again after correcting the details or TV state. You can cancel until saving
+begins; once saving starts, the dialog stays open until the operation finishes.
+A cancelled attempt does not save a TV.
+
+Pairing saves the TV connection. To set up automatic idle, sleep, and wake
+behavior on a fresh installation, use the [installer](../README.md#install)
+and `./configure.sh` from the release archive. Use [settings](#configuration)
+for individual changes.
 
 ## Common Commands
 
@@ -39,15 +105,10 @@ syntax.
   is pending.
 - `screen off` blanks the TV output while remembering that LG Buddy blanked it.
 - `screen on` restores the output according to the configured restore policy.
-- `brightness` opens LG Buddy Overview focused on brightness. Overview shows the
-  primary TV, brightness, volume, and mute with separate loading and failure
-  feedback. Move either slider to apply its value; click the sound icon to
-  toggle mute. Changes keep Overview open, and changing volume also unmutes
-  the TV, just like the volume command. Passive reads use stored native
-  credentials and never open a pairing prompt. If the GUI executable is absent
-  from a transitional installation, LG Buddy uses the retained Zenity dialog.
-  `brightness get` and `brightness set <0-100>` remain headless and read or
-  change OLED brightness directly.
+- `brightness` opens LG Buddy Overview focused on brightness. `brightness get`
+  and `brightness set <0-100>` remain headless and read or change OLED
+  brightness directly. If the GUI executable is absent, a transitional
+  installation falls back to the retained Zenity brightness dialog.
 - `volume` prints the current level, `mute` when muted, or `unknown` when the TV
   does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
   down` change the volume and unmute the TV. `volume mute [on|off]` toggles or
@@ -55,21 +116,13 @@ syntax.
 - `--version` reports the installed version and, for official builds, release
   metadata.
 
-The GUI has Overview and TVs tabs. TVs shows the configured TV's network
-addresses, managed input, control platform, and local credential state. These
-details are read-only. When available, the model reported by the TV replaces
-the generic profile heading; an unavailable TV still shows its saved details.
-A stored credential does not mean authentication has
-been verified with the TV. When no TV is configured, TVs shows an explanatory
-empty state; configure the first TV through the existing configurator.
-
 LG Buddy's services normally run automatically, so most users only need these
 commands and the settings described below.
 
 ## Configuration
 
-Run the configurator to change TV identity, control platform, idle behavior, or
-installed service wiring:
+Run the configurator from the extracted release archive to change TV identity,
+control platform, idle behavior, or installed service wiring:
 
 ```bash
 ./configure.sh
