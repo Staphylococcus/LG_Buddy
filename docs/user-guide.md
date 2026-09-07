@@ -38,9 +38,10 @@ selection saves immediately and changes which input LG Buddy manages; it does
 not switch the TV’s current source. If saving fails, the previous selection is
 restored.
 
-To remove the connection or recover from pairing problems, choose **Unpair
-TV…** and confirm. This removes the saved TV profile and its local native
-credential, while keeping other settings. It does not revoke authorization on
+To remove the connection or recover from pairing problems, click the **Unpair
+TV…** icon beside the TV model name and confirm. This removes the saved TV
+profile and its local native credential, while keeping other settings. It does
+not revoke authorization on
 the TV or remove compatibility credential storage. Cancelling the confirmation
 keeps the connection. Once unpaired, use **Pair a TV** to reconnect through
 native webOS. Cancelling or failing this new pairing leaves no TV configured.

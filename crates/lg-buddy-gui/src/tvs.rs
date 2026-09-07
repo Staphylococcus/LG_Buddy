@@ -48,7 +48,7 @@ struct TvsMode {
     platform: adw::ActionRow,
     credentials: adw::ActionRow,
     credential_description: gtk::Label,
-    unpair: ActionButton,
+    unpair: UnpairButton,
     management_error: gtk::Label,
     management_actions: gtk::Box,
     management_retry: RetryButton,
@@ -111,13 +111,8 @@ impl TvsMode {
             .margin_end(12)
             .build();
         credential_description.add_css_class("dim-label");
-        let unpair = ActionButton::new(on_intent);
-        unpair.button.add_css_class("destructive-action");
-        let unpair_row = adw::ActionRow::builder()
-            .activatable(false)
-            .selectable(false)
-            .build();
-        unpair_row.add_suffix(&unpair.button);
+        let unpair = UnpairButton::new(on_intent);
+        details.set_header_suffix(Some(&unpair.button));
         let management_error = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -139,7 +134,6 @@ impl TvsMode {
         details_box.append(&management_actions);
         details_box.append(&details);
         details_box.append(&credential_description);
-        details.add(&unpair_row);
         let clamp = adw::Clamp::builder()
             .maximum_size(600)
             .tightening_threshold(400)
@@ -512,17 +506,23 @@ struct PairButton {
     intent: Rc<RefCell<Option<TvsIntent>>>,
 }
 
-struct ActionButton {
+struct UnpairButton {
     button: gtk::Button,
     intent: Rc<RefCell<Option<TvsIntent>>>,
 }
 
-impl ActionButton {
+impl UnpairButton {
     fn new(on_intent: &IntentHandler) -> Self {
         let button = gtk::Button::builder()
+            .icon_name("list-remove-symbolic")
+            .width_request(36)
+            .height_request(36)
+            .valign(gtk::Align::Center)
             .visible(false)
             .sensitive(false)
             .build();
+        button.add_css_class("flat");
+        button.add_css_class("circular");
         let intent = Rc::new(RefCell::new(None));
         button.connect_clicked({
             let on_intent = Rc::clone(on_intent);
@@ -546,7 +546,6 @@ impl ActionButton {
         self.button.set_visible(action.is_some());
         self.button
             .set_sensitive(action.is_some_and(TvsAction::enabled));
-        self.button.set_label(action.map_or("", TvsAction::label));
         self.button.set_tooltip_text(action.map(TvsAction::label));
         self.button
             .update_property(&[gtk::accessible::Property::Label(
