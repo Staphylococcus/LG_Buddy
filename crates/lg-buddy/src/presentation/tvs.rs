@@ -163,6 +163,9 @@ impl TvsPresentation {
         retry_apply: bool,
     ) {
         self.input_enabled = enabled;
+        if let Some(action) = &mut self.pair_action {
+            action.enabled = confirmation_enabled;
+        }
         self.unpair_action = self
             .selected_profile()
             .map(|_| TvsAction::new("Unpair TV…", enabled, TvsIntent::UnpairTv));

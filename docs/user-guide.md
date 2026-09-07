@@ -51,16 +51,31 @@ With no TV configured, choose **Pair a TV** to get started.
 
 ### Settings
 
-The development version adds a read-only **Settings** tab with **Screen**,
-**Sleep & Wake**, and **Updates** groups. Each row shows the current configured
-value and a description shared with the settings commands. Expand a row to see
-its source, default, and accepted values. Invalid saved values are identified
-explicitly; they are not silently replaced by defaults.
+The released **1.6.0-beta.1** does not include GUI Settings. Development builds
+add a **Settings** tab with **Screen**, **Sleep & Wake**, and **Updates** groups.
+It exposes seven behavior settings shared with the [settings commands](#configuration). Settings remains independent of TV
+availability; it can load and edit configuration even when no TV is paired.
+Settings reloads when you enter the tab. Invalid saved values remain visible as
+invalid and are not silently replaced with defaults.
 
-Settings reloads when you enter the tab. These values describe configuration,
-not whether the corresponding service is currently running. For now, use the
-[settings commands](#configuration) to make changes. TV identity, HDMI input,
-and pairing remain in **TVs**.
+Expand a row to reveal its native editor, source, default, and accepted values:
+
+- toggles for idle blanking, TV sleep & wake, and automatic update checks, plus
+  bounded choices for the desktop backend, restore policy, and update channel,
+  commit on change;
+- the numeric idle timeout commits when you press Enter or leave the field;
+- **Reset** removes the explicit value and applies the default immediately.
+
+Each change is validated, saved, and applied automatically, without a separate
+**Save** or **Cancel** button. The row reports progress while this runs. Settings
+and TV changes wait for one another to finish. A validation or persistence failure
+restores the previous value and explains the error. If saving succeeds but
+runtime application fails, the saved value remains, a warning is shown, and
+**Retry apply** repeats only the runtime step.
+
+If the screen integration or automatic update checks are not installed or
+running, the row explains that condition. Changing a setting does not install
+or repair these services. TV identity, HDMI input, and pairing remain in **TVs**.
 
 ### Pair Your First TV
 

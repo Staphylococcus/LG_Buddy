@@ -256,6 +256,21 @@ observe_gui_state --select-page TVs
 printf '%s\n' 'screen_idle_timeout=120' 'updates_channel=stable' >> "$CONFIG_FILE"
 observe_gui_state --select-page Settings
 observe_gui_state --expected-settings-state ready --expected-settings-timeout '120 seconds'
+# A timeout draft is not saved until Enter; Reset removes the override immediately.
+cp "$CONFIG_FILE" "$WORK_DIR/before-settings-edit.env"
+observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
+cmp "$CONFIG_FILE" "$WORK_DIR/before-settings-edit.env" || fail "Typing a timeout saved before finalization."
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-settings-state ready --expected-settings-timeout '720 seconds'
+[ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Finalized timeout was not saved."
+observe_gui_state --edit-settings-timeout invalid --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-settings-state ready --expected-settings-timeout '720 seconds'
+[ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Invalid timeout changed configuration."
+observe_gui_state --focus-control "Reset Idle timeout" --window-id "$WINDOW_ID"
+observe_gui_state --activate-control "Reset Idle timeout"
+observe_gui_state --expected-settings-state ready --expected-settings-timeout '300 seconds'
+[ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "300" ] || fail "Reset did not restore the default timeout."
 cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
 observe_gui_state --select-page Overview
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true

@@ -16,10 +16,11 @@ controls close at hand.
 
 **1.6.0-beta.1** introduces Overview, the TVs view, and native first-TV pairing.
 This is an early preview of 1.6; further GUI work is still being developed.
-The development branch also includes TV input changes, local unpairing, and a
-read-only Settings tab. The latest stable 1.5 release does not include this expanded
-interface. See the [beta release notes](docs/releases/1.6.0-beta.1.md) for scope
-and installation details. Screenshots use sample TV data.
+The released beta does not include GUI Settings. Development builds also include
+TV input changes, local unpairing, and editable Settings controls. The latest
+stable 1.5 release does not include this expanded interface. See the
+[beta release notes](docs/releases/1.6.0-beta.1.md) for scope and installation
+details. Screenshots use sample TV data.
 
 ![LG Buddy Overview with a connected TV, brightness and volume sliders, and connection status](docs/screenshots/overview.png)
 
@@ -37,8 +38,8 @@ Move a slider to apply its value, or click the sound icon to toggle mute.
   and saved connection details in the TVs tab.
 
 GNOME is not required. Official release bundles include prebuilt binaries, so
-normal installation does not require a Rust toolchain. Settings and updates
-remain available through the command line.
+normal installation does not require a Rust toolchain. The stable CLI remains
+available for headless controls, settings, and updates.
 
 ## Desktop Compatibility
 

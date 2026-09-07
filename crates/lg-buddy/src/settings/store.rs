@@ -256,9 +256,26 @@ pub struct SettingsChange {
     mutation: SettingsMutation,
     path: PathBuf,
     file_changed: bool,
+    effective: EffectiveSetting,
 }
 
 impl SettingsChange {
+    pub fn effective_setting(&self) -> &EffectiveSetting {
+        &self.effective
+    }
+
+    pub(crate) fn for_apply(store: &SettingsStore, key: &str) -> Result<Self, SettingsError> {
+        let effective = store.effective_by_name(key)?;
+        let value = effective.required_value()?;
+        let mutation = SettingsMutation::set(store, key, &value.to_string())?;
+        Ok(Self {
+            mutation,
+            path: store.path().to_path_buf(),
+            file_changed: false,
+            effective,
+        })
+    }
+
     pub fn mutation(&self) -> SettingsMutation {
         self.mutation
     }
@@ -302,6 +319,18 @@ pub(crate) fn persist_settings_mutation(
         mutation,
         path: editor.path().to_path_buf(),
         file_changed,
+        effective: EffectiveSetting {
+            definition: mutation.definition(),
+            value: mutation.new_value,
+            source: match mutation.action() {
+                SettingsMutationAction::Set => SettingSource::ConfigEnv,
+                SettingsMutationAction::Unset if mutation.new_value.is_some() => {
+                    SettingSource::Default
+                }
+                SettingsMutationAction::Unset => SettingSource::Missing,
+            },
+            invalid_value: None,
+        },
     })
 }
 

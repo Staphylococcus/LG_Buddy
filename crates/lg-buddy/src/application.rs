@@ -12,9 +12,10 @@ use crate::overview::{
 };
 use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
 use crate::presentation::settings::SettingsGroup;
+use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome, SettingsMutationStage};
 use crate::settings_view::{
-    SettingsApplication, SettingsIntent, SettingsReadError, SettingsReadOperation,
-    SettingsTransition,
+    SettingsApplication, SettingsIntent, SettingsMutationOperation, SettingsReadError,
+    SettingsReadOperation, SettingsTransition,
 };
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
@@ -111,9 +112,8 @@ impl Application {
         &mut self,
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
-        self.settings
-            .handle_intent(intent)
-            .map(Self::settings_transition)
+        let transition = self.settings.handle_intent(intent)?;
+        Some(self.settings_transition(transition))
     }
 
     pub fn select_page(
@@ -133,15 +133,43 @@ impl Application {
         operation: SettingsReadOperation,
         result: Result<Vec<SettingsGroup>, SettingsReadError>,
     ) -> Option<ApplicationTransition> {
-        self.settings
-            .complete_read(operation, result)
-            .map(Self::settings_transition)
+        let transition = self.settings.complete_read(operation, result)?;
+        Some(self.settings_transition(transition))
     }
 
-    fn settings_transition(transition: SettingsTransition) -> ApplicationTransition {
+    pub fn settings_mutation_progress(
+        &mut self,
+        operation: &SettingsMutationOperation,
+        stage: SettingsMutationStage,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.mutation_progress(operation, stage)?;
+        Some(self.settings_transition(transition))
+    }
+
+    pub fn complete_settings_mutation(
+        &mut self,
+        operation: &SettingsMutationOperation,
+        result: Result<SettingsMutationOutcome, SettingsMutationFailure>,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.complete_mutation(operation, result)?;
+        Some(self.settings_transition(transition))
+    }
+
+    pub fn settings_mutation_worker_stopped(
+        &mut self,
+        operation: &SettingsMutationOperation,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.mutation_worker_stopped(operation)?;
+        Some(self.settings_transition(transition))
+    }
+
+    fn settings_transition(&mut self, transition: SettingsTransition) -> ApplicationTransition {
+        let tvs = self.tvs.set_controls_available(
+            !self.overview.has_pending_write() && !self.settings.is_mutating(),
+        );
         ApplicationTransition {
             overview: None,
-            tvs: None,
+            tvs,
             settings: Some(transition),
         }
     }
@@ -237,9 +265,9 @@ impl Application {
             self.tvs.shutdown();
             self.settings.shutdown();
         }
-        let tvs = self
-            .tvs
-            .set_controls_available(!self.overview.has_pending_write());
+        let tvs = self.tvs.set_controls_available(
+            !self.overview.has_pending_write() && !self.settings.is_mutating(),
+        );
         ApplicationTransition {
             overview: Some(transition),
             tvs,
@@ -255,10 +283,13 @@ impl Application {
         } else {
             None
         };
+        let settings = self
+            .settings
+            .set_controls_available(!self.tvs.is_managing() && !self.tvs.is_pairing());
         ApplicationTransition {
             overview,
             tvs: Some(transition),
-            settings: None,
+            settings,
         }
     }
 }
@@ -512,5 +543,120 @@ mod management_tests {
             .unwrap();
         assert!(done.tvs().unwrap().presentation().input_enabled());
         assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use crate::pairing::PairingIntent;
+    use crate::settings::{ConfigEnvReader, SettingsError};
+    use crate::settings_view::BehaviorSetting;
+
+    fn settings() -> Vec<SettingsGroup> {
+        crate::presentation::settings::SettingsPresentation::from_store(
+            &ConfigEnvReader::parse("/unused/config.env", "").into_store(),
+        )
+        .groups()
+        .to_vec()
+    }
+
+    fn editable(transition: &ApplicationTransition) -> bool {
+        transition
+            .settings()
+            .unwrap()
+            .presentation()
+            .groups()
+            .iter()
+            .flat_map(|group| group.rows())
+            .all(|row| row.editor_enabled())
+    }
+
+    #[test]
+    fn settings_write_blocks_pairing_and_close_rejects_late_completions() {
+        let (mut app, opening) = Application::open();
+        app.complete_tvs_read(opening.tvs().unwrap().read_operation().unwrap(), Ok(vec![]))
+            .unwrap();
+        app.complete_settings_read(
+            opening.settings().unwrap().read_operation().unwrap(),
+            Ok(settings()),
+        )
+        .unwrap();
+        let write = app
+            .handle_settings_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                enabled: false,
+            })
+            .unwrap();
+        assert!(!write
+            .tvs()
+            .unwrap()
+            .presentation()
+            .pair_action()
+            .unwrap()
+            .enabled());
+        assert!(app.handle_tvs_intent(TvsIntent::PairTv).is_none());
+        assert!(!editable(&write));
+        let operation = write.settings().unwrap().mutation_operation().unwrap();
+        let done = app
+            .complete_settings_mutation(
+                operation,
+                Err(SettingsMutationFailure::Persistence(SettingsError::Apply {
+                    message: "test persistence failure".into(),
+                })),
+            )
+            .unwrap();
+        assert!(done
+            .tvs()
+            .unwrap()
+            .presentation()
+            .pair_action()
+            .unwrap()
+            .enabled());
+        assert!(editable(&done));
+        let write = app
+            .handle_settings_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                enabled: false,
+            })
+            .unwrap();
+        let operation = write.settings().unwrap().mutation_operation().unwrap();
+        let close = app.handle_overview_intent(OverviewIntent::Cancel).unwrap();
+        assert!(matches!(
+            close.overview().unwrap().update(),
+            OverviewFrontendUpdate::Close
+        ));
+        assert!(app
+            .settings_mutation_progress(operation, SettingsMutationStage::Persisted)
+            .is_none());
+        assert!(app.settings_mutation_worker_stopped(operation).is_none());
+        assert!(app
+            .handle_settings_intent(SettingsIntent::Reset(BehaviorSetting::UpdatesChannel))
+            .is_none());
+    }
+
+    #[test]
+    fn pairing_blocks_settings_even_if_the_settings_read_finishes_later() {
+        let (mut app, opening) = Application::open();
+        app.complete_tvs_read(opening.tvs().unwrap().read_operation().unwrap(), Ok(vec![]))
+            .unwrap();
+        app.handle_tvs_intent(TvsIntent::PairTv).unwrap();
+        let loaded = app
+            .complete_settings_read(
+                opening.settings().unwrap().read_operation().unwrap(),
+                Ok(settings()),
+            )
+            .unwrap();
+        assert!(!editable(&loaded));
+        assert!(app
+            .handle_settings_intent(SettingsIntent::Reset(BehaviorSetting::UpdatesChannel))
+            .is_none());
+        let cancelled = app
+            .handle_tvs_intent(TvsIntent::Pairing(PairingIntent::Cancel))
+            .unwrap();
+        assert!(editable(&cancelled));
+        assert!(app
+            .handle_settings_intent(SettingsIntent::Reset(BehaviorSetting::UpdatesChannel))
+            .is_some());
     }
 }

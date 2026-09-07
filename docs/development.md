@@ -15,7 +15,7 @@ Compiling and testing the GTK frontend additionally requires:
 - libadwaita 1.5 or newer development files
 - `pkg-config`
 - a graphical session or virtual display for renderer tests
-- `xdotool` for the executable launch smoke test
+- `xdotool` for native pointer tests and the executable launch smoke test
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 
