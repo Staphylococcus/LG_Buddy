@@ -561,7 +561,10 @@ impl PairingLock {
 
 impl Drop for PairingLock {
     fn drop(&mut self) {
-        let _ = self.file.sync_all();
+        // Closing only our descriptor can leave the lock held by a child
+        // between fork and exec. Release the shared open-file-description lock.
+        #[cfg(unix)]
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -942,12 +945,23 @@ mod tests {
         let dir = TestDir::new("lock-lifecycle");
         let lock_path = dir.config().with_file_name(".config.env.pairing.lock");
         let first = PairingLock::acquire(lock_path.clone(), dir.0.clone()).unwrap();
+        // A forked child can retain this open file description until exec.
+        let inherited = first.file.try_clone().unwrap();
         let before = fs::metadata(&lock_path).unwrap().ino();
+        assert!(matches!(
+            PairingLock::acquire(lock_path.clone(), dir.0.clone()),
+            Err(PairingStoreError::PairingInProgress { .. })
+        ));
         drop(first);
         let after = fs::metadata(&lock_path).unwrap().ino();
         assert_eq!(before, after);
 
         let second = PairingLock::acquire(lock_path.clone(), dir.0.clone()).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            PairingLock::acquire(lock_path.clone(), dir.0.clone()),
+            Err(PairingStoreError::PairingInProgress { .. })
+        ));
         drop(second);
         assert_eq!(fs::metadata(lock_path).unwrap().ino(), before);
     }
