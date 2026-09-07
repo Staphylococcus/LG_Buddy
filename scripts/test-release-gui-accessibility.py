@@ -98,6 +98,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TIMEOUT_SECONDS,
         help=f"maximum observation time in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
     )
+    parser.add_argument("--select-page", choices=("Overview", "TVs"))
+    parser.add_argument("--expected-tvs-state", choices=("empty", "configured"))
+    parser.add_argument("--expected-tv-address")
+    parser.add_argument("--expected-tv-name", default="Primary TV")
     parser.add_argument("--focus-control", help="focus a control using native Tab navigation")
     parser.add_argument("--activate-control", help="activate an accessible button")
     parser.add_argument("--window-id", help="X window used for keyboard navigation")
@@ -172,8 +176,41 @@ def audio_contract(accessibles: list[object], args: argparse.Namespace) -> bool:
     return True
 
 
+def tvs_contract(expected_state: str, address: str | None, tv_name: str):
+    accessibles = accessible_tree()
+    visible = []
+    for item in accessibles:
+        try:
+            if item.getState().contains(pyatspi.STATE_SHOWING):
+                visible.append(item)
+        except Exception:
+            continue
+    names = {normalized_name(item) for item in visible}
+    if any(value in names for value in ("Add TV", "Pair a TV", "Pair a TV…")):
+        raise SystemExit("TVs exposed an action outside the read-only slice")
+    if expected_state == "empty":
+        return (accessibles, None) if "No TV configured" in names else None
+    if tv_name not in names or (address and address not in names):
+        return None
+    return accessibles, None
+
+
 def main() -> int:
     args = parse_args()
+    if args.select_page:
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            for item in accessible_tree():
+                try:
+                    if (normalized_name(item) == args.select_page
+                            and role(item) == pyatspi.ROLE_PAGE_TAB
+                            and item.getState().contains(pyatspi.STATE_SHOWING)
+                            and item.queryAction().doAction(0)):
+                        return 0
+                except Exception:
+                    continue
+            time.sleep(0.1)
+        raise SystemExit(f"could not select the {args.select_page} tab")
     if args.focus_control:
         if not args.window_id:
             raise SystemExit("--focus-control needs --window-id")
@@ -193,8 +230,11 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     contract = None
     while time.monotonic() < deadline:
-        contract = observed_contract(args.expected_state, args.expected_slider_value)
-        if contract is not None and audio_contract(contract[0], args):
+        if args.expected_tvs_state:
+            contract = tvs_contract(args.expected_tvs_state, args.expected_tv_address, args.expected_tv_name)
+        else:
+            contract = observed_contract(args.expected_state, args.expected_slider_value)
+        if contract is not None and (args.expected_tvs_state or audio_contract(contract[0], args)):
             break
         contract = None
         time.sleep(0.1)

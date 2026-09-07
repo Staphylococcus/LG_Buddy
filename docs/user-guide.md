@@ -55,6 +55,14 @@ syntax.
 - `--version` reports the installed version and, for official builds, release
   metadata.
 
+The GUI has Overview and TVs tabs. TVs shows the configured TV's network
+addresses, managed input, control platform, and local credential state. These
+details are read-only. When available, the model reported by the TV replaces
+the generic profile heading; an unavailable TV still shows its saved details.
+A stored credential does not mean authentication has
+been verified with the TV. When no TV is configured, TVs shows an explanatory
+empty state; configure the first TV through the existing configurator.
+
 LG Buddy's services normally run automatically, so most users only need these
 commands and the settings described below.
 
