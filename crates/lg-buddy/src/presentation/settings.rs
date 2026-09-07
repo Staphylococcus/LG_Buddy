@@ -21,10 +21,7 @@ pub enum SettingsStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsEditStatus {
     Unchanged,
-    Validating,
-    Persisting,
-    Persisted,
-    Applying,
+    Saving,
     Applied,
     ValidationFailed,
     PersistenceFailed,

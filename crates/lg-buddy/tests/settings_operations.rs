@@ -57,12 +57,8 @@ fn run_mutation(
         .mutation_operation()
         .expect("mutation operation")
         .clone();
-    let mut progress = |stage| {
-        app.mutation_progress(&operation, stage)
-            .expect("mutation progress belongs to active operation");
-    };
     let outcome = backend
-        .write_setting(operation.clone(), &mut progress)
+        .write_setting(operation.clone(), &mut |_| {})
         .expect("settings mutation succeeds");
     app.complete_mutation(
         &operation,
@@ -240,12 +236,8 @@ fn invalid_edit_preserves_config_bytes_and_effective_value() {
         .mutation_operation()
         .expect("mutation operation")
         .clone();
-    let mut progress = |stage| {
-        app.mutation_progress(&operation, stage)
-            .expect("validation progress belongs to active operation");
-    };
     let failure = backend
-        .write_setting(operation.clone(), &mut progress)
+        .write_setting(operation.clone(), &mut |_| {})
         .expect_err("invalid value is rejected before persistence");
     let transition = app
         .complete_mutation(&operation, Err::<SettingsMutationOutcome, _>(failure))
@@ -340,12 +332,8 @@ exit 23
         .mutation_operation()
         .expect("retry mutation operation")
         .clone();
-    let mut progress = |stage| {
-        app.mutation_progress(&retry_operation, stage)
-            .expect("retry progress belongs to active operation");
-    };
     let retry_outcome = backend
-        .write_setting(retry_operation.clone(), &mut progress)
+        .write_setting(retry_operation.clone(), &mut |_| {})
         .expect("retry application returns an outcome");
     assert!(!retry_outcome.change().file_changed());
     app.complete_mutation(

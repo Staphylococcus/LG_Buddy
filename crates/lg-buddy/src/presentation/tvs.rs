@@ -156,26 +156,27 @@ impl TvsPresentation {
 
     pub(crate) fn set_management(
         &mut self,
-        enabled: bool,
+        input_enabled: bool,
+        actions_enabled: bool,
         confirming: bool,
         confirmation_enabled: bool,
         error: Option<super::brightness::UserFacingError>,
         retry_apply: bool,
     ) {
-        self.input_enabled = enabled;
+        self.input_enabled = input_enabled;
         if let Some(action) = &mut self.pair_action {
             action.enabled = confirmation_enabled;
         }
         self.unpair_action = self
             .selected_profile()
-            .map(|_| TvsAction::new("Unpair TV…", enabled, TvsIntent::UnpairTv));
+            .map(|_| TvsAction::new("Unpair TV…", actions_enabled, TvsIntent::UnpairTv));
         self.unpair_confirmation = confirming.then(|| UnpairConfirmation {
             confirm: TvsAction::new("Unpair", confirmation_enabled, TvsIntent::ConfirmUnpair),
             cancel: TvsAction::new("Cancel", true, TvsIntent::CancelUnpair),
         });
         self.management_error = error;
-        self.retry_apply_action =
-            retry_apply.then(|| TvsAction::new("Retry", enabled, TvsIntent::RetryInputApply));
+        self.retry_apply_action = retry_apply
+            .then(|| TvsAction::new("Retry", actions_enabled, TvsIntent::RetryInputApply));
     }
 
     pub fn title(&self) -> &str {

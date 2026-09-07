@@ -443,8 +443,10 @@ impl TvsView {
             TvsStatus::Ready => match presentation.selected_profile() {
                 Some(profile) => {
                     mode.input.set_sensitive(presentation.input_enabled());
-                    mode.input.set_selected(hdmi_index(profile.input()));
-                    mode.unpair.render(presentation.unpair_action());
+                    let selected = hdmi_index(profile.input());
+                    if mode.input.selected() != selected {
+                        mode.input.set_selected(selected);
+                    }
                     mode.show_details(profile)
                 }
                 None => {
@@ -585,6 +587,7 @@ impl PairButton {
     }
 
     fn render(&self, action: Option<&TvsAction>) {
+        let was_visible = self.button.is_visible();
         self.intent.replace(
             action
                 .filter(|action| action.enabled())
@@ -600,7 +603,7 @@ impl PairButton {
             .update_property(&[gtk::accessible::Property::Label(
                 action.map_or("Pair a TV", TvsAction::label),
             )]);
-        if action.is_some() && !self.button.has_focus() {
+        if action.is_some() && !was_visible && !self.button.has_focus() {
             let button = self.button.clone();
             gtk::glib::idle_add_local_once(move || {
                 if button.is_mapped() && button.is_visible() && button.is_sensitive() {
@@ -866,8 +869,13 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
         .expect("input transition");
     view.render(&window, pending.presentation());
-    assert!(!view.single.input.is_sensitive());
+    assert!(view.single.input.is_sensitive());
     assert!(!view.single.unpair.button.is_sensitive());
+    view.single.input.set_selected(3);
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(TvsIntent::SetInput(HdmiInput::Hdmi4))
+    );
 
     let (mut app, opening) = TvsApplication::open();
     let ready_multiple = app

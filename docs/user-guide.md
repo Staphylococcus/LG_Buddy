@@ -70,8 +70,8 @@ Each setting shows a description and its current value:
 
 Each change is validated, saved, and applied automatically, without a separate
 **Save** or **Cancel** button. Successful changes need no notification and keep
-the layout stable. Controls are briefly disabled while Settings and TV changes
-wait for one another to finish. A validation or persistence failure
+the layout stable. Settings stay responsive while changes are saved in order.
+TV management waits until those changes finish. A validation or persistence failure
 restores the previous value and explains the error. If saving succeeds but
 runtime application fails, the saved value remains, a warning is shown, and
 **Retry apply** repeats only the runtime step.

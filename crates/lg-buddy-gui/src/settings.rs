@@ -76,6 +76,10 @@ impl SettingsView {
         self.retry_intent
             .replace(action.map(|action| action.intent()));
         match presentation.status() {
+            SettingsStatus::Loading { .. } if !presentation.groups().is_empty() => {
+                self.render_rows(presentation);
+                self.root.set_visible_child_name("settings");
+            }
             SettingsStatus::Loading { message } => {
                 self.status.set_title(message);
                 self.status.set_description(None);
@@ -104,17 +108,21 @@ impl SettingsView {
                         self.groups.borrow_mut().push(native);
                     }
                 }
-                for row in self.rows.borrow().iter() {
-                    if let Some(presentation) = presentation
-                        .groups()
-                        .iter()
-                        .flat_map(|group| group.rows())
-                        .find(|value| value.setting() == row.presentation.borrow().setting())
-                    {
-                        row.render(presentation);
-                    }
-                }
+                self.render_rows(presentation);
                 self.root.set_visible_child_name("settings");
+            }
+        }
+    }
+
+    fn render_rows(&self, presentation: &SettingsPresentation) {
+        for row in self.rows.borrow().iter() {
+            if let Some(presentation) = presentation
+                .groups()
+                .iter()
+                .flat_map(|group| group.rows())
+                .find(|value| value.setting() == row.presentation.borrow().setting())
+            {
+                row.render(presentation);
             }
         }
     }
@@ -138,7 +146,6 @@ struct NativeSettingRow {
     editor: NativeEditor,
     presentation: Rc<RefCell<SettingsRow>>,
     rendering: Rc<Cell<bool>>,
-    restore_focus: Cell<bool>,
 }
 
 impl NativeSettingRow {
@@ -221,6 +228,7 @@ impl NativeSettingRow {
             }
             SettingsEditor::Number { text } => {
                 let entry = gtk::Entry::builder()
+                    .text(text)
                     .width_chars(8)
                     .max_width_chars(8)
                     .input_purpose(gtk::InputPurpose::Digits)
@@ -308,11 +316,10 @@ impl NativeSettingRow {
             editor,
             presentation,
             rendering,
-            restore_focus: Cell::new(false),
         };
         // Populate values without producing commit intents.
         native.render_editor(initial.editor());
-        native.render(initial);
+        native.render_state(initial);
         native
     }
 
@@ -333,8 +340,13 @@ impl NativeSettingRow {
                 );
             }
             (NativeEditor::Number { entry, finalized }, SettingsEditor::Number { text }) => {
-                entry.set_text(text);
-                finalized.replace(text.clone());
+                // Preserve a newer, unsubmitted draft and leave the caret alone on success.
+                if entry.text().as_str() == finalized.borrow().as_str() {
+                    if entry.text().as_str() != text {
+                        entry.set_text(text);
+                    }
+                    finalized.replace(text.clone());
+                }
             }
             _ => unreachable!("a behavior setting keeps its declared editor type"),
         }
@@ -343,27 +355,20 @@ impl NativeSettingRow {
 
     fn render(&self, current: &SettingsRow) {
         let previous = self.presentation.borrow().clone();
-        if !in_flight(current.edit_status())
-            && (previous.editor() != current.editor() || in_flight(previous.edit_status()))
+        if previous == *current {
+            return;
+        }
+        if current.edit_status() != SettingsEditStatus::Saving
+            && (previous.editor() != current.editor()
+                || previous.edit_status() == SettingsEditStatus::Saving)
         {
             self.render_editor(current.editor());
         }
+        self.render_state(current);
+    }
+
+    fn render_state(&self, current: &SettingsRow) {
         self.rendering.set(true);
-        let widget: &gtk::Widget = match &self.editor {
-            NativeEditor::Toggle(widget) => widget.upcast_ref(),
-            NativeEditor::Choice(widget) => widget.upcast_ref(),
-            NativeEditor::Number { entry, .. } => entry.upcast_ref(),
-        };
-        if in_flight(current.edit_status()) && !in_flight(previous.edit_status()) {
-            self.restore_focus.set(
-                widget
-                    .root()
-                    .and_then(|root| root.downcast::<gtk::Window>().ok())
-                    .and_then(|window| GtkWindowExt::focus(&window))
-                    .is_some_and(|focus| focus == *widget || focus.is_ancestor(widget)),
-            );
-        }
-        widget.set_sensitive(current.editor_enabled());
         self.row.set_sensitive(current.editor_enabled());
         self.row.update_property(&[
             gtk::accessible::Property::Label(current.title()),
@@ -429,25 +434,8 @@ impl NativeSettingRow {
                 ))]);
         }
         self.presentation.replace(current.clone());
-        if !in_flight(current.edit_status())
-            && in_flight(previous.edit_status())
-            && self.restore_focus.replace(false)
-            && widget.is_mapped()
-        {
-            widget.grab_focus();
-        }
         self.rendering.set(false);
     }
-}
-
-fn in_flight(status: SettingsEditStatus) -> bool {
-    matches!(
-        status,
-        SettingsEditStatus::Validating
-            | SettingsEditStatus::Persisting
-            | SettingsEditStatus::Persisted
-            | SettingsEditStatus::Applying
-    )
 }
 
 fn detail_row(title: &str, value: &str) -> adw::ActionRow {
@@ -596,6 +584,15 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         )
         .unwrap();
     view.render(ready.presentation());
+    let refresh = editing.handle_intent(SettingsIntent::Refresh).unwrap();
+    view.render(refresh.presentation());
+    assert_eq!(view.root.visible_child_name().as_deref(), Some("settings"));
+    assert!(
+        view.page.is_mapped(),
+        "refresh must not unmap populated settings"
+    );
+    assert!(view.rows.borrow().iter().all(|row| row.row.is_sensitive()));
+    // A new edit supersedes this refresh; its stale read must not replace the value.
     intents.borrow_mut().clear();
     let entry = match &view.rows.borrow()[2].editor {
         NativeEditor::Number { entry, .. } => entry.clone(),
@@ -618,35 +615,37 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .measure(gtk::Orientation::Vertical, 600)
         .1;
     let writing = editing.handle_intent(intent).unwrap();
+    assert!(editing
+        .complete_read(
+            refresh.read_operation().unwrap(),
+            Ok(presentation.groups().to_vec())
+        )
+        .is_none());
     view.render(writing.presentation());
-    for stage in [
-        lg_buddy::settings::SettingsMutationStage::Validating,
-        lg_buddy::settings::SettingsMutationStage::Persisting,
-        lg_buddy::settings::SettingsMutationStage::Persisted,
-        lg_buddy::settings::SettingsMutationStage::Applying,
-    ] {
-        let progress = editing
-            .mutation_progress(writing.mutation_operation().unwrap(), stage)
-            .unwrap();
-        view.render(progress.presentation());
-        assert!(!view.rows.borrow()[2].feedback.is_visible());
-        assert_eq!(
-            view.groups.borrow()[0]
-                .measure(gtk::Orientation::Vertical, 600)
-                .1,
-            initial_height,
-            "an ordinary setting change must not shift the layout"
-        );
-    }
+    assert!(view.rows.borrow().iter().all(|row| row.row.is_sensitive()));
+    assert!(!view.rows.borrow()[2].feedback.is_visible());
+    assert_eq!(
+        view.groups.borrow()[0]
+            .measure(gtk::Orientation::Vertical, 600)
+            .1,
+        initial_height,
+        "an ordinary setting change must not shift the layout"
+    );
+    assert!(
+        GtkWindowExt::focus(&window).is_some_and(|focus| focus
+            == entry.clone().upcast::<gtk::Widget>()
+            || focus.is_ancestor(&entry)),
+        "saving must keep keyboard focus"
+    );
     assert_eq!(
         entry.text(),
         "900",
-        "progress must preserve the submitted draft"
+        "saving must preserve the submitted draft"
     );
-    assert!(!entry.is_sensitive());
+    assert!(entry.is_sensitive());
     assert!(
         intents.borrow().is_empty(),
-        "programmatic blur does not resubmit"
+        "rendering must not resubmit the value"
     );
     let failed = editing
         .complete_mutation(
@@ -700,6 +699,34 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             value: "720".into(),
         })
     );
+
+    let writing = editing
+        .handle_intent(SettingsIntent::Commit {
+            setting: BehaviorSetting::ScreenIdleTimeout,
+            value: "720".into(),
+        })
+        .unwrap();
+    view.render(writing.presentation());
+    entry.grab_focus();
+    entry.set_text("721");
+    entry.set_position(1);
+    let failed = editing
+        .complete_mutation(
+            writing.mutation_operation().unwrap(),
+            Err(lg_buddy::settings::SettingsMutationFailure::Persistence(
+                lg_buddy::settings::SettingsError::Apply {
+                    message: "write failed".into(),
+                },
+            )),
+        )
+        .unwrap();
+    view.render(failed.presentation());
+    assert_eq!(
+        entry.text(),
+        "721",
+        "completion must preserve a newer unsubmitted draft"
+    );
+    assert_eq!(entry.position(), 1, "completion must not move the caret");
 
     window.set_default_size(360, 600);
     pump_until(|| window.width() <= 360);

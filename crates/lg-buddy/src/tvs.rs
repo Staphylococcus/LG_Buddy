@@ -451,12 +451,14 @@ pub struct TvsApplication {
     state: TvsState,
     next_operation_id: u64,
     pending_model: Option<TvsModelReadOperation>,
+    pending_input: Option<HdmiInput>,
     pairing: Option<PairingApplication>,
     management: Option<TvsManagementOperation>,
     confirming_unpair: bool,
     controls_available: bool,
     management_error: Option<UserFacingError>,
     input_apply_failed: bool,
+    closed: bool,
 }
 
 impl TvsApplication {
@@ -466,26 +468,47 @@ impl TvsApplication {
             state: TvsState::Loading(operation),
             next_operation_id: 1,
             pending_model: None,
+            pending_input: None,
             pairing: None,
             management: None,
             confirming_unpair: false,
             controls_available: true,
             management_error: None,
             input_apply_failed: false,
+            closed: false,
         };
         let transition = application.transition(Some(operation), None);
         (application, transition)
     }
 
     pub fn handle_intent(&mut self, intent: TvsIntent) -> Option<TvsTransition> {
+        if self.closed {
+            return None;
+        }
         match intent {
             TvsIntent::SetInput(input) => {
-                if !self.can_manage() || self.confirming_unpair {
+                if !self.can_set_input() || self.confirming_unpair {
                     return None;
                 }
                 let profile = self.selected_profile()?;
-                if profile.input() == input {
+                let current_input = self
+                    .pending_input
+                    .or_else(|| {
+                        self.management
+                            .as_ref()
+                            .and_then(|operation| match operation.action {
+                                TvsManagementAction::SetInput(input) => Some(input),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or(profile.input());
+                if current_input == input {
                     return None;
+                }
+                if self.management.is_some() {
+                    self.pending_input = Some(input);
+                    self.management_error = None;
+                    return Some(self.transition(None, None));
                 }
                 self.start_management(TvsManagementAction::SetInput(input))
             }
@@ -579,6 +602,9 @@ impl TvsApplication {
         operation: TvsReadOperation,
         result: Result<Vec<TvProfile>, TvsReadError>,
     ) -> Option<TvsTransition> {
+        if self.closed {
+            return None;
+        }
         if !matches!(self.state, TvsState::Loading(active) if active == operation) {
             return None;
         }
@@ -610,6 +636,9 @@ impl TvsApplication {
         operation: TvsModelReadOperation,
         result: Result<String, TvsReadError>,
     ) -> Option<TvsTransition> {
+        if self.closed {
+            return None;
+        }
         if self.pending_model.as_ref() != Some(&operation) {
             return None;
         }
@@ -636,10 +665,12 @@ impl TvsApplication {
             pairing.shutdown();
         }
         self.pairing = None;
-        self.management = None;
         self.confirming_unpair = false;
-        self.state = TvsState::Closed;
         self.pending_model = None;
+        self.closed = true;
+        if self.management.is_none() {
+            self.state = TvsState::Closed;
+        }
     }
 
     pub fn pairing_progress(
@@ -647,6 +678,9 @@ impl TvsApplication {
         operation: &PairingOperation,
         stage: PairingStage,
     ) -> Option<TvsTransition> {
+        if self.closed {
+            return None;
+        }
         self.pairing
             .as_mut()?
             .progress(operation, stage)
@@ -658,6 +692,9 @@ impl TvsApplication {
         operation: &PairingOperation,
         result: Result<TvProfile, PairingError>,
     ) -> Option<TvsTransition> {
+        if self.closed {
+            return None;
+        }
         if !self.pairing.as_mut()?.complete(operation, &result) {
             return None;
         }
@@ -703,10 +740,21 @@ impl TvsApplication {
     }
 
     fn can_manage(&self) -> bool {
-        self.controls_available
+        !self.closed
+            && self.controls_available
             && self.management.is_none()
             && self.pairing.is_none()
             && self.selected_profile().is_some()
+    }
+
+    fn can_set_input(&self) -> bool {
+        !self.closed
+            && self.controls_available
+            && self.pairing.is_none()
+            && self.selected_profile().is_some()
+            && self.management.as_ref().is_none_or(|operation| {
+                matches!(operation.action, TvsManagementAction::SetInput(_))
+            })
     }
 
     pub fn is_managing(&self) -> bool {
@@ -745,6 +793,7 @@ impl TvsApplication {
             return None;
         }
         self.management = None;
+        let pending_input = self.pending_input.take();
         let toast = match result {
             Ok(TvsManagementOutcome::Unpaired) => {
                 self.state = TvsState::Empty;
@@ -776,8 +825,13 @@ impl TvsApplication {
                 None
             }
         };
+        if let Some(input) = pending_input {
+            let mut transition = self.start_management(TvsManagementAction::SetInput(input))?;
+            transition.profile_changed = !self.closed;
+            return Some(transition);
+        }
         let mut transition = self.transition(None, None);
-        transition.profile_changed = true;
+        transition.profile_changed = !self.closed;
         transition.toast_message = toast;
         Some(transition)
     }
@@ -835,13 +889,22 @@ impl TvsApplication {
             TvsState::Failed(error) => TvsPresentation::failed(error.clone()),
             TvsState::Closed => TvsPresentation::loading(),
         };
-        if let Some(operation) = &self.management {
-            if let TvsManagementAction::SetInput(input) = operation.action {
-                presentation.set_input(input);
-            }
+        let pending_input = self.pending_input.or_else(|| {
+            self.management
+                .as_ref()
+                .and_then(|operation| match operation.action {
+                    TvsManagementAction::SetInput(input) => Some(input),
+                    _ => None,
+                })
+        });
+        if let Some(input) = pending_input {
+            presentation.set_input(input);
         }
+        let input_enabled = self.can_set_input() && !self.confirming_unpair;
+        let actions_enabled = self.can_manage() && !self.confirming_unpair;
         presentation.set_management(
-            self.can_manage() && !self.confirming_unpair,
+            input_enabled,
+            actions_enabled,
             self.confirming_unpair,
             self.controls_available,
             self.management_error.clone(),
@@ -1405,16 +1468,44 @@ mod management_tests {
             started.presentation().selected_profile().unwrap().input(),
             HdmiInput::Hdmi3
         );
-        assert!(!started.presentation().input_enabled());
-        assert!(app
+        assert!(started.presentation().input_enabled());
+        let queued = app
             .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi4))
-            .is_none());
+            .expect("a later input choice is queued");
+        assert_eq!(
+            queued.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi4
+        );
+        assert!(queued.presentation().input_enabled());
+        let queued = app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi2))
+            .expect("the latest input choice replaces the queued one");
+        assert_eq!(
+            queued.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi2
+        );
         assert!(app.handle_intent(TvsIntent::UnpairTv).is_none());
         let failed = app
             .complete_management(
                 started.management_operation().unwrap(),
                 Err(TvsManagementError::stopped()),
             )
+            .unwrap();
+        assert_eq!(
+            failed.presentation().selected_profile().unwrap().input(),
+            HdmiInput::Hdmi2
+        );
+        assert!(failed.presentation().input_enabled());
+        let queued_operation = failed
+            .management_operation()
+            .expect("the queued input must start after the first result");
+        assert_eq!(
+            queued_operation.action(),
+            TvsManagementAction::SetInput(HdmiInput::Hdmi2)
+        );
+        assert_eq!(queued_operation.profile().input(), HdmiInput::Hdmi1);
+        let failed = app
+            .complete_management(queued_operation, Err(TvsManagementError::stopped()))
             .unwrap();
         assert_eq!(
             failed.presentation().selected_profile().unwrap().input(),
@@ -1452,6 +1543,48 @@ mod management_tests {
                 retry.management_operation().unwrap(),
                 Err(TvsManagementError::stopped())
             )
+            .is_some());
+        assert!(app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi4))
+            .is_none());
+    }
+
+    #[test]
+    fn shutdown_drains_a_queued_input_change() {
+        let (mut app, ready) = configured();
+        let started = app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+            .unwrap();
+        app.handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi4))
+            .expect("queued input");
+        app.handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi2))
+            .expect("latest queued input");
+        app.shutdown();
+
+        let queued = app
+            .complete_management(
+                started.management_operation().unwrap(),
+                Err(TvsManagementError::stopped()),
+            )
+            .expect("the active write completes after close");
+        let queued_operation = queued
+            .management_operation()
+            .expect("the queued write starts after close");
+        assert!(!queued.profile_changed());
+        assert_eq!(
+            queued_operation.action(),
+            TvsManagementAction::SetInput(HdmiInput::Hdmi2)
+        );
+        let completed = app
+            .complete_management(queued_operation, Err(TvsManagementError::stopped()))
+            .expect("the queued write completes after close");
+        assert_eq!(
+            completed.presentation().profiles(),
+            ready.presentation().profiles()
+        );
+        assert!(!completed.profile_changed());
+        assert!(app
+            .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi2))
             .is_none());
     }
 }
