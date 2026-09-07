@@ -162,7 +162,6 @@ impl PairingView {
             .title("Pair a TV")
             .content_width(480)
             .content_height(480)
-            .accessible_role(gtk::AccessibleRole::Dialog)
             .child(&toolbar)
             // Ask the application before dismissing: a worker may have begun
             // saving before its progress event reaches the main loop.
@@ -375,7 +374,8 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     pump();
     assert_eq!(view.dialog.title(), "Pair a TV");
     assert_eq!(window.visible_dialog().as_ref(), Some(&view.dialog));
-    assert_eq!(view.dialog.accessible_role(), gtk::AccessibleRole::Dialog);
+    // libadwaita 1.5.0 exposes the dialog role on an internal sheet.
+    // The installed AT-SPI smoke checks the effective dialog and its controls.
     assert!(gtk::prelude::GtkWindowExt::focus(&window)
         .is_some_and(|focus| focus.is_ancestor(&view.address)));
     assert!(view.pair.is_sensitive());
