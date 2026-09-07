@@ -1,5 +1,7 @@
 mod dev;
 
+pub mod application;
+pub mod audio;
 pub mod auth;
 pub mod backend;
 pub mod brightness;
@@ -7,7 +9,11 @@ pub mod commands;
 pub mod config;
 pub mod events;
 pub mod lifecycle;
+pub mod navigation;
 pub mod notifications;
+pub mod overview;
+pub mod pairing;
+mod pairing_store;
 pub mod platform_access_token;
 pub mod policy;
 pub mod presentation;
@@ -21,6 +27,7 @@ pub mod settings;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod tvs;
 pub mod update_install;
 pub mod updates;
 pub mod upgrade_preflight;

@@ -140,7 +140,7 @@ The headless binary retains its static `x86_64-unknown-linux-musl` release
 target. The GTK binary is a separate dynamically linked
 `x86_64-unknown-linux-gnu` artifact. Ubuntu 24.04 is the oldest release-bundle
 build and runtime baseline: GTK 4.14, libadwaita 1.5, and GLIBC 2.39. The source
-contract remains limited to GTK 4.10 APIs and libadwaita 1, but compatibility
+contract remains limited to GTK 4.10 APIs and libadwaita 1.5, but compatibility
 below the tested bundle baseline is not claimed. Fedora 43 and current Arch
 validate the same built artifact on newer supported userspaces. The release
 manifest and embedded ELF identities verify both artifacts, so the GUI does
@@ -517,6 +517,122 @@ Each slice must leave the existing `brightness get`, `brightness set`, service,
 and compatibility paths green. The Zenity implementation remains available in
 the v1.5.0 slice; removing it is tracked separately by
 [#130](https://github.com/Staphylococcus/LG_Buddy/issues/130).
+
+## Overview Increment
+
+[#172](https://github.com/Staphylococcus/LG_Buddy/issues/172) replaces the
+brightness-specific root with an application-owned `OverviewPresentation`.
+Overview is a single view showing the primary TV summary, brightness, volume,
+and mute. Navigation, pairing, profile management, and behavior settings belong
+to later slices; this increment adds no hidden navigation shell.
+
+The stable `lg-buddy brightness` path opens Overview focused on brightness.
+Two compact rows contain a brightness icon and slider, and a mute button and
+volume slider. Moving a slider submits its value; the sound icon toggles mute
+and reflects mute state. There are no Apply buttons or duplicate value labels.
+Changes keep the window open. Volume changes use the same set-then-unmute
+operation as the headless command. If unmuting fails after the volume changed,
+the presentation retains the changed level and offers recovery
+for the remaining mute operation.
+
+The core owns capability-specific loading, busy, success, and failure state.
+One failed read cannot remove controls whose state is already available.
+Unknown numeric volume is represented explicitly while mute remains usable.
+The TV summary shows a dot and connection label: green Connected, yellow
+Connecting while reads are pending, or red Disconnected. Individual control
+errors retain their own recovery feedback. Native reads and writes use stored
+credentials without opening pairing prompts.
+
+Configuration and TV work run on workers. Sliders stay adjustable while writes
+are pending, with the latest requested value retained for the next write.
+The core accepts a completion only for its active operation; closing or
+shutting down invalidates pending results.
+Closing does not undo a write already dispatched, and the GUI host lets that
+write finish without reopening the view.
+
+Headless tests own operation and recovery policy. GTK tests cover the expanded
+mapping and main-loop bridge; installed-GUI smoke exercises keyboard control,
+independent errors, the open-after-success behavior, and accessibility. CLI and
+service paths remain GTK-free.
+
+## TVs and Navigation Increment
+
+[#173](https://github.com/Staphylococcus/LG_Buddy/issues/173) adds TVs as the
+second destination alongside Overview. The application owns the available
+destinations, selected destination, TV collection, selected TV, and local
+profile state. GTK maps these to a native `AdwViewSwitcher` and `AdwViewStack`,
+moving navigation to `AdwViewSwitcherBar` at narrow widths. Switching views
+preserves Overview controls and pending operations; late results cannot steal
+focus from TVs.
+
+TVs reads the existing primary profile through the settings and credential
+adapters on a worker. Missing TV configuration produces an explanatory blank
+state with a standard symbolic display icon. Invalid or incomplete configuration
+remains an error. One configured TV opens directly to its details without a
+sidebar or add-TV action. Credential labels describe local observations; a
+stored token or legacy file does not establish authenticated access to a TV.
+After local details are available, a separate bounded read retrieves `modelName`
+from the TV's system information. The application uses it as the display name;
+unavailable or invalid responses retain the profile-name fallback. Late results
+cannot replace a different selection or a closed view. This does not persist a
+new name or turn local credential metadata into a pairing-health check.
+
+The renderer accepts multi-profile fixtures and shows an adaptive
+`AdwNavigationSplitView` only for more than one presented TV. Selection remains
+an application intent. Production storage still yields zero or one primary
+profile; this increment adds no schema, pairing, repair, or configuration writes.
+
+## First-TV Pairing Increment
+
+[#174](https://github.com/Staphylococcus/LG_Buddy/issues/174) adds **Pair a TV**
+only to the zero-TV blank state. It opens an adaptive `AdwDialog` with a grouped
+form for the IPv4 address, MAC address, and managed HDMI input; this flow uses
+native webOS. Its action-dialog header contains Cancel, a centered title, and
+Pair; it has no separate close button or footer actions. The dialog keeps
+navigation behind the modal, adapts to smaller windows, and routes Cancel,
+Escape, and native dismissal through the same application intent. Successful
+pairing closes the dialog to reveal TV details and shows a “TV paired successfully”
+toast after verification and saving.
+During pairing, a thin progress bar beneath the header shows completed workflow
+phases: connecting at 0%, TV confirmation at 25%, verification at 50%, and saving
+at 75%. These milestones are not time estimates; success closes the dialog.
+The form and Pair button stay disabled until the attempt ends. General failures
+produce a toast inside the dialog; recovery guidance remains visible in the
+form. Editing, retrying, or dismissing the form clears the failure toast.
+Validation errors remain inline and do not generate toasts.
+The setup guidance marks TV On With Mobile / Wake-on-LAN as required, and a
+static IP address and Always Ready as strongly recommended. The application
+owns field validation, connecting, confirmation guidance, capability verification,
+failure recovery, and cancellation. GTK declares no network or persistence
+policy and never shells out to the CLI.
+
+The foreground application backend pairs into memory, then chooses and sequences
+power, audio, and OLED brightness verification before saving. The webOS client
+provides authentication and cancellable typed reads; it does not decide which
+capabilities the pairing workflow requires. Both pairing and profile persistence refuse
+root execution. The existing `tvs/primary/access-token.json` location is used,
+and the configuration file is published atomically after the token. A failed
+configuration save restores the prior credential state. A process crash between
+the two publications can leave an orphan token, but no partial TV configuration;
+a subsequent pairing attempt replaces that orphan after verification.
+
+Cancellation is accepted until saving begins. Operation identities reject late
+progress and results from cancelled attempts. Once publication starts, dialog
+dismissal is disabled; the worker is allowed to finish on application
+window close. Success shows the new TV details and reloads Overview without
+accepting its earlier empty-state
+results. A toolkit-independent application coordinator owns this cross-view
+refresh and coordinates application close with pairing cancellation. GTK only
+executes declared operations and renders updates. An unexpected worker exit is
+reported to the coordinator as an internal failure, not as a TV connection error.
+No second-TV flow, discovery, legacy-platform pairing, or service setup
+is included.
+
+Headless workflow tests cover validation, confirmation, rejection, timeout,
+verification failure, cancellation, and persistence. Protocol fixtures exercise
+the native webOS exchange; GTK fixtures cover the form and intent mapping, and
+the installed accessibility check covers the blank-state CTA, modal form,
+validation feedback, and dismissal through Escape and the header's Cancel button.
 
 ## Evolution Rules
 

@@ -126,7 +126,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
-        GTK["lg-buddy-gui<br/>libadwaita / GTK brightness window"]
+        GTK["lg-buddy-gui<br/>libadwaita / GTK Overview"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -476,12 +476,37 @@ process is returned directly without a second prompt. The `brightness get` and
 `brightness set` commands never enter that launcher and use the TV picture
 abstraction in `tv.rs` for typed OLED brightness validation and live TV
 read/write operations. The interactive Zenity brightness dialog delegates its
-TV operations back through those direct CLI commands. The GTK brightness window
-uses the same typed picture capabilities through the core brightness
-application flow. Workers keep blocking TV operations off the GTK main loop;
-the application permits one write at a time, and opaque operation identity
-prevents late results from replacing newer or closed presentation state.
-Successful GTK writes retain the existing brightness success notification.
+TV operations back through those direct CLI commands. The GTK entrypoint opens
+one Overview focused on brightness, alongside the primary TV summary, volume,
+and mute. Two icon-and-slider rows submit changes as the sliders move; the
+sound icon toggles mute. The core Overview application owns its declarations and semantic
+intents; GTK renders them without adding TV or configuration policy. Workers
+keep blocking operations off the GTK main loop. Capability state is independent,
+and opaque operation identity prevents late results from replacing newer or
+closed presentation state. Successful changes keep Overview open; brightness
+writes retain the existing success notification. Passive native operations use
+stored credentials without opening pairing prompts.
+The TVs tab reads the existing primary profile and local credential state
+through application-owned operations, then enriches the display name with a
+separate optional model read from the TV. The application owns navigation and TV
+selection; GTK supplies the native view switcher and adaptive layout. Zero TVs
+produces a blank state, one TV opens directly to details, and only multi-profile
+renderer fixtures expose the TV-selection sidebar. Production storage remains
+limited to one primary profile. Tab changes retain pending Overview operations
+and do not initiate TV writes or pairing.
+The zero-TV blank state offers first-TV pairing through a separate foreground
+application workflow. GTK forwards the native webOS form and cancellation
+intents, and worker progress describes connecting, TV confirmation, verification,
+and saving. Validation, protocol authentication, capability checks, and credential
+persistence remain in the core. Pairing is refused as root. The access token
+stays in memory until verification succeeds; the primary profile is published
+last, with credential rollback on a failed save. Accepted cancellation prevents
+publication. Once saving begins, it finishes even if the window closes.
+The toolkit-independent application coordinator opens the new TV details and
+refreshes Overview with fresh operation identities after success. The application
+backend selects the capability checks; the webOS client supplies authentication
+and cancellable reads. GTK forwards unexpected worker termination to the core
+as an internal failure. This does not install or activate services.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

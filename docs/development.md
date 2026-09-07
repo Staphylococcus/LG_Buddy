@@ -12,7 +12,7 @@ Compiling the Rust runtime requires:
 Compiling and testing the GTK frontend additionally requires:
 
 - GTK 4.10 or newer development files
-- libadwaita 1 development files
+- libadwaita 1.5 or newer development files
 - `pkg-config`
 - a graphical session or virtual display for renderer tests
 - `xdotool` for the executable launch smoke test
@@ -60,7 +60,7 @@ Build the GTK frontend from source with:
 cargo build --release -p lg-buddy-gui
 ```
 
-Run its current brightness window with:
+Open Overview focused on brightness with:
 
 ```bash
 cargo run -p lg-buddy-gui -- brightness
@@ -234,6 +234,9 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
 | `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read/write flow and production adapters |
+| `crates/lg-buddy/src/overview.rs` | Toolkit-neutral Overview state, intents, and capability operations |
+| `crates/lg-buddy/src/tvs.rs` | Read-only TV collection, selection, and local profile operations |
+| `crates/lg-buddy/src/navigation.rs` | Desktop destinations and selected view |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |

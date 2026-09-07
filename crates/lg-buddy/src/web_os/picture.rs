@@ -6,7 +6,7 @@ use std::fmt;
 use std::thread;
 use std::time::Duration;
 
-const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
+pub(crate) const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
 const CREATE_ALERT_URI: &str = "ssap://system.notifications/createAlert";
 const CLOSE_ALERT_URI: &str = "ssap://system.notifications/closeAlert";
 const SET_SYSTEM_SETTINGS_LUNA_URI: &str = "luna://com.webos.settingsservice/setSystemSettings";
@@ -316,7 +316,7 @@ fn close_alert_id(
     Ok(format!("{ALERT_ID_CLOSE_PREFIX}{sequence}"))
 }
 
-fn parse_backlight_brightness_response(
+pub(crate) fn parse_backlight_brightness_response(
     response: &Value,
 ) -> Result<WebOsBacklightBrightness, WebOsBacklightBrightnessError> {
     let payload = match response.get("payload") {

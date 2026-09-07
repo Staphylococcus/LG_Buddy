@@ -1,9 +1,10 @@
 mod support;
 
+use lg_buddy::auth::BscpylgtvAuthContext;
 use lg_buddy::config::HdmiInput;
 use lg_buddy::tv::{
     BscpylgtvCommandClient, CurrentInput, CurrentVolume, OledBrightness, TvClient, TvErrorKind,
-    VolumeLevel,
+    TvOperation, VolumeLevel,
 };
 use std::net::Ipv4Addr;
 use support::MockBscpylgtv;
@@ -18,6 +19,69 @@ fn mock_get_input_matches_real_shape() {
         .expect("mock get_input should succeed");
 
     assert_eq!(input, CurrentInput::Hdmi(HdmiInput::Hdmi3));
+}
+
+#[test]
+fn mock_model_name_reads_default_system_info() {
+    let mock = MockBscpylgtv::new("mock-model-name");
+    let client = mock_client(&mock);
+
+    assert_eq!(
+        client.model_name().expect("model name should succeed"),
+        "OLED42C2"
+    );
+    assert_eq!(mock.calls()[0].command, "get_system_info");
+    assert_eq!(mock.calls()[0].args, vec!["true"]);
+}
+
+#[test]
+fn mock_model_name_accepts_planned_json_response() {
+    let mock = MockBscpylgtv::new("mock-model-name-planned");
+    mock.queue_success("get_system_info", r#"{"modelName":"OLED65C4"}"#);
+    let client = mock_client(&mock);
+
+    assert_eq!(client.model_name().expect("planned model name"), "OLED65C4");
+}
+
+#[test]
+fn mock_model_name_rejects_malformed_or_absent_response() {
+    for (label, stdout) in [
+        ("mock-model-name-malformed", "not-json\n"),
+        ("mock-model-name-absent", r#"{"returnValue":true}"#),
+    ] {
+        let mock = MockBscpylgtv::new(label);
+        mock.queue_success("get_system_info", stdout);
+        let error = mock_client(&mock)
+            .model_name()
+            .expect_err("invalid model response should fail");
+
+        assert_eq!(error.operation(), TvOperation::ReadModelName);
+        assert_eq!(error.kind(), TvErrorKind::InvalidResponse);
+    }
+}
+
+#[test]
+fn mock_model_name_preserves_rejection_and_authenticated_key_path() {
+    let mock = MockBscpylgtv::new("mock-model-name-rejected");
+    mock.queue_error("get_system_info", 7, "model read denied\n");
+    let client = mock_client(&mock).with_auth_context(
+        BscpylgtvAuthContext::new().with_key_file_path("/tmp/lg-buddy-model-name.sqlite"),
+    );
+
+    let error = client
+        .model_name()
+        .expect_err("rejected model read should fail");
+    assert_eq!(error.operation(), TvOperation::ReadModelName);
+    assert_eq!(error.kind(), TvErrorKind::Rejected);
+    assert!(error.detail().contains("model read denied"));
+
+    let call = &mock.calls()[0];
+    assert_eq!(call.command, "get_system_info");
+    assert_eq!(call.args, vec!["true"]);
+    assert_eq!(
+        call.key_file_path.as_deref(),
+        Some("/tmp/lg-buddy-model-name.sqlite")
+    );
 }
 
 #[test]
