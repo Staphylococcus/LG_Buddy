@@ -634,32 +634,46 @@ the native webOS exchange; GTK fixtures cover the form and intent mapping, and
 the installed accessibility check covers the blank-state CTA, modal form,
 validation feedback, and dismissal through Escape and the header's Cancel button.
 
-## Read-only Settings Increment
+## Settings Editing Increment
 
 [#176](https://github.com/Staphylococcus/LG_Buddy/issues/176) adds **Settings**
-as the third destination. `SettingsApplication` owns loading, failure, retry,
-and refresh on entry. Its backend reads `SettingsStore` on a worker thread;
+as the third destination in development. It was outside the released
+`1.6.0-beta.1` scope, which remains Overview, TVs, and first-TV pairing.
+[#177](https://github.com/Staphylococcus/LG_Buddy/issues/177) extends that view
+with editing while preserving the same application-owned boundary.
+
+`SettingsApplication` owns loading, failure, retry, refresh on entry, and
+mutation state. Its backend reads and writes `SettingsStore` on worker threads;
 operation identities reject stale completions and results after close.
-Configuration reads do not depend on a configured or reachable TV.
+Configuration reads and writes do not depend on a configured or reachable TV.
+Settings writes are serialized with TV management so concurrent operations
+cannot overwrite each other's configuration snapshots.
 
 The application builds three groups—Screen, Sleep & Wake, and Updates—from
-the seven behavior settings. Descriptions, defaults, accepted values, and
-effective-value sources come from the existing registry and store. Friendly
-titles and value labels belong to the presentation layer. Invalid values stay
-invalid, and persisted configuration is not treated as proof of runtime
-application or service health.
+seven behavior settings. Descriptions, defaults, accepted values, and
+effective-value sources come from the existing registry and store. Invalid
+values remain invalid rather than silently defaulting. The rows
+declare native editors and commit policy: toggles and bounded choices use
+`OnChange`, while the numeric idle timeout uses `OnFinalize` (Enter or focus
+loss). **Reset** is an immediate semantic intent; the view has no Save or
+Cancel workflow.
 
 GTK maps the presentation to a native `AdwPreferencesPage`, preference groups,
-and expandable rows. Descriptions and current values are visible immediately;
-source, default, and accepted values appear in expanded details. It neither
-parses configuration nor calls the settings CLI. Shared descriptions are
-improved in the registry rather than copied into GTK. This increment introduces
-no settings writes; ordinary editing and runtime application belong to #177.
+expandable rows, and the declared editors. It renders values, progress,
+feedback, and retry actions; it does not parse configuration, call the settings
+CLI, or implement validation or service policy. A shared typed settings executor
+is used by both CLI and GUI to validate, persist, and apply mutations. A
+validation or persistence failure restores the previous row value. A successful
+save followed by an apply failure keeps the saved value, shows a warning, and
+offers **Retry apply**. Missing or inactive user units are reported precisely;
+the workflow does not attempt privileged repair.
 
-Headless tests cover registry/store presentation and the loading/refresh/retry
-flow. Renderer tests cover native grouping, invalid text, expansion, and narrow
-layout. The installed AT-SPI smoke verifies the third tab, keyboard access to
-details, externally changed configuration, and preservation of the settings file.
+Headless tests cover registry/store presentation and the shared mutation
+executor, including validation, persistence, apply failure, and retry. Renderer
+tests cover native editors, commit timing, reset, feedback, and narrow layout.
+The installed AT-SPI smoke verifies the third tab, keyboard access to details
+and editors, externally changed configuration, and preservation of the settings
+file.
 
 ## Evolution Rules
 

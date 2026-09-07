@@ -4,13 +4,108 @@ use std::error::Error;
 use std::fmt;
 
 use crate::presentation::brightness::UserFacingError;
-use crate::presentation::settings::{SettingsGroup, SettingsPresentation};
-use crate::settings::SettingsStore;
+use crate::presentation::settings::{
+    SettingsEditStatus, SettingsEditor, SettingsFeedback, SettingsFeedbackSeverity, SettingsGroup,
+    SettingsPresentation, SettingsRow,
+};
+use crate::settings::{
+    execute_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
+    SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
+    SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BehaviorSetting {
+    ScreenBackend,
+    ScreenIdleBlank,
+    ScreenIdleTimeout,
+    ScreenRestorePolicy,
+    SystemSleepWakePolicy,
+    UpdatesAutoCheck,
+    UpdatesChannel,
+}
+
+impl BehaviorSetting {
+    pub fn key_name(self) -> &'static str {
+        match self {
+            Self::ScreenBackend => "screen.backend",
+            Self::ScreenIdleBlank => "screen.idle_blank",
+            Self::ScreenIdleTimeout => "screen.idle_timeout",
+            Self::ScreenRestorePolicy => "screen.restore_policy",
+            Self::SystemSleepWakePolicy => "system.sleep_wake_policy",
+            Self::UpdatesAutoCheck => "updates.auto_check",
+            Self::UpdatesChannel => "updates.channel",
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "screen.backend" => Self::ScreenBackend,
+            "screen.idle_blank" => Self::ScreenIdleBlank,
+            "screen.idle_timeout" => Self::ScreenIdleTimeout,
+            "screen.restore_policy" => Self::ScreenRestorePolicy,
+            "system.sleep_wake_policy" => Self::SystemSleepWakePolicy,
+            "updates.auto_check" => Self::UpdatesAutoCheck,
+            "updates.channel" => Self::UpdatesChannel,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsIntent {
     Retry,
     Refresh,
+    SetEnabled {
+        setting: BehaviorSetting,
+        enabled: bool,
+    },
+    Commit {
+        setting: BehaviorSetting,
+        value: String,
+    },
+    Reset(BehaviorSetting),
+    RetryApply(BehaviorSetting),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsMutationRequest {
+    Set(String),
+    Reset,
+    RetryApply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsMutationOperation {
+    id: u64,
+    setting: BehaviorSetting,
+    request: SettingsMutationRequest,
+}
+
+impl SettingsMutationOperation {
+    fn new(id: u64, setting: BehaviorSetting, request: SettingsMutationRequest) -> Self {
+        Self {
+            id,
+            setting,
+            request,
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn setting(&self) -> BehaviorSetting {
+        self.setting
+    }
+
+    pub fn key_name(&self) -> &'static str {
+        self.setting.key_name()
+    }
+
+    pub fn request(&self) -> &SettingsMutationRequest {
+        &self.request
+    }
 }
 
 /// Opaque identity for one asynchronous settings read.
@@ -27,6 +122,7 @@ impl SettingsReadOperation {
 pub struct SettingsTransition {
     presentation: SettingsPresentation,
     read_operation: Option<SettingsReadOperation>,
+    mutation_operation: Option<SettingsMutationOperation>,
     diagnostic: Option<String>,
 }
 
@@ -37,6 +133,10 @@ impl SettingsTransition {
 
     pub fn read_operation(&self) -> Option<SettingsReadOperation> {
         self.read_operation
+    }
+
+    pub fn mutation_operation(&self) -> Option<&SettingsMutationOperation> {
+        self.mutation_operation.as_ref()
     }
 
     pub fn diagnostic(&self) -> Option<&str> {
@@ -96,6 +196,12 @@ impl Error for SettingsReadError {}
 
 pub trait SettingsBackend: Send + Sync + 'static {
     fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError>;
+
+    fn write_setting(
+        &self,
+        operation: SettingsMutationOperation,
+        progress: &mut dyn FnMut(SettingsMutationStage),
+    ) -> Result<SettingsMutationOutcome, SettingsMutationFailure>;
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +213,34 @@ impl SettingsBackend for EnvironmentSettingsBackend {
             .map_err(|error| SettingsReadError::unreadable(error.to_string()))?;
         Ok(SettingsPresentation::from_store(&store).groups().to_vec())
     }
+
+    fn write_setting(
+        &self,
+        operation: SettingsMutationOperation,
+        progress: &mut dyn FnMut(SettingsMutationStage),
+    ) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
+        let path =
+            ConfigPathResolver::resolve_from_env().map_err(SettingsMutationFailure::Persistence)?;
+        let store = SettingsStore::load(&path).map_err(SettingsMutationFailure::Persistence)?;
+        let applier = SettingsApplier::from_env();
+        match operation.request() {
+            SettingsMutationRequest::Set(value) => {
+                progress(SettingsMutationStage::Validating);
+                let mutation = SettingsMutation::set(&store, operation.key_name(), value)
+                    .map_err(SettingsMutationFailure::Validation)?;
+                execute_settings_mutation(&path, mutation, &applier, progress)
+            }
+            SettingsMutationRequest::Reset => {
+                progress(SettingsMutationStage::Validating);
+                let mutation = SettingsMutation::unset(&store, operation.key_name())
+                    .map_err(SettingsMutationFailure::Validation)?;
+                execute_settings_mutation(&path, mutation, &applier, progress)
+            }
+            SettingsMutationRequest::RetryApply => {
+                retry_settings_apply(&store, operation.key_name(), &applier, progress)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +248,14 @@ enum SettingsApplicationState {
     Loading(SettingsReadOperation),
     Ready,
     Failed,
+    Mutating(SettingsMutationOperation),
     Closed,
+}
+
+#[derive(Debug, Clone)]
+struct PendingMutation {
+    operation: SettingsMutationOperation,
+    previous_row: SettingsRow,
 }
 
 #[derive(Debug)]
@@ -122,6 +263,9 @@ pub struct SettingsApplication {
     state: SettingsApplicationState,
     next_operation_id: u64,
     presentation: SettingsPresentation,
+    controls_available: bool,
+    pending_mutation: Option<PendingMutation>,
+    reconcile_mutation: Option<PendingMutation>,
 }
 
 impl SettingsApplication {
@@ -133,10 +277,14 @@ impl SettingsApplication {
                 state: SettingsApplicationState::Loading(operation),
                 next_operation_id: 1,
                 presentation: presentation.clone(),
+                controls_available: true,
+                pending_mutation: None,
+                reconcile_mutation: None,
             },
             SettingsTransition {
                 presentation,
                 read_operation: Some(operation),
+                mutation_operation: None,
                 diagnostic: None,
             },
         )
@@ -155,6 +303,52 @@ impl SettingsApplication {
             {
                 Some(self.begin_read())
             }
+            SettingsIntent::SetEnabled { setting, enabled }
+                if self.controls_available
+                    && matches!(self.state, SettingsApplicationState::Ready) =>
+            {
+                let is_toggle = self
+                    .presentation
+                    .row(setting)
+                    .is_some_and(|row| matches!(row.editor(), SettingsEditor::Toggle { .. }));
+                is_toggle
+                    .then(|| {
+                        self.begin_mutation(
+                            setting,
+                            SettingsMutationRequest::Set(if enabled {
+                                "enabled".to_string()
+                            } else {
+                                "disabled".to_string()
+                            }),
+                        )
+                    })
+                    .flatten()
+            }
+            SettingsIntent::Commit { setting, value }
+                if self.controls_available
+                    && matches!(self.state, SettingsApplicationState::Ready) =>
+            {
+                self.begin_mutation(setting, SettingsMutationRequest::Set(value))
+            }
+            SettingsIntent::Reset(setting)
+                if self.controls_available
+                    && matches!(self.state, SettingsApplicationState::Ready) =>
+            {
+                self.begin_mutation(setting, SettingsMutationRequest::Reset)
+            }
+            SettingsIntent::RetryApply(setting)
+                if self.controls_available
+                    && matches!(self.state, SettingsApplicationState::Ready) =>
+            {
+                let retryable = self
+                    .presentation
+                    .row(setting)
+                    .and_then(SettingsRow::retry_apply_action)
+                    .is_some_and(|action| action.enabled());
+                retryable
+                    .then(|| self.begin_mutation(setting, SettingsMutationRequest::RetryApply))
+                    .flatten()
+            }
             _ => None,
         }
     }
@@ -170,14 +364,48 @@ impl SettingsApplication {
 
         let (presentation, diagnostic) = match result {
             Ok(groups) => {
+                let previous = self.presentation.clone();
+                let mut presentation = SettingsPresentation::ready(groups);
+                presentation.preserve_apply_failures_from(&previous);
+                if let Some(pending) = self.reconcile_mutation.take() {
+                    let changed =
+                        presentation
+                            .row(pending.operation.setting())
+                            .is_some_and(|row| {
+                                row.value_label() != pending.previous_row.value_label()
+                                    || row.source_label() != pending.previous_row.source_label()
+                            });
+                    presentation.set_row_state(
+                        pending.operation.setting(),
+                        if changed {
+                            SettingsEditStatus::ApplyFailed
+                        } else {
+                            SettingsEditStatus::PersistenceFailed
+                        },
+                        Some(SettingsFeedback::new(
+                            SettingsFeedbackSeverity::Warning,
+                            if changed {
+                                "The setting was saved, but runtime apply could not be confirmed. Retry apply."
+                            } else {
+                                "The saved value is unchanged; runtime apply could not be confirmed. Retry apply."
+                            },
+                        )),
+                        true,
+                    );
+                }
+                presentation.set_controls_available(self.controls_available);
                 self.state = SettingsApplicationState::Ready;
-                (SettingsPresentation::ready(groups), None)
+                (presentation, None)
             }
             Err(error) => {
                 self.state = SettingsApplicationState::Failed;
                 let diagnostic = error.diagnostic().to_string();
+                let previous_groups = self.presentation.groups().to_vec();
                 (
-                    SettingsPresentation::failed(user_facing_read_error(error.failure())),
+                    SettingsPresentation::failed_with_groups(
+                        user_facing_read_error(error.failure()),
+                        previous_groups,
+                    ),
                     Some(diagnostic),
                 )
             }
@@ -186,8 +414,165 @@ impl SettingsApplication {
         Some(SettingsTransition {
             presentation,
             read_operation: None,
+            mutation_operation: None,
             diagnostic,
         })
+    }
+
+    pub fn mutation_progress(
+        &mut self,
+        operation: &SettingsMutationOperation,
+        stage: SettingsMutationStage,
+    ) -> Option<SettingsTransition> {
+        if !matches!(
+            &self.state,
+            SettingsApplicationState::Mutating(active) if active == operation
+        ) {
+            return None;
+        }
+
+        let (status, message) = match stage {
+            SettingsMutationStage::Validating => {
+                (SettingsEditStatus::Validating, "Checking this value…")
+            }
+            SettingsMutationStage::Persisting => {
+                (SettingsEditStatus::Persisting, "Saving this setting…")
+            }
+            SettingsMutationStage::Persisted => {
+                (SettingsEditStatus::Persisted, "Setting saved; applying it…")
+            }
+            SettingsMutationStage::Applying => {
+                (SettingsEditStatus::Applying, "Applying this setting…")
+            }
+        };
+        self.presentation.set_row_state(
+            operation.setting(),
+            status,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Info,
+                message,
+            )),
+            false,
+        );
+        Some(self.transition(None, None, None))
+    }
+
+    pub fn complete_mutation(
+        &mut self,
+        operation: &SettingsMutationOperation,
+        result: Result<SettingsMutationOutcome, SettingsMutationFailure>,
+    ) -> Option<SettingsTransition> {
+        let pending = match &self.pending_mutation {
+            Some(pending) if pending.operation == *operation => pending.clone(),
+            _ => return None,
+        };
+        if !matches!(
+            &self.state,
+            SettingsApplicationState::Mutating(active) if active == operation
+        ) {
+            return None;
+        }
+        self.pending_mutation = None;
+
+        match result {
+            Ok(outcome) => {
+                let effective = outcome.change().effective_setting();
+                let mut replacement = crate::presentation::settings::row_from_effective(effective);
+                replacement.set_editor_enabled(self.controls_available);
+                self.presentation.replace_row(replacement);
+                self.presentation
+                    .set_controls_available(self.controls_available);
+                self.state = SettingsApplicationState::Ready;
+                match outcome.apply() {
+                    Ok(apply_outcome) => {
+                        let (severity, message) = apply_feedback(apply_outcome);
+                        self.presentation.set_row_state(
+                            operation.setting(),
+                            SettingsEditStatus::Applied,
+                            Some(SettingsFeedback::new(severity, message)),
+                            false,
+                        )
+                    }
+                    Err(_error) => self.presentation.set_row_state(
+                        operation.setting(),
+                        SettingsEditStatus::ApplyFailed,
+                        Some(SettingsFeedback::new(
+                            SettingsFeedbackSeverity::Warning,
+                            "Saved, but could not apply yet. Retry apply.",
+                        )),
+                        true,
+                    ),
+                }
+                let diagnostic = outcome.apply().as_ref().err().map(ToString::to_string);
+                Some(self.transition(None, None, diagnostic))
+            }
+            Err(failure) => {
+                let status = match &failure {
+                    SettingsMutationFailure::Validation(_) => SettingsEditStatus::ValidationFailed,
+                    SettingsMutationFailure::Persistence(_) => {
+                        SettingsEditStatus::PersistenceFailed
+                    }
+                };
+                let preserve_retry_apply = pending.previous_row.retry_apply_action().is_some();
+                self.presentation.replace_row(pending.previous_row);
+                self.presentation
+                    .set_controls_available(self.controls_available);
+                self.presentation.set_row_state(
+                    operation.setting(),
+                    status,
+                    Some(SettingsFeedback::new(
+                        SettingsFeedbackSeverity::Error,
+                        mutation_failure_message(&failure),
+                    )),
+                    preserve_retry_apply,
+                );
+                self.state = SettingsApplicationState::Ready;
+                Some(self.transition(None, None, Some(failure.error().to_string())))
+            }
+        }
+    }
+
+    pub fn mutation_worker_stopped(
+        &mut self,
+        operation: &SettingsMutationOperation,
+    ) -> Option<SettingsTransition> {
+        let pending = match &self.pending_mutation {
+            Some(pending) if pending.operation == *operation => pending.clone(),
+            _ => return None,
+        };
+        if !matches!(
+            &self.state,
+            SettingsApplicationState::Mutating(active) if active == operation
+        ) {
+            return None;
+        }
+
+        self.pending_mutation = None;
+        self.presentation.set_row_state(
+            operation.setting(),
+            SettingsEditStatus::PersistenceFailed,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Warning,
+                "Refreshing settings to reconcile the stopped write…",
+            )),
+            false,
+        );
+        self.reconcile_mutation = Some(pending);
+        Some(self.begin_read())
+    }
+
+    pub fn is_mutating(&self) -> bool {
+        self.pending_mutation.is_some()
+    }
+
+    pub fn set_controls_available(&mut self, available: bool) -> Option<SettingsTransition> {
+        if self.controls_available == available {
+            return None;
+        }
+        self.controls_available = available;
+        self.presentation
+            .set_controls_available(available && !self.is_mutating());
+        Some(self.transition(None, None, None))
     }
 
     pub fn shutdown(&mut self) {
@@ -202,12 +587,114 @@ impl SettingsApplication {
         let operation = SettingsReadOperation::new(self.next_operation_id);
         self.next_operation_id += 1;
         self.state = SettingsApplicationState::Loading(operation);
-        self.presentation = SettingsPresentation::loading();
+        self.presentation.mark_loading();
         SettingsTransition {
             presentation: self.presentation.clone(),
             read_operation: Some(operation),
+            mutation_operation: None,
             diagnostic: None,
         }
+    }
+
+    fn begin_mutation(
+        &mut self,
+        setting: BehaviorSetting,
+        request: SettingsMutationRequest,
+    ) -> Option<SettingsTransition> {
+        let previous_row = self.presentation.row(setting)?.clone();
+        let operation = SettingsMutationOperation::new(self.next_operation_id, setting, request);
+        self.next_operation_id += 1;
+        self.pending_mutation = Some(PendingMutation {
+            operation: operation.clone(),
+            previous_row,
+        });
+        self.state = SettingsApplicationState::Mutating(operation.clone());
+        self.presentation.set_row_state(
+            setting,
+            SettingsEditStatus::Validating,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Info,
+                "Checking this value…",
+            )),
+            false,
+        );
+        self.presentation.set_controls_available(false);
+        Some(self.transition(None, Some(operation), None))
+    }
+
+    fn transition(
+        &self,
+        read_operation: Option<SettingsReadOperation>,
+        mutation_operation: Option<SettingsMutationOperation>,
+        diagnostic: Option<String>,
+    ) -> SettingsTransition {
+        SettingsTransition {
+            presentation: self.presentation.clone(),
+            read_operation,
+            mutation_operation,
+            diagnostic,
+        }
+    }
+}
+
+fn mutation_failure_message(failure: &SettingsMutationFailure) -> String {
+    match failure {
+        SettingsMutationFailure::Validation(error) => match error {
+            SettingsError::InvalidValue { .. } => {
+                "That value is not valid. Choose one of the accepted values.".to_string()
+            }
+            _ => "That change is not valid for this setting.".to_string(),
+        },
+        SettingsMutationFailure::Persistence(_) => {
+            "LG Buddy could not save this setting. Your previous value was kept.".to_string()
+        }
+    }
+}
+
+fn apply_feedback(outcome: &SettingsApplyOutcome) -> (SettingsFeedbackSeverity, String) {
+    match outcome {
+        SettingsApplyOutcome::NotInstalled { service } => (
+            SettingsFeedbackSeverity::Warning,
+            format!(
+                "Saved; {} is not installed yet.",
+                apply_target_label(service)
+            ),
+        ),
+        SettingsApplyOutcome::InactiveDisabled { service } => (
+            SettingsFeedbackSeverity::Warning,
+            format!(
+                "Saved; {} is inactive and disabled. It will apply when started.",
+                apply_target_label(service)
+            ),
+        ),
+        SettingsApplyOutcome::Skipped { .. } => (
+            SettingsFeedbackSeverity::Warning,
+            "Saved; runtime apply was skipped by configuration.".to_string(),
+        ),
+        SettingsApplyOutcome::NoActionRequired => (
+            SettingsFeedbackSeverity::Info,
+            "Saved; no runtime action was required.".to_string(),
+        ),
+        SettingsApplyOutcome::Enabled { .. } => (
+            SettingsFeedbackSeverity::Info,
+            "Saved; scheduled for the next graphical session.".to_string(),
+        ),
+        SettingsApplyOutcome::Restarted { .. }
+        | SettingsApplyOutcome::EnabledStarted { .. }
+        | SettingsApplyOutcome::DisabledStopped { .. } => (
+            SettingsFeedbackSeverity::Info,
+            "Saved and applied".to_string(),
+        ),
+    }
+}
+
+fn apply_target_label(service: &str) -> &'static str {
+    if service.contains("screen") {
+        "the screen integration"
+    } else if service.contains("update_check") {
+        "automatic update checks"
+    } else {
+        "the related service"
     }
 }
 
@@ -234,7 +721,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::presentation::settings::{SettingsRow, SettingsStatus};
+    use crate::presentation::settings::{
+        SettingsEditStatus, SettingsFeedback, SettingsFeedbackSeverity, SettingsRow, SettingsStatus,
+    };
     use crate::settings::{ConfigEnvReader, SettingValue, SettingsStore, SETTINGS_REGISTRY};
 
     fn groups(contents: &str) -> Vec<SettingsGroup> {
@@ -484,6 +973,311 @@ screen_backend=wayland\n",
             row(ready.presentation().groups(), "Updates", "Update channel").value_label(),
             "Stable"
         );
+    }
+
+    #[test]
+    fn failed_refresh_keeps_hidden_apply_warning_for_retry() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        app.presentation.set_row_state(
+            BehaviorSetting::ScreenIdleBlank,
+            SettingsEditStatus::ApplyFailed,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Warning,
+                "Saved, but could not apply yet. Retry apply.",
+            )),
+            true,
+        );
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let failed = app
+            .complete_read(
+                refresh.read_operation().unwrap(),
+                Err(SettingsReadError::unreadable("temporary read failure")),
+            )
+            .unwrap();
+        assert!(matches!(
+            failed.presentation().status(),
+            SettingsStatus::Failed(_)
+        ));
+        assert_eq!(failed.presentation().groups().len(), 3);
+        assert_eq!(
+            failed
+                .presentation()
+                .row(BehaviorSetting::ScreenIdleBlank)
+                .unwrap()
+                .edit_status(),
+            SettingsEditStatus::ApplyFailed
+        );
+        assert!(failed
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap()
+            .retry_apply_action()
+            .is_some());
+
+        let retry = app.handle_intent(SettingsIntent::Retry).unwrap();
+        let ready = app
+            .complete_read(retry.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let row = ready
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap();
+        assert_eq!(row.edit_status(), SettingsEditStatus::ApplyFailed);
+        assert!(row.retry_apply_action().is_some());
+    }
+
+    #[test]
+    fn mutation_suppresses_duplicates_and_worker_stop_is_recoverable() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+
+        let transition = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                value: "disabled".to_string(),
+            })
+            .unwrap();
+        let operation = transition.mutation_operation().unwrap().clone();
+        assert!(app.is_mutating());
+        assert!(app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                value: "enabled".to_string(),
+            })
+            .is_none());
+
+        app.mutation_progress(&operation, SettingsMutationStage::Persisting)
+            .unwrap();
+        assert_eq!(
+            app.presentation()
+                .row(BehaviorSetting::ScreenIdleBlank)
+                .unwrap()
+                .edit_status(),
+            SettingsEditStatus::Persisting
+        );
+
+        let stopped = app.mutation_worker_stopped(&operation).unwrap();
+        assert!(stopped.read_operation().is_some());
+        let reconciled = app
+            .complete_read(stopped.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let row = reconciled
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap();
+        assert_eq!(row.edit_status(), SettingsEditStatus::PersistenceFailed);
+        assert_eq!(
+            row.feedback().unwrap().severity(),
+            SettingsFeedbackSeverity::Warning
+        );
+        assert!(row.feedback().unwrap().message().contains("unchanged"));
+        assert!(row
+            .retry_apply_action()
+            .is_some_and(|action| action.enabled()));
+        assert!(!app.is_mutating());
+        assert!(app
+            .handle_intent(SettingsIntent::RetryApply(BehaviorSetting::ScreenIdleBlank))
+            .is_some());
+    }
+
+    #[test]
+    fn set_enabled_intent_uses_canonical_toggle_values() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let transition = app
+            .handle_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::UpdatesAutoCheck,
+                enabled: false,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.mutation_operation().unwrap().request(),
+            &SettingsMutationRequest::Set("disabled".to_string())
+        );
+        assert!(app
+            .handle_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleTimeout,
+                enabled: true,
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn failed_apply_warning_survives_unchanged_refresh_but_not_changed_value() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        app.presentation.set_row_state(
+            BehaviorSetting::ScreenIdleBlank,
+            SettingsEditStatus::ApplyFailed,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Warning,
+                "Saved, but could not apply yet. Retry apply.",
+            )),
+            true,
+        );
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        assert_eq!(refresh.presentation().groups().len(), 3);
+        assert_eq!(
+            refresh
+                .presentation()
+                .row(BehaviorSetting::ScreenIdleBlank)
+                .unwrap()
+                .edit_status(),
+            SettingsEditStatus::ApplyFailed
+        );
+        let operation = refresh.read_operation().unwrap();
+        let ready = app.complete_read(operation, Ok(groups(""))).unwrap();
+        let row = ready
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap();
+        assert_eq!(row.edit_status(), SettingsEditStatus::ApplyFailed);
+        assert!(row.retry_apply_action().is_some());
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let changed = app
+            .complete_read(
+                refresh.read_operation().unwrap(),
+                Ok(groups("screen_idle_blank=disabled\n")),
+            )
+            .unwrap();
+        let row = changed
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap();
+        assert_eq!(row.value_label(), "Disabled");
+        assert_eq!(row.edit_status(), SettingsEditStatus::Unchanged);
+        assert!(row.retry_apply_action().is_none());
+    }
+
+    #[test]
+    fn validation_failure_restores_previous_row_without_claiming_a_save() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let transition = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleTimeout,
+                value: "bad".to_string(),
+            })
+            .unwrap();
+        let operation = transition.mutation_operation().unwrap().clone();
+        let transition = app
+            .complete_mutation(
+                &operation,
+                Err(SettingsMutationFailure::Validation(
+                    SettingsError::InvalidValue {
+                        key: "screen.idle_timeout".to_string(),
+                        value: "bad".to_string(),
+                        expected: "1–86400 seconds".to_string(),
+                    },
+                )),
+            )
+            .unwrap();
+        let row = transition
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleTimeout)
+            .unwrap();
+        assert_eq!(row.value_label(), "300 seconds");
+        assert_eq!(row.edit_status(), SettingsEditStatus::ValidationFailed);
+        assert!(row.feedback().unwrap().message().contains("not valid"));
+    }
+
+    #[test]
+    fn failed_new_edit_keeps_retry_apply_for_prior_saved_warning() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        app.presentation.set_row_state(
+            BehaviorSetting::ScreenIdleBlank,
+            SettingsEditStatus::ApplyFailed,
+            Some(SettingsFeedback::new(
+                SettingsFeedbackSeverity::Warning,
+                "Saved, but could not apply yet. Retry apply.",
+            )),
+            true,
+        );
+        let transition = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                value: "disabled".to_string(),
+            })
+            .unwrap();
+        let operation = transition.mutation_operation().unwrap().clone();
+        let transition = app
+            .complete_mutation(
+                &operation,
+                Err(SettingsMutationFailure::Persistence(SettingsError::Apply {
+                    message: "write failed".to_string(),
+                })),
+            )
+            .unwrap();
+        let row = transition
+            .presentation()
+            .row(BehaviorSetting::ScreenIdleBlank)
+            .unwrap();
+        assert_eq!(row.edit_status(), SettingsEditStatus::PersistenceFailed);
+        assert!(row.retry_apply_action().is_some());
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let refreshed = app
+            .complete_read(refresh.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        assert!(
+            refreshed
+                .presentation()
+                .row(BehaviorSetting::ScreenIdleBlank)
+                .unwrap()
+                .retry_apply_action()
+                .is_some(),
+            "navigation must retain the pending runtime retry after a failed later edit"
+        );
+    }
+
+    #[test]
+    fn apply_outcomes_do_not_claim_runtime_application_when_deferred() {
+        let (severity, message) = apply_feedback(&SettingsApplyOutcome::NotInstalled {
+            service: "lg-buddy-screen.service",
+        });
+        assert_eq!(severity, SettingsFeedbackSeverity::Warning);
+        assert!(message.contains("Saved;"));
+        assert!(message.contains("not installed"));
+        assert!(message.contains("screen integration"));
+        assert!(!message.contains("LG_Buddy"));
+        assert!(!message.contains("Saved and applied"));
+
+        let (severity, message) = apply_feedback(&SettingsApplyOutcome::NoActionRequired);
+        assert_eq!(severity, SettingsFeedbackSeverity::Info);
+        assert!(message.contains("no runtime action"));
+        assert!(!message.contains("Saved and applied"));
+
+        let (_, message) = apply_feedback(&SettingsApplyOutcome::Enabled {
+            unit: "LG_Buddy_update_check.timer",
+        });
+        assert!(message.contains("next graphical session"));
+        assert!(!message.contains("Saved and applied"));
+    }
+
+    #[test]
+    fn shutdown_rejects_late_mutation_result() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let transition = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                value: "disabled".to_string(),
+            })
+            .unwrap();
+        let operation = transition.mutation_operation().unwrap().clone();
+        app.shutdown();
+        assert!(app.mutation_worker_stopped(&operation).is_none());
     }
 
     #[test]

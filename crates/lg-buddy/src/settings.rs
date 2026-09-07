@@ -3,6 +3,7 @@ use std::io;
 mod command;
 mod formatter;
 mod model;
+mod mutation;
 mod screen;
 mod service;
 mod store;
@@ -16,6 +17,10 @@ pub use model::{
     ApplyStrategy, EnumSettingType, IntegerSettingType, SettingAlias, SettingDefinition,
     SettingKey, SettingMutability, SettingOperation, SettingType, SettingValue, SettingsError,
     SettingsRegistry,
+};
+pub use mutation::{
+    execute_settings_mutation, retry_settings_apply, SettingsMutationFailure,
+    SettingsMutationOutcome, SettingsMutationStage,
 };
 pub use service::{
     ServiceController, SettingsApplyOutcome, SystemdUserServiceController, UserServiceState,
@@ -175,30 +180,27 @@ impl<C: ServiceController, P: PlatformPreflight> SettingsCommandRunner<C, P> {
             SettingsCommand::Set { key, value } => {
                 let mutation = SettingsMutation::set(&self.store, &key, &value)?;
                 tv::preflight_if_required(&self.store, &self.preflight, &mutation, writer)?;
-                let change = persist_settings_mutation(self.store.path(), mutation)?;
-                let apply = self.apply_after_persist(&change)?;
-                self.formatter.write_change(writer, &change, &apply)
+                let outcome = execute_settings_mutation(
+                    self.store.path(),
+                    mutation,
+                    &self.applier,
+                    &mut |_| {},
+                )
+                .map_err(SettingsMutationFailure::into_error)?;
+                self.formatter.write_mutation_outcome(writer, &outcome)
             }
             SettingsCommand::Unset(key) => {
                 let mutation = SettingsMutation::unset(&self.store, &key)?;
-                let change = persist_settings_mutation(self.store.path(), mutation)?;
-                let apply = self.apply_after_persist(&change)?;
-                self.formatter.write_change(writer, &change, &apply)
+                let outcome = execute_settings_mutation(
+                    self.store.path(),
+                    mutation,
+                    &self.applier,
+                    &mut |_| {},
+                )
+                .map_err(SettingsMutationFailure::into_error)?;
+                self.formatter.write_mutation_outcome(writer, &outcome)
             }
         }
-    }
-
-    fn apply_after_persist(
-        &self,
-        change: &SettingsChange,
-    ) -> Result<SettingsApplyOutcome, SettingsError> {
-        self.applier
-            .apply(change)
-            .map_err(|err| SettingsError::ApplyAfterPersist {
-                key: change.mutation().key_name().to_string(),
-                path: change.path().to_path_buf(),
-                message: err.to_string(),
-            })
     }
 }
 

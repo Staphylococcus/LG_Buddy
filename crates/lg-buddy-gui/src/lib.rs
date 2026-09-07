@@ -27,8 +27,8 @@ use lg_buddy::pairing::{
     EnvironmentPairingBackend, PairingBackend, PairingError, PairingOperation, PairingStage,
 };
 use lg_buddy::settings_view::{
-    EnvironmentSettingsBackend, SettingsBackend, SettingsIntent, SettingsReadError,
-    SettingsReadOperation, SettingsTransition,
+    EnvironmentSettingsBackend, SettingsBackend, SettingsIntent, SettingsMutationOperation,
+    SettingsReadError, SettingsReadOperation, SettingsTransition,
 };
 use lg_buddy::tvs::{
     EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
@@ -313,6 +313,63 @@ impl ApplicationController {
         if let Some(operation) = transition.read_operation() {
             Self::start_settings_read(controller, operation);
         }
+        if let Some(operation) = transition.mutation_operation() {
+            Self::start_settings_mutation(controller, operation.clone());
+        }
+    }
+
+    fn start_settings_mutation(controller: &Rc<Self>, operation: SettingsMutationOperation) {
+        use lg_buddy::settings::{
+            SettingsMutationFailure, SettingsMutationOutcome, SettingsMutationStage,
+        };
+        enum Update {
+            Progress(SettingsMutationStage),
+            Done(Box<Result<SettingsMutationOutcome, SettingsMutationFailure>>),
+            Stopped,
+        }
+        let backend = Arc::clone(&controller.settings_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::channel();
+        // Atomic publication and runtime apply finish even when the window closes.
+        let mut application_hold = Some(controller.gtk_application.hold());
+        thread::spawn(move || {
+            let result = backend.write_setting(worker_operation, &mut |stage| {
+                let _ = sender.send(Update::Progress(stage));
+            });
+            let _ = sender.send(Update::Done(Box::new(result)));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || loop {
+            let update = match receiver.try_recv() {
+                Ok(update) => update,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Update::Stopped,
+            };
+            let done = matches!(update, Update::Done(_) | Update::Stopped);
+            if let Some(controller) = controller.upgrade() {
+                let transition = match update {
+                    Update::Progress(stage) => controller
+                        .application
+                        .borrow_mut()
+                        .settings_mutation_progress(&operation, stage),
+                    Update::Done(result) => controller
+                        .application
+                        .borrow_mut()
+                        .complete_settings_mutation(&operation, *result),
+                    Update::Stopped => controller
+                        .application
+                        .borrow_mut()
+                        .settings_mutation_worker_stopped(&operation),
+                };
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            if done {
+                drop(application_hold.take());
+                return glib::ControlFlow::Break;
+            }
+        });
     }
 
     fn start_settings_read(controller: &Rc<Self>, operation: SettingsReadOperation) {
@@ -719,6 +776,17 @@ pub(crate) mod controller_test_support {
     struct DefaultSettingsBackend;
 
     impl lg_buddy::settings_view::SettingsBackend for DefaultSettingsBackend {
+        fn write_setting(
+            &self,
+            _operation: lg_buddy::settings_view::SettingsMutationOperation,
+            _progress: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+        ) -> Result<
+            lg_buddy::settings::SettingsMutationOutcome,
+            lg_buddy::settings::SettingsMutationFailure,
+        > {
+            panic!("unexpected write in a read-only test backend")
+        }
+
         fn read_settings(
             &self,
         ) -> Result<
@@ -973,6 +1041,7 @@ pub(crate) mod controller_test_support {
         );
         run_pairing_scenario();
         run_settings_scenario();
+        run_settings_write_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -1141,6 +1210,17 @@ pub(crate) mod controller_test_support {
             Mutex<std::collections::VecDeque<Result<Vec<SettingsGroup>, SettingsReadError>>>,
         );
         impl SettingsBackend for SettingsMock {
+            fn write_setting(
+                &self,
+                _operation: lg_buddy::settings_view::SettingsMutationOperation,
+                _progress: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+            ) -> Result<
+                lg_buddy::settings::SettingsMutationOutcome,
+                lg_buddy::settings::SettingsMutationFailure,
+            > {
+                panic!("unexpected write in a read-only test backend")
+            }
+
             fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
                 self.0
                     .lock()
@@ -1211,6 +1291,145 @@ pub(crate) mod controller_test_support {
         pump_until(|| widget_contains_text(native.upcast_ref(), "120 seconds"));
         controller.shutdown();
         controller.window.close();
+    }
+
+    fn run_settings_write_scenario() {
+        use lg_buddy::settings::{
+            execute_settings_mutation, SettingsApplier, SettingsMutation, SettingsMutationFailure,
+            SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
+        };
+        use lg_buddy::settings_view::{
+            BehaviorSetting, SettingsMutationOperation, SettingsMutationRequest,
+        };
+        struct SettingsWriter {
+            path: std::path::PathBuf,
+            started: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            panic_after_save: bool,
+        }
+        impl lg_buddy::settings_view::SettingsBackend for SettingsWriter {
+            fn read_settings(
+                &self,
+            ) -> Result<
+                Vec<lg_buddy::presentation::settings::SettingsGroup>,
+                lg_buddy::settings_view::SettingsReadError,
+            > {
+                Ok(
+                    lg_buddy::presentation::settings::SettingsPresentation::from_store(
+                        &SettingsStore::load(&self.path).unwrap(),
+                    )
+                    .groups()
+                    .to_vec(),
+                )
+            }
+            fn write_setting(
+                &self,
+                operation: SettingsMutationOperation,
+                progress: &mut dyn FnMut(SettingsMutationStage),
+            ) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
+                progress(SettingsMutationStage::Validating);
+                self.started.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                let SettingsMutationRequest::Set(value) = operation.request() else {
+                    unreachable!()
+                };
+                let mutation = SettingsMutation::set(
+                    &SettingsStore::load(&self.path).unwrap(),
+                    operation.key_name(),
+                    value,
+                )
+                .unwrap();
+                // updates.channel has no systemd action, so this fake never touches host services.
+                let result = execute_settings_mutation(
+                    &self.path,
+                    mutation,
+                    &SettingsApplier::from_env(),
+                    progress,
+                );
+                assert!(
+                    !self.panic_after_save,
+                    "test worker stopped after publication"
+                );
+                result
+            }
+        }
+        for (suffix, panic_after_save, close_pending) in [
+            ("SettingsWrite", false, false),
+            ("SettingsStopped", true, false),
+            ("SettingsClose", false, true),
+        ] {
+            let path =
+                std::env::temp_dir().join(format!("lg-buddy-{suffix}-{}.env", std::process::id()));
+            std::fs::write(&path, "updates_channel=stable\n").unwrap();
+            let application = test_application(suffix);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (controller, opening) = ApplicationController::new(
+                &application,
+                Arc::new(PanicBackend),
+                Arc::new(EmptyTvsBackend),
+                Arc::new(SettingsWriter {
+                    path: path.clone(),
+                    started: started_tx,
+                    release: Mutex::new(release_rx),
+                    panic_after_save,
+                }),
+            );
+            ApplicationController::render_settings_transition(
+                &controller,
+                opening.settings().unwrap(),
+            );
+            controller
+                .window
+                .choose_page(super::ApplicationPage::Settings);
+            controller.present();
+            let native = controller.window.window();
+            pump_until(|| widget_contains_text(native.upcast_ref(), "Stable"));
+            ApplicationController::handle_settings_intent(
+                &controller,
+                lg_buddy::settings_view::SettingsIntent::Commit {
+                    setting: BehaviorSetting::UpdatesChannel,
+                    value: "prerelease".into(),
+                },
+            );
+            pump_until(|| started_rx.try_recv().is_ok());
+            assert!(std::fs::read_to_string(&path).unwrap().contains("stable"));
+            pump_for(Duration::from_millis(20));
+            if close_pending {
+                ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
+                assert!(controller.closed.get());
+            }
+            release_tx.send(()).unwrap();
+            pump_until(|| {
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("prerelease")
+            });
+            if close_pending {
+                pump_for(Duration::from_millis(30));
+                assert!(
+                    controller.closed.get(),
+                    "late completion must not reopen Settings"
+                );
+            } else {
+                pump_until(|| widget_contains_text(native.upcast_ref(), "Prerelease"));
+                if panic_after_save {
+                    pump_until(|| {
+                        widget_contains_text(native.upcast_ref(), "The setting was saved, but runtime apply could not be confirmed. Retry apply.")
+                    });
+                } else {
+                    pump_until(|| {
+                        widget_contains_text(
+                            native.upcast_ref(),
+                            "Saved; no runtime action was required.",
+                        )
+                    });
+                }
+                controller.shutdown();
+            }
+            controller.window.close();
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     fn run_pairing_scenario() {

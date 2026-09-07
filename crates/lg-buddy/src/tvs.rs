@@ -518,7 +518,10 @@ impl TvsApplication {
                 Some(self.transition(None, None))
             }
             TvsIntent::PairTv => {
-                if !matches!(self.state, TvsState::Empty) || self.pairing.is_some() {
+                if !self.controls_available
+                    || !matches!(self.state, TvsState::Empty)
+                    || self.pairing.is_some()
+                {
                     return None;
                 }
                 self.pairing = Some(PairingApplication::new());

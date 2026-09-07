@@ -1,0 +1,357 @@
+mod support;
+
+use std::fs;
+
+use lg_buddy::presentation::settings::{
+    SettingsEditStatus, SettingsFeedbackSeverity, SettingsPresentation, SettingsStatus,
+};
+use lg_buddy::settings::{
+    SettingsCommand, SettingsCommandRunner, SettingsMutationFailure, SettingsMutationOutcome,
+    SettingsStore,
+};
+use lg_buddy::settings_view::{
+    BehaviorSetting, EnvironmentSettingsBackend, SettingsApplication, SettingsBackend,
+    SettingsIntent, SettingsTransition,
+};
+use support::{ExecutableScript, TestConfigFile, TestEnv};
+
+const BEHAVIOR_CONFIG: &str = "screen_backend=auto
+screen_idle_blank=enabled
+screen_idle_timeout=300
+screen_restore_policy=conservative
+system_sleep_wake_policy=enabled
+updates_auto_check=enabled
+updates_channel=stable
+";
+
+fn row(
+    presentation: &SettingsPresentation,
+    setting: BehaviorSetting,
+) -> &lg_buddy::presentation::settings::SettingsRow {
+    presentation
+        .groups()
+        .iter()
+        .flat_map(|group| group.rows())
+        .find(|row| row.setting() == setting)
+        .expect("settings presentation contains requested row")
+}
+
+fn open_ready(
+    app: &mut SettingsApplication,
+    opening: SettingsTransition,
+    backend: &EnvironmentSettingsBackend,
+) -> SettingsTransition {
+    let read = opening.read_operation().expect("opening read operation");
+    let groups = backend.read_settings().expect("read settings without a TV");
+    app.complete_read(read, Ok(groups))
+        .expect("complete settings read")
+}
+
+fn run_mutation(
+    app: &mut SettingsApplication,
+    backend: &EnvironmentSettingsBackend,
+    intent: SettingsIntent,
+) -> SettingsTransition {
+    let started = app.handle_intent(intent).expect("start settings mutation");
+    let operation = started
+        .mutation_operation()
+        .expect("mutation operation")
+        .clone();
+    let mut progress = |stage| {
+        app.mutation_progress(&operation, stage)
+            .expect("mutation progress belongs to active operation");
+    };
+    let outcome = backend
+        .write_setting(operation.clone(), &mut progress)
+        .expect("settings mutation succeeds");
+    app.complete_mutation(
+        &operation,
+        Ok::<SettingsMutationOutcome, SettingsMutationFailure>(outcome),
+    )
+    .expect("complete settings mutation")
+}
+
+#[test]
+fn environment_backend_edits_all_behavior_settings_without_a_tv_and_matches_cli() {
+    let gui_config = TestConfigFile::new("settings-operations-gui");
+    let cli_config = TestConfigFile::new("settings-operations-cli");
+    gui_config.write_contents(BEHAVIOR_CONFIG);
+    cli_config.write_contents(BEHAVIOR_CONFIG);
+
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", gui_config.path());
+    env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+    let backend = EnvironmentSettingsBackend;
+    let (mut app, opening) = SettingsApplication::open();
+    let ready = open_ready(&mut app, opening, &backend);
+    assert!(matches!(
+        ready.presentation().status(),
+        SettingsStatus::Ready
+    ));
+    assert_eq!(
+        ready
+            .presentation()
+            .groups()
+            .iter()
+            .map(|group| group.rows().len())
+            .sum::<usize>(),
+        7,
+        "the Settings view is independent of TV availability"
+    );
+
+    let edits = [
+        (
+            SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenBackend,
+                value: "wayland".to_string(),
+            },
+            "screen.backend",
+            "wayland",
+        ),
+        (
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                enabled: false,
+            },
+            "screen.idle_blank",
+            "disabled",
+        ),
+        (
+            SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleTimeout,
+                value: "600".to_string(),
+            },
+            "screen.idle_timeout",
+            "600",
+        ),
+        (
+            SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenRestorePolicy,
+                value: "aggressive".to_string(),
+            },
+            "screen.restore_policy",
+            "aggressive",
+        ),
+        (
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::SystemSleepWakePolicy,
+                enabled: false,
+            },
+            "system.sleep_wake_policy",
+            "disabled",
+        ),
+        (
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::UpdatesAutoCheck,
+                enabled: false,
+            },
+            "updates.auto_check",
+            "disabled",
+        ),
+        (
+            SettingsIntent::Commit {
+                setting: BehaviorSetting::UpdatesChannel,
+                value: "prerelease".to_string(),
+            },
+            "updates.channel",
+            "prerelease",
+        ),
+    ];
+
+    for (intent, key, value) in edits {
+        let setting = match &intent {
+            SettingsIntent::SetEnabled { setting, .. } | SettingsIntent::Commit { setting, .. } => {
+                *setting
+            }
+            _ => unreachable!("the edit table contains only setting writes"),
+        };
+        let transition = run_mutation(&mut app, &backend, intent);
+        assert_eq!(
+            row(transition.presentation(), setting).edit_status(),
+            SettingsEditStatus::Applied
+        );
+
+        env.set("LG_BUDDY_CONFIG", cli_config.path());
+        let runner = SettingsCommandRunner::new(SettingsStore::load(cli_config.path()).unwrap());
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                },
+                &mut Vec::new(),
+            )
+            .expect("CLI settings write");
+        env.set("LG_BUDDY_CONFIG", gui_config.path());
+
+        assert_eq!(
+            fs::read(gui_config.path()).unwrap(),
+            fs::read(cli_config.path()).unwrap(),
+            "GUI and CLI persist the same bytes for {key}"
+        );
+    }
+}
+
+#[test]
+fn reset_removes_a_setting_override_without_a_tv() {
+    let config = TestConfigFile::new("settings-reset");
+    config.write_contents("screen_backend=wayland\n");
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+    let backend = EnvironmentSettingsBackend;
+    let (mut app, opening) = SettingsApplication::open();
+    open_ready(&mut app, opening, &backend);
+    let transition = run_mutation(
+        &mut app,
+        &backend,
+        SettingsIntent::Reset(BehaviorSetting::ScreenBackend),
+    );
+
+    assert!(!fs::read_to_string(config.path())
+        .unwrap()
+        .contains("screen_backend="));
+    let setting = row(transition.presentation(), BehaviorSetting::ScreenBackend);
+    assert_eq!(setting.value_label(), "Automatic");
+    assert_eq!(setting.source_label(), "Default");
+}
+
+#[test]
+fn invalid_edit_preserves_config_bytes_and_effective_value() {
+    let config = TestConfigFile::new("settings-invalid-edit");
+    config.write_contents("screen_idle_timeout=300\n");
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
+
+    let backend = EnvironmentSettingsBackend;
+    let (mut app, opening) = SettingsApplication::open();
+    open_ready(&mut app, opening, &backend);
+    let before = fs::read(config.path()).unwrap();
+    let started = app
+        .handle_intent(SettingsIntent::Commit {
+            setting: BehaviorSetting::ScreenIdleTimeout,
+            value: "not-a-number".to_string(),
+        })
+        .expect("start invalid edit");
+    let operation = started
+        .mutation_operation()
+        .expect("mutation operation")
+        .clone();
+    let mut progress = |stage| {
+        app.mutation_progress(&operation, stage)
+            .expect("validation progress belongs to active operation");
+    };
+    let failure = backend
+        .write_setting(operation.clone(), &mut progress)
+        .expect_err("invalid value is rejected before persistence");
+    let transition = app
+        .complete_mutation(&operation, Err::<SettingsMutationOutcome, _>(failure))
+        .expect("complete rejected mutation");
+
+    assert_eq!(fs::read(config.path()).unwrap(), before);
+    let setting = row(
+        transition.presentation(),
+        BehaviorSetting::ScreenIdleTimeout,
+    );
+    assert_eq!(setting.value_label(), "300 seconds");
+    assert_eq!(setting.edit_status(), SettingsEditStatus::ValidationFailed);
+    assert_eq!(
+        setting.feedback().map(|feedback| feedback.severity()),
+        Some(SettingsFeedbackSeverity::Error)
+    );
+}
+
+#[test]
+fn apply_failure_keeps_saved_value_and_retry_does_not_rewrite() {
+    let config = TestConfigFile::new("settings-apply-failure-gui");
+    let cli_config = TestConfigFile::new("settings-apply-failure-cli");
+    config.write_contents("screen_idle_timeout=300\n");
+    cli_config.write_contents("screen_idle_timeout=300\n");
+    let systemctl = ExecutableScript::new(
+        "settings-systemctl-failure",
+        "systemctl",
+        r##"#!/bin/sh
+case "$2" in
+  cat|is-active|is-enabled) exit 0 ;;
+  restart) exit 23 ;;
+esac
+exit 23
+"##,
+    );
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+
+    let backend = EnvironmentSettingsBackend;
+    let (mut app, opening) = SettingsApplication::open();
+    open_ready(&mut app, opening, &backend);
+    let transition = run_mutation(
+        &mut app,
+        &backend,
+        SettingsIntent::Commit {
+            setting: BehaviorSetting::ScreenIdleTimeout,
+            value: "600".to_string(),
+        },
+    );
+    let setting = row(
+        transition.presentation(),
+        BehaviorSetting::ScreenIdleTimeout,
+    );
+    assert_eq!(setting.edit_status(), SettingsEditStatus::ApplyFailed);
+    assert_eq!(
+        setting.feedback().map(|feedback| feedback.severity()),
+        Some(SettingsFeedbackSeverity::Warning)
+    );
+    assert!(setting
+        .retry_apply_action()
+        .is_some_and(|action| action.enabled()));
+    assert!(fs::read_to_string(config.path())
+        .unwrap()
+        .contains("screen_idle_timeout=600"));
+
+    env.set("LG_BUDDY_CONFIG", cli_config.path());
+    let runner = SettingsCommandRunner::new(SettingsStore::load(cli_config.path()).unwrap());
+    assert!(runner
+        .run(
+            SettingsCommand::Set {
+                key: "screen.idle_timeout".to_string(),
+                value: "600".to_string(),
+            },
+            &mut Vec::new(),
+        )
+        .is_err());
+    env.set("LG_BUDDY_CONFIG", config.path());
+    assert_eq!(
+        fs::read(config.path()).unwrap(),
+        fs::read(cli_config.path()).unwrap()
+    );
+
+    let saved = fs::read(config.path()).unwrap();
+    let retry_started = app
+        .handle_intent(SettingsIntent::RetryApply(
+            BehaviorSetting::ScreenIdleTimeout,
+        ))
+        .expect("start retry apply");
+    let retry_operation = retry_started
+        .mutation_operation()
+        .expect("retry mutation operation")
+        .clone();
+    let mut progress = |stage| {
+        app.mutation_progress(&retry_operation, stage)
+            .expect("retry progress belongs to active operation");
+    };
+    let retry_outcome = backend
+        .write_setting(retry_operation.clone(), &mut progress)
+        .expect("retry application returns an outcome");
+    assert!(!retry_outcome.change().file_changed());
+    app.complete_mutation(
+        &retry_operation,
+        Ok::<SettingsMutationOutcome, SettingsMutationFailure>(retry_outcome),
+    )
+    .expect("complete retry apply");
+    assert_eq!(fs::read(config.path()).unwrap(), saved);
+}

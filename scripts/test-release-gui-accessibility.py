@@ -102,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-settings-state", choices=("ready", "invalid"))
     parser.add_argument("--expected-settings-timeout")
     parser.add_argument("--require-settings-details", action="store_true")
+    parser.add_argument("--edit-settings-timeout", help="type a timeout draft through native keyboard input")
     parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
     parser.add_argument("--expected-tv-name", default="Primary TV")
@@ -257,6 +258,44 @@ def main() -> int:
                     continue
             time.sleep(0.1)
         raise SystemExit(f"could not select the {args.select_page} tab")
+    if args.edit_settings_timeout is not None:
+        if not args.window_id:
+            raise SystemExit("--edit-settings-timeout needs --window-id")
+        accessibles = accessible_tree()
+        entry = next((item for item in accessibles if name(item) == "Idle timeout"
+                      and role(item) == pyatspi.ROLE_TEXT
+                      and item.getState().contains(pyatspi.STATE_SHOWING)), None)
+        if entry is None:
+            for _ in range(40):
+                if any(name(item) == "Idle timeout" and role(item) != pyatspi.ROLE_TEXT
+                       and item.getState().contains(pyatspi.STATE_FOCUSED)
+                       for item in accessible_tree()):
+                    subprocess.run(["xdotool", "key", "--window", args.window_id, "space"], check=True)
+                    break
+                subprocess.run(["xdotool", "key", "--window", args.window_id, "Tab"], check=True)
+                time.sleep(0.05)
+            else:
+                raise SystemExit("could not focus Idle timeout through Tab navigation")
+            deadline = time.monotonic() + args.timeout
+            while entry is None and time.monotonic() < deadline:
+                entry = next((item for item in accessible_tree() if name(item) == "Idle timeout"
+                              and role(item) == pyatspi.ROLE_TEXT
+                              and item.getState().contains(pyatspi.STATE_SHOWING)), None)
+                time.sleep(0.05)
+        if entry is None:
+            raise SystemExit("could not find the Idle timeout editor")
+        for _ in range(40):
+            if any(name(item) == "Idle timeout" and role(item) == pyatspi.ROLE_TEXT
+                   and item.getState().contains(pyatspi.STATE_FOCUSED)
+                   for item in accessible_tree()):
+                break
+            subprocess.run(["xdotool", "key", "--window", args.window_id, "Tab"], check=True)
+            time.sleep(0.05)
+        else:
+            raise SystemExit("could not focus the Idle timeout editor through Tab navigation")
+        subprocess.run(["xdotool", "key", "--window", args.window_id, "ctrl+a"], check=True)
+        subprocess.run(["xdotool", "type", "--window", args.window_id, "--clearmodifiers", "--", args.edit_settings_timeout], check=True)
+        return 0
     if args.focus_control:
         if not args.window_id:
             raise SystemExit("--focus-control needs --window-id")
