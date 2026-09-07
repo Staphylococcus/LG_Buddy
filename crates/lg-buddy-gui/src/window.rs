@@ -125,7 +125,7 @@ impl ApplicationWindow {
     }
 
     pub(crate) fn render_tvs(&self, presentation: &TvsPresentation) {
-        self.tvs.render(presentation);
+        self.tvs.render(&self.window, presentation);
         self.pairing.render(&self.window, presentation.pairing());
     }
 

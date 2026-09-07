@@ -293,6 +293,43 @@ impl ApplicationController {
         if let Some(operation) = transition.pairing_operation() {
             Self::start_pairing(controller, operation.clone());
         }
+        if let Some(operation) = transition.management_operation() {
+            Self::start_tvs_management(controller, operation.clone());
+        }
+    }
+
+    fn start_tvs_management(
+        controller: &Rc<Self>,
+        operation: lg_buddy::tvs::TvsManagementOperation,
+    ) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut application_hold = Some(controller.gtk_application.hold());
+        thread::spawn(move || {
+            let _ = sender.send(backend.manage(&worker_operation));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(lg_buddy::tvs::TvsManagementError::stopped())
+                }
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller
+                    .application
+                    .borrow_mut()
+                    .complete_tvs_management(&operation, result);
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            drop(application_hold.take());
+            glib::ControlFlow::Break
+        });
     }
 
     fn start_pairing(controller: &Rc<Self>, operation: PairingOperation) {

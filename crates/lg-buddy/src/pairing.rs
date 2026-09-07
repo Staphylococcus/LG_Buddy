@@ -659,7 +659,7 @@ mod tests {
                         Some(PlatformAccessToken::new("test-client-key").unwrap())
                     );
                     let complete = app.complete_pairing(&operation, Ok(result)).unwrap();
-                    assert!(complete.profile_created());
+                    assert!(complete.profile_changed());
                     assert_eq!(stages.last(), Some(&PairingStage::Saving));
                     let retry = pair_and_save(&operation, &path, &mut |_| {}, |_| {
                         panic!("existing profile must refuse before connecting")
@@ -746,7 +746,7 @@ mod tests {
         let saved = app
             .complete_pairing(&operation, Ok(profile(&operation)))
             .unwrap();
-        assert!(saved.profile_created());
+        assert!(saved.profile_changed());
         assert_eq!(saved.toast_message(), Some("TV paired successfully"));
         assert_eq!(saved.presentation().profiles().len(), 1);
         assert_eq!(
@@ -815,7 +815,7 @@ mod tests {
             assert!(presentation.error().is_some());
             assert!(presentation.can_submit());
             assert!(failed.presentation().profiles().is_empty());
-            assert!(!failed.profile_created());
+            assert!(!failed.profile_changed());
             assert_eq!(
                 failed.toast_message(),
                 Some(presentation.error().unwrap().summary())
@@ -884,7 +884,7 @@ mod tests {
         assert!(app
             .complete_pairing(&operation, Ok(profile(&operation)))
             .unwrap()
-            .profile_created());
+            .profile_changed());
 
         let (mut app, _) = blank();
         let operation = submit(&mut app);

@@ -494,6 +494,15 @@ produces a blank state, one TV opens directly to details, and only multi-profile
 renderer fixtures expose the TV-selection sidebar. Production storage remains
 limited to one primary profile. Tab changes retain pending Overview operations
 and do not initiate TV writes or pairing.
+The TVs application also declares immediate managed-input changes and confirmed
+local unpairing. Input edits reuse the settings registry, persistence, and apply
+strategy. Unpairing shares the pairing store’s lock and atomic config publication,
+removes only primary-profile keys and the local native token, and restores that
+token if config publication fails. Compatibility credential storage and unrelated
+settings are retained. A started change disables profile controls and suspends
+Overview operations; completion reloads Overview with new operation identities.
+Active Overview writes must finish before profile changes can begin. GTK only
+renders the input selection, confirmation, progress availability, and errors.
 The zero-TV blank state offers first-TV pairing through a separate foreground
 application workflow. GTK forwards the native webOS form and cancellation
 intents, and worker progress describes connecting, TV confirmation, verification,

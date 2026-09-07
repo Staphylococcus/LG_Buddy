@@ -4,6 +4,7 @@ use std::net::Ipv4Addr;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use lg_buddy::config::HdmiInput;
 use lg_buddy::presentation::tvs::{TvsAction, TvsPresentation, TvsStatus};
 use lg_buddy::tvs::{TvId, TvProfile, TvsIntent};
 
@@ -28,6 +29,11 @@ pub(crate) struct TvsView {
     sidebar_rows: RefCell<Vec<adw::ActionRow>>,
     rendered_selected: RefCell<Option<TvId>>,
     suppress: Rc<Cell<bool>>,
+    unpair_dialog: adw::AlertDialog,
+    unpair_dialog_visible: Cell<bool>,
+    unpair_confirm_intent: Rc<RefCell<Option<TvsIntent>>>,
+    unpair_cancel_intent: Rc<RefCell<Option<TvsIntent>>>,
+    restore_focus: RefCell<Option<gtk::Widget>>,
 }
 
 struct TvsMode {
@@ -38,15 +44,19 @@ struct TvsMode {
     details: adw::PreferencesGroup,
     address: adw::ActionRow,
     mac: adw::ActionRow,
-    input: adw::ActionRow,
+    input: adw::ComboRow,
     platform: adw::ActionRow,
     credentials: adw::ActionRow,
     credential_description: gtk::Label,
+    unpair: ActionButton,
+    management_error: gtk::Label,
+    management_actions: gtk::Box,
+    management_retry: RetryButton,
     retry: RetryButton,
 }
 
 impl TvsMode {
-    fn new(on_intent: &IntentHandler) -> Self {
+    fn new(on_intent: &IntentHandler, suppress: &Rc<Cell<bool>>) -> Self {
         let status = adw::StatusPage::builder()
             .icon_name(TV_ICON_NAME)
             .title("Loading TVs")
@@ -69,12 +79,31 @@ impl TvsMode {
         let details = adw::PreferencesGroup::builder().title("TV details").build();
         let address = detail_row("Address");
         let mac = detail_row("MAC address");
-        let input = detail_row("HDMI input");
+        let input_model = gtk::StringList::new(&["HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4"]);
+        let input = adw::ComboRow::builder()
+            .title("HDMI input")
+            .model(&input_model)
+            .build();
+        input.set_selected(0);
+        {
+            let suppress = Rc::clone(suppress);
+            let on_intent = Rc::clone(on_intent);
+            input.connect_selected_notify(move |row| {
+                if suppress.get() {
+                    return;
+                }
+                if let Some(input) = hdmi_input(row.selected()) {
+                    on_intent(TvsIntent::SetInput(input));
+                }
+            });
+        }
         let platform = detail_row("Platform");
         let credentials = detail_row("Credentials");
-        for row in [&address, &mac, &input, &platform, &credentials] {
-            details.add(row);
-        }
+        details.add(&address);
+        details.add(&mac);
+        details.add(&input);
+        details.add(&platform);
+        details.add(&credentials);
         let credential_description = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -82,14 +111,35 @@ impl TvsMode {
             .margin_end(12)
             .build();
         credential_description.add_css_class("dim-label");
+        let unpair = ActionButton::new(on_intent);
+        unpair.button.add_css_class("destructive-action");
+        let unpair_row = adw::ActionRow::builder()
+            .activatable(false)
+            .selectable(false)
+            .build();
+        unpair_row.add_suffix(&unpair.button);
+        let management_error = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .visible(false)
+            .build();
+        management_error.set_accessible_role(gtk::AccessibleRole::Alert);
+        management_error.add_css_class("error");
+        let management_retry = RetryButton::new(on_intent);
+        let management_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        management_actions.append(&management_error);
+        management_actions.append(&management_retry.button);
         let details_box = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
             .margin_top(16)
             .margin_bottom(20)
             .build();
+        details_box.append(&management_actions);
         details_box.append(&details);
         details_box.append(&credential_description);
+        details.add(&unpair_row);
         let clamp = adw::Clamp::builder()
             .maximum_size(600)
             .tightening_threshold(400)
@@ -123,6 +173,10 @@ impl TvsMode {
             platform,
             credentials,
             credential_description,
+            unpair,
+            management_error,
+            management_actions,
+            management_retry,
             retry,
         }
     }
@@ -145,7 +199,6 @@ impl TvsMode {
         self.details.set_title(profile.display_name());
         self.address.set_subtitle(&profile.address().to_string());
         self.mac.set_subtitle(&profile.mac().to_string());
-        self.input.set_subtitle(profile.input_label());
         self.platform.set_subtitle(profile.platform_label());
         self.credentials.set_subtitle(profile.credentials().label());
         self.credential_description
@@ -195,7 +248,7 @@ impl TvsView {
             .title("TVs")
             .child(&sidebar_toolbar)
             .build();
-        let multiple = TvsMode::new(&on_intent);
+        let multiple = TvsMode::new(&on_intent, &suppress);
         let multiple_toolbar = toolbar_page("TV details", &multiple.stack, true);
         let content_page = adw::NavigationPage::builder()
             .title("TV details")
@@ -235,7 +288,7 @@ impl TvsView {
             split_for_activation.set_show_content(true);
         });
 
-        let single = TvsMode::new(&on_intent);
+        let single = TvsMode::new(&on_intent, &suppress);
         let root = gtk::Stack::new();
         root.set_vexpand(true);
         root.set_hexpand(true);
@@ -244,6 +297,31 @@ impl TvsView {
         root.add_named(&single.stack, Some("single"));
         root.add_named(&split_bin, Some("multiple"));
         root.set_visible_child_name("single");
+
+        let unpair_dialog = adw::AlertDialog::builder()
+            .can_close(true)
+            .default_response("cancel")
+            .close_response("cancel")
+            .build();
+        unpair_dialog.add_responses(&[("cancel", ""), ("confirm", "")]);
+        unpair_dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+        let unpair_confirm_intent = Rc::new(RefCell::new(None));
+        let unpair_cancel_intent = Rc::new(RefCell::new(None));
+        unpair_dialog.connect_response(None, {
+            let on_intent = Rc::clone(&on_intent);
+            let unpair_confirm_intent = unpair_confirm_intent.clone();
+            let unpair_cancel_intent = unpair_cancel_intent.clone();
+            move |_, response| {
+                let intent = match response {
+                    "confirm" => unpair_confirm_intent.borrow().clone(),
+                    "cancel" => unpair_cancel_intent.borrow().clone(),
+                    _ => None,
+                };
+                if let Some(intent) = intent {
+                    on_intent(intent);
+                }
+            }
+        });
 
         Self {
             root,
@@ -257,6 +335,11 @@ impl TvsView {
             sidebar_rows: RefCell::new(Vec::new()),
             rendered_selected: RefCell::new(None),
             suppress,
+            unpair_dialog,
+            unpair_dialog_visible: Cell::new(false),
+            unpair_confirm_intent,
+            unpair_cancel_intent,
+            restore_focus: RefCell::new(None),
         }
     }
 
@@ -264,7 +347,11 @@ impl TvsView {
         self.root.upcast_ref()
     }
 
-    pub(crate) fn render(&self, presentation: &TvsPresentation) {
+    pub(crate) fn render(&self, parent: &adw::ApplicationWindow, presentation: &TvsPresentation) {
+        if presentation.unpair_confirmation().is_some() && !self.unpair_dialog_visible.get() {
+            self.restore_focus
+                .replace(gtk::prelude::GtkWindowExt::focus(parent));
+        }
         self.suppress.set(true);
         let profiles = presentation.profiles();
         let is_multiple = profiles.len() > 1;
@@ -282,6 +369,7 @@ impl TvsView {
         } else {
             self.render_mode(&self.single, presentation);
         }
+        self.render_unpair_dialog(parent, presentation);
         self.suppress.set(false);
     }
 
@@ -337,6 +425,19 @@ impl TvsView {
     fn render_mode(&self, mode: &TvsMode, presentation: &TvsPresentation) {
         mode.retry.render(presentation.retry_action());
         mode.pair.render(presentation.pair_action());
+        mode.unpair.render(presentation.unpair_action());
+        mode.management_retry
+            .render(presentation.retry_apply_action());
+        let management_error = presentation.management_error();
+        if let Some(error) = management_error {
+            mode.management_error.set_text(&error_text(error));
+        } else {
+            mode.management_error.set_text("");
+        }
+        mode.management_error
+            .set_visible(management_error.is_some());
+        mode.management_actions
+            .set_visible(management_error.is_some() || presentation.retry_apply_action().is_some());
         match presentation.status() {
             TvsStatus::Loading { message } => mode.show_status(message, None, false),
             TvsStatus::Empty { title, description } => {
@@ -346,7 +447,12 @@ impl TvsView {
                 mode.show_status(error.summary(), Some(error.detail()), true)
             }
             TvsStatus::Ready => match presentation.selected_profile() {
-                Some(profile) => mode.show_details(profile),
+                Some(profile) => {
+                    mode.input.set_sensitive(presentation.input_enabled());
+                    mode.input.set_selected(hdmi_index(profile.input()));
+                    mode.unpair.render(presentation.unpair_action());
+                    mode.show_details(profile)
+                }
                 None => {
                     debug_assert!(
                         false,
@@ -355,6 +461,43 @@ impl TvsView {
                     mode.stack.set_visible_child_name("details");
                 }
             },
+        }
+    }
+
+    fn render_unpair_dialog(
+        &self,
+        parent: &adw::ApplicationWindow,
+        presentation: &TvsPresentation,
+    ) {
+        let Some(confirmation) = presentation.unpair_confirmation() else {
+            self.unpair_confirm_intent.replace(None);
+            self.unpair_cancel_intent.replace(None);
+            if self.unpair_dialog_visible.replace(false) {
+                self.unpair_dialog.force_close();
+                if let Some(focus) = self.restore_focus.take() {
+                    let _ = focus.grab_focus();
+                }
+            }
+            return;
+        };
+
+        self.unpair_dialog.set_heading(Some(confirmation.title()));
+        self.unpair_dialog.set_body(confirmation.body());
+        self.unpair_dialog
+            .set_response_label("confirm", confirmation.confirm_action().label());
+        self.unpair_dialog
+            .set_response_label("cancel", confirmation.cancel_action().label());
+        self.unpair_dialog
+            .set_response_enabled("confirm", confirmation.confirm_action().enabled());
+        self.unpair_dialog
+            .set_response_enabled("cancel", confirmation.cancel_action().enabled());
+        self.unpair_confirm_intent
+            .replace(Some(confirmation.confirm_action().intent()));
+        self.unpair_cancel_intent
+            .replace(Some(confirmation.cancel_action().intent()));
+
+        if !self.unpair_dialog_visible.replace(true) {
+            self.unpair_dialog.present(Some(parent));
         }
     }
 }
@@ -367,6 +510,49 @@ struct RetryButton {
 struct PairButton {
     button: gtk::Button,
     intent: Rc<RefCell<Option<TvsIntent>>>,
+}
+
+struct ActionButton {
+    button: gtk::Button,
+    intent: Rc<RefCell<Option<TvsIntent>>>,
+}
+
+impl ActionButton {
+    fn new(on_intent: &IntentHandler) -> Self {
+        let button = gtk::Button::builder()
+            .visible(false)
+            .sensitive(false)
+            .build();
+        let intent = Rc::new(RefCell::new(None));
+        button.connect_clicked({
+            let on_intent = Rc::clone(on_intent);
+            let intent = Rc::clone(&intent);
+            move |_| {
+                let intent = intent.borrow().clone();
+                if let Some(intent) = intent {
+                    on_intent(intent);
+                }
+            }
+        });
+        Self { button, intent }
+    }
+
+    fn render(&self, action: Option<&TvsAction>) {
+        self.intent.replace(
+            action
+                .filter(|action| action.enabled())
+                .map(TvsAction::intent),
+        );
+        self.button.set_visible(action.is_some());
+        self.button
+            .set_sensitive(action.is_some_and(TvsAction::enabled));
+        self.button.set_label(action.map_or("", TvsAction::label));
+        self.button.set_tooltip_text(action.map(TvsAction::label));
+        self.button
+            .update_property(&[gtk::accessible::Property::Label(
+                action.map_or("", TvsAction::label),
+            )]);
+    }
 }
 
 impl PairButton {
@@ -465,6 +651,29 @@ fn detail_row(title: &str) -> adw::ActionRow {
         .build()
 }
 
+fn error_text(error: &lg_buddy::presentation::brightness::UserFacingError) -> String {
+    format!("{} {}", error.summary(), error.detail())
+}
+
+fn hdmi_input(index: u32) -> Option<HdmiInput> {
+    match index {
+        0 => Some(HdmiInput::Hdmi1),
+        1 => Some(HdmiInput::Hdmi2),
+        2 => Some(HdmiInput::Hdmi3),
+        3 => Some(HdmiInput::Hdmi4),
+        _ => None,
+    }
+}
+
+fn hdmi_index(input: HdmiInput) -> u32 {
+    match input {
+        HdmiInput::Hdmi1 => 0,
+        HdmiInput::Hdmi2 => 1,
+        HdmiInput::Hdmi3 => 2,
+        HdmiInput::Hdmi4 => 3,
+    }
+}
+
 fn sidebar_row(profile: &TvProfile) -> adw::ActionRow {
     adw::ActionRow::builder()
         .title(profile.display_name())
@@ -528,7 +737,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .build();
     window.present();
     let (mut app, opening) = TvsApplication::open();
-    view.render(opening.presentation());
+    view.render(&window, opening.presentation());
     assert_eq!(view.root.visible_child_name().as_deref(), Some("single"));
     assert_eq!(
         view.single.status.icon_name().as_deref(),
@@ -541,7 +750,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             Ok(Vec::new()),
         )
         .expect("empty transition");
-    view.render(empty.presentation());
+    view.render(&window, empty.presentation());
     assert_eq!(view.single.status.title().as_str(), "No TV configured");
     assert_eq!(
         view.single.status.description().as_deref(),
@@ -561,7 +770,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     let pairing = app
         .handle_intent(TvsIntent::PairTv)
         .expect("pairing transition");
-    view.render(pairing.presentation());
+    view.render(&window, pairing.presentation());
     assert_eq!(
         view.single.stack.visible_child_name().as_deref(),
         Some("status")
@@ -570,7 +779,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     let blank = app
         .handle_intent(TvsIntent::Pairing(lg_buddy::pairing::PairingIntent::Cancel))
         .expect("blank transition");
-    view.render(blank.presentation());
+    view.render(&window, blank.presentation());
     pump();
     assert_eq!(
         view.single.stack.visible_child_name().as_deref(),
@@ -586,7 +795,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             Ok(vec![one]),
         )
         .expect("one profile transition");
-    view.render(ready_one.presentation());
+    view.render(&window, ready_one.presentation());
     assert_eq!(view.root.visible_child_name().as_deref(), Some("single"));
     assert_eq!(
         view.single.stack.visible_child_name().as_deref(),
@@ -610,10 +819,23 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .credentials
         .subtitle()
         .is_some_and(|subtitle| subtitle.contains("Stored locally")));
+    assert_eq!(view.single.input.selected(), 1);
+    assert!(view.single.input.is_sensitive());
     assert!(
         intents.borrow().is_empty(),
         "rendering must not select a TV"
     );
+
+    // A user change is semantic input, while a later presentation update
+    // restores the optimistic/effective value without feeding back an intent.
+    view.single.input.set_selected(2);
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(TvsIntent::SetInput(HdmiInput::Hdmi3))
+    );
+    view.render(&window, ready_one.presentation());
+    assert_eq!(view.single.input.selected(), 1);
+    assert!(intents.borrow().is_empty(), "render must not apply input");
 
     let model = app
         .complete_model_read(
@@ -624,12 +846,19 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             Ok("OLED42C2".to_string()),
         )
         .expect("model transition");
-    view.render(model.presentation());
+    view.render(&window, model.presentation());
     assert_eq!(view.single.details.title().as_str(), "OLED42C2");
     assert_eq!(
         view.single.address.subtitle().as_deref(),
         Some("192.0.2.10")
     );
+
+    let pending = app
+        .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+        .expect("input transition");
+    view.render(&window, pending.presentation());
+    assert!(!view.single.input.is_sensitive());
+    assert!(!view.single.unpair.button.is_sensitive());
 
     let (mut app, opening) = TvsApplication::open();
     let ready_multiple = app
@@ -641,7 +870,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             ]),
         )
         .expect("multiple profile transition");
-    view.render(ready_multiple.presentation());
+    view.render(&window, ready_multiple.presentation());
     assert_eq!(view.root.visible_child_name().as_deref(), Some("multiple"));
     assert_eq!(view.sidebar_rows.borrow().len(), 2);
     assert_eq!(view.sidebar.selected_row().map(|row| row.index()), Some(0));
@@ -657,7 +886,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     let selected = app
         .handle_intent(selected_intent)
         .expect("changed selection transition");
-    view.render(selected.presentation());
+    view.render(&window, selected.presentation());
     assert!(
         intents.borrow().is_empty(),
         "render must not feed back selection"
@@ -678,13 +907,49 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .expect("native Back action");
     assert!(!view.split.shows_content(), "Back opens the TV list");
     assert!(window.is_visible(), "Back must not close the application");
-    view.render(selected.presentation());
+    view.render(&window, selected.presentation());
     assert!(
         !view.split.shows_content(),
         "unchanged selection preserves list navigation"
     );
     selected_row.emit_activate();
     assert!(view.split.shows_content());
+
+    pump();
+    assert!(
+        view.multiple.unpair.button.grab_focus(),
+        "unpair action must be focusable"
+    );
+    view.multiple.unpair.button.emit_clicked();
+    assert_eq!(intents.borrow_mut().pop(), Some(TvsIntent::UnpairTv));
+    let confirming = app
+        .handle_intent(TvsIntent::UnpairTv)
+        .expect("confirmation transition");
+    view.render(&window, confirming.presentation());
+    assert_eq!(view.unpair_dialog.heading().as_deref(), Some("Unpair TV?"));
+    assert_eq!(
+        view.unpair_dialog.default_response().as_deref(),
+        Some("cancel")
+    );
+    assert_eq!(
+        window.visible_dialog().as_ref(),
+        Some(view.unpair_dialog.upcast_ref::<adw::Dialog>())
+    );
+    view.unpair_dialog.close();
+    pump();
+    assert_eq!(intents.borrow_mut().pop(), Some(TvsIntent::CancelUnpair));
+    let cancelled = app
+        .handle_intent(TvsIntent::CancelUnpair)
+        .expect("cancel transition");
+    view.render(&window, cancelled.presentation());
+    pump();
+    assert!(window.visible_dialog().is_none());
+    assert!(
+        gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| focus
+            == view.multiple.unpair.button.clone().upcast::<gtk::Widget>()
+            || focus.is_ancestor(&view.multiple.unpair.button)),
+        "cancel restores focus to the destructive action"
+    );
 
     let (mut app, opening) = TvsApplication::open();
     let failed = app
@@ -696,7 +961,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             )),
         )
         .expect("failure transition");
-    view.render(failed.presentation());
+    view.render(&window, failed.presentation());
     assert!(view.single.retry.button.is_visible());
     view.single.retry.button.emit_clicked();
     assert_eq!(intents.borrow_mut().pop(), Some(TvsIntent::Retry));
@@ -707,7 +972,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
 
     // The TVs-local breakpoint collapses the split at narrow sizes while the
     // top-level application breakpoint remains owned by the window shell.
-    view.render(ready_multiple.presentation());
+    view.render(&window, ready_multiple.presentation());
     pump();
     view.split.set_collapsed(false);
     view.split_bin.allocate(900, 420, -1, None);

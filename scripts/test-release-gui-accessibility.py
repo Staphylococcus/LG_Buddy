@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
         help=f"maximum observation time in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
     )
     parser.add_argument("--select-page", choices=("Overview", "TVs"))
-    parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid"))
+    parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
     parser.add_argument("--expected-tv-name", default="Primary TV")
     parser.add_argument("--focus-control", help="focus a control using native Tab navigation")
@@ -187,6 +187,8 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
             continue
     names = {normalized_name(item) for item in visible}
     dialogs = [item for item in visible if role(item) == pyatspi.ROLE_DIALOG]
+    if expected_state == "unpair":
+        return (accessibles, None) if {"Unpair TV?", "Cancel", "Unpair"} <= names else None
     if expected_state in ("pairing", "pairing-invalid"):
         if len(dialogs) != 1 or not {"TV address", "MAC address", "HDMI input", "Cancel", "Pair"} <= names:
             return None

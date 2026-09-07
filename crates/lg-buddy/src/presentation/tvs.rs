@@ -10,6 +10,11 @@ pub struct TvsPresentation {
     retry_action: Option<TvsAction>,
     pair_action: Option<TvsAction>,
     pairing: Option<super::pairing::PairingPresentation>,
+    input_enabled: bool,
+    unpair_action: Option<TvsAction>,
+    unpair_confirmation: Option<UnpairConfirmation>,
+    management_error: Option<super::brightness::UserFacingError>,
+    retry_apply_action: Option<TvsAction>,
 }
 
 /// The state a renderer can show without interpreting application policy.
@@ -29,6 +34,26 @@ pub struct TvsAction {
     intent: TvsIntent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpairConfirmation {
+    confirm: TvsAction,
+    cancel: TvsAction,
+}
+impl UnpairConfirmation {
+    pub fn title(&self) -> &str {
+        "Unpair TV?"
+    }
+    pub fn body(&self) -> &str {
+        "Remove this TV and its saved native credential from LG Buddy? You can pair a TV again afterwards. This does not remove LG Buddy’s authorization on the TV itself."
+    }
+    pub fn confirm_action(&self) -> &TvsAction {
+        &self.confirm
+    }
+    pub fn cancel_action(&self) -> &TvsAction {
+        &self.cancel
+    }
+}
+
 impl TvsPresentation {
     pub(crate) fn loading() -> Self {
         Self {
@@ -41,6 +66,11 @@ impl TvsPresentation {
             retry_action: None,
             pair_action: None,
             pairing: None,
+            input_enabled: false,
+            unpair_action: None,
+            unpair_confirmation: None,
+            management_error: None,
+            retry_apply_action: None,
         }
     }
 
@@ -56,6 +86,11 @@ impl TvsPresentation {
             retry_action: None,
             pair_action: Some(TvsAction::new("Pair a TV", true, TvsIntent::PairTv)),
             pairing: None,
+            input_enabled: false,
+            unpair_action: None,
+            unpair_confirmation: None,
+            management_error: None,
+            retry_apply_action: None,
         }
     }
 
@@ -68,6 +103,11 @@ impl TvsPresentation {
             retry_action: None,
             pair_action: None,
             pairing: None,
+            input_enabled: false,
+            unpair_action: None,
+            unpair_confirmation: None,
+            management_error: None,
+            retry_apply_action: None,
         }
     }
 
@@ -80,7 +120,59 @@ impl TvsPresentation {
             retry_action: Some(TvsAction::new("Retry", true, TvsIntent::Retry)),
             pair_action: None,
             pairing: None,
+            input_enabled: false,
+            unpair_action: None,
+            unpair_confirmation: None,
+            management_error: None,
+            retry_apply_action: None,
         }
+    }
+
+    pub fn input_enabled(&self) -> bool {
+        self.input_enabled
+    }
+    pub fn unpair_action(&self) -> Option<&TvsAction> {
+        self.unpair_action.as_ref()
+    }
+    pub fn unpair_confirmation(&self) -> Option<&UnpairConfirmation> {
+        self.unpair_confirmation.as_ref()
+    }
+    pub fn management_error(&self) -> Option<&super::brightness::UserFacingError> {
+        self.management_error.as_ref()
+    }
+    pub fn retry_apply_action(&self) -> Option<&TvsAction> {
+        self.retry_apply_action.as_ref()
+    }
+
+    pub(crate) fn set_input(&mut self, input: crate::config::HdmiInput) {
+        if let Some(profile) = self
+            .profiles
+            .iter_mut()
+            .find(|p| Some(p.id()) == self.selected_id.as_ref())
+        {
+            profile.set_input(input);
+        }
+    }
+
+    pub(crate) fn set_management(
+        &mut self,
+        enabled: bool,
+        confirming: bool,
+        confirmation_enabled: bool,
+        error: Option<super::brightness::UserFacingError>,
+        retry_apply: bool,
+    ) {
+        self.input_enabled = enabled;
+        self.unpair_action = self
+            .selected_profile()
+            .map(|_| TvsAction::new("Unpair TV…", enabled, TvsIntent::UnpairTv));
+        self.unpair_confirmation = confirming.then(|| UnpairConfirmation {
+            confirm: TvsAction::new("Unpair", confirmation_enabled, TvsIntent::ConfirmUnpair),
+            cancel: TvsAction::new("Cancel", true, TvsIntent::CancelUnpair),
+        });
+        self.management_error = error;
+        self.retry_apply_action =
+            retry_apply.then(|| TvsAction::new("Retry", enabled, TvsIntent::RetryInputApply));
     }
 
     pub fn title(&self) -> &str {

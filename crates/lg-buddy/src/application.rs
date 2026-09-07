@@ -13,8 +13,8 @@ use crate::overview::{
 use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
-    TvProfile, TvsApplication, TvsIntent, TvsModelReadOperation, TvsReadError, TvsReadOperation,
-    TvsTransition,
+    TvProfile, TvsApplication, TvsIntent, TvsManagementError, TvsManagementOperation,
+    TvsManagementOutcome, TvsModelReadOperation, TvsReadError, TvsReadOperation, TvsTransition,
 };
 
 pub enum OverviewCompletion {
@@ -78,6 +78,9 @@ impl Application {
         &mut self,
         intent: OverviewIntent,
     ) -> Option<ApplicationTransition> {
+        if self.tvs.is_managing() && intent != OverviewIntent::Cancel {
+            return None;
+        }
         let transition = self.overview.handle_intent(intent)?;
         Some(self.overview_transition(transition))
     }
@@ -129,6 +132,15 @@ impl Application {
         Some(self.tvs_transition(transition))
     }
 
+    pub fn complete_tvs_management(
+        &mut self,
+        operation: &TvsManagementOperation,
+        result: Result<TvsManagementOutcome, TvsManagementError>,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.tvs.complete_management(operation, result)?;
+        Some(self.tvs_transition(transition))
+    }
+
     pub fn pairing_progress(
         &mut self,
         operation: &PairingOperation,
@@ -167,15 +179,20 @@ impl Application {
         if matches!(transition.update(), OverviewFrontendUpdate::Close) {
             self.tvs.shutdown();
         }
+        let tvs = self
+            .tvs
+            .set_controls_available(!self.overview.has_pending_write());
         ApplicationTransition {
             overview: Some(transition),
-            tvs: None,
+            tvs,
         }
     }
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
-        let overview = if transition.profile_created() {
-            self.overview.profile_created()
+        let overview = if transition.management_operation().is_some() {
+            self.overview.profile_change_started()
+        } else if transition.profile_changed() {
+            self.overview.profile_changed()
         } else {
             None
         };
@@ -330,5 +347,110 @@ mod tests {
             .complete_pairing(&operation, Ok(profile(&operation)))
             .is_none());
         assert!(application.handle_tvs_intent(TvsIntent::PairTv).is_none());
+    }
+}
+
+#[cfg(test)]
+mod management_tests {
+    use super::*;
+    use crate::brightness::BrightnessWriteOutcome;
+    use crate::config::{HdmiInput, TvPlatform};
+    use crate::overview::{OverviewIntent, OverviewOperation};
+    use crate::tvs::{TvCredentialState, TvId};
+
+    fn configured() -> (Application, ApplicationTransition) {
+        let (mut app, opening) = Application::open();
+        let profile = TvProfile::new(
+            TvId::primary(),
+            "TV",
+            "192.0.2.10".parse().unwrap(),
+            "02:11:22:33:44:55".parse().unwrap(),
+            HdmiInput::Hdmi1,
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        );
+        app.complete_tvs_read(
+            opening.tvs().unwrap().read_operation().unwrap(),
+            Ok(vec![profile]),
+        )
+        .unwrap();
+        (app, opening)
+    }
+
+    #[test]
+    fn profile_change_invalidates_overview_reads_and_blocks_new_writes_until_reload() {
+        let (mut app, opening) = configured();
+        let change = app
+            .handle_tvs_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+            .unwrap();
+        assert!(change.overview().unwrap().operations().is_empty());
+        assert!(app
+            .handle_overview_intent(OverviewIntent::SetBrightness(50))
+            .is_none());
+        for operation in opening.overview().unwrap().operations() {
+            if let OverviewOperation::ReadBrightness(read) = operation {
+                assert!(app
+                    .complete_overview(OverviewCompletion::BrightnessRead(
+                        *read,
+                        Ok(OledBrightness::new(50).unwrap())
+                    ))
+                    .is_none());
+            }
+        }
+        let done = app
+            .complete_tvs_management(
+                change.tvs().unwrap().management_operation().unwrap(),
+                Err(TvsManagementError::stopped()),
+            )
+            .unwrap();
+        assert_eq!(done.overview().unwrap().operations().len(), 3);
+        assert!(done.tvs().unwrap().presentation().input_enabled());
+    }
+
+    #[test]
+    fn active_overview_write_disables_profile_changes_until_it_finishes() {
+        let (mut app, opening) = configured();
+        for operation in opening.overview().unwrap().operations() {
+            if let OverviewOperation::ReadBrightness(read) = operation {
+                app.complete_overview(OverviewCompletion::BrightnessRead(
+                    *read,
+                    Ok(OledBrightness::new(50).unwrap()),
+                ))
+                .unwrap();
+            }
+        }
+        let writing = app
+            .handle_overview_intent(OverviewIntent::SetBrightness(60))
+            .unwrap();
+        assert!(!writing.tvs().unwrap().presentation().input_enabled());
+        assert!(!writing
+            .tvs()
+            .unwrap()
+            .presentation()
+            .unpair_action()
+            .unwrap()
+            .enabled());
+        assert!(app
+            .handle_tvs_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
+            .is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
+        let operation = writing
+            .overview()
+            .unwrap()
+            .operations()
+            .iter()
+            .find_map(|op| match op {
+                OverviewOperation::WriteBrightness(write) => Some(*write),
+                _ => None,
+            })
+            .unwrap();
+        let done = app
+            .complete_overview(OverviewCompletion::BrightnessWrite(
+                operation,
+                Ok(BrightnessWriteOutcome::applied()),
+            ))
+            .unwrap();
+        assert!(done.tvs().unwrap().presentation().input_enabled());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
     }
 }
