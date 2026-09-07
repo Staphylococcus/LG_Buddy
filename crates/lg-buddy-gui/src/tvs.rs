@@ -513,8 +513,16 @@ struct UnpairButton {
 
 impl UnpairButton {
     fn new(on_intent: &IntentHandler) -> Self {
+        static RESOURCES: std::sync::Once = std::sync::Once::new();
+        RESOURCES.call_once(|| {
+            gtk::gio::resources_register_include!("lg-buddy-gui.gresource")
+                .expect("bundled GUI resources must be valid");
+        });
+        let icon = gtk::gio::FileIcon::new(&gtk::gio::File::for_uri(
+            "resource:///io/github/staphylococcus/LGBuddy/icons/edit-delete-symbolic.svg",
+        ));
         let button = gtk::Button::builder()
-            .icon_name("list-remove-symbolic")
+            .child(&gtk::Image::from_gicon(&icon))
             .width_request(36)
             .height_request(36)
             .valign(gtk::Align::Center)
@@ -523,6 +531,7 @@ impl UnpairButton {
             .build();
         button.add_css_class("flat");
         button.add_css_class("circular");
+        button.add_css_class("destructive-action");
         let intent = Rc::new(RefCell::new(None));
         button.connect_clicked({
             let on_intent = Rc::clone(on_intent);

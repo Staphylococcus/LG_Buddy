@@ -14,6 +14,7 @@ Compiling and testing the GTK frontend additionally requires:
 - GTK 4.10 or newer development files
 - libadwaita 1.5 or newer development files
 - `pkg-config`
+- `glib-compile-resources` (provided by the GLib development tools)
 - a graphical session or virtual display for renderer tests
 - `xdotool` for native pointer tests and the executable launch smoke test
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
