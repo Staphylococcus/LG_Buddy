@@ -1,5 +1,6 @@
 mod overview;
 mod pairing;
+mod settings;
 mod tvs;
 mod window;
 
@@ -24,6 +25,10 @@ use lg_buddy::overview::{
 };
 use lg_buddy::pairing::{
     EnvironmentPairingBackend, PairingBackend, PairingError, PairingOperation, PairingStage,
+};
+use lg_buddy::settings_view::{
+    EnvironmentSettingsBackend, SettingsBackend, SettingsIntent, SettingsReadError,
+    SettingsReadOperation, SettingsTransition,
 };
 use lg_buddy::tvs::{
     EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
@@ -103,6 +108,7 @@ fn run_application() -> glib::ExitCode {
         Rc::clone(&controller),
         Arc::new(EnvironmentOverviewBackend),
         Arc::new(EnvironmentTvsBackend),
+        Arc::new(EnvironmentSettingsBackend),
     );
     application.run_with_args(&["lg-buddy-gui"])
 }
@@ -146,6 +152,7 @@ struct ApplicationController {
     window: window::ApplicationWindow,
     tvs_backend: Arc<dyn TvsBackend>,
     pairing_backend: Arc<dyn PairingBackend>,
+    settings_backend: Arc<dyn SettingsBackend>,
     navigation: RefCell<Navigation>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
@@ -156,20 +163,23 @@ impl ApplicationController {
         gtk_application: &adw::Application,
         backend: Arc<dyn OverviewBackend>,
         tvs_backend: Arc<dyn TvsBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
     ) -> (Rc<Self>, ApplicationTransition) {
-        Self::with_pairing_backend(
+        Self::with_backends(
             gtk_application,
             backend,
             tvs_backend,
             Arc::new(EnvironmentPairingBackend),
+            settings_backend,
         )
     }
 
-    fn with_pairing_backend(
+    fn with_backends(
         gtk_application: &adw::Application,
         backend: Arc<dyn OverviewBackend>,
         tvs_backend: Arc<dyn TvsBackend>,
         pairing_backend: Arc<dyn PairingBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
     ) -> (Rc<Self>, ApplicationTransition) {
         let (application, opening) = Application::open();
         let controller = Rc::new_cyclic(|controller| {
@@ -193,13 +203,22 @@ impl ApplicationController {
                 let controller = controller.clone();
                 move |page| {
                     if let Some(controller) = controller.upgrade() {
-                        controller.navigate(page);
+                        Self::navigate(&controller, page);
+                    }
+                }
+            });
+            let on_settings = Rc::new({
+                let controller = controller.clone();
+                move |intent| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::handle_settings_intent(&controller, intent);
                     }
                 }
             });
             Self {
                 tvs_backend,
                 pairing_backend,
+                settings_backend,
                 navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
@@ -207,6 +226,7 @@ impl ApplicationController {
                     gtk_application,
                     on_intent,
                     on_tvs,
+                    on_settings,
                     on_navigation,
                 ),
                 backend,
@@ -233,6 +253,9 @@ impl ApplicationController {
     }
 
     fn apply_transition(controller: &Rc<Self>, transition: ApplicationTransition) {
+        if let Some(settings) = transition.settings() {
+            Self::render_settings_transition(controller, settings);
+        }
         if let Some(tvs) = transition.tvs() {
             Self::render_tvs_transition(controller, tvs);
         }
@@ -259,11 +282,63 @@ impl ApplicationController {
         }
     }
 
-    fn navigate(&self, page: ApplicationPage) {
-        if !self.closed.get() {
-            self.navigation.borrow_mut().select(page);
-            self.window.navigate(self.navigation.borrow().selected());
+    fn navigate(controller: &Rc<Self>, page: ApplicationPage) {
+        if !controller.closed.get() {
+            controller.navigation.borrow_mut().select(page);
+            controller
+                .window
+                .navigate(controller.navigation.borrow().selected());
+            let transition = controller.application.borrow_mut().select_page(page);
+            if let Some(transition) = transition {
+                Self::apply_transition(controller, transition);
+            }
         }
+    }
+
+    fn handle_settings_intent(controller: &Rc<Self>, intent: SettingsIntent) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_settings_intent(intent);
+        if let Some(transition) = transition {
+            Self::apply_transition(controller, transition);
+        }
+    }
+
+    fn render_settings_transition(controller: &Rc<Self>, transition: &SettingsTransition) {
+        if let Some(diagnostic) = transition.diagnostic() {
+            eprintln!("LG Buddy GUI: {diagnostic}");
+        }
+        controller.window.render_settings(transition.presentation());
+        if let Some(operation) = transition.read_operation() {
+            Self::start_settings_read(controller, operation);
+        }
+    }
+
+    fn start_settings_read(controller: &Rc<Self>, operation: SettingsReadOperation) {
+        let backend = Arc::clone(&controller.settings_backend);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.read_settings());
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(SettingsReadError::stopped()),
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller
+                    .application
+                    .borrow_mut()
+                    .complete_settings_read(operation, result);
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn handle_tvs_intent(controller: &Rc<Self>, intent: TvsIntent) {
@@ -559,11 +634,13 @@ fn connect_application(
     controller: Rc<RefCell<Option<Rc<ApplicationController>>>>,
     backend: Arc<dyn OverviewBackend>,
     tvs_backend: Arc<dyn TvsBackend>,
+    settings_backend: Arc<dyn SettingsBackend>,
 ) {
     application.connect_activate({
         let controller = Rc::clone(&controller);
         let backend = Arc::clone(&backend);
         let tvs_backend = Arc::clone(&tvs_backend);
+        let settings_backend = Arc::clone(&settings_backend);
         move |application| {
             if let Some(controller) = controller.borrow().as_ref() {
                 controller.present();
@@ -573,6 +650,7 @@ fn connect_application(
                 application,
                 Arc::clone(&backend),
                 Arc::clone(&tvs_backend),
+                Arc::clone(&settings_backend),
             );
             controller.replace(Some(Rc::clone(&overview)));
             ApplicationController::apply_transition(&overview, opening);
@@ -638,6 +716,25 @@ pub(crate) mod controller_test_support {
     use super::{ApplicationController, APPLICATION_ID};
 
     struct EmptyTvsBackend;
+    struct DefaultSettingsBackend;
+
+    impl lg_buddy::settings_view::SettingsBackend for DefaultSettingsBackend {
+        fn read_settings(
+            &self,
+        ) -> Result<
+            Vec<lg_buddy::presentation::settings::SettingsGroup>,
+            lg_buddy::settings_view::SettingsReadError,
+        > {
+            let store = lg_buddy::settings::ConfigEnvReader::parse("/unused/config.env", "");
+            Ok(
+                lg_buddy::presentation::settings::SettingsPresentation::from_store(
+                    &lg_buddy::settings::SettingsStore::from_reader(store),
+                )
+                .groups()
+                .to_vec(),
+            )
+        }
+    }
     impl lg_buddy::tvs::TvsBackend for EmptyTvsBackend {
         fn read_profiles(
             &self,
@@ -875,6 +972,7 @@ pub(crate) mod controller_test_support {
             "renderer test must initialize GTK first"
         );
         run_pairing_scenario();
+        run_settings_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -887,6 +985,7 @@ pub(crate) mod controller_test_support {
                 profiles: Mutex::new(profiles_rx),
                 model: Mutex::new(model_rx),
             }),
+            Arc::new(DefaultSettingsBackend),
         );
         ApplicationController::apply_transition(&controller, opening.clone());
         let native_window = controller.window.window();
@@ -1011,6 +1110,7 @@ pub(crate) mod controller_test_support {
             &panic_application,
             Arc::new(PanicBackend),
             Arc::new(EmptyTvsBackend),
+            Arc::new(DefaultSettingsBackend),
         );
         let panic_opening = panic_opening.overview().unwrap();
         let initial = match panic_opening.update() {
@@ -1030,6 +1130,87 @@ pub(crate) mod controller_test_support {
         });
         panic_controller.window.close();
         assert_cancel_waits_for_write_in_application_loop();
+    }
+
+    fn run_settings_scenario() {
+        use lg_buddy::presentation::settings::{SettingsGroup, SettingsPresentation};
+        use lg_buddy::settings::ConfigEnvReader;
+        use lg_buddy::settings_view::{SettingsBackend, SettingsReadError};
+
+        struct SettingsMock(
+            Mutex<std::collections::VecDeque<Result<Vec<SettingsGroup>, SettingsReadError>>>,
+        );
+        impl SettingsBackend for SettingsMock {
+            fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("expected settings read")
+            }
+        }
+        fn settings(timeout: u32) -> Vec<SettingsGroup> {
+            let store = ConfigEnvReader::parse(
+                "/unused/config.env",
+                &format!("screen_idle_timeout={timeout}\n"),
+            )
+            .into_store();
+            SettingsPresentation::from_store(&store).groups().to_vec()
+        }
+        fn retry_button(widget: &gtk::Widget) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                if button.label().as_deref() == Some("Retry") && button.is_visible() {
+                    return Some(button.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(button) = retry_button(&current) {
+                    return Some(button);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+
+        let application = test_application("Settings");
+        let backend = std::sync::Arc::new(SettingsMock(Mutex::new(
+            std::collections::VecDeque::from([
+                Err(SettingsReadError::unreadable("test settings read failure")),
+                Ok(settings(600)),
+                Ok(settings(120)),
+            ]),
+        )));
+        let (controller, opening) = ApplicationController::new(
+            &application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            backend,
+        );
+        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        controller.present();
+        let native = controller.window.window();
+        pump_until(|| {
+            widget_contains_text(native.upcast_ref(), "LG Buddy could not read its settings")
+        });
+        retry_button(native.upcast_ref())
+            .expect("visible Retry button")
+            .emit_clicked();
+        pump_until(|| widget_contains_text(native.upcast_ref(), "600 seconds"));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Settings
+        );
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        pump_until(|| widget_contains_text(native.upcast_ref(), "120 seconds"));
+        controller.shutdown();
+        controller.window.close();
     }
 
     fn run_pairing_scenario() {
@@ -1093,7 +1274,7 @@ pub(crate) mod controller_test_support {
             let application = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             let (release, receiver) = mpsc::channel();
-            let (controller, opening) = ApplicationController::with_pairing_backend(
+            let (controller, opening) = ApplicationController::with_backends(
                 &application,
                 Arc::new(backend),
                 Arc::new(TvsMock),
@@ -1102,10 +1283,14 @@ pub(crate) mod controller_test_support {
                     reject,
                     panic,
                 }),
+                Arc::new(DefaultSettingsBackend),
             );
             ApplicationController::render_tvs_transition(&controller, opening.tvs().unwrap());
             controller.present();
-            controller.navigate(lg_buddy::navigation::ApplicationPage::Tvs);
+            ApplicationController::navigate(
+                &controller,
+                lg_buddy::navigation::ApplicationPage::Tvs,
+            );
             pump_until(|| {
                 widget_contains_text(controller.window.window().upcast_ref(), "No TV configured")
             });
@@ -1208,6 +1393,7 @@ pub(crate) mod controller_test_support {
             Rc::clone(&controller),
             Arc::new(backend),
             Arc::new(EmptyTvsBackend),
+            Arc::new(DefaultSettingsBackend),
         );
         controls
             .summary

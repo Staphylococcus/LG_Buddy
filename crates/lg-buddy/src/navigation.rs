@@ -5,15 +5,17 @@ pub enum ApplicationPage {
     #[default]
     Overview,
     Tvs,
+    Settings,
 }
 
 impl ApplicationPage {
-    pub const ALL: [Self; 2] = [Self::Overview, Self::Tvs];
+    pub const ALL: [Self; 3] = [Self::Overview, Self::Tvs, Self::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Tvs => "TVs",
+            Self::Settings => "Settings",
         }
     }
 }

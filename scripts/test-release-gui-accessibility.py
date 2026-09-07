@@ -15,7 +15,8 @@ WINDOW_TITLE = "LG Buddy"
 CONTROL_NAME = "OLED Pixel Brightness"
 VOLUME_NAME = "TV Volume"
 DEFAULT_TIMEOUT_SECONDS = 10
-MAX_ACCESSIBLES = 256
+# Expanded Settings rows expose their detail widgets as well as the navigation.
+MAX_ACCESSIBLES = 1024
 
 
 def accessible_tree(root: object | None = None) -> list[object]:
@@ -97,7 +98,10 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TIMEOUT_SECONDS,
         help=f"maximum observation time in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
     )
-    parser.add_argument("--select-page", choices=("Overview", "TVs"))
+    parser.add_argument("--select-page", choices=("Overview", "TVs", "Settings"))
+    parser.add_argument("--expected-settings-state", choices=("ready", "invalid"))
+    parser.add_argument("--expected-settings-timeout")
+    parser.add_argument("--require-settings-details", action="store_true")
     parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
     parser.add_argument("--expected-tv-name", default="Primary TV")
@@ -216,6 +220,27 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
     return accessibles, None
 
 
+def settings_contract(args: argparse.Namespace):
+    accessibles = accessible_tree()
+    names = {name(item) for item in accessibles}
+    if not {"Screen", "Sleep & Wake", "Updates", "Desktop integration", "Idle blanking",
+            "Idle timeout", "Restore policy", "TV sleep & wake", "Automatic update checks",
+            "Update channel"} <= names:
+        return None
+    if args.expected_settings_timeout and args.expected_settings_timeout not in names:
+        return None
+    if args.expected_settings_state == "invalid" and not any(value.startswith("Invalid value") for value in names):
+        return None
+    if args.expected_settings_state == "ready" and any(value.startswith("Invalid value") for value in names):
+        return None
+    if args.require_settings_details:
+        visible = {name(item) for item in accessibles
+                   if item.getState().contains(pyatspi.STATE_SHOWING)}
+        if not {"Source", "Default", "Accepted values"} <= visible:
+            return None
+    return accessibles, None
+
+
 def main() -> int:
     args = parse_args()
     if args.select_page:
@@ -257,11 +282,13 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     contract = None
     while time.monotonic() < deadline:
-        if args.expected_tvs_state:
+        if args.expected_settings_state:
+            contract = settings_contract(args)
+        elif args.expected_tvs_state:
             contract = tvs_contract(args.expected_tvs_state, args.expected_tv_address, args.expected_tv_name)
         else:
             contract = observed_contract(args.expected_state, args.expected_slider_value)
-        if contract is not None and (args.expected_tvs_state or audio_contract(contract[0], args)):
+        if contract is not None and (args.expected_settings_state or args.expected_tvs_state or audio_contract(contract[0], args)):
             break
         contract = None
         time.sleep(0.1)
@@ -283,7 +310,7 @@ def main() -> int:
                     print(f"    value: {item.queryValue().currentValue}", file=sys.stderr)
             except Exception:
                 continue
-        expected = f" {args.expected_tvs_state or args.expected_state} state"
+        expected = f" {args.expected_settings_state or args.expected_tvs_state or args.expected_state} state"
         if args.expected_slider_value is not None:
             expected += f" at slider value {args.expected_slider_value:g}"
         raise SystemExit(
@@ -296,7 +323,7 @@ def main() -> int:
         {(role_name(item), name(item)) for item in accessibles if name(item)}
     )
     print("AT-SPI accessibility contract verified:")
-    print(f"  presentation state: {args.expected_tvs_state or args.expected_state}")
+    print(f"  presentation state: {args.expected_settings_state or args.expected_tvs_state or args.expected_state}")
     if slider_value is not None:
         print(f"  slider value: {slider_value:g}")
     for observed_role, accessible_name in observed:

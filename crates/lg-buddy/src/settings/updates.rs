@@ -21,7 +21,8 @@ pub(super) const AUTO_CHECK: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::ManageUpdateCheckTimer,
-    description: "Automatic background update checks and update notifications.",
+    description:
+        "Periodically check for new LG Buddy versions and notify you when an update is available.",
 };
 
 pub(super) const CHANNEL: SettingDefinition = SettingDefinition {
@@ -36,7 +37,8 @@ pub(super) const CHANNEL: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RuntimePolicyOnly,
-    description: "Release channel used by all update operations.",
+    description:
+        "Choose stable releases or include prerelease versions in update checks and installation.",
 };
 
 pub(super) fn apply_check_timer<C: ServiceController>(

@@ -306,13 +306,13 @@ mod tests {
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
                 "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set,unset | apply=no-runtime-apply-required | description=Control platform for the primary configured TV.",
-                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen backend selection for user-session blanking and restore behavior.",
-                "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle-driven blanking and restore behavior for the configured screen.",
-                "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Idle timeout in seconds before LG Buddy blanks the configured screen.",
-                "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Screen restore policy after LG Buddy blanks the configured screen.",
-                "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=System sleep and wake policy for lifecycle hooks.",
-                "updates.auto_check | storage=updates_auto_check | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=manage-update-check-timer | description=Automatic background update checks and update notifications.",
-                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=stable,prerelease aliases=(none) | default=stable | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Release channel used by all update operations.",
+                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.",
+                "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.",
+                "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Seconds of user inactivity before LG Buddy blanks the configured screen.",
+                "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Conservative restores the TV only after LG Buddy blanked or powered it off. Aggressive also attempts to restore it without a prior LG Buddy action.",
+                "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Power off the TV before the computer sleeps and restore it after waking.",
+                "updates.auto_check | storage=updates_auto_check | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=manage-update-check-timer | description=Periodically check for new LG Buddy versions and notify you when an update is available.",
+                "updates.channel | storage=updates_channel | fallbacks=(none) | type=enum values=stable,prerelease aliases=(none) | default=stable | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Choose stable releases or include prerelease versions in update checks and installation.",
             ]
         );
     }
@@ -495,7 +495,7 @@ screen.backend
   supported operations: get, describe, set, unset
   allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)
   apply: restart-user-screen-service
-  description: Screen backend selection for user-session blanking and restore behavior.
+  description: Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.
 
 screen.idle_blank
   storage key: screen_idle_blank
@@ -507,7 +507,7 @@ screen.idle_blank
   supported operations: get, describe, set, unset
   allowed values: enabled, disabled
   apply: restart-user-screen-service
-  description: Idle-driven blanking and restore behavior for the configured screen.
+  description: Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.
 
 screen.idle_timeout
   storage key: screen_idle_timeout
@@ -519,7 +519,7 @@ screen.idle_timeout
   supported operations: get, describe, set, unset
   range: 1..=86400
   apply: restart-user-screen-service
-  description: Idle timeout in seconds before LG Buddy blanks the configured screen.
+  description: Seconds of user inactivity before LG Buddy blanks the configured screen.
 
 screen.restore_policy
   storage key: screen_restore_policy
@@ -532,7 +532,7 @@ screen.restore_policy
   allowed values: conservative, aggressive
   aliases: marker_only -> conservative
   apply: restart-user-screen-service
-  description: Screen restore policy after LG Buddy blanks the configured screen.
+  description: Conservative restores the TV only after LG Buddy blanked or powered it off. Aggressive also attempts to restore it without a prior LG Buddy action.
 
 system.sleep_wake_policy
   storage key: system_sleep_wake_policy
@@ -544,7 +544,7 @@ system.sleep_wake_policy
   supported operations: get, describe, set, unset
   allowed values: enabled, disabled
   apply: runtime-policy-only
-  description: System sleep and wake policy for lifecycle hooks.
+  description: Power off the TV before the computer sleeps and restore it after waking.
 
 updates.auto_check
   storage key: updates_auto_check
@@ -556,7 +556,7 @@ updates.auto_check
   supported operations: get, describe, set, unset
   allowed values: enabled, disabled
   apply: manage-update-check-timer
-  description: Automatic background update checks and update notifications.
+  description: Periodically check for new LG Buddy versions and notify you when an update is available.
 
 updates.channel
   storage key: updates_channel
@@ -568,7 +568,7 @@ updates.channel
   supported operations: get, describe, set, unset
   allowed values: stable, prerelease
   apply: runtime-policy-only
-  description: Release channel used by all update operations.
+  description: Choose stable releases or include prerelease versions in update checks and installation.
 "
         );
     }

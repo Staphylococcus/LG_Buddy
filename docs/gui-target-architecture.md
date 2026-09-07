@@ -634,6 +634,33 @@ the native webOS exchange; GTK fixtures cover the form and intent mapping, and
 the installed accessibility check covers the blank-state CTA, modal form,
 validation feedback, and dismissal through Escape and the header's Cancel button.
 
+## Read-only Settings Increment
+
+[#176](https://github.com/Staphylococcus/LG_Buddy/issues/176) adds **Settings**
+as the third destination. `SettingsApplication` owns loading, failure, retry,
+and refresh on entry. Its backend reads `SettingsStore` on a worker thread;
+operation identities reject stale completions and results after close.
+Configuration reads do not depend on a configured or reachable TV.
+
+The application builds three groups—Screen, Sleep & Wake, and Updates—from
+the seven behavior settings. Descriptions, defaults, accepted values, and
+effective-value sources come from the existing registry and store. Friendly
+titles and value labels belong to the presentation layer. Invalid values stay
+invalid, and persisted configuration is not treated as proof of runtime
+application or service health.
+
+GTK maps the presentation to a native `AdwPreferencesPage`, preference groups,
+and expandable rows. Descriptions and current values are visible immediately;
+source, default, and accepted values appear in expanded details. It neither
+parses configuration nor calls the settings CLI. Shared descriptions are
+improved in the registry rather than copied into GTK. This increment introduces
+no settings writes; ordinary editing and runtime application belong to #177.
+
+Headless tests cover registry/store presentation and the loading/refresh/retry
+flow. Renderer tests cover native grouping, invalid text, expansion, and narrow
+layout. The installed AT-SPI smoke verifies the third tab, keyboard access to
+details, externally changed configuration, and preservation of the settings file.
+
 ## Evolution Rules
 
 Later GUI areas follow the same method:

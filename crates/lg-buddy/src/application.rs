@@ -11,6 +11,11 @@ use crate::overview::{
     OverviewTvIdentity,
 };
 use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
+use crate::presentation::settings::SettingsGroup;
+use crate::settings_view::{
+    SettingsApplication, SettingsIntent, SettingsReadError, SettingsReadOperation,
+    SettingsTransition,
+};
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
     TvProfile, TvsApplication, TvsIntent, TvsManagementError, TvsManagementOperation,
@@ -44,6 +49,7 @@ pub enum OverviewCompletion {
 pub struct ApplicationTransition {
     overview: Option<OverviewTransition>,
     tvs: Option<TvsTransition>,
+    settings: Option<SettingsTransition>,
 }
 
 impl ApplicationTransition {
@@ -54,22 +60,33 @@ impl ApplicationTransition {
     pub fn tvs(&self) -> Option<&TvsTransition> {
         self.tvs.as_ref()
     }
+
+    pub fn settings(&self) -> Option<&SettingsTransition> {
+        self.settings.as_ref()
+    }
 }
 
 pub struct Application {
     overview: OverviewApplication,
     tvs: TvsApplication,
+    settings: SettingsApplication,
 }
 
 impl Application {
     pub fn open() -> (Self, ApplicationTransition) {
         let (overview, overview_opening) = OverviewApplication::open();
         let (tvs, tvs_opening) = TvsApplication::open();
+        let (settings, settings_opening) = SettingsApplication::open();
         (
-            Self { overview, tvs },
+            Self {
+                overview,
+                tvs,
+                settings,
+            },
             ApplicationTransition {
                 overview: Some(overview_opening),
                 tvs: Some(tvs_opening),
+                settings: Some(settings_opening),
             },
         )
     }
@@ -88,6 +105,45 @@ impl Application {
     pub fn handle_tvs_intent(&mut self, intent: TvsIntent) -> Option<ApplicationTransition> {
         let transition = self.tvs.handle_intent(intent)?;
         Some(self.tvs_transition(transition))
+    }
+
+    pub fn handle_settings_intent(
+        &mut self,
+        intent: SettingsIntent,
+    ) -> Option<ApplicationTransition> {
+        self.settings
+            .handle_intent(intent)
+            .map(Self::settings_transition)
+    }
+
+    pub fn select_page(
+        &mut self,
+        page: crate::navigation::ApplicationPage,
+    ) -> Option<ApplicationTransition> {
+        match page {
+            crate::navigation::ApplicationPage::Settings => {
+                self.handle_settings_intent(SettingsIntent::Refresh)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn complete_settings_read(
+        &mut self,
+        operation: SettingsReadOperation,
+        result: Result<Vec<SettingsGroup>, SettingsReadError>,
+    ) -> Option<ApplicationTransition> {
+        self.settings
+            .complete_read(operation, result)
+            .map(Self::settings_transition)
+    }
+
+    fn settings_transition(transition: SettingsTransition) -> ApplicationTransition {
+        ApplicationTransition {
+            overview: None,
+            tvs: None,
+            settings: Some(transition),
+        }
     }
 
     pub fn complete_overview(
@@ -173,11 +229,13 @@ impl Application {
     pub fn shutdown(&mut self) {
         self.overview.shutdown();
         self.tvs.shutdown();
+        self.settings.shutdown();
     }
 
     fn overview_transition(&mut self, transition: OverviewTransition) -> ApplicationTransition {
         if matches!(transition.update(), OverviewFrontendUpdate::Close) {
             self.tvs.shutdown();
+            self.settings.shutdown();
         }
         let tvs = self
             .tvs
@@ -185,6 +243,7 @@ impl Application {
         ApplicationTransition {
             overview: Some(transition),
             tvs,
+            settings: None,
         }
     }
 
@@ -199,6 +258,7 @@ impl Application {
         ApplicationTransition {
             overview,
             tvs: Some(transition),
+            settings: None,
         }
     }
 }

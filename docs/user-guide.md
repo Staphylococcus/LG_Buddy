@@ -49,6 +49,19 @@ With no TV configured, choose **Pair a TV** to get started.
 
 ![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
 
+### Settings
+
+The development version adds a read-only **Settings** tab with **Screen**,
+**Sleep & Wake**, and **Updates** groups. Each row shows the current configured
+value and a description shared with the settings commands. Expand a row to see
+its source, default, and accepted values. Invalid saved values are identified
+explicitly; they are not silently replaced by defaults.
+
+Settings reloads when you enter the tab. These values describe configuration,
+not whether the corresponding service is currently running. For now, use the
+[settings commands](#configuration) to make changes. TV identity, HDMI input,
+and pairing remain in **TVs**.
+
 ### Pair Your First TV
 
 Open **TVs → Pair a TV**. The dialog pairs your first TV using native webOS.
