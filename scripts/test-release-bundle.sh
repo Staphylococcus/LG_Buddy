@@ -341,6 +341,28 @@ assert_mode "$BUNDLE_DIR/release-manifest.json" 644
 assert_file "$BUNDLE_DIR/docs/architecture-overview.md"
 assert_file "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 assert_file "$BUNDLE_DIR/docs/user-guide.md"
+python3 - "$BUNDLE_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+bundle = Path(sys.argv[1])
+for name in ("README.md", "docs/user-guide.md"):
+    document = bundle / name
+    images = re.findall(
+        r'!\[[^\]]*\]\(([^)\s]+)\)|<img\b[^>]*\bsrc="([^"]+)"',
+        document.read_text(encoding="utf-8"),
+    )
+    for markdown_source, html_source in images:
+        source = markdown_source or html_source
+        url = urlsplit(source)
+        if not url.scheme and not url.netloc:
+            assert (document.parent / unquote(url.path)).is_file(), (
+                f"Broken bundled documentation image in {name}: {source}"
+            )
+print("Bundled documentation image links verified.")
+PY
 assert_file "$BUNDLE_DIR/docs/development.md"
 assert_file "$BUNDLE_DIR/docs/release-process.md"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"

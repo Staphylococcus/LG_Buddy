@@ -88,6 +88,12 @@ install -m 644 "$REPO_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
 cp -R "$REPO_ROOT/docs/." "$BUNDLE_DIR/docs/"
 install -m 755 "$GUI_BINARY_PATH" "$BUNDLE_DIR/$GUI_BUNDLE_PATH"
 install -m 644 "$APP_ICON_SOURCE" "$BUNDLE_DIR/$APP_ICON_BUNDLE_PATH"
+# Documentation uses the source-tree icon path; older updaters require bundled
+# assets to remain under docs/. Keep the extracted guide's image links usable.
+sed -i "s|src=\"data/icons/hicolor/scalable/apps/$APP_ICON_NAME\"|src=\"$APP_ICON_BUNDLE_PATH\"|g" \
+    "$BUNDLE_DIR/README.md"
+sed -i "s|src=\"../data/icons/hicolor/scalable/apps/$APP_ICON_NAME\"|src=\"$APP_ICON_NAME\"|g" \
+    "$BUNDLE_DIR/docs/user-guide.md"
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" create \
     --output "$BUNDLE_DIR/release-manifest.json" \
     --release-tag "v$VERSION" \
