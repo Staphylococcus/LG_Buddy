@@ -662,9 +662,11 @@ workflow.
 
 GTK maps the presentation to a native `AdwPreferencesPage`, preference groups,
 direct `AdwSwitchRow`, `AdwComboRow`, and `AdwActionRow` editors. It renders
-values through those native controls, plus progress, feedback, and retry
-actions only when needed; it does not parse configuration, call the settings
-CLI, or implement validation or service policy. A shared typed settings
+values through those native controls, plus error/warning feedback and retry
+actions when needed. Mutation stages still drive control availability, but
+the application emits no routine progress or success messages, keeping the
+layout stable during ordinary edits. GTK does not parse configuration, call
+the settings CLI, or implement validation or service policy. A shared typed settings
 executor is used by both CLI and GUI to validate, persist, and apply mutations.
 A validation or persistence failure restores the previous row value. A
 successful save followed by an apply failure keeps the saved value, shows a

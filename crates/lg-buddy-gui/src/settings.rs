@@ -614,8 +614,30 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         }]
     );
     let intent = intents.borrow_mut().pop().unwrap();
+    let initial_height = view.groups.borrow()[0]
+        .measure(gtk::Orientation::Vertical, 600)
+        .1;
     let writing = editing.handle_intent(intent).unwrap();
     view.render(writing.presentation());
+    for stage in [
+        lg_buddy::settings::SettingsMutationStage::Validating,
+        lg_buddy::settings::SettingsMutationStage::Persisting,
+        lg_buddy::settings::SettingsMutationStage::Persisted,
+        lg_buddy::settings::SettingsMutationStage::Applying,
+    ] {
+        let progress = editing
+            .mutation_progress(writing.mutation_operation().unwrap(), stage)
+            .unwrap();
+        view.render(progress.presentation());
+        assert!(!view.rows.borrow()[2].feedback.is_visible());
+        assert_eq!(
+            view.groups.borrow()[0]
+                .measure(gtk::Orientation::Vertical, 600)
+                .1,
+            initial_height,
+            "an ordinary setting change must not shift the layout"
+        );
+    }
     assert_eq!(
         entry.text(),
         "900",

@@ -431,29 +431,14 @@ impl SettingsApplication {
             return None;
         }
 
-        let (status, message) = match stage {
-            SettingsMutationStage::Validating => {
-                (SettingsEditStatus::Validating, "Checking this value…")
-            }
-            SettingsMutationStage::Persisting => {
-                (SettingsEditStatus::Persisting, "Saving this setting…")
-            }
-            SettingsMutationStage::Persisted => {
-                (SettingsEditStatus::Persisted, "Setting saved; applying it…")
-            }
-            SettingsMutationStage::Applying => {
-                (SettingsEditStatus::Applying, "Applying this setting…")
-            }
+        let status = match stage {
+            SettingsMutationStage::Validating => SettingsEditStatus::Validating,
+            SettingsMutationStage::Persisting => SettingsEditStatus::Persisting,
+            SettingsMutationStage::Persisted => SettingsEditStatus::Persisted,
+            SettingsMutationStage::Applying => SettingsEditStatus::Applying,
         };
-        self.presentation.set_row_state(
-            operation.setting(),
-            status,
-            Some(SettingsFeedback::new(
-                SettingsFeedbackSeverity::Info,
-                message,
-            )),
-            false,
-        );
+        self.presentation
+            .set_row_state(operation.setting(), status, None, false);
         Some(self.transition(None, None, None))
     }
 
@@ -484,15 +469,12 @@ impl SettingsApplication {
                     .set_controls_available(self.controls_available);
                 self.state = SettingsApplicationState::Ready;
                 match outcome.apply() {
-                    Ok(apply_outcome) => {
-                        let (severity, message) = apply_feedback(apply_outcome);
-                        self.presentation.set_row_state(
-                            operation.setting(),
-                            SettingsEditStatus::Applied,
-                            Some(SettingsFeedback::new(severity, message)),
-                            false,
-                        )
-                    }
+                    Ok(apply_outcome) => self.presentation.set_row_state(
+                        operation.setting(),
+                        SettingsEditStatus::Applied,
+                        apply_feedback(apply_outcome),
+                        false,
+                    ),
                     Err(_error) => self.presentation.set_row_state(
                         operation.setting(),
                         SettingsEditStatus::ApplyFailed,
@@ -609,15 +591,8 @@ impl SettingsApplication {
             previous_row,
         });
         self.state = SettingsApplicationState::Mutating(operation.clone());
-        self.presentation.set_row_state(
-            setting,
-            SettingsEditStatus::Validating,
-            Some(SettingsFeedback::new(
-                SettingsFeedbackSeverity::Info,
-                "Checking this value…",
-            )),
-            false,
-        );
+        self.presentation
+            .set_row_state(setting, SettingsEditStatus::Validating, None, false);
         self.presentation.set_controls_available(false);
         Some(self.transition(None, Some(operation), None))
     }
@@ -651,41 +626,29 @@ fn mutation_failure_message(failure: &SettingsMutationFailure) -> String {
     }
 }
 
-fn apply_feedback(outcome: &SettingsApplyOutcome) -> (SettingsFeedbackSeverity, String) {
-    match outcome {
-        SettingsApplyOutcome::NotInstalled { service } => (
-            SettingsFeedbackSeverity::Warning,
-            format!(
-                "Saved; {} is not installed yet.",
-                apply_target_label(service)
-            ),
+fn apply_feedback(outcome: &SettingsApplyOutcome) -> Option<SettingsFeedback> {
+    let message = match outcome {
+        SettingsApplyOutcome::NotInstalled { service } => format!(
+            "Saved; {} is not installed yet.",
+            apply_target_label(service)
         ),
-        SettingsApplyOutcome::InactiveDisabled { service } => (
-            SettingsFeedbackSeverity::Warning,
-            format!(
-                "Saved; {} is inactive and disabled. It will apply when started.",
-                apply_target_label(service)
-            ),
+        SettingsApplyOutcome::InactiveDisabled { service } => format!(
+            "Saved; {} is inactive and disabled. It will apply when started.",
+            apply_target_label(service)
         ),
-        SettingsApplyOutcome::Skipped { .. } => (
-            SettingsFeedbackSeverity::Warning,
-            "Saved; runtime apply was skipped by configuration.".to_string(),
-        ),
-        SettingsApplyOutcome::NoActionRequired => (
-            SettingsFeedbackSeverity::Info,
-            "Saved; no runtime action was required.".to_string(),
-        ),
-        SettingsApplyOutcome::Enabled { .. } => (
-            SettingsFeedbackSeverity::Info,
-            "Saved; scheduled for the next graphical session.".to_string(),
-        ),
-        SettingsApplyOutcome::Restarted { .. }
+        SettingsApplyOutcome::Skipped { .. } => {
+            "Saved; runtime apply was skipped by configuration.".to_string()
+        }
+        SettingsApplyOutcome::NoActionRequired
+        | SettingsApplyOutcome::Enabled { .. }
+        | SettingsApplyOutcome::Restarted { .. }
         | SettingsApplyOutcome::EnabledStarted { .. }
-        | SettingsApplyOutcome::DisabledStopped { .. } => (
-            SettingsFeedbackSeverity::Info,
-            "Saved and applied".to_string(),
-        ),
-    }
+        | SettingsApplyOutcome::DisabledStopped { .. } => return None,
+    };
+    Some(SettingsFeedback::new(
+        SettingsFeedbackSeverity::Warning,
+        message,
+    ))
 }
 
 fn apply_target_label(service: &str) -> &'static str {
@@ -1242,26 +1205,54 @@ screen_backend=wayland\n",
 
     #[test]
     fn apply_outcomes_do_not_claim_runtime_application_when_deferred() {
-        let (severity, message) = apply_feedback(&SettingsApplyOutcome::NotInstalled {
-            service: "lg-buddy-screen.service",
-        });
-        assert_eq!(severity, SettingsFeedbackSeverity::Warning);
-        assert!(message.contains("Saved;"));
-        assert!(message.contains("not installed"));
-        assert!(message.contains("screen integration"));
-        assert!(!message.contains("LG_Buddy"));
-        assert!(!message.contains("Saved and applied"));
+        for (outcome, detail) in [
+            (
+                SettingsApplyOutcome::NotInstalled {
+                    service: "lg-buddy-screen.service",
+                },
+                "not installed",
+            ),
+            (
+                SettingsApplyOutcome::InactiveDisabled {
+                    service: "lg-buddy-screen.service",
+                },
+                "inactive and disabled",
+            ),
+            (
+                SettingsApplyOutcome::Skipped {
+                    reason: "test".into(),
+                },
+                "skipped",
+            ),
+        ] {
+            let feedback = apply_feedback(&outcome).expect("incomplete apply needs feedback");
+            assert_eq!(feedback.severity(), SettingsFeedbackSeverity::Warning);
+            assert!(feedback.message().contains(detail));
+        }
+    }
 
-        let (severity, message) = apply_feedback(&SettingsApplyOutcome::NoActionRequired);
-        assert_eq!(severity, SettingsFeedbackSeverity::Info);
-        assert!(message.contains("no runtime action"));
-        assert!(!message.contains("Saved and applied"));
-
-        let (_, message) = apply_feedback(&SettingsApplyOutcome::Enabled {
-            unit: "LG_Buddy_update_check.timer",
-        });
-        assert!(message.contains("next graphical session"));
-        assert!(!message.contains("Saved and applied"));
+    #[test]
+    fn successful_apply_outcomes_are_silent() {
+        for outcome in [
+            SettingsApplyOutcome::NoActionRequired,
+            SettingsApplyOutcome::Enabled {
+                unit: "LG_Buddy_update_check.timer",
+            },
+            SettingsApplyOutcome::Restarted {
+                service: "LG_Buddy_screen.service",
+            },
+            SettingsApplyOutcome::EnabledStarted {
+                unit: "LG_Buddy_update_check.timer",
+            },
+            SettingsApplyOutcome::DisabledStopped {
+                unit: "LG_Buddy_update_check.timer",
+            },
+        ] {
+            assert!(
+                apply_feedback(&outcome).is_none(),
+                "unexpected feedback for {outcome:?}"
+            );
+        }
     }
 
     #[test]

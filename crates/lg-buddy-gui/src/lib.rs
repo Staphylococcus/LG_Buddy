@@ -1299,6 +1299,7 @@ pub(crate) mod controller_test_support {
     }
 
     fn run_settings_write_scenario() {
+        use adw::prelude::{ComboRowExt, PreferencesRowExt};
         use lg_buddy::settings::{
             execute_settings_mutation, SettingsApplier, SettingsMutation, SettingsMutationFailure,
             SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
@@ -1357,6 +1358,21 @@ pub(crate) mod controller_test_support {
                 );
                 result
             }
+        }
+        fn update_channel(widget: &gtk::Widget) -> Option<adw::ComboRow> {
+            if let Some(row) = widget.downcast_ref::<adw::ComboRow>() {
+                if row.title() == "Update channel" {
+                    return Some(row.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(row) = update_channel(&current) {
+                    return Some(row);
+                }
+                child = current.next_sibling();
+            }
+            None
         }
         for (suffix, panic_after_save, close_pending) in [
             ("SettingsWrite", false, false),
@@ -1424,10 +1440,8 @@ pub(crate) mod controller_test_support {
                     });
                 } else {
                     pump_until(|| {
-                        widget_contains_text(
-                            native.upcast_ref(),
-                            "Saved; no runtime action was required.",
-                        )
+                        update_channel(native.upcast_ref())
+                            .is_some_and(|row| row.selected() == 1 && row.is_sensitive())
                     });
                 }
                 controller.shutdown();
