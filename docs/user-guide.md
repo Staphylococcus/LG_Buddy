@@ -38,9 +38,10 @@ selection saves immediately and changes which input LG Buddy manages; it does
 not switch the TV’s current source. If saving fails, the previous selection is
 restored.
 
-To remove the connection or recover from pairing problems, choose **Unpair
-TV…** and confirm. This removes the saved TV profile and its local native
-credential, while keeping other settings. It does not revoke authorization on
+To remove the connection or recover from pairing problems, click the **Unpair
+TV…** icon beside the TV model name and confirm. This removes the saved TV
+profile and its local native credential, while keeping other settings. It does
+not revoke authorization on
 the TV or remove compatibility credential storage. Cancelling the confirmation
 keeps the connection. Once unpaired, use **Pair a TV** to reconnect through
 native webOS. Cancelling or failing this new pairing leaves no TV configured.
@@ -58,17 +59,19 @@ availability; it can load and edit configuration even when no TV is paired.
 Settings reloads when you enter the tab. Invalid saved values remain visible as
 invalid and are not silently replaced with defaults.
 
-Expand a row to reveal its native editor, source, default, and accepted values:
+Each setting shows a description and its current value:
 
 - toggles for idle blanking, TV sleep & wake, and automatic update checks, plus
   bounded choices for the desktop backend, restore policy, and update channel,
-  commit on change;
+  apply on change. Click a choice row to open its available values;
 - the numeric idle timeout commits when you press Enter or leave the field;
-- **Reset** removes the explicit value and applies the default immediately.
+- errors and runtime-application warnings appear only when an operation needs
+  attention, with **Retry apply** offered when runtime application fails.
 
 Each change is validated, saved, and applied automatically, without a separate
-**Save** or **Cancel** button. The row reports progress while this runs. Settings
-and TV changes wait for one another to finish. A validation or persistence failure
+**Save** or **Cancel** button. Successful changes need no notification and keep
+the layout stable. Settings stay responsive while changes are saved in order.
+TV management waits until those changes finish. A validation or persistence failure
 restores the previous value and explains the error. If saving succeeds but
 runtime application fails, the saved value remains, a warning is shown, and
 **Retry apply** repeats only the runtime step.

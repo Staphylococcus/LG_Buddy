@@ -48,7 +48,7 @@ struct TvsMode {
     platform: adw::ActionRow,
     credentials: adw::ActionRow,
     credential_description: gtk::Label,
-    unpair: ActionButton,
+    unpair: UnpairButton,
     management_error: gtk::Label,
     management_actions: gtk::Box,
     management_retry: RetryButton,
@@ -111,13 +111,8 @@ impl TvsMode {
             .margin_end(12)
             .build();
         credential_description.add_css_class("dim-label");
-        let unpair = ActionButton::new(on_intent);
-        unpair.button.add_css_class("destructive-action");
-        let unpair_row = adw::ActionRow::builder()
-            .activatable(false)
-            .selectable(false)
-            .build();
-        unpair_row.add_suffix(&unpair.button);
+        let unpair = UnpairButton::new(on_intent);
+        details.set_header_suffix(Some(&unpair.button));
         let management_error = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -139,7 +134,6 @@ impl TvsMode {
         details_box.append(&management_actions);
         details_box.append(&details);
         details_box.append(&credential_description);
-        details.add(&unpair_row);
         let clamp = adw::Clamp::builder()
             .maximum_size(600)
             .tightening_threshold(400)
@@ -449,8 +443,10 @@ impl TvsView {
             TvsStatus::Ready => match presentation.selected_profile() {
                 Some(profile) => {
                     mode.input.set_sensitive(presentation.input_enabled());
-                    mode.input.set_selected(hdmi_index(profile.input()));
-                    mode.unpair.render(presentation.unpair_action());
+                    let selected = hdmi_index(profile.input());
+                    if mode.input.selected() != selected {
+                        mode.input.set_selected(selected);
+                    }
                     mode.show_details(profile)
                 }
                 None => {
@@ -512,17 +508,32 @@ struct PairButton {
     intent: Rc<RefCell<Option<TvsIntent>>>,
 }
 
-struct ActionButton {
+struct UnpairButton {
     button: gtk::Button,
     intent: Rc<RefCell<Option<TvsIntent>>>,
 }
 
-impl ActionButton {
+impl UnpairButton {
     fn new(on_intent: &IntentHandler) -> Self {
+        static RESOURCES: std::sync::Once = std::sync::Once::new();
+        RESOURCES.call_once(|| {
+            gtk::gio::resources_register_include!("lg-buddy-gui.gresource")
+                .expect("bundled GUI resources must be valid");
+        });
+        let icon = gtk::gio::FileIcon::new(&gtk::gio::File::for_uri(
+            "resource:///io/github/staphylococcus/LGBuddy/icons/edit-delete-symbolic.svg",
+        ));
         let button = gtk::Button::builder()
+            .child(&gtk::Image::from_gicon(&icon))
+            .width_request(36)
+            .height_request(36)
+            .valign(gtk::Align::Center)
             .visible(false)
             .sensitive(false)
             .build();
+        button.add_css_class("flat");
+        button.add_css_class("circular");
+        button.add_css_class("destructive-action");
         let intent = Rc::new(RefCell::new(None));
         button.connect_clicked({
             let on_intent = Rc::clone(on_intent);
@@ -546,7 +557,6 @@ impl ActionButton {
         self.button.set_visible(action.is_some());
         self.button
             .set_sensitive(action.is_some_and(TvsAction::enabled));
-        self.button.set_label(action.map_or("", TvsAction::label));
         self.button.set_tooltip_text(action.map(TvsAction::label));
         self.button
             .update_property(&[gtk::accessible::Property::Label(
@@ -577,6 +587,7 @@ impl PairButton {
     }
 
     fn render(&self, action: Option<&TvsAction>) {
+        let was_visible = self.button.is_visible();
         self.intent.replace(
             action
                 .filter(|action| action.enabled())
@@ -592,7 +603,7 @@ impl PairButton {
             .update_property(&[gtk::accessible::Property::Label(
                 action.map_or("Pair a TV", TvsAction::label),
             )]);
-        if action.is_some() && !self.button.has_focus() {
+        if action.is_some() && !was_visible && !self.button.has_focus() {
             let button = self.button.clone();
             gtk::glib::idle_add_local_once(move || {
                 if button.is_mapped() && button.is_visible() && button.is_sensitive() {
@@ -858,8 +869,13 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .handle_intent(TvsIntent::SetInput(HdmiInput::Hdmi3))
         .expect("input transition");
     view.render(&window, pending.presentation());
-    assert!(!view.single.input.is_sensitive());
+    assert!(view.single.input.is_sensitive());
     assert!(!view.single.unpair.button.is_sensitive());
+    view.single.input.set_selected(3);
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(TvsIntent::SetInput(HdmiInput::Hdmi4))
+    );
 
     let (mut app, opening) = TvsApplication::open();
     let ready_multiple = app

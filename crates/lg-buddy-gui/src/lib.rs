@@ -309,7 +309,9 @@ impl ApplicationController {
         if let Some(diagnostic) = transition.diagnostic() {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
-        controller.window.render_settings(transition.presentation());
+        if !controller.closed.get() {
+            controller.window.render_settings(transition.presentation());
+        }
         if let Some(operation) = transition.read_operation() {
             Self::start_settings_read(controller, operation);
         }
@@ -319,56 +321,33 @@ impl ApplicationController {
     }
 
     fn start_settings_mutation(controller: &Rc<Self>, operation: SettingsMutationOperation) {
-        use lg_buddy::settings::{
-            SettingsMutationFailure, SettingsMutationOutcome, SettingsMutationStage,
-        };
-        enum Update {
-            Progress(SettingsMutationStage),
-            Done(Box<Result<SettingsMutationOutcome, SettingsMutationFailure>>),
-            Stopped,
-        }
         let backend = Arc::clone(&controller.settings_backend);
         let worker_operation = operation.clone();
-        let (sender, receiver) = mpsc::channel();
-        // Atomic publication and runtime apply finish even when the window closes.
-        let mut application_hold = Some(controller.gtk_application.hold());
+        let (sender, receiver) = mpsc::sync_channel(1);
+        // Keep the controller and application alive until accepted writes drain.
+        let application_hold = controller.gtk_application.hold();
         thread::spawn(move || {
-            let result = backend.write_setting(worker_operation, &mut |stage| {
-                let _ = sender.send(Update::Progress(stage));
-            });
-            let _ = sender.send(Update::Done(Box::new(result)));
+            let result = backend.write_setting(worker_operation, &mut |_| {});
+            let _ = sender.send(result);
         });
-        let controller = Rc::downgrade(controller);
-        glib::timeout_add_local(Duration::from_millis(10), move || loop {
-            let update = match receiver.try_recv() {
-                Ok(update) => update,
+        let controller = Rc::clone(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let transition = match receiver.try_recv() {
+                Ok(result) => controller
+                    .application
+                    .borrow_mut()
+                    .complete_settings_mutation(&operation, result),
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => Update::Stopped,
+                Err(mpsc::TryRecvError::Disconnected) => controller
+                    .application
+                    .borrow_mut()
+                    .settings_mutation_worker_stopped(&operation),
             };
-            let done = matches!(update, Update::Done(_) | Update::Stopped);
-            if let Some(controller) = controller.upgrade() {
-                let transition = match update {
-                    Update::Progress(stage) => controller
-                        .application
-                        .borrow_mut()
-                        .settings_mutation_progress(&operation, stage),
-                    Update::Done(result) => controller
-                        .application
-                        .borrow_mut()
-                        .complete_settings_mutation(&operation, *result),
-                    Update::Stopped => controller
-                        .application
-                        .borrow_mut()
-                        .settings_mutation_worker_stopped(&operation),
-                };
-                if let Some(transition) = transition {
-                    Self::apply_transition(&controller, transition);
-                }
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
             }
-            if done {
-                drop(application_hold.take());
-                return glib::ControlFlow::Break;
-            }
+            let _ = &application_hold;
+            glib::ControlFlow::Break
         });
     }
 
@@ -378,22 +357,22 @@ impl ApplicationController {
         thread::spawn(move || {
             let _ = sender.send(backend.read_settings());
         });
-        let controller = Rc::downgrade(controller);
+        let controller = Rc::clone(controller);
+        let application_hold = controller.gtk_application.hold();
         glib::timeout_add_local(Duration::from_millis(10), move || {
             let result = match receiver.try_recv() {
                 Ok(result) => result,
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => Err(SettingsReadError::stopped()),
             };
-            if let Some(controller) = controller.upgrade() {
-                let transition = controller
-                    .application
-                    .borrow_mut()
-                    .complete_settings_read(operation, result);
-                if let Some(transition) = transition {
-                    Self::apply_transition(&controller, transition);
-                }
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_settings_read(operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
             }
+            let _ = &application_hold;
             glib::ControlFlow::Break
         });
     }
@@ -412,9 +391,11 @@ impl ApplicationController {
         if let Some(diagnostic) = transition.diagnostic() {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
-        controller.window.render_tvs(transition.presentation());
-        if let Some(message) = transition.toast_message() {
-            controller.window.show_toast(message);
+        if !controller.closed.get() {
+            controller.window.render_tvs(transition.presentation());
+            if let Some(message) = transition.toast_message() {
+                controller.window.show_toast(message);
+            }
         }
         if let Some(operation) = transition.read_operation() {
             Self::start_tvs_read(controller, operation);
@@ -437,11 +418,11 @@ impl ApplicationController {
         let backend = Arc::clone(&controller.tvs_backend);
         let worker_operation = operation.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
-        let mut application_hold = Some(controller.gtk_application.hold());
+        let application_hold = controller.gtk_application.hold();
         thread::spawn(move || {
             let _ = sender.send(backend.manage(&worker_operation));
         });
-        let controller = Rc::downgrade(controller);
+        let controller = Rc::clone(controller);
         glib::timeout_add_local(Duration::from_millis(10), move || {
             let result = match receiver.try_recv() {
                 Ok(result) => result,
@@ -450,16 +431,14 @@ impl ApplicationController {
                     Err(lg_buddy::tvs::TvsManagementError::stopped())
                 }
             };
-            if let Some(controller) = controller.upgrade() {
-                let transition = controller
-                    .application
-                    .borrow_mut()
-                    .complete_tvs_management(&operation, result);
-                if let Some(transition) = transition {
-                    Self::apply_transition(&controller, transition);
-                }
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_tvs_management(&operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
             }
-            drop(application_hold.take());
+            let _ = &application_hold;
             glib::ControlFlow::Break
         });
     }
@@ -1001,6 +980,11 @@ pub(crate) mod controller_test_support {
                 return true;
             }
         }
+        if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+            if entry.text() == expected {
+                return true;
+            }
+        }
         let mut child = widget.first_child();
         while let Some(current) = child {
             if widget_contains_text(&current, expected) {
@@ -1279,7 +1263,7 @@ pub(crate) mod controller_test_support {
         retry_button(native.upcast_ref())
             .expect("visible Retry button")
             .emit_clicked();
-        pump_until(|| widget_contains_text(native.upcast_ref(), "600 seconds"));
+        pump_until(|| widget_contains_text(native.upcast_ref(), "600"));
         assert_eq!(
             controller.navigation.borrow().selected(),
             super::ApplicationPage::Settings
@@ -1288,12 +1272,13 @@ pub(crate) mod controller_test_support {
         controller
             .window
             .choose_page(super::ApplicationPage::Settings);
-        pump_until(|| widget_contains_text(native.upcast_ref(), "120 seconds"));
+        pump_until(|| widget_contains_text(native.upcast_ref(), "120"));
         controller.shutdown();
         controller.window.close();
     }
 
     fn run_settings_write_scenario() {
+        use adw::prelude::{ComboRowExt, PreferencesRowExt};
         use lg_buddy::settings::{
             execute_settings_mutation, SettingsApplier, SettingsMutation, SettingsMutationFailure,
             SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
@@ -1353,10 +1338,26 @@ pub(crate) mod controller_test_support {
                 result
             }
         }
-        for (suffix, panic_after_save, close_pending) in [
-            ("SettingsWrite", false, false),
-            ("SettingsStopped", true, false),
-            ("SettingsClose", false, true),
+        fn update_channel(widget: &gtk::Widget) -> Option<adw::ComboRow> {
+            if let Some(row) = widget.downcast_ref::<adw::ComboRow>() {
+                if row.title() == "Update channel" {
+                    return Some(row.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(row) = update_channel(&current) {
+                    return Some(row);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        for (suffix, panic_after_save, close_pending, queued) in [
+            ("SettingsWrite", false, false, false),
+            ("SettingsStopped", true, false, false),
+            ("SettingsClose", false, true, false),
+            ("SettingsQueuedClose", false, true, true),
         ] {
             let path =
                 std::env::temp_dir().join(format!("lg-buddy-{suffix}-{}.env", std::process::id()));
@@ -1394,6 +1395,16 @@ pub(crate) mod controller_test_support {
             );
             pump_until(|| started_rx.try_recv().is_ok());
             assert!(std::fs::read_to_string(&path).unwrap().contains("stable"));
+            assert!(update_channel(native.upcast_ref()).unwrap().is_sensitive());
+            if queued {
+                ApplicationController::handle_settings_intent(
+                    &controller,
+                    lg_buddy::settings_view::SettingsIntent::Commit {
+                        setting: BehaviorSetting::UpdatesChannel,
+                        value: "stable".into(),
+                    },
+                );
+            }
             pump_for(Duration::from_millis(20));
             if close_pending {
                 ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
@@ -1405,6 +1416,11 @@ pub(crate) mod controller_test_support {
                     .unwrap()
                     .contains("prerelease")
             });
+            if queued {
+                pump_until(|| started_rx.try_recv().is_ok());
+                release_tx.send(()).unwrap();
+                pump_until(|| std::fs::read_to_string(&path).unwrap().contains("stable"));
+            }
             if close_pending {
                 pump_for(Duration::from_millis(30));
                 assert!(
@@ -1419,10 +1435,8 @@ pub(crate) mod controller_test_support {
                     });
                 } else {
                     pump_until(|| {
-                        widget_contains_text(
-                            native.upcast_ref(),
-                            "Saved; no runtime action was required.",
-                        )
+                        update_channel(native.upcast_ref())
+                            .is_some_and(|row| row.selected() == 1 && row.is_sensitive())
                     });
                 }
                 controller.shutdown();

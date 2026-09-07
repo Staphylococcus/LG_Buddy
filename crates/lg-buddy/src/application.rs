@@ -12,7 +12,7 @@ use crate::overview::{
 };
 use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
 use crate::presentation::settings::SettingsGroup;
-use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome, SettingsMutationStage};
+use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome};
 use crate::settings_view::{
     SettingsApplication, SettingsIntent, SettingsMutationOperation, SettingsReadError,
     SettingsReadOperation, SettingsTransition,
@@ -134,15 +134,6 @@ impl Application {
         result: Result<Vec<SettingsGroup>, SettingsReadError>,
     ) -> Option<ApplicationTransition> {
         let transition = self.settings.complete_read(operation, result)?;
-        Some(self.settings_transition(transition))
-    }
-
-    pub fn settings_mutation_progress(
-        &mut self,
-        operation: &SettingsMutationOperation,
-        stage: SettingsMutationStage,
-    ) -> Option<ApplicationTransition> {
-        let transition = self.settings.mutation_progress(operation, stage)?;
         Some(self.settings_transition(transition))
     }
 
@@ -596,7 +587,7 @@ mod settings_tests {
             .unwrap()
             .enabled());
         assert!(app.handle_tvs_intent(TvsIntent::PairTv).is_none());
-        assert!(!editable(&write));
+        assert!(editable(&write));
         let operation = write.settings().unwrap().mutation_operation().unwrap();
         let done = app
             .complete_settings_mutation(
@@ -626,9 +617,6 @@ mod settings_tests {
             close.overview().unwrap().update(),
             OverviewFrontendUpdate::Close
         ));
-        assert!(app
-            .settings_mutation_progress(operation, SettingsMutationStage::Persisted)
-            .is_none());
         assert!(app.settings_mutation_worker_stopped(operation).is_none());
         assert!(app
             .handle_settings_intent(SettingsIntent::Reset(BehaviorSetting::UpdatesChannel))
