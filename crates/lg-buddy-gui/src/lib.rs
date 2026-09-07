@@ -1,4 +1,5 @@
 mod overview;
+mod pairing;
 mod tvs;
 mod window;
 
@@ -22,6 +23,10 @@ use lg_buddy::overview::{
     OverviewAudioWriteOperation, OverviewBackend, OverviewBrightnessReadOperation,
     OverviewBrightnessWriteOperation, OverviewFrontendUpdate, OverviewIntent, OverviewOperation,
     OverviewSummaryError, OverviewSummaryOperation, OverviewTransition, OverviewTvIdentity,
+};
+use lg_buddy::pairing::{
+    EnvironmentPairingBackend, PairingBackend, PairingError, PairingFailure, PairingOperation,
+    PairingStage,
 };
 use lg_buddy::tv::{AudioStatus, OledBrightness};
 use lg_buddy::tvs::{
@@ -113,6 +118,7 @@ fn install_application_actions(
     let quit = gtk::gio::SimpleAction::new("quit", None);
     let application_for_quit = application.clone();
     quit.connect_activate({
+        let controller = Rc::clone(&controller);
         move |_, _| {
             if let Some(controller) = controller.borrow().as_ref() {
                 ApplicationController::handle_intent(controller, OverviewIntent::Cancel);
@@ -122,7 +128,20 @@ fn install_application_actions(
         }
     });
     application.add_action(&quit);
-    application.set_accels_for_action("app.quit", &["<Primary>q", "Escape"]);
+    application.set_accels_for_action("app.quit", &["<Primary>q"]);
+    let escape = gtk::gio::SimpleAction::new("escape", None);
+    let application_for_escape = application.clone();
+    escape.connect_activate(move |_, _| {
+        if let Some(controller) = controller.borrow().as_ref() {
+            if !controller.window.dismiss_dialog() {
+                ApplicationController::handle_intent(controller, OverviewIntent::Cancel);
+            }
+        } else {
+            application_for_escape.quit();
+        }
+    });
+    application.add_action(&escape);
+    application.set_accels_for_action("app.escape", &["Escape"]);
 }
 
 enum WorkerResult {
@@ -154,6 +173,7 @@ struct ApplicationController {
     window: window::ApplicationWindow,
     tvs: RefCell<TvsApplication>,
     tvs_backend: Arc<dyn TvsBackend>,
+    pairing_backend: Arc<dyn PairingBackend>,
     navigation: RefCell<Navigation>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
@@ -164,6 +184,20 @@ impl ApplicationController {
         gtk_application: &adw::Application,
         backend: Arc<dyn OverviewBackend>,
         tvs_backend: Arc<dyn TvsBackend>,
+    ) -> (Rc<Self>, OverviewTransition, TvsTransition) {
+        Self::with_pairing_backend(
+            gtk_application,
+            backend,
+            tvs_backend,
+            Arc::new(EnvironmentPairingBackend),
+        )
+    }
+
+    fn with_pairing_backend(
+        gtk_application: &adw::Application,
+        backend: Arc<dyn OverviewBackend>,
+        tvs_backend: Arc<dyn TvsBackend>,
+        pairing_backend: Arc<dyn PairingBackend>,
     ) -> (Rc<Self>, OverviewTransition, TvsTransition) {
         let (application, opening) = OverviewApplication::open();
         let (tvs, tvs_opening) = TvsApplication::open();
@@ -195,6 +229,7 @@ impl ApplicationController {
             Self {
                 tvs: RefCell::new(tvs),
                 tvs_backend,
+                pairing_backend,
                 navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
@@ -262,12 +297,72 @@ impl ApplicationController {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
         controller.window.render_tvs(transition.presentation());
+        if let Some(message) = transition.toast_message() {
+            controller.window.show_toast(message);
+        }
         if let Some(operation) = transition.read_operation() {
             Self::start_tvs_read(controller, operation);
         }
         if let Some(operation) = transition.model_read_operation() {
             Self::start_tvs_model_read(controller, operation.clone());
         }
+        if let Some(operation) = transition.pairing_operation() {
+            Self::start_pairing(controller, operation.clone());
+        }
+        if transition.profile_created() {
+            let overview = controller.application.borrow_mut().profile_created();
+            if let Some(overview) = overview {
+                Self::apply_transition(controller, overview);
+            }
+        }
+    }
+
+    fn start_pairing(controller: &Rc<Self>, operation: PairingOperation) {
+        enum Update {
+            Progress(PairingStage),
+            Done(Result<lg_buddy::tvs::TvProfile, PairingError>),
+        }
+        let backend = Arc::clone(&controller.pairing_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::channel();
+        // A started publication must finish even if the window closes.
+        let mut application_hold = Some(controller.gtk_application.hold());
+        thread::spawn(move || {
+            let result = backend.pair(&worker_operation, &mut |stage| {
+                let _ = sender.send(Update::Progress(stage));
+            });
+            let _ = sender.send(Update::Done(result));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || loop {
+            let update = match receiver.try_recv() {
+                Ok(update) => update,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Update::Done(Err(PairingError::new(PairingFailure::Connection)))
+                }
+            };
+            let done = matches!(update, Update::Done(_));
+            if let Some(controller) = controller.upgrade() {
+                let transition = match update {
+                    Update::Progress(stage) => controller
+                        .tvs
+                        .borrow_mut()
+                        .pairing_progress(&operation, stage),
+                    Update::Done(result) => controller
+                        .tvs
+                        .borrow_mut()
+                        .complete_pairing(&operation, result),
+                };
+                if let Some(transition) = transition {
+                    Self::apply_tvs_transition(&controller, transition);
+                }
+            }
+            if done {
+                drop(application_hold.take());
+                return glib::ControlFlow::Break;
+            }
+        });
     }
 
     fn start_tvs_model_read(controller: &Rc<Self>, operation: TvsModelReadOperation) {
@@ -775,6 +870,7 @@ pub(crate) mod controller_test_support {
             gtk::is_initialized(),
             "renderer test must initialize GTK first"
         );
+        run_pairing_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -930,6 +1026,155 @@ pub(crate) mod controller_test_support {
         });
         panic_controller.window.close();
         assert_cancel_waits_for_write_in_application_loop();
+    }
+
+    fn run_pairing_scenario() {
+        use lg_buddy::pairing::{
+            PairingBackend, PairingError, PairingFailure, PairingIntent, PairingOperation,
+            PairingStage,
+        };
+        use lg_buddy::tvs::{TvCredentialState, TvId, TvProfile, TvsIntent};
+        struct PairingMock {
+            release: Mutex<mpsc::Receiver<()>>,
+            reject: bool,
+        }
+        impl PairingBackend for PairingMock {
+            fn pair(
+                &self,
+                operation: &PairingOperation,
+                progress: &mut dyn FnMut(PairingStage),
+            ) -> Result<TvProfile, PairingError> {
+                assert!(!gtk::is_initialized_main_thread());
+                progress(PairingStage::WaitingForConfirmation);
+                self.release.lock().unwrap().recv().unwrap();
+                if operation.is_cancelled() {
+                    return Err(PairingError::new(PairingFailure::Cancelled));
+                }
+                if self.reject {
+                    return Err(PairingError::new(PairingFailure::Rejected));
+                }
+                progress(PairingStage::Verifying);
+                let request = operation.request();
+                Ok(TvProfile::new(
+                    TvId::primary(),
+                    "Primary TV",
+                    request.address(),
+                    request.mac(),
+                    request.input(),
+                    TvPlatform::LgWebOs,
+                    TvCredentialState::Stored,
+                ))
+            }
+        }
+        struct TvsMock;
+        impl lg_buddy::tvs::TvsBackend for TvsMock {
+            fn read_profiles(&self) -> Result<Vec<TvProfile>, lg_buddy::tvs::TvsReadError> {
+                Ok(vec![])
+            }
+            fn read_model_name(
+                &self,
+                _: &TvProfile,
+            ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+                Ok("Test OLED".into())
+            }
+        }
+        for (cancel, reject, name) in [
+            (false, false, "PairSuccess"),
+            (true, false, "PairCancel"),
+            (false, true, "PairRejected"),
+        ] {
+            let application = test_application(name);
+            let (backend, controls) = BlockingBackend::new();
+            let (release, receiver) = mpsc::channel();
+            let (controller, _, opening) = ApplicationController::with_pairing_backend(
+                &application,
+                Arc::new(backend),
+                Arc::new(TvsMock),
+                Arc::new(PairingMock {
+                    release: Mutex::new(receiver),
+                    reject,
+                }),
+            );
+            ApplicationController::apply_tvs_transition(&controller, opening);
+            controller.present();
+            controller.navigate(lg_buddy::navigation::ApplicationPage::Tvs);
+            pump_until(|| {
+                widget_contains_text(controller.window.window().upcast_ref(), "No TV configured")
+            });
+            for intent in [
+                TvsIntent::PairTv,
+                TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
+                TvsIntent::Pairing(PairingIntent::SetMac("02:11:22:33:44:55".into())),
+                TvsIntent::Pairing(PairingIntent::Submit),
+            ] {
+                ApplicationController::handle_tvs_intent(&controller, intent);
+            }
+            pump_until(|| {
+                widget_contains_text(
+                    controller.window.window().upcast_ref(),
+                    "Confirm on Your TV",
+                )
+            });
+            assert!(!widget_contains_text(
+                controller.window.window().upcast_ref(),
+                "TV paired successfully",
+            ));
+            if cancel {
+                assert!(controller.window.dismiss_dialog());
+                assert!(!controller.closed.get());
+                release.send(()).unwrap();
+                pump_for(Duration::from_millis(60));
+                assert!(!controller.tvs.borrow().is_pairing());
+            } else if reject {
+                release.send(()).unwrap();
+                pump_until(|| {
+                    widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Could Not Pair TV",
+                    )
+                });
+                assert!(controller.tvs.borrow().is_pairing());
+            } else {
+                release.send(()).unwrap();
+                controls
+                    .summary
+                    .send(Ok(OverviewTvIdentity::new(
+                        "192.0.2.10".parse().unwrap(),
+                        HdmiInput::Hdmi1,
+                        TvPlatform::LgWebOs,
+                    )))
+                    .unwrap();
+                controls
+                    .brightness
+                    .send(Ok(OledBrightness::new(50).unwrap()))
+                    .unwrap();
+                controls
+                    .audio
+                    .send(Ok(AudioStatus::new(
+                        CurrentVolume::Level(VolumeLevel::new(25).unwrap()),
+                        false,
+                    )))
+                    .unwrap();
+                pump_until(|| {
+                    widget_contains_text(controller.window.window().upcast_ref(), "Test OLED")
+                });
+                assert!(!controller.tvs.borrow().is_pairing());
+                assert_eq!(
+                    controller.navigation.borrow().selected(),
+                    lg_buddy::navigation::ApplicationPage::Tvs
+                );
+            }
+            assert_eq!(
+                widget_contains_text(
+                    controller.window.window().upcast_ref(),
+                    "TV paired successfully",
+                ),
+                !cancel && !reject,
+                "only successful pairing should show the confirmation toast",
+            );
+            ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
+            assert!(controller.closed.get());
+        }
     }
 
     fn assert_cancel_waits_for_write_in_application_loop() {

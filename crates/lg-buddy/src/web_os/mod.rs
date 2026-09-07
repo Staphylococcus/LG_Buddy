@@ -22,7 +22,7 @@ pub use audio::{WebOsAudioStatus, WebOsAudioStatusError, WebOsAudioVolume};
 pub(crate) use client::WebOsClientRegistration;
 pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
-    WebOsClientRegistrationError, WebOsEndpoint,
+    WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
 };
 pub use control::WebOsControlError;
 pub use input::{WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError};

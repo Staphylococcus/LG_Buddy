@@ -253,6 +253,17 @@ cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
 start_gui enabled
 observe_gui_state --select-page TVs
 observe_gui_state --expected-tvs-state empty
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-tvs-state pairing-invalid
+xdotool key --window "$WINDOW_ID" Escape
+observe_gui_state --expected-tvs-state empty
+# A second opening starts with a fresh form and uses the header's Cancel button.
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+observe_gui_state --activate-control Cancel
+observe_gui_state --expected-tvs-state empty
 send_closing_mnemonic Escape
 finish_gui "empty TVs view"
 cmp -s "$STATE_FILE" "$WORK_DIR/before-empty.json" || fail "Empty profile performed a TV operation."

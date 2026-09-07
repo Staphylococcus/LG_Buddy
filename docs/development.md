@@ -12,7 +12,7 @@ Compiling the Rust runtime requires:
 Compiling and testing the GTK frontend additionally requires:
 
 - GTK 4.10 or newer development files
-- libadwaita 1.4 or newer development files
+- libadwaita 1.5 or newer development files
 - `pkg-config`
 - a graphical session or virtual display for renderer tests
 - `xdotool` for the executable launch smoke test

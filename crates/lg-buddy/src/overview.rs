@@ -430,6 +430,31 @@ impl OverviewApplication {
         }
     }
 
+    /// Reload after the first primary profile has been saved. Preserve the
+    /// operation sequence so late results from the empty state stay stale.
+    pub fn profile_created(&mut self) -> Option<OverviewTransition> {
+        if self.is_closed()
+            || matches!(self.brightness, BrightnessState::Applying { .. })
+            || matches!(self.audio, AudioState::Applying { .. })
+        {
+            return None;
+        }
+        let summary = self.new_summary();
+        let brightness = OverviewBrightnessReadOperation::new(self.next_id);
+        self.next_id += 1;
+        self.brightness = BrightnessState::Loading(brightness);
+        self.brightness_presentation = BrightnessPresentation::loading();
+        let audio = self.new_audio_read();
+        Some(self.transition(
+            vec![
+                OverviewOperation::ReadSummary(summary),
+                OverviewOperation::ReadBrightness(brightness),
+                OverviewOperation::ReadAudio(audio),
+            ],
+            None,
+        ))
+    }
+
     pub fn complete_summary(
         &mut self,
         operation: OverviewSummaryOperation,
@@ -1149,6 +1174,37 @@ mod tests {
     use crate::audio::AudioWriteFailure;
     use crate::presentation::brightness::BrightnessStatus;
     use crate::presentation::overview::AudioStatus;
+
+    #[test]
+    fn first_profile_reload_rejects_results_from_the_empty_state() {
+        let (mut app, original) = OverviewApplication::open();
+        let refreshed = app.profile_created().unwrap();
+        assert_eq!(refreshed.operations().len(), 3);
+        for operation in original.operations() {
+            assert!(!refreshed.operations().contains(operation));
+            let stale = match *operation {
+                OverviewOperation::ReadSummary(op) => app.complete_summary(
+                    op,
+                    Err(OverviewSummaryError::new(
+                        OverviewSummaryFailure::NotConfigured,
+                        "old config",
+                    )),
+                ),
+                OverviewOperation::ReadBrightness(op) => {
+                    app.complete_brightness_read(op, Ok(OledBrightness::new(30).unwrap()))
+                }
+                OverviewOperation::ReadAudio(op) => app.complete_audio_read(
+                    op,
+                    Ok(crate::tv::AudioStatus::new(
+                        CurrentVolume::Level(VolumeLevel::new(20).unwrap()),
+                        false,
+                    )),
+                ),
+                _ => unreachable!(),
+            };
+            assert!(stale.is_none());
+        }
+    }
 
     fn ready_application() -> OverviewApplication {
         let (mut app, opening) = OverviewApplication::open();

@@ -33,6 +33,8 @@ pub(crate) struct TvsView {
 struct TvsMode {
     stack: gtk::Stack,
     status: adw::StatusPage,
+    status_error: gtk::Label,
+    pair: PairButton,
     details: adw::PreferencesGroup,
     address: adw::ActionRow,
     mac: adw::ActionRow,
@@ -51,7 +53,18 @@ impl TvsMode {
             .vexpand(true)
             .build();
         let retry = RetryButton::new(on_intent);
-        status.set_child(Some(&retry.button));
+        let pair = PairButton::new(on_intent);
+        let status_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        status_actions.set_halign(gtk::Align::Center);
+        status_actions.append(&retry.button);
+        status_actions.append(&pair.button);
+        let status_error = gtk::Label::builder().wrap(true).visible(false).build();
+        status_error.set_accessible_role(gtk::AccessibleRole::Alert);
+        status_error.add_css_class("error");
+        let status_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        status_content.append(&status_error);
+        status_content.append(&status_actions);
+        status.set_child(Some(&status_content));
 
         let details = adw::PreferencesGroup::builder().title("TV details").build();
         let address = detail_row("Address");
@@ -101,6 +114,8 @@ impl TvsMode {
         Self {
             stack,
             status,
+            status_error,
+            pair,
             details,
             address,
             mac,
@@ -114,13 +129,15 @@ impl TvsMode {
 
     fn show_status(&self, title: &str, description: Option<&str>, error: bool) {
         self.status.set_title(title);
-        self.status.set_description(description);
+        self.status
+            .set_description(if error { None } else { description });
         self.status.set_icon_name(Some(TV_ICON_NAME));
-        self.status.set_accessible_role(if error {
-            gtk::AccessibleRole::Alert
+        self.status_error.set_text(if error {
+            description.unwrap_or(title)
         } else {
-            gtk::AccessibleRole::Status
+            ""
         });
+        self.status_error.set_visible(error);
         self.stack.set_visible_child_name("status");
     }
 
@@ -260,8 +277,11 @@ impl TvsView {
             self.sidebar.unselect_all();
         }
 
-        self.render_mode(&self.single, presentation);
-        self.render_mode(&self.multiple, presentation);
+        if is_multiple {
+            self.render_mode(&self.multiple, presentation);
+        } else {
+            self.render_mode(&self.single, presentation);
+        }
         self.suppress.set(false);
     }
 
@@ -316,6 +336,7 @@ impl TvsView {
 
     fn render_mode(&self, mode: &TvsMode, presentation: &TvsPresentation) {
         mode.retry.render(presentation.retry_action());
+        mode.pair.render(presentation.pair_action());
         match presentation.status() {
             TvsStatus::Loading { message } => mode.show_status(message, None, false),
             TvsStatus::Empty { title, description } => {
@@ -341,6 +362,59 @@ impl TvsView {
 struct RetryButton {
     button: gtk::Button,
     intent: Rc<RefCell<Option<TvsIntent>>>,
+}
+
+struct PairButton {
+    button: gtk::Button,
+    intent: Rc<RefCell<Option<TvsIntent>>>,
+}
+
+impl PairButton {
+    fn new(on_intent: &IntentHandler) -> Self {
+        let button = gtk::Button::with_label("Pair a TV");
+        button.add_css_class("suggested-action");
+        button.add_css_class("pill");
+        button.set_visible(false);
+        button.set_sensitive(false);
+        let intent = Rc::new(RefCell::new(None));
+        button.connect_clicked({
+            let on_intent = Rc::clone(on_intent);
+            let intent = Rc::clone(&intent);
+            move |_| {
+                let intent = intent.borrow().clone();
+                if let Some(intent) = intent {
+                    on_intent(intent);
+                }
+            }
+        });
+        Self { button, intent }
+    }
+
+    fn render(&self, action: Option<&TvsAction>) {
+        self.intent.replace(
+            action
+                .filter(|action| action.enabled())
+                .map(TvsAction::intent),
+        );
+        self.button.set_visible(action.is_some());
+        self.button
+            .set_sensitive(action.is_some_and(TvsAction::enabled));
+        self.button
+            .set_label(action.map_or("Pair a TV", TvsAction::label));
+        self.button.set_tooltip_text(action.map(TvsAction::label));
+        self.button
+            .update_property(&[gtk::accessible::Property::Label(
+                action.map_or("Pair a TV", TvsAction::label),
+            )]);
+        if action.is_some() && !self.button.has_focus() {
+            let button = self.button.clone();
+            gtk::glib::idle_add_local_once(move || {
+                if button.is_mapped() && button.is_visible() && button.is_sensitive() {
+                    button.grab_focus();
+                }
+            });
+        }
+    }
 }
 
 impl RetryButton {
@@ -471,8 +545,38 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert_eq!(view.single.status.title().as_str(), "No TV configured");
     assert_eq!(
         view.single.status.description().as_deref(),
-        Some("Configure a TV to see its details here.")
+        Some("Pair your TV to control it with LG Buddy.")
     );
+    assert!(view.single.pair.button.is_visible());
+    assert!(view.single.pair.button.is_sensitive());
+    assert_eq!(
+        view.single.pair.button.label().as_deref(),
+        Some("Pair a TV")
+    );
+    pump();
+    assert!(view.single.pair.button.has_focus());
+
+    view.single.pair.button.emit_clicked();
+    assert_eq!(intents.borrow_mut().pop(), Some(TvsIntent::PairTv));
+    let pairing = app
+        .handle_intent(TvsIntent::PairTv)
+        .expect("pairing transition");
+    view.render(pairing.presentation());
+    assert_eq!(
+        view.single.stack.visible_child_name().as_deref(),
+        Some("status")
+    );
+    assert!(!view.single.pair.button.is_visible());
+    let blank = app
+        .handle_intent(TvsIntent::Pairing(lg_buddy::pairing::PairingIntent::Cancel))
+        .expect("blank transition");
+    view.render(blank.presentation());
+    pump();
+    assert_eq!(
+        view.single.stack.visible_child_name().as_deref(),
+        Some("status")
+    );
+    assert!(view.single.pair.button.has_focus());
 
     let one = profile("primary", "Primary TV", "192.0.2.10");
     let (mut app, opening) = TvsApplication::open();
@@ -615,4 +719,5 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(view.split_bin.current_breakpoint().is_some());
     assert!(view.split.is_collapsed());
     window.close();
+    crate::pairing::run_renderer_scenarios(application);
 }

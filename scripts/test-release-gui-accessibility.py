@@ -18,9 +18,8 @@ DEFAULT_TIMEOUT_SECONDS = 10
 MAX_ACCESSIBLES = 256
 
 
-def accessible_tree() -> list[object]:
-    desktop = pyatspi.Registry.getDesktop(0)
-    pending = [desktop]
+def accessible_tree(root: object | None = None) -> list[object]:
+    pending = [root if root is not None else pyatspi.Registry.getDesktop(0)]
     observed: list[object] = []
     while pending and len(observed) < MAX_ACCESSIBLES:
         accessible = pending.pop()
@@ -99,7 +98,7 @@ def parse_args() -> argparse.Namespace:
         help=f"maximum observation time in seconds (default: {DEFAULT_TIMEOUT_SECONDS})",
     )
     parser.add_argument("--select-page", choices=("Overview", "TVs"))
-    parser.add_argument("--expected-tvs-state", choices=("empty", "configured"))
+    parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid"))
     parser.add_argument("--expected-tv-address")
     parser.add_argument("--expected-tv-name", default="Primary TV")
     parser.add_argument("--focus-control", help="focus a control using native Tab navigation")
@@ -117,7 +116,8 @@ def observed_contract(expected_state: str, expected_slider_value: float | None):
     accessibles = accessible_tree()
     if not any(name(item) == WINDOW_TITLE for item in accessibles):
         return None
-    if any(normalized_name(item) in ("Apply", "Apply Volume", "Cancel") for item in accessibles):
+    if any(normalized_name(item) in ("Apply", "Apply Volume", "Cancel")
+           and item.getState().contains(pyatspi.STATE_SHOWING) for item in accessibles):
         raise SystemExit("Overview still exposes a removed action")
     slider = next((item for item in accessibles
         if role(item) == pyatspi.ROLE_SLIDER and name(item) == CONTROL_NAME), None)
@@ -186,10 +186,29 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
         except Exception:
             continue
     names = {normalized_name(item) for item in visible}
-    if any(value in names for value in ("Add TV", "Pair a TV", "Pair a TV…")):
-        raise SystemExit("TVs exposed an action outside the read-only slice")
+    dialogs = [item for item in visible if role(item) == pyatspi.ROLE_DIALOG]
+    if expected_state in ("pairing", "pairing-invalid"):
+        if len(dialogs) != 1 or not {"TV address", "MAC address", "HDMI input", "Cancel", "Pair"} <= names:
+            return None
+        dialog_names = {normalized_name(item) for item in accessible_tree(dialogs[0])}
+        if "Close" in dialog_names:
+            raise SystemExit("Pairing exposed a close button alongside Cancel")
+        if expected_state == "pairing-invalid":
+            if not any(role(item) == pyatspi.ROLE_ALERT and "address" in name(item).lower()
+                       for item in visible):
+                return None
+        elif not any(role(item) == pyatspi.ROLE_TEXT
+                     and item.getState().contains(pyatspi.STATE_FOCUSED) for item in visible):
+            return None
+        return accessibles, None
+    if dialogs:
+        return None
+    if "Add TV" in names:
+        raise SystemExit("TVs exposed an unsupported second-TV action")
     if expected_state == "empty":
-        return (accessibles, None) if "No TV configured" in names else None
+        return (accessibles, None) if {"No TV configured", "Pair a TV"} <= names else None
+    if any(value in names for value in ("Pair a TV", "Pair a TV…")):
+        raise SystemExit("A configured TV exposed the first-TV pairing action")
     if tv_name not in names or (address and address not in names):
         return None
     return accessibles, None
@@ -222,8 +241,14 @@ def main() -> int:
             time.sleep(0.1)
         raise SystemExit(f"could not focus {args.focus_control} through Tab navigation")
     if args.activate_control:
-        for item in accessible_tree():
-            if name(item) == args.activate_control:
+        accessibles = accessible_tree()
+        dialog = next((item for item in accessibles if role(item) == pyatspi.ROLE_DIALOG
+                       and item.getState().contains(pyatspi.STATE_SHOWING)), None)
+        for item in accessible_tree(dialog) if dialog is not None else accessibles:
+            if (name(item) == args.activate_control
+                    and role(item) in (pyatspi.ROLE_PUSH_BUTTON, pyatspi.ROLE_TOGGLE_BUTTON)
+                    and item.getState().contains(pyatspi.STATE_SHOWING)
+                    and item.getState().contains(pyatspi.STATE_SENSITIVE)):
                 if item.queryAction().doAction(0):
                     return 0
         raise SystemExit(f"could not activate {args.activate_control}")
@@ -254,7 +279,7 @@ def main() -> int:
                 print(f"  {role_name(item)}: {name(item)} [{', '.join(flags)}]", file=sys.stderr)
             except Exception:
                 continue
-        expected = f" {args.expected_state} state"
+        expected = f" {args.expected_tvs_state or args.expected_state} state"
         if args.expected_slider_value is not None:
             expected += f" at slider value {args.expected_slider_value:g}"
         raise SystemExit(
@@ -267,7 +292,7 @@ def main() -> int:
         {(role_name(item), name(item)) for item in accessibles if name(item)}
     )
     print("AT-SPI accessibility contract verified:")
-    print(f"  presentation state: {args.expected_state}")
+    print(f"  presentation state: {args.expected_tvs_state or args.expected_state}")
     if slider_value is not None:
         print(f"  slider value: {slider_value:g}")
     for observed_role, accessible_name in observed:

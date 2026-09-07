@@ -8,6 +8,8 @@ pub struct TvsPresentation {
     profiles: Vec<TvProfile>,
     selected_id: Option<TvId>,
     retry_action: Option<TvsAction>,
+    pair_action: Option<TvsAction>,
+    pairing: Option<super::pairing::PairingPresentation>,
 }
 
 /// The state a renderer can show without interpreting application policy.
@@ -37,6 +39,8 @@ impl TvsPresentation {
             profiles: Vec::new(),
             selected_id: None,
             retry_action: None,
+            pair_action: None,
+            pairing: None,
         }
     }
 
@@ -45,11 +49,13 @@ impl TvsPresentation {
             title: "TVs".to_string(),
             status: TvsStatus::Empty {
                 title: "No TV configured".to_string(),
-                description: "Configure a TV to see its details here.".to_string(),
+                description: "Pair your TV to control it with LG Buddy.".to_string(),
             },
             profiles: Vec::new(),
             selected_id: None,
             retry_action: None,
+            pair_action: Some(TvsAction::new("Pair a TV", true, TvsIntent::PairTv)),
+            pairing: None,
         }
     }
 
@@ -60,6 +66,8 @@ impl TvsPresentation {
             profiles,
             selected_id: Some(selected_id),
             retry_action: None,
+            pair_action: None,
+            pairing: None,
         }
     }
 
@@ -70,6 +78,8 @@ impl TvsPresentation {
             profiles: Vec::new(),
             selected_id: None,
             retry_action: Some(TvsAction::new("Retry", true, TvsIntent::Retry)),
+            pair_action: None,
+            pairing: None,
         }
     }
 
@@ -97,6 +107,19 @@ impl TvsPresentation {
 
     pub fn retry_action(&self) -> Option<&TvsAction> {
         self.retry_action.as_ref()
+    }
+
+    pub fn pair_action(&self) -> Option<&TvsAction> {
+        self.pair_action.as_ref()
+    }
+
+    pub fn pairing(&self) -> Option<&super::pairing::PairingPresentation> {
+        self.pairing.as_ref()
+    }
+
+    pub(crate) fn set_pairing(&mut self, pairing: super::pairing::PairingPresentation) {
+        self.pair_action = None;
+        self.pairing = Some(pairing);
     }
 }
 
@@ -143,7 +166,7 @@ mod tests {
         assert_eq!(TvCredentialState::Stored.label(), "Stored locally");
         assert!(TvCredentialState::Stored
             .description()
-            .contains("not verified"));
+            .contains("does not establish current access"));
         assert_eq!(
             TvCredentialState::LocalFile.description(),
             "A legacy credential file is present locally; authentication is not verified."
