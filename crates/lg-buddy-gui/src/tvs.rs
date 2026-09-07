@@ -702,6 +702,7 @@ fn toolbar_page(
 
 #[cfg(test)]
 pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
+    use crate::controller_test_support::pump_until;
     use lg_buddy::config::{HdmiInput, TvPlatform};
     use lg_buddy::tvs::{TvCredentialState, TvsApplication, TvsReadError, TvsReadFailure};
 
@@ -935,14 +936,21 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         window.visible_dialog().as_ref(),
         Some(view.unpair_dialog.upcast_ref::<adw::Dialog>())
     );
-    view.unpair_dialog.close();
-    pump();
+    // libadwaita 1.5 opens the sheet on frame-clock ticks. Closing it before
+    // its contents are mapped has no effect, even though visible_dialog is set.
+    pump_until(|| {
+        view.unpair_dialog
+            .child()
+            .is_some_and(|child| child.is_mapped())
+    });
+    assert!(view.unpair_dialog.close());
+    pump_until(|| !intents.borrow().is_empty());
     assert_eq!(intents.borrow_mut().pop(), Some(TvsIntent::CancelUnpair));
     let cancelled = app
         .handle_intent(TvsIntent::CancelUnpair)
         .expect("cancel transition");
     view.render(&window, cancelled.presentation());
-    pump();
+    pump_until(|| window.visible_dialog().is_none());
     assert!(window.visible_dialog().is_none());
     assert!(
         gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| focus

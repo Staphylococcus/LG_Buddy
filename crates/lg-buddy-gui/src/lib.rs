@@ -804,7 +804,7 @@ pub(crate) mod controller_test_support {
         application
     }
 
-    fn pump_until(mut ready: impl FnMut() -> bool) {
+    pub(crate) fn pump_until(mut ready: impl FnMut() -> bool) {
         let context = glib::MainContext::default();
         let deadline = Instant::now() + Duration::from_secs(3);
         while !ready() {
