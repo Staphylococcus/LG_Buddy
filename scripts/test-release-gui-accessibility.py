@@ -15,7 +15,7 @@ WINDOW_TITLE = "LG Buddy"
 CONTROL_NAME = "OLED Pixel Brightness"
 VOLUME_NAME = "TV Volume"
 DEFAULT_TIMEOUT_SECONDS = 10
-# Expanded Settings rows expose their detail widgets as well as the navigation.
+# Settings uses direct native rows; keep traversal bounded while the UI updates.
 MAX_ACCESSIBLES = 1024
 
 
@@ -101,7 +101,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--select-page", choices=("Overview", "TVs", "Settings"))
     parser.add_argument("--expected-settings-state", choices=("ready", "invalid"))
     parser.add_argument("--expected-settings-timeout")
-    parser.add_argument("--require-settings-details", action="store_true")
     parser.add_argument("--edit-settings-timeout", help="type a timeout draft through native keyboard input")
     parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
@@ -221,6 +220,14 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
     return accessibles, None
 
 
+def text_value(accessible: object) -> str:
+    try:
+        text = accessible.queryText()
+        return str(text.getText(0, text.characterCount))
+    except Exception:
+        return ""
+
+
 def settings_contract(args: argparse.Namespace):
     accessibles = accessible_tree()
     names = {name(item) for item in accessibles}
@@ -228,17 +235,32 @@ def settings_contract(args: argparse.Namespace):
             "Idle timeout", "Restore policy", "TV sleep & wake", "Automatic update checks",
             "Update channel"} <= names:
         return None
-    if args.expected_settings_timeout and args.expected_settings_timeout not in names:
-        return None
-    if args.expected_settings_state == "invalid" and not any(value.startswith("Invalid value") for value in names):
-        return None
-    if args.expected_settings_state == "ready" and any(value.startswith("Invalid value") for value in names):
-        return None
-    if args.require_settings_details:
-        visible = {name(item) for item in accessibles
-                   if item.getState().contains(pyatspi.STATE_SHOWING)}
-        if not {"Source", "Default", "Accepted values"} <= visible:
+    if args.expected_settings_timeout:
+        timeout_entry = next(
+            (
+                item
+                for item in accessibles
+                if name(item) == "Idle timeout" and role(item) == pyatspi.ROLE_TEXT
+            ),
+            None,
+        )
+        if timeout_entry is None or text_value(timeout_entry) != args.expected_settings_timeout:
             return None
+    visible_names = set()
+    for item in accessibles:
+        try:
+            if item.getState().contains(pyatspi.STATE_SHOWING):
+                visible_names.add(name(item))
+        except Exception:
+            continue
+    invalid_values = any(
+        value.startswith("Invalid value") or value.startswith("Invalid configured value")
+        for value in visible_names
+    )
+    if args.expected_settings_state == "invalid" and not invalid_values:
+        return None
+    if args.expected_settings_state == "ready" and invalid_values:
+        return None
     return accessibles, None
 
 
@@ -266,18 +288,9 @@ def main() -> int:
                       and role(item) == pyatspi.ROLE_TEXT
                       and item.getState().contains(pyatspi.STATE_SHOWING)), None)
         if entry is None:
-            for _ in range(40):
-                if any(name(item) == "Idle timeout" and role(item) != pyatspi.ROLE_TEXT
-                       and item.getState().contains(pyatspi.STATE_FOCUSED)
-                       for item in accessible_tree()):
-                    subprocess.run(["xdotool", "key", "--window", args.window_id, "space"], check=True)
-                    break
-                subprocess.run(["xdotool", "key", "--window", args.window_id, "Tab"], check=True)
-                time.sleep(0.05)
-            else:
-                raise SystemExit("could not focus Idle timeout through Tab navigation")
             deadline = time.monotonic() + args.timeout
             while entry is None and time.monotonic() < deadline:
+                subprocess.run(["xdotool", "key", "--window", args.window_id, "Tab"], check=True)
                 entry = next((item for item in accessible_tree() if name(item) == "Idle timeout"
                               and role(item) == pyatspi.ROLE_TEXT
                               and item.getState().contains(pyatspi.STATE_SHOWING)), None)

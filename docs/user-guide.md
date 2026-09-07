@@ -58,13 +58,14 @@ availability; it can load and edit configuration even when no TV is paired.
 Settings reloads when you enter the tab. Invalid saved values remain visible as
 invalid and are not silently replaced with defaults.
 
-Expand a row to reveal its native editor, source, default, and accepted values:
+Each setting shows a description and its current value:
 
 - toggles for idle blanking, TV sleep & wake, and automatic update checks, plus
   bounded choices for the desktop backend, restore policy, and update channel,
-  commit on change;
+  apply on change. Click a choice row to open its available values;
 - the numeric idle timeout commits when you press Enter or leave the field;
-- **Reset** removes the explicit value and applies the default immediately.
+- errors and runtime-application warnings appear only when an operation needs
+  attention, with **Retry apply** offered when runtime application fails.
 
 Each change is validated, saved, and applied automatically, without a separate
 **Save** or **Cancel** button. The row reports progress while this runs. Settings

@@ -651,29 +651,32 @@ cannot overwrite each other's configuration snapshots.
 
 The application builds three groups—Screen, Sleep & Wake, and Updates—from
 seven behavior settings. Descriptions, defaults, accepted values, and
-effective-value sources come from the existing registry and store. Invalid
-values remain invalid rather than silently defaulting. The rows
-declare native editors and commit policy: toggles and bounded choices use
+effective-value sources come from the existing registry and store. GTK shows
+the registry descriptions and typed feedback; application code owns metadata
+validation and feedback decisions. Invalid values remain invalid rather than
+silently defaulting. The rows declare native editors and commit policy:
+toggles and bounded choices use
 `OnChange`, while the numeric idle timeout uses `OnFinalize` (Enter or focus
-loss). **Reset** is an immediate semantic intent; the view has no Save or
-Cancel workflow.
+loss). The view has no detail accordion, reset action, Save button, or Cancel
+workflow.
 
 GTK maps the presentation to a native `AdwPreferencesPage`, preference groups,
-expandable rows, and the declared editors. It renders values, progress,
-feedback, and retry actions; it does not parse configuration, call the settings
-CLI, or implement validation or service policy. A shared typed settings executor
-is used by both CLI and GUI to validate, persist, and apply mutations. A
-validation or persistence failure restores the previous row value. A successful
-save followed by an apply failure keeps the saved value, shows a warning, and
-offers **Retry apply**. Missing or inactive user units are reported precisely;
-the workflow does not attempt privileged repair.
+direct `AdwSwitchRow`, `AdwComboRow`, and `AdwActionRow` editors. It renders
+values through those native controls, plus progress, feedback, and retry
+actions only when needed; it does not parse configuration, call the settings
+CLI, or implement validation or service policy. A shared typed settings
+executor is used by both CLI and GUI to validate, persist, and apply mutations.
+A validation or persistence failure restores the previous row value. A
+successful save followed by an apply failure keeps the saved value, shows a
+warning, and offers **Retry apply**. Missing or inactive user units are
+reported precisely; the workflow does not attempt privileged repair.
 
 Headless tests cover registry/store presentation and the shared mutation
 executor, including validation, persistence, apply failure, and retry. Renderer
-tests cover native editors, commit timing, reset, feedback, and narrow layout.
-The installed AT-SPI smoke verifies the third tab, keyboard access to details
-and editors, externally changed configuration, and preservation of the settings
-file.
+tests cover native editors, commit timing, choice-menu interaction, feedback,
+and narrow layout. The installed AT-SPI smoke verifies the third tab, direct
+keyboard access to editors, numeric draft and Enter validation, externally
+changed configuration, and preservation of the settings file.
 
 ## Evolution Rules
 

@@ -1001,6 +1001,11 @@ pub(crate) mod controller_test_support {
                 return true;
             }
         }
+        if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+            if entry.text() == expected {
+                return true;
+            }
+        }
         let mut child = widget.first_child();
         while let Some(current) = child {
             if widget_contains_text(&current, expected) {
@@ -1279,7 +1284,7 @@ pub(crate) mod controller_test_support {
         retry_button(native.upcast_ref())
             .expect("visible Retry button")
             .emit_clicked();
-        pump_until(|| widget_contains_text(native.upcast_ref(), "600 seconds"));
+        pump_until(|| widget_contains_text(native.upcast_ref(), "600"));
         assert_eq!(
             controller.navigation.borrow().selected(),
             super::ApplicationPage::Settings
@@ -1288,7 +1293,7 @@ pub(crate) mod controller_test_support {
         controller
             .window
             .choose_page(super::ApplicationPage::Settings);
-        pump_until(|| widget_contains_text(native.upcast_ref(), "120 seconds"));
+        pump_until(|| widget_contains_text(native.upcast_ref(), "120"));
         controller.shutdown();
         controller.window.close();
     }
