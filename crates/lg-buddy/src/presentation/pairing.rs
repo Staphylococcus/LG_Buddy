@@ -75,7 +75,7 @@ impl PairingPresentation {
             PairingStage::WaitingForConfirmation => "Use your TV remote to allow LG Buddy’s connection request. You have one minute to respond.",
             PairingStage::Verifying => "Checking that LG Buddy can read the TV’s power, sound, and brightness controls.",
             PairingStage::Saving => "Saving the verified TV and its access token.",
-            PairingStage::Failed => "No TV configuration was saved. Check the details below and try again.",
+            PairingStage::Failed => "Check the details below for how to continue.",
         }
     }
 }

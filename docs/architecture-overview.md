@@ -502,8 +502,11 @@ persistence remain in the core. Pairing is refused as root. The access token
 stays in memory until verification succeeds; the primary profile is published
 last, with credential rollback on a failed save. Accepted cancellation prevents
 publication. Once saving begins, it finishes even if the window closes.
-Success opens the new TV details and refreshes Overview with fresh operation
-identities. This does not install or activate services.
+The toolkit-independent application coordinator opens the new TV details and
+refreshes Overview with fresh operation identities after success. The application
+backend selects the capability checks; the webOS client supplies authentication
+and cancellable reads. GTK forwards unexpected worker termination to the core
+as an internal failure. This does not install or activate services.
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.

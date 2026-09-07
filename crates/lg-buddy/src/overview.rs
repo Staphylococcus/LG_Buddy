@@ -432,7 +432,7 @@ impl OverviewApplication {
 
     /// Reload after the first primary profile has been saved. Preserve the
     /// operation sequence so late results from the empty state stay stale.
-    pub fn profile_created(&mut self) -> Option<OverviewTransition> {
+    pub(crate) fn profile_created(&mut self) -> Option<OverviewTransition> {
         if self.is_closed()
             || matches!(self.brightness, BrightnessState::Applying { .. })
             || matches!(self.audio, AudioState::Applying { .. })

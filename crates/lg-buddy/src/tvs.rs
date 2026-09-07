@@ -277,7 +277,7 @@ impl TvsTransition {
     }
 
     /// The durable profile changed, so other application views can reload it.
-    pub fn profile_created(&self) -> bool {
+    pub(crate) fn profile_created(&self) -> bool {
         self.profile_created
     }
 

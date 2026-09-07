@@ -1,5 +1,6 @@
 mod dev;
 
+pub mod application;
 pub mod audio;
 pub mod auth;
 pub mod backend;

@@ -606,8 +606,10 @@ owns field validation, connecting, confirmation guidance, capability verificatio
 failure recovery, and cancellation. GTK declares no network or persistence
 policy and never shells out to the CLI.
 
-The foreground worker pairs into memory and verifies power, audio, and OLED
-brightness reads before saving. Both pairing and profile persistence refuse
+The foreground application backend pairs into memory, then chooses and sequences
+power, audio, and OLED brightness verification before saving. The webOS client
+provides authentication and cancellable typed reads; it does not decide which
+capabilities the pairing workflow requires. Both pairing and profile persistence refuse
 root execution. The existing `tvs/primary/access-token.json` location is used,
 and the configuration file is published atomically after the token. A failed
 configuration save restores the prior credential state. A process crash between
@@ -619,7 +621,11 @@ progress and results from cancelled attempts. Once publication starts, dialog
 dismissal is disabled; the worker is allowed to finish on application
 window close. Success shows the new TV details and reloads Overview without
 accepting its earlier empty-state
-results. No second-TV flow, discovery, legacy-platform pairing, or service setup
+results. A toolkit-independent application coordinator owns this cross-view
+refresh and coordinates application close with pairing cancellation. GTK only
+executes declared operations and renders updates. An unexpected worker exit is
+reported to the coordinator as an internal failure, not as a TV connection error.
+No second-TV flow, discovery, legacy-platform pairing, or service setup
 is included.
 
 Headless workflow tests cover validation, confirmation, rejection, timeout,

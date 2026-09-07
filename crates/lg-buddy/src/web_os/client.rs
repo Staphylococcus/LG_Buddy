@@ -18,7 +18,6 @@ use tungstenite::{client_tls_with_config, Connector, HandshakeError, Message, We
 const WEBOS_WS_PORT: u16 = 3000;
 const WEBOS_WSS_PORT: u16 = 3001;
 const PAIRING_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const PAIRING_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
 
 type WebOsSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -89,7 +88,6 @@ pub struct WebOsClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebOsPairingEvent {
     WaitingForConfirmation,
-    Verifying,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,9 +95,30 @@ pub enum WebOsPairingError {
     Cancelled,
     Rejected,
     Timeout,
-    VerificationFailed,
     Failed,
 }
+
+/// Failure while a caller performs a cancellable typed read after pairing.
+/// The protocol layer deliberately does not choose which reads constitute
+/// verification; the application owns that policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsPairingReadError {
+    Cancelled,
+    Timeout,
+    Failed,
+}
+
+impl fmt::Display for WebOsPairingReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "webOS pairing read was cancelled"),
+            Self::Timeout => write!(f, "webOS pairing read timed out"),
+            Self::Failed => write!(f, "webOS pairing read failed"),
+        }
+    }
+}
+
+impl Error for WebOsPairingReadError {}
 
 impl fmt::Display for WebOsPairingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -107,7 +126,6 @@ impl fmt::Display for WebOsPairingError {
             Self::Cancelled => write!(f, "webOS pairing was cancelled"),
             Self::Rejected => write!(f, "webOS pairing was rejected"),
             Self::Timeout => write!(f, "webOS pairing timed out"),
-            Self::VerificationFailed => write!(f, "webOS pairing verification failed"),
             Self::Failed => write!(f, "webOS pairing failed"),
         }
     }
@@ -142,15 +160,6 @@ impl WebOsClient {
             .register_for_pairing(pairing_deadline, cancelled, on_event)
             .map_err(pairing_registration_error)?;
 
-        if cancelled() {
-            return Err(WebOsPairingError::Cancelled);
-        }
-        on_event(WebOsPairingEvent::Verifying);
-
-        // Confirmation may reasonably take a minute, while capability reads
-        // should never inherit that long deadline after pairing succeeds.
-        client.response_timeout = response_timeout.min(PAIRING_VERIFICATION_TIMEOUT);
-        client.verify_pairing_capabilities(cancelled)?;
         if cancelled() {
             return Err(WebOsPairingError::Cancelled);
         }
@@ -269,61 +278,83 @@ impl WebOsClient {
         WebOsClientRegistration { client: self }
     }
 
-    fn verify_pairing_capabilities(
+    /// Reads the typed power state for application-owned pairing checks.
+    pub fn power_state_with_cancellation(
         &mut self,
+        response_timeout: Duration,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<(), WebOsPairingError> {
-        self.verify_pairing_capability(
+    ) -> Result<super::power::WebOsPowerState, WebOsPairingReadError> {
+        self.pairing_read(
             super::power::GET_POWER_STATE_URI,
             json!({}),
+            response_timeout,
             cancelled,
-            |response| super::power::parse_power_state_response(response).map(|_| ()),
-        )?;
-        self.verify_pairing_capability(
+            super::power::parse_power_state_response,
+        )
+    }
+
+    /// Reads the typed audio status for application-owned pairing checks.
+    pub fn audio_status_with_cancellation(
+        &mut self,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::audio::WebOsAudioStatus, WebOsPairingReadError> {
+        self.pairing_read(
             super::audio::GET_AUDIO_STATUS_URI,
             json!({}),
+            response_timeout,
             cancelled,
-            |response| super::audio::parse_audio_status_response(response).map(|_| ()),
-        )?;
-        self.verify_pairing_capability(
+            super::audio::parse_audio_status_response,
+        )
+    }
+
+    /// Reads the typed OLED backlight brightness for application-owned
+    /// pairing checks.
+    pub fn backlight_brightness_with_cancellation(
+        &mut self,
+        response_timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<super::picture::WebOsBacklightBrightness, WebOsPairingReadError> {
+        self.pairing_read(
             super::picture::GET_SYSTEM_SETTINGS_URI,
             json!({
                 "category": "picture",
                 "keys": ["backlight"],
             }),
+            response_timeout,
             cancelled,
-            |response| super::picture::parse_backlight_brightness_response(response).map(|_| ()),
-        )?;
-        Ok(())
+            super::picture::parse_backlight_brightness_response,
+        )
     }
 
-    fn verify_pairing_capability<F, E>(
+    fn pairing_read<T, E>(
         &mut self,
         uri: &str,
         payload: Value,
+        response_timeout: Duration,
         cancelled: &dyn Fn() -> bool,
-        parse: F,
-    ) -> Result<(), WebOsPairingError>
-    where
-        F: FnOnce(&Value) -> Result<(), E>,
-        E: fmt::Display,
-    {
+        parse: impl FnOnce(&Value) -> Result<T, E>,
+    ) -> Result<T, WebOsPairingReadError> {
         if cancelled() {
-            return Err(WebOsPairingError::Cancelled);
+            return Err(WebOsPairingReadError::Cancelled);
         }
         let response = self
-            .send_pairing_request(uri, payload, cancelled)
-            .map_err(pairing_verification_transport_error)?;
-        parse(&response).map_err(|_error| WebOsPairingError::VerificationFailed)
+            .send_pairing_request(uri, payload, response_timeout, cancelled)
+            .map_err(pairing_read_transport_error)?;
+        parse(&response).map_err(|_error| WebOsPairingReadError::Failed)
     }
 
     fn send_pairing_request(
         &mut self,
         uri: &str,
         payload: Value,
+        response_timeout: Duration,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Value, PairingTransportError> {
-        set_write_timeout(&mut self.socket, self.response_timeout)
+        if response_timeout.is_zero() {
+            return Err(PairingTransportError::Failed);
+        }
+        set_write_timeout(&mut self.socket, response_timeout)
             .map_err(|_source| PairingTransportError::Failed)?;
         let request_id = self
             .next_request_id()
@@ -337,7 +368,7 @@ impl WebOsClient {
         self.send_message(request)
             .map_err(|_source| PairingTransportError::Failed)?;
         let deadline = Instant::now()
-            .checked_add(self.response_timeout)
+            .checked_add(response_timeout)
             .ok_or(PairingTransportError::Failed)?;
         let response = self
             .receive_correlated_until(&request_id, deadline, cancelled)
@@ -553,11 +584,11 @@ fn pairing_transport_error_from_client(source: WebOsClientError) -> PairingTrans
     }
 }
 
-fn pairing_verification_transport_error(error: PairingTransportError) -> WebOsPairingError {
+fn pairing_read_transport_error(error: PairingTransportError) -> WebOsPairingReadError {
     match error {
-        PairingTransportError::Cancelled => WebOsPairingError::Cancelled,
-        PairingTransportError::Timeout => WebOsPairingError::Timeout,
-        PairingTransportError::Failed => WebOsPairingError::VerificationFailed,
+        PairingTransportError::Cancelled => WebOsPairingReadError::Cancelled,
+        PairingTransportError::Timeout => WebOsPairingReadError::Timeout,
+        PairingTransportError::Failed => WebOsPairingReadError::Failed,
     }
 }
 
@@ -990,6 +1021,7 @@ mod tests {
     use super::{
         WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
         WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
+        WebOsPairingReadError,
     };
     use crate::auth::SystemUser;
     use crate::platform_access_token::{
@@ -999,7 +1031,7 @@ mod tests {
     use crate::web_os::test_support::{
         WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
     };
-    use crate::web_os::{WebOsPowerStateError, WebOsRegistrationError};
+    use crate::web_os::{WebOsAudioVolume, WebOsPowerStateError, WebOsRegistrationError};
     use serde_json::json;
     use std::fs;
     use std::net::TcpListener;
@@ -1066,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_in_memory_accepts_and_verifies_without_persisting_token() {
+    fn pair_in_memory_accepts_without_choosing_verification_checks() {
         let server = WebOsTestServer::for_scenario(
             WebOsTestVersion::WebOs24Version92261,
             WebOsTestScenario::StatefulTv,
@@ -1079,16 +1111,10 @@ mod tests {
             &|| false,
             &mut |event| events.push(event),
         )
-        .expect("pair and verify native webOS client");
+        .expect("pair native webOS client");
 
         assert_eq!(access_token.as_secret_str(), "webos-test-access-token");
-        assert_eq!(
-            events,
-            vec![
-                WebOsPairingEvent::WaitingForConfirmation,
-                WebOsPairingEvent::Verifying,
-            ]
-        );
+        assert_eq!(events, vec![WebOsPairingEvent::WaitingForConfirmation,]);
         assert_eq!(
             server.snapshot().registration_tokens,
             vec![None],
@@ -1096,11 +1122,45 @@ mod tests {
         );
         assert_eq!(
             client
-                .power_state()
+                .power_state_with_cancellation(RESPONSE_TIMEOUT, &|| false)
                 .expect("returned client remains authenticated"),
             super::super::WebOsPowerState::Active
         );
+        assert_eq!(
+            client
+                .audio_status_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("typed audio read")
+                .volume(),
+            WebOsAudioVolume::Known(20)
+        );
+        assert_eq!(
+            client
+                .backlight_brightness_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("typed backlight read")
+                .as_percent(),
+            100
+        );
         drop(client);
+        server.finish();
+    }
+
+    #[test]
+    fn pair_in_memory_does_not_verify_capabilities_before_returning() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let result = WebOsClient::pair_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &|| false,
+            &mut |_| {},
+        );
+
+        // This scenario rejects the first power read. A successful pair proves
+        // that capability verification starts only when the caller asks.
+        assert!(result.is_ok());
         server.finish();
     }
 
@@ -1223,27 +1283,23 @@ mod tests {
     }
 
     #[test]
-    fn pair_in_memory_reports_capability_verification_failure() {
+    fn cancellable_typed_pairing_read_reports_protocol_failure() {
         let server = WebOsTestServer::for_scenario(
             WebOsTestVersion::WebOs24Version92261,
             WebOsTestScenario::PowerStatePermissionDenied,
         );
-        let mut events = Vec::new();
-        let error = pairing_error(WebOsClient::pair_in_memory(
+        let (mut client, _) = WebOsClient::pair_in_memory(
             server.endpoint(),
             CONNECT_TIMEOUT,
             RESPONSE_TIMEOUT,
             &|| false,
-            &mut |event| events.push(event),
-        ));
+            &mut |_| {},
+        )
+        .expect("pairing should finish before capability checks");
 
-        assert_eq!(error, WebOsPairingError::VerificationFailed);
         assert_eq!(
-            events,
-            vec![
-                WebOsPairingEvent::WaitingForConfirmation,
-                WebOsPairingEvent::Verifying,
-            ]
+            client.power_state_with_cancellation(RESPONSE_TIMEOUT, &|| false),
+            Err(WebOsPairingReadError::Failed)
         );
         server.finish();
     }

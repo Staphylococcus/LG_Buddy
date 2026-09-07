@@ -12,26 +12,22 @@ use std::time::Duration;
 
 use gtk::glib;
 use gtk::prelude::*;
-use lg_buddy::audio::{AudioWriteError, AudioWriteFailure, AudioWriteOutcome};
+use lg_buddy::application::{Application, ApplicationTransition, OverviewCompletion};
+use lg_buddy::audio::{AudioWriteError, AudioWriteFailure};
 use lg_buddy::brightness::{
     BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
-    BrightnessWriteOutcome,
 };
 use lg_buddy::navigation::{ApplicationPage, Navigation};
 use lg_buddy::overview::{
-    EnvironmentOverviewBackend, OverviewApplication, OverviewAudioReadOperation,
-    OverviewAudioWriteOperation, OverviewBackend, OverviewBrightnessReadOperation,
-    OverviewBrightnessWriteOperation, OverviewFrontendUpdate, OverviewIntent, OverviewOperation,
-    OverviewSummaryError, OverviewSummaryOperation, OverviewTransition, OverviewTvIdentity,
+    EnvironmentOverviewBackend, OverviewBackend, OverviewFrontendUpdate, OverviewIntent,
+    OverviewOperation, OverviewSummaryError, OverviewTransition,
 };
 use lg_buddy::pairing::{
-    EnvironmentPairingBackend, PairingBackend, PairingError, PairingFailure, PairingOperation,
-    PairingStage,
+    EnvironmentPairingBackend, PairingBackend, PairingError, PairingOperation, PairingStage,
 };
-use lg_buddy::tv::{AudioStatus, OledBrightness};
 use lg_buddy::tvs::{
-    EnvironmentTvsBackend, TvsApplication, TvsBackend, TvsIntent, TvsModelReadOperation,
-    TvsReadError, TvsReadOperation, TvsTransition,
+    EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
+    TvsReadOperation, TvsTransition,
 };
 
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
@@ -144,34 +140,10 @@ fn install_application_actions(
     application.set_accels_for_action("app.escape", &["Escape"]);
 }
 
-enum WorkerResult {
-    Summary(
-        OverviewSummaryOperation,
-        Result<OverviewTvIdentity, OverviewSummaryError>,
-    ),
-    BrightnessRead(
-        OverviewBrightnessReadOperation,
-        Result<OledBrightness, BrightnessReadError>,
-    ),
-    AudioRead(
-        OverviewAudioReadOperation,
-        Result<AudioStatus, lg_buddy::overview::AudioReadError>,
-    ),
-    BrightnessWrite(
-        OverviewBrightnessWriteOperation,
-        Result<BrightnessWriteOutcome, BrightnessWriteError>,
-    ),
-    AudioWrite(
-        OverviewAudioWriteOperation,
-        Result<AudioWriteOutcome, AudioWriteError>,
-    ),
-}
-
 struct ApplicationController {
-    application: RefCell<OverviewApplication>,
+    application: RefCell<Application>,
     gtk_application: adw::Application,
     window: window::ApplicationWindow,
-    tvs: RefCell<TvsApplication>,
     tvs_backend: Arc<dyn TvsBackend>,
     pairing_backend: Arc<dyn PairingBackend>,
     navigation: RefCell<Navigation>,
@@ -184,7 +156,7 @@ impl ApplicationController {
         gtk_application: &adw::Application,
         backend: Arc<dyn OverviewBackend>,
         tvs_backend: Arc<dyn TvsBackend>,
-    ) -> (Rc<Self>, OverviewTransition, TvsTransition) {
+    ) -> (Rc<Self>, ApplicationTransition) {
         Self::with_pairing_backend(
             gtk_application,
             backend,
@@ -198,9 +170,8 @@ impl ApplicationController {
         backend: Arc<dyn OverviewBackend>,
         tvs_backend: Arc<dyn TvsBackend>,
         pairing_backend: Arc<dyn PairingBackend>,
-    ) -> (Rc<Self>, OverviewTransition, TvsTransition) {
-        let (application, opening) = OverviewApplication::open();
-        let (tvs, tvs_opening) = TvsApplication::open();
+    ) -> (Rc<Self>, ApplicationTransition) {
+        let (application, opening) = Application::open();
         let controller = Rc::new_cyclic(|controller| {
             let on_intent: overview::IntentHandler = Rc::new({
                 let controller = controller.clone();
@@ -227,7 +198,6 @@ impl ApplicationController {
                 }
             });
             Self {
-                tvs: RefCell::new(tvs),
                 tvs_backend,
                 pairing_backend,
                 navigation: RefCell::new(Navigation::default()),
@@ -243,7 +213,7 @@ impl ApplicationController {
                 closed: Cell::new(false),
             }
         });
-        (controller, opening, tvs_opening)
+        (controller, opening)
     }
 
     fn present(&self) {
@@ -253,13 +223,25 @@ impl ApplicationController {
     }
 
     fn handle_intent(controller: &Rc<Self>, intent: OverviewIntent) {
-        let transition = controller.application.borrow_mut().handle_intent(intent);
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_overview_intent(intent);
         if let Some(transition) = transition {
             Self::apply_transition(controller, transition);
         }
     }
 
-    fn apply_transition(controller: &Rc<Self>, transition: OverviewTransition) {
+    fn apply_transition(controller: &Rc<Self>, transition: ApplicationTransition) {
+        if let Some(tvs) = transition.tvs() {
+            Self::render_tvs_transition(controller, tvs);
+        }
+        if let Some(overview) = transition.overview() {
+            Self::render_overview_transition(controller, overview);
+        }
+    }
+
+    fn render_overview_transition(controller: &Rc<Self>, transition: &OverviewTransition) {
         if let Some(diagnostic) = transition.diagnostic() {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
@@ -269,7 +251,6 @@ impl ApplicationController {
             }
             OverviewFrontendUpdate::Close => {
                 controller.closed.set(true);
-                controller.tvs.borrow_mut().shutdown();
                 controller.window.close();
             }
         }
@@ -286,13 +267,16 @@ impl ApplicationController {
     }
 
     fn handle_tvs_intent(controller: &Rc<Self>, intent: TvsIntent) {
-        let transition = controller.tvs.borrow_mut().handle_intent(intent);
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_tvs_intent(intent);
         if let Some(transition) = transition {
-            Self::apply_tvs_transition(controller, transition);
+            Self::apply_transition(controller, transition);
         }
     }
 
-    fn apply_tvs_transition(controller: &Rc<Self>, transition: TvsTransition) {
+    fn render_tvs_transition(controller: &Rc<Self>, transition: &TvsTransition) {
         if let Some(diagnostic) = transition.diagnostic() {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
@@ -309,18 +293,13 @@ impl ApplicationController {
         if let Some(operation) = transition.pairing_operation() {
             Self::start_pairing(controller, operation.clone());
         }
-        if transition.profile_created() {
-            let overview = controller.application.borrow_mut().profile_created();
-            if let Some(overview) = overview {
-                Self::apply_transition(controller, overview);
-            }
-        }
     }
 
     fn start_pairing(controller: &Rc<Self>, operation: PairingOperation) {
         enum Update {
             Progress(PairingStage),
             Done(Result<lg_buddy::tvs::TvProfile, PairingError>),
+            Stopped,
         }
         let backend = Arc::clone(&controller.pairing_backend);
         let worker_operation = operation.clone();
@@ -338,24 +317,26 @@ impl ApplicationController {
             let update = match receiver.try_recv() {
                 Ok(update) => update,
                 Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Update::Done(Err(PairingError::new(PairingFailure::Connection)))
-                }
+                Err(mpsc::TryRecvError::Disconnected) => Update::Stopped,
             };
-            let done = matches!(update, Update::Done(_));
+            let done = matches!(update, Update::Done(_) | Update::Stopped);
             if let Some(controller) = controller.upgrade() {
                 let transition = match update {
                     Update::Progress(stage) => controller
-                        .tvs
+                        .application
                         .borrow_mut()
                         .pairing_progress(&operation, stage),
                     Update::Done(result) => controller
-                        .tvs
+                        .application
                         .borrow_mut()
                         .complete_pairing(&operation, result),
+                    Update::Stopped => controller
+                        .application
+                        .borrow_mut()
+                        .pairing_worker_stopped(&operation),
                 };
                 if let Some(transition) = transition {
-                    Self::apply_tvs_transition(&controller, transition);
+                    Self::apply_transition(&controller, transition);
                 }
             }
             if done {
@@ -383,11 +364,11 @@ impl ApplicationController {
             };
             if let Some(controller) = controller.upgrade() {
                 let transition = controller
-                    .tvs
+                    .application
                     .borrow_mut()
-                    .complete_model_read(operation.clone(), result);
+                    .complete_tvs_model_read(operation.clone(), result);
                 if let Some(transition) = transition {
-                    Self::apply_tvs_transition(&controller, transition);
+                    Self::apply_transition(&controller, transition);
                 }
             }
             glib::ControlFlow::Break
@@ -410,9 +391,12 @@ impl ApplicationController {
                 )),
             };
             if let Some(controller) = controller.upgrade() {
-                let transition = controller.tvs.borrow_mut().complete_read(operation, result);
+                let transition = controller
+                    .application
+                    .borrow_mut()
+                    .complete_tvs_read(operation, result);
                 if let Some(transition) = transition {
-                    Self::apply_tvs_transition(&controller, transition);
+                    Self::apply_transition(&controller, transition);
                 }
             }
             glib::ControlFlow::Break
@@ -432,21 +416,24 @@ impl ApplicationController {
         thread::spawn(move || {
             let result = match operation {
                 OverviewOperation::ReadSummary(operation) => {
-                    WorkerResult::Summary(operation, backend.read_summary())
+                    OverviewCompletion::Summary(operation, backend.read_summary())
                 }
                 OverviewOperation::ReadBrightness(operation) => {
-                    WorkerResult::BrightnessRead(operation, backend.read_brightness())
+                    OverviewCompletion::BrightnessRead(operation, backend.read_brightness())
                 }
                 OverviewOperation::ReadAudio(operation) => {
-                    WorkerResult::AudioRead(operation, backend.read_audio())
+                    OverviewCompletion::AudioRead(operation, backend.read_audio())
                 }
-                OverviewOperation::WriteBrightness(operation) => WorkerResult::BrightnessWrite(
+                OverviewOperation::WriteBrightness(operation) => {
+                    OverviewCompletion::BrightnessWrite(
+                        operation,
+                        backend.write_brightness(operation.brightness()),
+                    )
+                }
+                OverviewOperation::WriteAudio(operation) => OverviewCompletion::AudioWrite(
                     operation,
-                    backend.write_brightness(operation.brightness()),
+                    backend.write_audio(operation.operation()),
                 ),
-                OverviewOperation::WriteAudio(operation) => {
-                    WorkerResult::AudioWrite(operation, backend.write_audio(operation.operation()))
-                }
             };
             let _ = sender.send(result);
         });
@@ -473,38 +460,38 @@ impl ApplicationController {
         });
     }
 
-    fn disconnected_result(operation: OverviewOperation) -> WorkerResult {
+    fn disconnected_result(operation: OverviewOperation) -> OverviewCompletion {
         let message = "the Overview operation stopped before returning a result";
         match operation {
-            OverviewOperation::ReadSummary(operation) => WorkerResult::Summary(
+            OverviewOperation::ReadSummary(operation) => OverviewCompletion::Summary(
                 operation,
                 Err(OverviewSummaryError::new(
                     lg_buddy::overview::OverviewSummaryFailure::Internal,
                     message,
                 )),
             ),
-            OverviewOperation::ReadBrightness(operation) => WorkerResult::BrightnessRead(
+            OverviewOperation::ReadBrightness(operation) => OverviewCompletion::BrightnessRead(
                 operation,
                 Err(BrightnessReadError::new(
                     BrightnessReadFailure::Internal,
                     message,
                 )),
             ),
-            OverviewOperation::ReadAudio(operation) => WorkerResult::AudioRead(
+            OverviewOperation::ReadAudio(operation) => OverviewCompletion::AudioRead(
                 operation,
                 Err(lg_buddy::overview::AudioReadError::new(
                     lg_buddy::overview::AudioReadFailure::Internal,
                     message,
                 )),
             ),
-            OverviewOperation::WriteBrightness(operation) => WorkerResult::BrightnessWrite(
+            OverviewOperation::WriteBrightness(operation) => OverviewCompletion::BrightnessWrite(
                 operation,
                 Err(BrightnessWriteError::new(
                     BrightnessWriteFailure::Internal,
                     message,
                 )),
             ),
-            OverviewOperation::WriteAudio(operation) => WorkerResult::AudioWrite(
+            OverviewOperation::WriteAudio(operation) => OverviewCompletion::AudioWrite(
                 operation,
                 Err(AudioWriteError::new(
                     AudioWriteFailure::Internal,
@@ -515,29 +502,11 @@ impl ApplicationController {
         }
     }
 
-    fn complete(controller: &Rc<Self>, result: WorkerResult) {
-        let transition = match result {
-            WorkerResult::Summary(operation, result) => controller
-                .application
-                .borrow_mut()
-                .complete_summary(operation, result),
-            WorkerResult::BrightnessRead(operation, result) => controller
-                .application
-                .borrow_mut()
-                .complete_brightness_read(operation, result),
-            WorkerResult::AudioRead(operation, result) => controller
-                .application
-                .borrow_mut()
-                .complete_audio_read(operation, result),
-            WorkerResult::BrightnessWrite(operation, result) => controller
-                .application
-                .borrow_mut()
-                .complete_brightness_write(operation, result),
-            WorkerResult::AudioWrite(operation, result) => controller
-                .application
-                .borrow_mut()
-                .complete_audio_write(operation, result),
-        };
+    fn complete(controller: &Rc<Self>, result: OverviewCompletion) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .complete_overview(result);
         if let Some(transition) = transition {
             Self::apply_transition(controller, transition);
         }
@@ -545,7 +514,6 @@ impl ApplicationController {
 
     fn shutdown(&self) {
         self.application.borrow_mut().shutdown();
-        self.tvs.borrow_mut().shutdown();
     }
 }
 
@@ -564,14 +532,13 @@ fn connect_application(
                 controller.present();
                 return;
             }
-            let (overview, opening, tvs_opening) = ApplicationController::new(
+            let (overview, opening) = ApplicationController::new(
                 application,
                 Arc::clone(&backend),
                 Arc::clone(&tvs_backend),
             );
             controller.replace(Some(Rc::clone(&overview)));
             ApplicationController::apply_transition(&overview, opening);
-            ApplicationController::apply_tvs_transition(&overview, tvs_opening);
             overview.present();
         }
     });
@@ -876,7 +843,7 @@ pub(crate) mod controller_test_support {
         let application = test_application("Blocking");
         let (profiles_tx, profiles_rx) = mpsc::channel();
         let (model_tx, model_rx) = mpsc::channel();
-        let (controller, opening, tvs_opening) = ApplicationController::new(
+        let (controller, opening) = ApplicationController::new(
             &application,
             Arc::new(backend),
             Arc::new(BlockingTvsBackend {
@@ -885,7 +852,6 @@ pub(crate) mod controller_test_support {
             }),
         );
         ApplicationController::apply_transition(&controller, opening.clone());
-        ApplicationController::apply_tvs_transition(&controller, tvs_opening);
         let native_window = controller.window.window();
         controller.present();
         controller.present();
@@ -1004,11 +970,12 @@ pub(crate) mod controller_test_support {
         heartbeat_source.remove();
 
         let panic_application = test_application("Panic");
-        let (panic_controller, panic_opening, _) = ApplicationController::new(
+        let (panic_controller, panic_opening) = ApplicationController::new(
             &panic_application,
             Arc::new(PanicBackend),
             Arc::new(EmptyTvsBackend),
         );
+        let panic_opening = panic_opening.overview().unwrap();
         let initial = match panic_opening.update() {
             super::OverviewFrontendUpdate::Present(presentation) => presentation.clone(),
             super::OverviewFrontendUpdate::Close => panic!("opening must present"),
@@ -1037,6 +1004,7 @@ pub(crate) mod controller_test_support {
         struct PairingMock {
             release: Mutex<mpsc::Receiver<()>>,
             reject: bool,
+            panic: bool,
         }
         impl PairingBackend for PairingMock {
             fn pair(
@@ -1050,6 +1018,7 @@ pub(crate) mod controller_test_support {
                 if operation.is_cancelled() {
                     return Err(PairingError::new(PairingFailure::Cancelled));
                 }
+                assert!(!self.panic, "injected pairing worker failure");
                 if self.reject {
                     return Err(PairingError::new(PairingFailure::Rejected));
                 }
@@ -1078,24 +1047,26 @@ pub(crate) mod controller_test_support {
                 Ok("Test OLED".into())
             }
         }
-        for (cancel, reject, name) in [
-            (false, false, "PairSuccess"),
-            (true, false, "PairCancel"),
-            (false, true, "PairRejected"),
+        for (cancel, reject, panic, name) in [
+            (false, false, false, "PairSuccess"),
+            (true, false, false, "PairCancel"),
+            (false, true, false, "PairRejected"),
+            (false, false, true, "PairWorkerStopped"),
         ] {
             let application = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             let (release, receiver) = mpsc::channel();
-            let (controller, _, opening) = ApplicationController::with_pairing_backend(
+            let (controller, opening) = ApplicationController::with_pairing_backend(
                 &application,
                 Arc::new(backend),
                 Arc::new(TvsMock),
                 Arc::new(PairingMock {
                     release: Mutex::new(receiver),
                     reject,
+                    panic,
                 }),
             );
-            ApplicationController::apply_tvs_transition(&controller, opening);
+            ApplicationController::render_tvs_transition(&controller, opening.tvs().unwrap());
             controller.present();
             controller.navigate(lg_buddy::navigation::ApplicationPage::Tvs);
             pump_until(|| {
@@ -1124,8 +1095,8 @@ pub(crate) mod controller_test_support {
                 assert!(!controller.closed.get());
                 release.send(()).unwrap();
                 pump_for(Duration::from_millis(60));
-                assert!(!controller.tvs.borrow().is_pairing());
-            } else if reject {
+                assert!(!controller.application.borrow().is_pairing());
+            } else if reject || panic {
                 release.send(()).unwrap();
                 pump_until(|| {
                     widget_contains_text(
@@ -1133,7 +1104,17 @@ pub(crate) mod controller_test_support {
                         "Could Not Pair TV",
                     )
                 });
-                assert!(controller.tvs.borrow().is_pairing());
+                assert!(controller.application.borrow().is_pairing());
+                if panic {
+                    assert!(widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Pairing stopped unexpectedly",
+                    ));
+                    assert!(!widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Check the IP address",
+                    ));
+                }
             } else {
                 release.send(()).unwrap();
                 controls
@@ -1158,7 +1139,7 @@ pub(crate) mod controller_test_support {
                 pump_until(|| {
                     widget_contains_text(controller.window.window().upcast_ref(), "Test OLED")
                 });
-                assert!(!controller.tvs.borrow().is_pairing());
+                assert!(!controller.application.borrow().is_pairing());
                 assert_eq!(
                     controller.navigation.borrow().selected(),
                     lg_buddy::navigation::ApplicationPage::Tvs
@@ -1169,7 +1150,7 @@ pub(crate) mod controller_test_support {
                     controller.window.window().upcast_ref(),
                     "TV paired successfully",
                 ),
-                !cancel && !reject,
+                !cancel && !reject && !panic,
                 "only successful pairing should show the confirmation toast",
             );
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);

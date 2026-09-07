@@ -13,7 +13,9 @@ use crate::pairing_store::PairingStore;
 use crate::presentation::{brightness::UserFacingError, pairing::PairingPresentation};
 use crate::settings::ConfigPathResolver;
 use crate::tvs::{TvCredentialState, TvId, TvProfile};
-use crate::web_os::{WebOsClient, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent};
+use crate::web_os::{
+    WebOsClient, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent, WebOsPairingReadError,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingIntent {
@@ -119,6 +121,7 @@ pub enum PairingFailure {
     Verification,
     Connection,
     Persistence,
+    Internal,
 }
 
 /// Contains only application-owned guidance, never a server frame or token.
@@ -142,6 +145,7 @@ impl PairingError {
             PairingFailure::Verification => ("TV access could not be verified", "Check that this TV supports LG Buddy’s power, sound, and OLED brightness controls, then try again."),
             PairingFailure::Connection => ("Could not connect to the TV", "Check the IP address, turn the TV on, and make sure it is on the same network."),
             PairingFailure::Persistence => ("Could not save the TV", "Run LG Buddy as your normal user. Check that its configuration folder is writable and that another setup has not already configured a TV."),
+            PairingFailure::Internal => ("Pairing stopped unexpectedly", "Restart LG Buddy to check whether the TV was saved before trying again."),
         };
         UserFacingError::new(title, detail)
     }
@@ -166,33 +170,68 @@ impl PairingBackend for EnvironmentPairingBackend {
     ) -> Result<TvProfile, PairingError> {
         let path = ConfigPathResolver::resolve_from_env()
             .map_err(|_| PairingError::new(PairingFailure::Persistence))?;
-        pair_and_save(operation, &path, progress, |progress| {
-            WebOsClient::pair_in_memory(
-                WebOsEndpoint::wss(operation.request.address),
-                Duration::from_secs(3),
-                Duration::from_secs(60),
-                &|| operation.is_cancelled(),
-                &mut |event| {
-                    progress(match event {
-                        WebOsPairingEvent::WaitingForConfirmation => {
-                            PairingStage::WaitingForConfirmation
-                        }
-                        WebOsPairingEvent::Verifying => PairingStage::Verifying,
-                    })
-                },
-            )
-            .map_err(|error| {
-                PairingError::new(match error {
-                    WebOsPairingError::Cancelled => PairingFailure::Cancelled,
-                    WebOsPairingError::Rejected => PairingFailure::Rejected,
-                    WebOsPairingError::Timeout => PairingFailure::Timeout,
-                    WebOsPairingError::VerificationFailed => PairingFailure::Verification,
-                    WebOsPairingError::Failed => PairingFailure::Connection,
-                })
-            })
-            .map(|(_client, token)| token)
-        })
+        pair_and_save_webos(
+            operation,
+            &path,
+            WebOsEndpoint::wss(operation.request.address),
+            progress,
+        )
     }
+}
+
+fn pair_and_save_webos(
+    operation: &PairingOperation,
+    path: &std::path::Path,
+    endpoint: WebOsEndpoint,
+    progress: &mut dyn FnMut(PairingStage),
+) -> Result<TvProfile, PairingError> {
+    pair_and_save(operation, path, progress, |progress| {
+        let (mut client, token) = WebOsClient::pair_in_memory(
+            endpoint,
+            Duration::from_secs(3),
+            Duration::from_secs(60),
+            &|| operation.is_cancelled(),
+            &mut |event| match event {
+                WebOsPairingEvent::WaitingForConfirmation => {
+                    progress(PairingStage::WaitingForConfirmation)
+                }
+            },
+        )
+        .map_err(|error| {
+            PairingError::new(match error {
+                WebOsPairingError::Cancelled => PairingFailure::Cancelled,
+                WebOsPairingError::Rejected => PairingFailure::Rejected,
+                WebOsPairingError::Timeout => PairingFailure::Timeout,
+                WebOsPairingError::Failed => PairingFailure::Connection,
+            })
+        })?;
+
+        progress(PairingStage::Verifying);
+        const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
+        client
+            .power_state_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
+            .map_err(map_pairing_read_error)?;
+        client
+            .audio_status_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
+            .map_err(map_pairing_read_error)?;
+        client
+            .backlight_brightness_with_cancellation(VERIFICATION_TIMEOUT, &|| {
+                operation.is_cancelled()
+            })
+            .map_err(map_pairing_read_error)?;
+        if operation.is_cancelled() {
+            return Err(PairingError::new(PairingFailure::Cancelled));
+        }
+        Ok(token)
+    })
+}
+
+fn map_pairing_read_error(error: WebOsPairingReadError) -> PairingError {
+    PairingError::new(match error {
+        WebOsPairingReadError::Cancelled => PairingFailure::Cancelled,
+        WebOsPairingReadError::Timeout => PairingFailure::Timeout,
+        WebOsPairingReadError::Failed => PairingFailure::Verification,
+    })
 }
 
 fn pair_and_save(
@@ -375,6 +414,167 @@ mod tests {
     use super::*;
     use crate::presentation::tvs::TvsStatus;
     use crate::tvs::{TvsApplication, TvsIntent, TvsTransition};
+    use crate::web_os::test_support::{WebOsTestScenario, WebOsTestServer, WebOsTestVersion};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn pairing_test_path(label: &str) -> std::path::PathBuf {
+        let sequence = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lg-buddy-pairing-verification-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("config.env")
+    }
+
+    fn skip_pairing_tests_as_root() -> bool {
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    #[test]
+    fn environment_pairing_verifies_capabilities_before_saving() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        use crate::auth::resolve_config_owner;
+        use crate::platform_access_token::PlatformAccessTokenStore;
+        use crate::settings::SettingsStore;
+        use std::fs;
+
+        let path = pairing_test_path("success");
+        let original = b"# Preserve unrelated settings\nscreen_idle_timeout=42\n";
+        fs::write(&path, original).unwrap();
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let mut stages = Vec::new();
+
+        let profile = pair_and_save_webos(&operation, &path, server.endpoint(), &mut |stage| {
+            stages.push(stage);
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert!(!path
+                .parent()
+                .unwrap()
+                .join("tvs/primary/access-token.json")
+                .exists());
+        })
+        .expect("pairing should verify before saving");
+
+        assert_eq!(profile.address(), operation.request().address());
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying,
+                PairingStage::Saving,
+            ]
+        );
+        assert_eq!(
+            SettingsStore::load(&path)
+                .unwrap()
+                .raw_storage_value("tvs_primary_ip"),
+            Some("192.0.2.10")
+        );
+        let token_store = PlatformAccessTokenStore::for_primary_profile(
+            &path,
+            resolve_config_owner(&path).unwrap(),
+        )
+        .unwrap();
+        assert!(token_store.load().unwrap().is_some());
+        server.finish();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn environment_pairing_verification_failure_does_not_save() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        use std::fs;
+
+        let path = pairing_test_path("verification-failure");
+        let original = b"# Preserve unrelated settings\nscreen_idle_timeout=42\n";
+        fs::write(&path, original).unwrap();
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let mut stages = Vec::new();
+
+        let error = pair_and_save_webos(&operation, &path, server.endpoint(), &mut |stage| {
+            stages.push(stage)
+        })
+        .expect_err("capability denial must prevent saving");
+
+        assert_eq!(error.failure(), PairingFailure::Verification);
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying,
+            ]
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!path
+            .parent()
+            .unwrap()
+            .join("tvs/primary/access-token.json")
+            .exists());
+        server.finish();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cancellation_at_verifying_skips_capability_requests_and_save() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        use std::fs;
+
+        let path = pairing_test_path("cancel-verifying");
+        let original = b"# Preserve unrelated settings\nscreen_idle_timeout=42\n";
+        fs::write(&path, original).unwrap();
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let operation_for_progress = operation.clone();
+        let mut stages = Vec::new();
+
+        let error = pair_and_save_webos(&operation, &path, server.endpoint(), &mut |stage| {
+            stages.push(stage);
+            if stage == PairingStage::Verifying {
+                assert!(operation_for_progress.cancel());
+            }
+        })
+        .expect_err("cancellation must stop before the first capability read");
+
+        assert_eq!(error.failure(), PairingFailure::Cancelled);
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying,
+            ]
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!path
+            .parent()
+            .unwrap()
+            .join("tvs/primary/access-token.json")
+            .exists());
+        server.finish();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 
     #[test]
     fn workflow_publishes_only_verified_uncancelled_profiles() {

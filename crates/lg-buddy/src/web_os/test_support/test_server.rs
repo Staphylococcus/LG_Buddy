@@ -60,7 +60,7 @@ static TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WRITE_SETTINGS_SIGNED_ENVELOPE: OnceLock<Value> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestScenario {
+pub(crate) enum WebOsTestScenario {
     StatefulTv,
     ProtocolEcho,
     UnrelatedFrameBeforeResponse,
@@ -83,7 +83,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestVersion {
+pub(crate) enum WebOsTestVersion {
     // Local hardware baseline: webOS24 / 9.2.2-61.
     WebOs24Version92261,
     // External hardware observation: webOS26 firmware 43.21.60.
@@ -97,7 +97,7 @@ enum WebOsTestTransport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestInput {
+pub(crate) enum WebOsTestInput {
     Hdmi2,
     Hdmi3,
 }
@@ -570,7 +570,7 @@ struct WebOsTestRuntime {
     restore_session_interruption_injected: bool,
 }
 
-pub(in crate::web_os) struct WebOsTestServer {
+pub(crate) struct WebOsTestServer {
     endpoint: WebOsEndpoint,
     address: std::net::SocketAddr,
     runtime: Arc<Mutex<WebOsTestRuntime>>,
@@ -600,10 +600,7 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn for_scenario(
-        version: WebOsTestVersion,
-        scenario: WebOsTestScenario,
-    ) -> Self {
+    pub(crate) fn for_scenario(version: WebOsTestVersion, scenario: WebOsTestScenario) -> Self {
         Self::spawn(
             version,
             WebOsPowerState::Active,
@@ -742,7 +739,7 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn endpoint(&self) -> WebOsEndpoint {
+    pub(crate) fn endpoint(&self) -> WebOsEndpoint {
         self.endpoint
     }
 
@@ -799,7 +796,7 @@ impl WebOsTestServer {
         }
     }
 
-    pub(in crate::web_os) fn finish(mut self) {
+    pub(crate) fn finish(mut self) {
         self.stop_and_join().expect("webOS test server thread");
     }
 
