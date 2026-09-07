@@ -66,6 +66,12 @@ chmod 755 "$MOCK_COMMAND"
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
 export LG_BUDDY_BSCPYLGTV_COMMAND="$MOCK_COMMAND"
 
+reset_tv_state() {
+    # Cancelled reads may still finish after the GUI exits. Serialize resets
+    # with their writes so an old snapshot cannot replace the next scenario.
+    flock "$STATE_FILE.lock" tee "$STATE_FILE" >/dev/null
+}
+
 start_gui() {
     local accessibility="${1:-disabled}"
     local color_scheme="${2:-}"
@@ -205,7 +211,7 @@ observe_gui_state() {
 
 # Read current state, edit the initially focused brightness slider through the
 # keyboard. Movement submits automatically and keeps Overview open.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' | reset_tv_state
 start_accessibility_bus
 start_gui enabled
 wait_for_calls get_picture_settings 1
@@ -270,7 +276,7 @@ cmp -s "$STATE_FILE" "$WORK_DIR/before-empty.json" || fail "Empty profile perfor
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
 
 # A failed optional model read retains the local TV details.
-printf '%s\n' '{"backlight":50,"calls":[],"plan":{"get_system_info":[{"result":"error","status":1,"stderr":"planned model read failure"}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":50,"calls":[],"plan":{"get_system_info":[{"result":"error","status":1,"stderr":"planned model read failure"}]}}' | reset_tv_state
 start_gui enabled
 wait_for_calls get_system_info 1
 observe_gui_state --select-page TVs
@@ -279,7 +285,7 @@ send_closing_mnemonic Escape
 finish_gui "unavailable TV model"
 
 # A slow write must not disable the slider or discard subsequent movement.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' | reset_tv_state
 start_gui enabled
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --expected-slider-value 50 --expected-volume 20 --require-brightness-focus
@@ -299,7 +305,7 @@ PY
 
 # A failed read stays visible and Retry performs a fresh read. Observe each
 # rendered presentation before sending the action that depends on it.
-printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' | reset_tv_state
 start_gui enabled
 wait_for_calls get_picture_settings 1
 observe_gui_state --expected-state read-failed --expected-volume 20 --expected-muted false
@@ -318,7 +324,7 @@ finish_gui "read-failure cancellation"
 
 # Volume succeeded but unmuting failed: show the changed level and recover the
 # remaining mute operation without repeating the successful volume write.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"set_mute":[{"result":"error","status":1,"stderr":"planned unmute failure"}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"set_mute":[{"result":"error","status":1,"stderr":"planned unmute failure"}]}}' | reset_tv_state
 start_gui enabled
 observe_gui_state --expected-volume 20 --expected-muted true
 xdotool windowfocus --sync "$WINDOW_ID"
@@ -341,13 +347,13 @@ assert sum(call["command"] == "set_volume" for call in state["calls"]) == 1, sta
 PY
 
 # Cancelling the loading window never writes a value.
-printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' | reset_tv_state
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
 finish_gui "loading cancellation"
-# The read-only subprocess may finish after its window closes. Let this mock
-# finish before reusing its state file for the next scenario.
+# Wait for the delayed brightness read before checking for writes. Other read
+# workers may still be finishing when the next scenario resets the state.
 wait_for_calls get_picture_settings 1
 python3 - "$STATE_FILE" <<'PY'
 import json
@@ -370,7 +376,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         local geometry=""
         local screenshot="$WORK_DIR/$label.xwd"
 
-        printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
+        printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' | reset_tv_state
         start_gui enabled "$color_scheme" "$scale"
         wait_for_calls get_picture_settings 1
         observe_gui_state --expected-state ready --expected-slider-value 50

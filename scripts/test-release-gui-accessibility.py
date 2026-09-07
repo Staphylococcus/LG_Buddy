@@ -277,6 +277,8 @@ def main() -> int:
                     (pyatspi.STATE_CHECKED, "checked"),
                 ) if states.contains(state)]
                 print(f"  {role_name(item)}: {name(item)} [{', '.join(flags)}]", file=sys.stderr)
+                if role(item) == pyatspi.ROLE_SLIDER:
+                    print(f"    value: {item.queryValue().currentValue}", file=sys.stderr)
             except Exception:
                 continue
         expected = f" {args.expected_tvs_state or args.expected_state} state"
