@@ -15,8 +15,9 @@ controls close at hand.
 ## 1.6 Beta Preview
 
 **1.6.0-beta.1** introduces Overview, the TVs view, and native first-TV pairing.
-This is an early preview of 1.6; GUI settings and credential repair are still
-being developed. The latest stable 1.5 release does not include this expanded
+This is an early preview of 1.6; further GUI work is still being developed.
+The development branch also includes TV input changes, local unpairing, and a
+read-only Settings tab. The latest stable 1.5 release does not include this expanded
 interface. See the [beta release notes](docs/releases/1.6.0-beta.1.md) for scope
 and installation details. Screenshots use sample TV data.
 

@@ -24,6 +24,7 @@ pub mod session;
 pub mod session_bus;
 pub mod session_notifications;
 pub mod settings;
+pub mod settings_view;
 pub mod sources;
 pub mod state;
 pub mod tv;

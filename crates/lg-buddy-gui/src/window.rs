@@ -5,13 +5,16 @@ use adw::prelude::*;
 use lg_buddy::navigation::ApplicationPage;
 use lg_buddy::overview::OverviewIntent;
 use lg_buddy::presentation::overview::OverviewPresentation;
+use lg_buddy::presentation::settings::SettingsPresentation;
 use lg_buddy::presentation::tvs::TvsPresentation;
+use lg_buddy::settings_view::SettingsIntent;
 use lg_buddy::tvs::TvsIntent;
 
 pub(crate) struct ApplicationWindow {
     window: adw::ApplicationWindow,
     overview: crate::overview::OverviewView,
     tvs: crate::tvs::TvsView,
+    settings: crate::settings::SettingsView,
     pairing: crate::pairing::PairingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
@@ -25,6 +28,7 @@ impl ApplicationWindow {
         application: &adw::Application,
         on_overview: crate::overview::IntentHandler,
         on_tvs: Rc<dyn Fn(TvsIntent)>,
+        on_settings: Rc<dyn Fn(SettingsIntent)>,
         on_navigation: Rc<dyn Fn(ApplicationPage)>,
     ) -> Self {
         let window = adw::ApplicationWindow::builder()
@@ -39,6 +43,7 @@ impl ApplicationWindow {
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
         let pairing = crate::pairing::PairingView::new(on_tvs);
+        let settings = crate::settings::SettingsView::new(on_settings);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(false);
@@ -46,6 +51,10 @@ impl ApplicationWindow {
             let (widget, icon): (&gtk::Widget, _) = match page {
                 ApplicationPage::Overview => (overview.widget().upcast_ref(), "view-grid-symbolic"),
                 ApplicationPage::Tvs => (tvs.widget().upcast_ref(), "video-display-symbolic"),
+                ApplicationPage::Settings => (
+                    settings.widget().upcast_ref(),
+                    "preferences-system-symbolic",
+                ),
             };
             stack.add_titled_with_icon(widget, Some(page_name(page)), page.title(), icon);
         }
@@ -58,6 +67,7 @@ impl ApplicationWindow {
                     match stack.visible_child_name().as_deref() {
                         Some("overview") => on_navigation(ApplicationPage::Overview),
                         Some("tvs") => on_navigation(ApplicationPage::Tvs),
+                        Some("settings") => on_navigation(ApplicationPage::Settings),
                         _ => {}
                     }
                 }
@@ -77,7 +87,7 @@ impl ApplicationWindow {
         window.set_content(Some(&toolbar));
         let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
             adw::BreakpointConditionLengthType::MaxWidth,
-            400.0,
+            540.0,
             adw::LengthUnit::Sp,
         ));
         narrow.add_setter(
@@ -111,6 +121,7 @@ impl ApplicationWindow {
             window,
             overview,
             tvs,
+            settings,
             pairing,
             toasts,
             stack,
@@ -127,6 +138,10 @@ impl ApplicationWindow {
     pub(crate) fn render_tvs(&self, presentation: &TvsPresentation) {
         self.tvs.render(&self.window, presentation);
         self.pairing.render(&self.window, presentation.pairing());
+    }
+
+    pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
+        self.settings.render(presentation);
     }
 
     pub(crate) fn dismiss_dialog(&self) -> bool {
@@ -179,5 +194,6 @@ fn page_name(page: ApplicationPage) -> &'static str {
     match page {
         ApplicationPage::Overview => "overview",
         ApplicationPage::Tvs => "tvs",
+        ApplicationPage::Settings => "settings",
     }
 }

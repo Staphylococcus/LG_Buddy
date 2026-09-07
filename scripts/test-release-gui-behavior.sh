@@ -240,6 +240,23 @@ observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-mut
 observe_gui_state --select-page TVs
 TV_ADDRESS="$(sed -n 's/^tvs_primary_ip=//p' "$CONFIG_FILE" | tail -n1)"
 observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+# Settings reads the shared store without changing it, including invalid values.
+cp "$CONFIG_FILE" "$WORK_DIR/before-settings.env"
+printf '%s\n' 'screen_idle_timeout=600' 'updates_channel=not-a-channel' >> "$CONFIG_FILE"
+cp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env"
+observe_gui_state --select-page Settings
+observe_gui_state --expected-settings-state invalid --expected-settings-timeout '600 seconds'
+xdotool windowsize --sync "$WINDOW_ID" 700 780
+observe_gui_state --focus-control "Desktop integration" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" space
+observe_gui_state --expected-settings-state invalid --require-settings-details
+cmp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env" || fail "Inspecting Settings changed configuration."
+# Returning to Settings reloads changes made outside the GUI.
+observe_gui_state --select-page TVs
+printf '%s\n' 'screen_idle_timeout=120' 'updates_channel=stable' >> "$CONFIG_FILE"
+observe_gui_state --select-page Settings
+observe_gui_state --expected-settings-state ready --expected-settings-timeout '120 seconds'
+cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
 observe_gui_state --select-page Overview
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
 xdotool windowfocus --sync "$WINDOW_ID"
@@ -424,6 +441,9 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         PLATFORM_HEIGHT="$(printf '%s\n' "$geometry" | sed -n 's/^HEIGHT=//p')"
         xwd -silent -id "$WINDOW_ID" -out "$screenshot"
         PLATFORM_MEAN="$(python3 "$SCRIPT_DIR/xwd_mean.py" "$screenshot")"
+
+        observe_gui_state --select-page Settings
+        observe_gui_state --expected-settings-state ready
 
         xdotool windowfocus --sync "$WINDOW_ID"
         send_closing_mnemonic Escape

@@ -720,6 +720,7 @@ mod tests {
         view.window.close();
         late_brightness_respects_focus(&application);
         crate::tvs::run_renderer_scenarios(&application);
+        crate::settings::run_renderer_scenarios(&application);
         crate::controller_test_support::run_scenario();
     }
 }
