@@ -1,7 +1,13 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use crate::config::{
     parse_config_entries, resolve_config_path, resolve_config_path_from_env, ConfigPathSources,
@@ -10,6 +16,8 @@ use crate::config::{
 use super::{
     SettingDefinition, SettingKey, SettingOperation, SettingValue, SettingsError, SETTINGS_REGISTRY,
 };
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct ConfigEnvEditor {
@@ -80,9 +88,11 @@ impl ConfigEnvEditor {
             }
         }
 
-        fs::write(&self.path, self.render()).map_err(|err| SettingsError::WriteConfig {
-            path: self.path.clone(),
-            message: err.to_string(),
+        atomic_write_config(&self.path, self.render().as_bytes()).map_err(|err| {
+            SettingsError::WriteConfig {
+                path: self.path.clone(),
+                message: err.to_string(),
+            }
         })
     }
 
@@ -102,6 +112,66 @@ impl ConfigEnvEditor {
             .find(|(_, line)| config_line_key(line) == Some(storage_key))
             .map(|(index, _)| index)
     }
+}
+
+fn atomic_write_config(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // Continue updating an existing symlink's target instead of replacing the
+    // link itself. A dangling link cannot be safely resolved for publication.
+    let path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)?,
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    // Check the original file's write access without truncating it. Rename
+    // permission alone must not let a save replace a read-only configuration.
+    let metadata = match OpenOptions::new().write(true).open(&path) {
+        Ok(file) => Some(file.metadata()?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name")
+    })?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(
+        ".settings.{}.{}.tmp",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temp_path = path.with_file_name(temp_name);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(if metadata.is_some() { 0o600 } else { 0o666 });
+    let mut file = options.open(&temp_path)?;
+    let result = (|| {
+        file.write_all(contents)?;
+        if let Some(metadata) = metadata {
+            #[cfg(unix)]
+            {
+                let created = file.metadata()?;
+                if (created.uid(), created.gid()) != (metadata.uid(), metadata.gid()) {
+                    let result =
+                        unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) };
+                    if result != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            }
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.sync_all()?;
+        drop(file);
+        // Publication is the final fallible step: errors leave the old bytes
+        // intact, and success means readers can see the complete new contents.
+        fs::rename(&temp_path, &path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,9 +256,26 @@ pub struct SettingsChange {
     mutation: SettingsMutation,
     path: PathBuf,
     file_changed: bool,
+    effective: EffectiveSetting,
 }
 
 impl SettingsChange {
+    pub fn effective_setting(&self) -> &EffectiveSetting {
+        &self.effective
+    }
+
+    pub(crate) fn for_apply(store: &SettingsStore, key: &str) -> Result<Self, SettingsError> {
+        let effective = store.effective_by_name(key)?;
+        let value = effective.required_value()?;
+        let mutation = SettingsMutation::set(store, key, &value.to_string())?;
+        Ok(Self {
+            mutation,
+            path: store.path().to_path_buf(),
+            file_changed: false,
+            effective,
+        })
+    }
+
     pub fn mutation(&self) -> SettingsMutation {
         self.mutation
     }
@@ -202,7 +289,7 @@ impl SettingsChange {
     }
 }
 
-pub(super) fn persist_settings_mutation(
+pub(crate) fn persist_settings_mutation(
     path: &Path,
     mutation: SettingsMutation,
 ) -> Result<SettingsChange, SettingsError> {
@@ -232,6 +319,18 @@ pub(super) fn persist_settings_mutation(
         mutation,
         path: editor.path().to_path_buf(),
         file_changed,
+        effective: EffectiveSetting {
+            definition: mutation.definition(),
+            value: mutation.new_value,
+            source: match mutation.action() {
+                SettingsMutationAction::Set => SettingSource::ConfigEnv,
+                SettingsMutationAction::Unset if mutation.new_value.is_some() => {
+                    SettingSource::Default
+                }
+                SettingsMutationAction::Unset => SettingSource::Missing,
+            },
+            invalid_value: None,
+        },
     })
 }
 

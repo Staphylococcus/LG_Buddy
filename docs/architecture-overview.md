@@ -7,10 +7,8 @@ It is not a product roadmap. It is a map of what exists today and how the main p
 For the top-level system, desktop, and service event paths that enter the
 runtime, see [Runtime event handler map](runtime-event-handler-map.md).
 
-For the application-owned presentation contract and GTK renderer boundary,
-including the target beyond the currently delivered slice, see
-[GUI target architecture](gui-target-architecture.md). The architecture below
-describes the current implementation.
+For the current application-owned presentation contract and GTK renderer
+boundary, see [Frontend architecture](gui-target-architecture.md).
 
 ## Repository Shape
 
@@ -98,11 +96,13 @@ The main runtime consumers are:
 - desktop environment and session integrations, including GNOME, native
   Wayland, `swayidle`, and Linux input activity sources
 - TTY users invoking the CLI directly
-- the stable `lg-buddy brightness` launcher, which opens the matching installed
-  GTK executable and uses Zenity only when that executable is absent
-- the `lg-buddy-gui brightness` GTK window, which asynchronously reads and
-  writes OLED brightness and renders application-owned Loading, Ready,
-  Applying, or Failed presentation state
+- the installed `lg-buddy` launcher with no arguments, which opens normal
+  Overview through the matching GTK executable
+- the `lg-buddy brightness` launcher, which opens the matching GTK executable
+  focused on brightness and uses Zenity only when that executable is absent
+- the `lg-buddy-gui` GTK window, which renders Overview, TVs, pairing, and
+  Settings from typed application state and sends semantic user intents through
+  the in-process Rust API
 
 ```mermaid
 flowchart LR
@@ -126,7 +126,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
-        GTK["lg-buddy-gui<br/>libadwaita / GTK brightness window"]
+        GTK["lg-buddy-gui<br/>Overview / TVs / Settings / dialogs"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -141,8 +141,12 @@ flowchart LR
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
-        BRIGHTNESS["brightness.rs<br/>brightness application flow"]
-        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Applying / Failed declarations"]
+        APPLICATION["application.rs<br/>cross-view coordination"]
+        VIEWS["overview.rs / tvs.rs / settings_view.rs<br/>view state + typed operations"]
+        PRESENTATION["presentation/*<br/>typed content / controls / feedback"]
+        BRIGHTNESS["brightness.rs / audio.rs<br/>TV control operations"]
+        PAIRING["pairing.rs / pairing_store.rs<br/>native pairing + credential persistence"]
+        SETTINGS["settings/*<br/>registry / validation / persistence / apply"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -193,13 +197,23 @@ flowchart LR
     LOGINDADAPTER -->|"lock SessionObservation"| RUNNER
     NM --> MAIN
     TERMINAL --> MAIN
-    MAIN -->|"brightness launcher"| GTK
-    MAIN -.->|"GUI absent"| ZENITY
+    MAIN -->|"normal / brightness launcher"| GTK
+    MAIN -.->|"brightness only; GUI absent"| ZENITY
     ZENITY --> MAIN
-    GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
-    BRIGHTNESS --> PRESENTATION
-    PRESENTATION --> GTK
+    GTK -->|"semantic intents / worker completions"| APPLICATION
+    APPLICATION --> VIEWS
+    VIEWS --> PRESENTATION
+    PRESENTATION -->|"render"| GTK
+    VIEWS --> BRIGHTNESS
+    VIEWS --> PAIRING
+    VIEWS --> SETTINGS
+    VIEWS --> CONFIG
+    VIEWS --> TV
+    SETTINGS --> CONFIG
+    PAIRING --> CONFIG
+    PAIRING --> WEBOS
     MAIN --> COMMANDS
+    COMMANDS --> SETTINGS
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE
     COMMANDS --> NOTIFICATIONS
@@ -242,7 +256,7 @@ flowchart LR
     WOL -->|"magic packet"| LGTV
 ```
 
-The intended split is:
+The current split is:
 
 - `lib.rs`
   - public entry surface for the binary
@@ -252,13 +266,30 @@ The intended split is:
   - CLI/API command entrypoints
   - config, state, and dependency loading for command execution
   - command output handoff
-- `brightness.rs`
-  - toolkit-neutral brightness read/write application flow
-  - typed brightness dependencies and production TV/config/notification adapters
-  - opaque operation identities, single-write enforcement, and stale-completion rejection
-- `presentation/brightness.rs`
-  - toolkit-neutral Loading, Ready, Applying, and Failed declarations
-  - semantic Propose, Apply, Retry, and Cancel intents
+- `application.rs`
+  - toolkit-neutral coordination between Overview, TVs, and Settings
+  - cross-view refresh and operation availability after pairing, unpairing, or
+    settings changes
+- `overview.rs`, `tvs.rs`, and `settings_view.rs`
+  - view state, semantic intents, typed operations, and completion handling
+  - retry decisions, progress, cancellation boundaries, and stale-completion
+    rejection
+- `brightness.rs` and `audio.rs`
+  - brightness and audio read/write operations over shared TV/config adapters
+  - the brightness application contract and operation identities reused by
+    Overview
+- `pairing.rs` and `pairing_store.rs`
+  - native webOS pairing and profile/credential persistence with rollback
+- `settings/*`
+  - the canonical settings registry, descriptions, validation, persistence, and
+    runtime apply behavior shared by CLI and GUI
+- `presentation/*`
+  - typed screen content, values, availability, progress, and user-facing errors
+  - brightness declarations reused inside the combined Overview presentation
+- `crates/lg-buddy-gui/src/*`
+  - persistent native widgets, navigation, focus, accessibility, and dialogs
+  - workers that execute application operations and return typed completions
+  - no separate validation, persistence, retry policy, or TV workflow
 - `events.rs`
   - canonical runtime event envelope and source classification
 - `policy.rs`
@@ -429,6 +460,13 @@ The intended public user-action surface is:
 - `updates check [--notify]`
 - `updates install`
 
+The installed application entrypoint is `lg-buddy` with no arguments. It
+locates `lg-buddy-gui` beside the runtime and launches it with no arguments for
+normal Overview. `lg-buddy-gui` with no arguments has the same normal Overview
+behavior. `lg-buddy brightness` remains a brightness-focused deep link;
+`lg-buddy --help` and `lg-buddy help` remain CLI help. These launch routes do
+not change the operational CLI, service, or update paths listed above.
+
 The binary also retains package-owned and compatibility entrypoints during the
 public-surface migration:
 
@@ -469,19 +507,68 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The `brightness` command locates `lg-buddy-gui` beside the running CLI and
-launches its `brightness` entrypoint. Only an absent GUI executable selects the
-temporary Zenity compatibility flow; an invalid installation or failed GUI
-process is returned directly without a second prompt. The `brightness get` and
-`brightness set` commands never enter that launcher and use the TV picture
-abstraction in `tv.rs` for typed OLED brightness validation and live TV
-read/write operations. The interactive Zenity brightness dialog delegates its
-TV operations back through those direct CLI commands. The GTK brightness window
-uses the same typed picture capabilities through the core brightness
-application flow. Workers keep blocking TV operations off the GTK main loop;
-the application permits one write at a time, and opaque operation identity
-prevents late results from replacing newer or closed presentation state.
-Successful GTK writes retain the existing brightness success notification.
+The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the running CLI
+and launches its no-argument entrypoint for normal Overview. A missing GUI is an
+error on this path. The `brightness` command locates the same executable and
+launches its `brightness` entrypoint, which selects the brightness control even
+when another view is already open. Only an absent GUI on this focused path
+selects the temporary Zenity compatibility flow; an invalid installation or
+failed GUI process is returned directly without a second prompt. The
+`brightness get` and `brightness set` commands never enter either launcher and
+use the TV picture abstraction in `tv.rs` for typed OLED brightness validation
+and live TV read/write operations. The interactive Zenity brightness dialog
+delegates its TV operations back through those direct CLI commands. The GTK
+entrypoint opens one Overview alongside the primary TV summary, volume, and
+mute. Two icon-and-slider rows submit changes as the sliders move; the sound
+icon toggles mute. The core Overview application owns its declarations and semantic
+intents; GTK renders them without adding TV or configuration policy. Workers
+keep blocking operations off the GTK main loop. Capability state is independent,
+and opaque operation identity prevents late results from replacing newer or
+closed presentation state. Successful changes keep Overview open; brightness
+writes retain the existing success notification. Passive native operations use
+stored credentials without opening pairing prompts.
+The TVs tab reads the existing primary profile and local credential state
+through application-owned operations, then enriches the display name with a
+separate optional model read from the TV. The application owns navigation and TV
+selection; GTK supplies the native view switcher and adaptive layout. Zero TVs
+produces a blank state, one TV opens directly to details, and only multi-profile
+renderer fixtures expose the TV-selection sidebar. Production storage remains
+limited to one primary profile. Tab changes retain pending Overview operations
+and do not initiate TV writes or pairing.
+The TVs application also declares immediate managed-input changes and confirmed
+local unpairing. Input edits reuse the settings registry, persistence, and apply
+strategy. Unpairing shares the pairing store’s lock and atomic config publication,
+removes only primary-profile keys and the local native token, and restores that
+token if config publication fails. Compatibility credential storage and unrelated
+settings are retained. A started change disables profile controls and suspends
+Overview operations; completion reloads Overview with new operation identities.
+Active Overview writes must finish before profile changes can begin. GTK only
+renders the input selection, confirmation, progress availability, and errors.
+The zero-TV blank state offers first-TV pairing through a separate foreground
+application workflow. GTK forwards the native webOS form and cancellation
+intents, and worker progress describes connecting, TV confirmation, verification,
+and saving. Validation, protocol authentication, capability checks, and credential
+persistence remain in the core. Pairing is refused as root. The access token
+stays in memory until verification succeeds; the primary profile is published
+last, with credential rollback on a failed save. Accepted cancellation prevents
+publication. Once saving begins, it finishes even if the window closes.
+The toolkit-independent application coordinator opens the new TV details and
+refreshes Overview with fresh operation identities after success. The application
+backend selects the capability checks; the webOS client supplies authentication
+and cancellable reads. GTK forwards unexpected worker termination to the core
+as an internal failure. This does not install or activate services.
+
+Settings reads the seven behavior settings from the shared registry, including
+their descriptions, value choices, and validation. Toggle and choice changes
+submit immediately; the numeric timeout commits on Enter or focus loss.
+`SettingsApplication` serializes mutations through the same persistence and
+runtime apply path as the CLI. Successful changes are silent. Validation and
+persistence failures restore the prior value; an apply failure retains the
+saved value and offers a retry of the runtime step. Missing or inactive services
+are reported after the apply attempt, rather than monitored continuously.
+Persistent native rows keep focus and layout stable across refreshes. About is
+a native informational dialog reached from the main menu.
+
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
@@ -965,6 +1052,9 @@ The Rust runtime currently owns:
 - screen on
 - brightness control
 - volume and mute control
+- application coordination for Overview, TVs, native pairing, and Settings
+- TV profile and credential persistence, including confirmed unpairing
+- the shared settings registry, validation, persistence, and runtime apply path
 - `monitor` command with GNOME, native Wayland, and `swayidle` paths
 
 The shell layer still owns:
@@ -979,4 +1069,15 @@ What is still not implemented:
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes
 
-So the current architecture should be read as a Rust-owned runtime with a thin shell setup surface.
+The no-argument launcher opens the installed application but does not replace
+the shell setup surface. v1.6 exposes TV connection/capability status and
+actionable control, pairing, and settings errors. A resolved screen backend
+display is not a GUI requirement; the existing CLI diagnostics remain available.
+
+The complete GUI first-run, service, and update journey, including runtime/service
+state and update state, belongs to v1.7.0 under
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The contents of
+runtime/service state remain to be defined. The current architecture is a
+Rust-owned runtime and application with a thin GTK renderer and shell setup
+surface. See [Frontend architecture](gui-target-architecture.md) for the current
+view and renderer boundaries.

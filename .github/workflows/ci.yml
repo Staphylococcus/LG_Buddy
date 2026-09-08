@@ -219,7 +219,7 @@ jobs:
               "$bundle/lg-buddy" \
               "$bundle/docs/lg-buddy-gui-x86_64-unknown-linux-gnu" \
               "${{ matrix.package_manager }}"
-          runuser -u tester -- dbus-run-session -- xvfb-run -a \
+          runuser -u tester -- dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" \
               env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals LG_BUDDY_TEST_PLATFORM_CONTRACT=1 \
               bash ./scripts/test-installed-gui.sh \
               "$bundle/lg-buddy" \

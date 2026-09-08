@@ -5,7 +5,7 @@ umask 0022
 
 GUI_BINARY="${1:-./target/debug/lg-buddy-gui}"
 APPLICATION_ID="io.github.staphylococcus.LGBuddy"
-WINDOW_TITLE="LG TV Brightness"
+WINDOW_TITLE="LG Buddy"
 GUI_PID=""
 WINDOW_IDS=()
 
@@ -29,7 +29,7 @@ command -v gapplication >/dev/null || fail "gapplication is required for the GUI
 command -v xdotool >/dev/null || fail "xdotool is required for the GUI launch smoke test."
 
 ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
-    "$GUI_BINARY" brightness &
+    "$GUI_BINARY" &
 GUI_PID=$!
 
 for ((attempt = 0; attempt < 300; attempt++)); do
@@ -42,19 +42,20 @@ for ((attempt = 0; attempt < 300; attempt++)); do
     mapfile -t WINDOW_IDS < <(
         xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" 2>/dev/null || true
     )
-    [ "${#WINDOW_IDS[@]}" -le 1 ] || fail "GUI presented duplicate brightness windows."
+    [ "${#WINDOW_IDS[@]}" -le 1 ] || fail "GUI presented duplicate Overview windows."
     [ "${#WINDOW_IDS[@]}" -eq 0 ] || break
     sleep 0.1
 done
 
-[ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "GUI did not present the brightness window."
+[ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "GUI did not present Overview."
 
 ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$GUI_BINARY" brightness
+kill -0 "$GUI_PID" 2>/dev/null || fail "Reactivation replaced the running GUI process."
 mapfile -t WINDOW_IDS < <(
     xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" 2>/dev/null || true
 )
-[ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "Reactivation did not preserve one brightness window."
+[ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "Reactivation did not preserve one Overview window."
 
 gapplication action "$APPLICATION_ID" quit
 wait "$GUI_PID"

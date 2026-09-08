@@ -15,7 +15,7 @@ Feature: Brightness
     When I run the command "brightness"
     Then the command fails
     And the command exits with status 1
-    And stderr contains "installed brightness GUI"
+    And stderr contains "installed LG Buddy GUI"
     And stderr contains "exited with status 23"
     And the GTK brightness GUI received "brightness"
     And the brightness compatibility dialog was not opened

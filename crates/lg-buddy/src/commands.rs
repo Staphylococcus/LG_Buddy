@@ -8,6 +8,7 @@ use std::process::Command as ProcessCommand;
 use std::process::Output;
 use std::time::Duration;
 
+use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
 use crate::brightness::{
     notify_brightness_success_with, read_current_brightness_with, write_brightness_with,
 };
@@ -27,8 +28,8 @@ use crate::wol::UdpWakeOnLanSender;
 use crate::{BrightnessCommand, MuteCommand, RunError, StartupMode, VolumeCommand};
 
 const SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
-const BRIGHTNESS_GUI_ENV: &str = "LG_BUDDY_GUI";
-const BRIGHTNESS_GUI_EXECUTABLE: &str = "lg-buddy-gui";
+const GUI_ENV: &str = "LG_BUDDY_GUI";
+const GUI_EXECUTABLE: &str = "lg-buddy-gui";
 
 trait ReachabilityChecker {
     fn is_reachable(&self, tv_ip: Ipv4Addr) -> io::Result<bool>;
@@ -60,13 +61,13 @@ struct CurrentExeBrightnessCli {
     command_path: PathBuf,
 }
 
-struct InstalledBrightnessGui {
+struct InstalledGui {
     current_exe: PathBuf,
     command_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrightnessGuiLaunchOutcome {
+enum GuiLaunchOutcome {
     Launched,
     Missing,
 }
@@ -141,17 +142,15 @@ impl CurrentExeBrightnessCli {
     }
 }
 
-impl InstalledBrightnessGui {
+impl InstalledGui {
     fn from_env() -> Result<Self, RunError> {
         let current_exe = env::current_exe()?;
-        let command_path = match env::var_os(BRIGHTNESS_GUI_ENV) {
+        let command_path = match env::var_os(GUI_ENV) {
             Some(value) if value.is_empty() => {
-                return Err(RunError::Policy(format!(
-                    "{BRIGHTNESS_GUI_ENV} is set but empty"
-                )));
+                return Err(RunError::Policy(format!("{GUI_ENV} is set but empty")));
             }
             Some(value) => PathBuf::from(value),
-            None => current_exe.with_file_name(BRIGHTNESS_GUI_EXECUTABLE),
+            None => current_exe.with_file_name(GUI_EXECUTABLE),
         };
 
         Ok(Self {
@@ -168,37 +167,31 @@ impl InstalledBrightnessGui {
         }
     }
 
-    fn launch(&self) -> Result<BrightnessGuiLaunchOutcome, RunError> {
+    fn launch(&self, arguments: &[&str]) -> Result<GuiLaunchOutcome, RunError> {
         match fs::symlink_metadata(&self.command_path) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(BrightnessGuiLaunchOutcome::Missing);
+                return Ok(GuiLaunchOutcome::Missing);
             }
             Err(error) => {
                 return Err(RunError::Policy(format!(
-                    "could not inspect installed brightness GUI at `{}`: {error}",
+                    "could not inspect installed LG Buddy GUI at `{}`: {error}",
                     self.command_path.display()
                 )));
             }
         }
         let metadata = fs::metadata(&self.command_path).map_err(|error| {
-            invalid_brightness_gui(
+            invalid_gui(
                 &self.command_path,
                 &format!("its target cannot be inspected: {error}"),
             )
         })?;
 
         if !metadata.is_file() {
-            return Err(invalid_brightness_gui(
-                &self.command_path,
-                "it is not a regular file",
-            ));
+            return Err(invalid_gui(&self.command_path, "it is not a regular file"));
         }
         if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(invalid_brightness_gui(
-                &self.command_path,
-                "it is not executable",
-            ));
+            return Err(invalid_gui(&self.command_path, "it is not executable"));
         }
 
         let current_metadata = fs::metadata(&self.current_exe).map_err(|error| {
@@ -208,42 +201,42 @@ impl InstalledBrightnessGui {
             ))
         })?;
         if metadata.dev() == current_metadata.dev() && metadata.ino() == current_metadata.ino() {
-            return Err(invalid_brightness_gui(
+            return Err(invalid_gui(
                 &self.command_path,
                 "it resolves to the lg-buddy executable and would recursively relaunch itself",
             ));
         }
 
         let output = ProcessCommand::new(&self.command_path)
-            .arg("brightness")
+            .args(arguments)
             .output()
             .map_err(|error| {
                 RunError::Policy(format!(
-                    "could not launch installed brightness GUI at `{}`: {error}",
+                    "could not launch installed LG Buddy GUI at `{}`: {error}",
                     self.command_path.display()
                 ))
             })?;
 
         if output.status.success() {
-            Ok(BrightnessGuiLaunchOutcome::Launched)
+            Ok(GuiLaunchOutcome::Launched)
         } else {
             Err(RunError::Policy(format!(
-                "installed brightness GUI at `{}` failed: {}",
+                "installed LG Buddy GUI at `{}` failed: {}",
                 self.command_path.display(),
-                brightness_gui_output_message(&output)
+                gui_output_message(&output)
             )))
         }
     }
 }
 
-fn invalid_brightness_gui(path: &Path, reason: &str) -> RunError {
+fn invalid_gui(path: &Path, reason: &str) -> RunError {
     RunError::Policy(format!(
-        "invalid brightness GUI installation at `{}`: {reason}",
+        "invalid LG Buddy GUI installation at `{}`: {reason}",
         path.display()
     ))
 }
 
-fn brightness_gui_output_message(output: &Output) -> String {
+fn gui_output_message(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stderr.is_empty() {
         return stderr
@@ -477,16 +470,27 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
     )
 }
 
+pub fn run_overview() -> Result<(), RunError> {
+    let gui = InstalledGui::from_env()?;
+    match gui.launch(&[])? {
+        GuiLaunchOutcome::Launched => Ok(()),
+        GuiLaunchOutcome::Missing => Err(RunError::Policy(format!(
+            "LG Buddy GUI is not installed at `{}`; install the matching lg-buddy-gui executable",
+            gui.command_path.display()
+        ))),
+    }
+}
+
 pub fn run_brightness<W: Write>(
     writer: &mut W,
     command: BrightnessCommand,
 ) -> Result<(), RunError> {
     match command {
         BrightnessCommand::Prompt => {
-            let gui = InstalledBrightnessGui::from_env()?;
-            match gui.launch()? {
-                BrightnessGuiLaunchOutcome::Launched => return Ok(()),
-                BrightnessGuiLaunchOutcome::Missing => {}
+            let gui = InstalledGui::from_env()?;
+            match gui.launch(&["brightness"])? {
+                GuiLaunchOutcome::Launched => return Ok(()),
+                GuiLaunchOutcome::Missing => {}
             }
 
             let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
@@ -751,9 +755,7 @@ enum VolumeChange {
 }
 
 fn read_audio_status<C: TvClient>(config: &Config, tv_client: &C) -> Result<AudioStatus, RunError> {
-    TvDevice::new(tv_client, config.tv_ip)
-        .audio()
-        .status()
+    read_audio_status_with(config, tv_client)
         .map_err(|err| RunError::Policy(format!("failed to read volume: {err}")))
 }
 
@@ -762,13 +764,13 @@ fn set_volume_and_unmute<C: TvClient>(
     tv_client: &C,
     volume: VolumeLevel,
 ) -> Result<(), RunError> {
-    let audio = TvDevice::new(tv_client, config.tv_ip).audio();
-    audio
-        .set_volume(volume)
-        .map_err(|err| RunError::Policy(format!("failed to set volume: {err}")))?;
-    audio
-        .set_muted(false)
-        .map_err(|err| RunError::Policy(format!("volume was changed, but unmuting failed: {err}")))
+    apply_audio_operation_with(
+        config,
+        tv_client,
+        AudioOperation::SetVolumeAndUnmute(volume),
+    )
+    .map(|_| ())
+    .map_err(|err| RunError::Policy(err.to_string()))
 }
 
 fn change_volume_and_unmute<C: TvClient>(
@@ -788,10 +790,9 @@ fn change_volume_and_unmute<C: TvClient>(
 }
 
 fn set_muted<C: TvClient>(config: &Config, tv_client: &C, muted: bool) -> Result<(), RunError> {
-    TvDevice::new(tv_client, config.tv_ip)
-        .audio()
-        .set_muted(muted)
-        .map_err(|err| RunError::Policy(format!("failed to set mute: {err}")))
+    apply_audio_operation_with(config, tv_client, AudioOperation::SetMuted(muted))
+        .map(|_| ())
+        .map_err(|err| RunError::Policy(err.to_string()))
 }
 
 fn run_brightness_prompt_with<
@@ -880,8 +881,7 @@ mod tests {
 
     use super::{
         run_brightness_command_with, run_brightness_prompt_with, BrightnessCli,
-        BrightnessDialogDeps, BrightnessGuiLaunchOutcome, BrightnessUi, InstalledBrightnessGui,
-        ReachabilityChecker,
+        BrightnessDialogDeps, BrightnessUi, GuiLaunchOutcome, InstalledGui, ReachabilityChecker,
     };
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
@@ -1678,14 +1678,16 @@ mod tests {
 
     #[test]
     fn installed_brightness_gui_launches_only_the_brightness_command() {
-        let launcher = InstalledBrightnessGui::new(
+        let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             find_command_in_path("test").expect("test executable"),
         );
 
         assert_eq!(
-            launcher.launch().expect("GUI launch should succeed"),
-            BrightnessGuiLaunchOutcome::Launched
+            launcher
+                .launch(&["brightness"])
+                .expect("GUI launch should succeed"),
+            GuiLaunchOutcome::Launched
         );
     }
 
@@ -1693,26 +1695,28 @@ mod tests {
     fn missing_installed_brightness_gui_allows_compatibility_fallback() {
         let anchor =
             ExecutableScript::new("brightness-gui-missing", "anchor", "#!/bin/sh\nexit 0\n");
-        let launcher = InstalledBrightnessGui::new(
+        let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             anchor.path().with_file_name("missing-lg-buddy-gui"),
         );
 
         assert_eq!(
-            launcher.launch().expect("missing GUI should be recognized"),
-            BrightnessGuiLaunchOutcome::Missing
+            launcher
+                .launch(&["brightness"])
+                .expect("missing GUI should be recognized"),
+            GuiLaunchOutcome::Missing
         );
     }
 
     #[test]
     fn failed_installed_brightness_gui_is_reported_without_fallback() {
-        let launcher = InstalledBrightnessGui::new(
+        let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             python3_path(),
         );
 
         let error = launcher
-            .launch()
+            .launch(&["brightness"])
             .expect_err("failed GUI must not become a missing-GUI fallback");
 
         let error = error.to_string();
@@ -1724,18 +1728,18 @@ mod tests {
     fn invalid_installed_brightness_gui_is_rejected() {
         let anchor =
             ExecutableScript::new("brightness-gui-invalid", "anchor", "#!/bin/sh\nexit 0\n");
-        let launcher = InstalledBrightnessGui::new(
+        let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             anchor.path().parent().expect("anchor parent"),
         );
 
         let error = launcher
-            .launch()
+            .launch(&["brightness"])
             .expect_err("directory must not be treated as a GUI executable");
 
         assert!(error
             .to_string()
-            .contains("invalid brightness GUI installation"));
+            .contains("invalid LG Buddy GUI installation"));
         assert!(error.to_string().contains("not a regular file"));
     }
 
@@ -1746,26 +1750,25 @@ mod tests {
         let gui_path = anchor.path().with_file_name("lg-buddy-gui");
         symlink(anchor.path().with_file_name("missing-target"), &gui_path)
             .expect("create dangling GUI symlink");
-        let launcher =
-            InstalledBrightnessGui::new(env::current_exe().expect("current executable"), gui_path);
+        let launcher = InstalledGui::new(env::current_exe().expect("current executable"), gui_path);
 
         let error = launcher
-            .launch()
+            .launch(&["brightness"])
             .expect_err("dangling GUI installation must not use compatibility fallback");
 
         assert!(error
             .to_string()
-            .contains("invalid brightness GUI installation"));
+            .contains("invalid LG Buddy GUI installation"));
         assert!(error.to_string().contains("target cannot be inspected"));
     }
 
     #[test]
     fn brightness_gui_cannot_resolve_to_the_cli_executable() {
         let current_exe = env::current_exe().expect("current executable");
-        let launcher = InstalledBrightnessGui::new(&current_exe, &current_exe);
+        let launcher = InstalledGui::new(&current_exe, &current_exe);
 
         let error = launcher
-            .launch()
+            .launch(&["brightness"])
             .expect_err("recursive GUI launch must be rejected");
 
         assert!(error

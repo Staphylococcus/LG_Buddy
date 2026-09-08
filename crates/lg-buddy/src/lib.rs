@@ -1,5 +1,7 @@
 mod dev;
 
+pub mod application;
+pub mod audio;
 pub mod auth;
 pub mod backend;
 pub mod brightness;
@@ -7,7 +9,11 @@ pub mod commands;
 pub mod config;
 pub mod events;
 pub mod lifecycle;
+pub mod navigation;
 pub mod notifications;
+pub mod overview;
+pub mod pairing;
+mod pairing_store;
 pub mod platform_access_token;
 pub mod policy;
 pub mod presentation;
@@ -18,9 +24,11 @@ pub mod session;
 pub mod session_bus;
 pub mod session_notifications;
 pub mod settings;
+pub mod settings_view;
 pub mod sources;
 pub mod state;
 pub mod tv;
+pub mod tvs;
 pub mod update_install;
 pub mod updates;
 pub mod upgrade_preflight;
@@ -59,6 +67,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Overview,
     Startup(StartupMode),
     Shutdown,
     Power(PowerCommand),
@@ -419,6 +428,7 @@ impl From<TvClientBuildError> for RunError {
 impl Command {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Overview => "overview",
             Self::Startup(_) => "startup",
             Self::Shutdown => "shutdown",
             Self::Power(_) => "power",
@@ -442,6 +452,7 @@ impl Command {
 
     pub fn placeholder_message(&self) -> &'static str {
         match self {
+            Self::Overview => "TODO: implemented via command handler",
             Self::Startup(_) => "TODO: implemented via command handler",
             Self::Shutdown => "TODO: implemented via command handler",
             Self::Power(_) => "TODO: implemented via command handler",
@@ -470,13 +481,16 @@ pub fn usage(program: &str) -> String {
 LG Buddy TV control
 
 Usage:
+  {program}
   {program} <command>
   {program} help [COMMAND...]
   {program} --help, -h
   {program} --version, -V
 
+With no command, open Overview in the installed graphical application.
+
 Commands:
-  brightness      Open the TV brightness control dialog
+  brightness      Open Overview focused on brightness
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
                   Set the TV OLED brightness
@@ -703,7 +717,7 @@ where
 {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
-        return Ok(ParseOutcome::Help(HelpTopic::Global));
+        return Ok(ParseOutcome::Command(Command::Overview));
     };
 
     let first = first.as_ref();
@@ -801,6 +815,7 @@ where
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
+        Command::Overview => crate::commands::run_overview(),
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
         Command::Power(PowerCommand::On) => crate::commands::run_startup(writer, StartupMode::Boot),
@@ -1268,10 +1283,10 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn no_args_prints_help() {
+    fn no_args_opens_overview() {
         assert_eq!(
             parse_args(Vec::<String>::new()),
-            Ok(ParseOutcome::Help(HelpTopic::Global))
+            Ok(ParseOutcome::Command(Command::Overview))
         );
     }
 

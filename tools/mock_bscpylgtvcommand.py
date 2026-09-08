@@ -28,6 +28,7 @@ DEFAULT_STATE = {
     "backlight": 50,
     "volume": 20,
     "muted": False,
+    "model_name": "OLED42C2",
     "plan": {},
     "calls": [],
 }
@@ -280,6 +281,18 @@ def main() -> int:
             save_state(state_path, state)
             return powered_off_error()
         print(input_to_app_id(str(state["input"])))
+        save_state(state_path, state)
+        return 0
+
+    if command == "get_system_info":
+        if not state["power_on"]:
+            save_state(state_path, state)
+            return powered_off_error()
+        if args.command_args != ["true"]:
+            print("get_system_info mock requires JSON output mode", file=sys.stderr)
+            save_state(state_path, state)
+            return 2
+        print(json.dumps({"modelName": str(state["model_name"])}))
         save_state(state_path, state)
         return 0
 

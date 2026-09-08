@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::error::Error;
 use std::fmt;
 
-const GET_AUDIO_STATUS_URI: &str = "ssap://audio/getStatus";
+pub(crate) const GET_AUDIO_STATUS_URI: &str = "ssap://audio/getStatus";
 const SET_AUDIO_VOLUME_URI: &str = "ssap://audio/setVolume";
 const AUDIO_VOLUME_UP_URI: &str = "ssap://audio/volumeUp";
 const AUDIO_VOLUME_DOWN_URI: &str = "ssap://audio/volumeDown";
@@ -141,7 +141,7 @@ impl WebOsClient {
     }
 }
 
-fn parse_audio_status_response(
+pub(crate) fn parse_audio_status_response(
     response: &Value,
 ) -> Result<WebOsAudioStatus, WebOsAudioStatusError> {
     let payload = match response.get("payload") {

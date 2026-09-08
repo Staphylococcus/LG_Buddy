@@ -12,10 +12,11 @@ Compiling the Rust runtime requires:
 Compiling and testing the GTK frontend additionally requires:
 
 - GTK 4.10 or newer development files
-- libadwaita 1 development files
+- libadwaita 1.5 or newer development files
 - `pkg-config`
+- `glib-compile-resources` (provided by the GLib development tools)
 - a graphical session or virtual display for renderer tests
-- `xdotool` for the executable launch smoke test
+- `xdotool` for native pointer tests and the executable launch smoke test
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 
@@ -60,20 +61,32 @@ Build the GTK frontend from source with:
 cargo build --release -p lg-buddy-gui
 ```
 
-Run its current brightness window with:
+Run the normal Overview directly with:
+
+```bash
+cargo run -p lg-buddy-gui
+```
+
+Run the brightness deep link directly with:
 
 ```bash
 cargo run -p lg-buddy-gui -- brightness
 ```
 
-After building both workspace binaries, the stable launcher can be exercised
-with `cargo run -p lg-buddy -- brightness`; it resolves `lg-buddy-gui` beside
-the running CLI executable. `LG_BUDDY_GUI` overrides that companion path for
-relocation and subprocess tests. Only a missing path selects the temporary
-Zenity compatibility flow.
+After building both workspace binaries, the installed app launcher can be
+exercised with `cargo run -p lg-buddy`; it resolves `lg-buddy-gui` beside the
+running CLI executable and launches its normal Overview entrypoint.
+`cargo run -p lg-buddy -- brightness` remains the brightness-focused deep link.
+`LG_BUDDY_GUI` overrides that companion path for relocation and subprocess
+tests. Only the brightness path selects the temporary Zenity compatibility flow
+when the GUI path is missing; the no-argument launcher requires the GUI.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
 Official release bundles ship and verify both.
+
+The GUI launch does not replace `install.sh` or `configure.sh`. The complete GUI
+first-run, service, and update journey remains tracked in
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 Official release builds inject version identity into the binary:
 
@@ -125,6 +138,10 @@ bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-r
 python3 scripts/test_release_promotion.py
 python3 scripts/test_record_github_release_responses.py
 ```
+
+The GUI launch checks cover both no-argument normal Overview launch and the
+brightness deep link, including focus handoff from another view. Installed
+smoke keeps the desktop entry, runtime, and GUI together.
 
 Optional hardware smoke for gamepad activity:
 
@@ -234,9 +251,22 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/lib.rs` | CLI parsing and command dispatch |
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
 | `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read/write flow and production adapters |
+| `crates/lg-buddy/src/overview.rs` | Toolkit-neutral Overview state, intents, and capability operations |
+| `crates/lg-buddy/src/tvs.rs` | TV collection, selection, pairing coordination, and local profile operations |
+| `crates/lg-buddy/src/pairing.rs` | First-TV pairing workflow, validation, and cancellation |
+| `crates/lg-buddy/src/pairing_store.rs` | TV profile and native credential persistence with rollback |
+| `crates/lg-buddy/src/settings_view.rs` | Settings presentation, intents, reads, and serialized mutations |
+| `crates/lg-buddy/src/navigation.rs` | Desktop destinations and selected view |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
+| `crates/lg-buddy/src/application.rs` | Cross-view application coordinator and typed transitions |
+| `crates/lg-buddy-gui/src/lib.rs` | GTK application controller, worker bridge, and command-line reactivation |
+| `crates/lg-buddy-gui/src/window.rs` | Adwaita window, navigation stack, About dialog, and shared dialogs |
+| `crates/lg-buddy-gui/src/overview.rs` | Overview summary, brightness, volume, mute, and focus rendering |
+| `crates/lg-buddy-gui/src/tvs.rs` | TV list/details rendering, adaptive navigation, and unpair dialog |
+| `crates/lg-buddy-gui/src/pairing.rs` | Native first-TV pairing dialog and progress rendering |
+| `crates/lg-buddy-gui/src/settings.rs` | Native settings rows, editors, and feedback rendering |
 | `crates/lg-buddy/src/screen.rs` | Session screen blank/restore policy |
 | `crates/lg-buddy/src/lifecycle.rs` | Startup, shutdown, system sleep, and system resume policy |
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
@@ -277,7 +307,7 @@ the branch contract and recovery process, see
 | `docs/architecture-overview.md` | Runtime architecture |
 | `docs/defaults-and-configuration.md` | Product defaults and persistent configuration guidance |
 | `docs/gamepad-subsystem.md` | Gamepad activity architecture and adapter guidance |
-| `docs/gui-target-architecture.md` | Target declarative application contract and GTK renderer boundary |
+| `docs/gui-target-architecture.md` | Current application-owned presentation and GTK renderer boundary |
 | `docs/runtime-event-handler-map.md` | Top-level system, desktop, and runtime event handler map |
 | `docs/session-backend-model.md` | Session source semantics, ownership, and observation contract |
 | `docs/testing-strategy.md` | Test strategy and scope |

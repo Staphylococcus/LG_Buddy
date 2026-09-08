@@ -29,7 +29,7 @@ pub(super) const BACKEND: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Screen backend selection for user-session blanking and restore behavior.",
+    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.",
 };
 
 pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
@@ -44,7 +44,7 @@ pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Idle-driven blanking and restore behavior for the configured screen.",
+    description: "Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.",
 };
 
 pub(super) const IDLE_TIMEOUT: SettingDefinition = SettingDefinition {
@@ -59,7 +59,7 @@ pub(super) const IDLE_TIMEOUT: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Idle timeout in seconds before LG Buddy blanks the configured screen.",
+    description: "Seconds of user inactivity before LG Buddy blanks the configured screen.",
 };
 
 pub(super) const RESTORE_POLICY: SettingDefinition = SettingDefinition {
@@ -74,7 +74,7 @@ pub(super) const RESTORE_POLICY: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Screen restore policy after LG Buddy blanks the configured screen.",
+    description: "Conservative restores the TV only after LG Buddy blanked or powered it off. Aggressive also attempts to restore it without a prior LG Buddy action.",
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

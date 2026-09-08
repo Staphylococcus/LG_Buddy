@@ -1,6 +1,10 @@
-mod brightness;
+mod overview;
+mod pairing;
+mod settings;
+mod tvs;
+mod window;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
@@ -9,25 +13,48 @@ use std::time::Duration;
 
 use gtk::glib;
 use gtk::prelude::*;
+use lg_buddy::application::{Application, ApplicationTransition, OverviewCompletion};
+use lg_buddy::audio::{AudioWriteError, AudioWriteFailure};
 use lg_buddy::brightness::{
-    BrightnessApplication, BrightnessReadError, BrightnessReadOperation, BrightnessReader,
-    BrightnessTransition, BrightnessWriteError, BrightnessWriteOperation, BrightnessWriter,
-    EnvironmentBrightnessReader, EnvironmentBrightnessWriter,
+    BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
 };
-use lg_buddy::presentation::brightness::{BrightnessFrontendUpdate, BrightnessIntent};
+use lg_buddy::navigation::{ApplicationPage, Navigation};
+use lg_buddy::overview::{
+    EnvironmentOverviewBackend, OverviewBackend, OverviewFrontendUpdate, OverviewIntent,
+    OverviewOperation, OverviewSummaryError, OverviewTransition,
+};
+use lg_buddy::pairing::{
+    EnvironmentPairingBackend, PairingBackend, PairingError, PairingOperation, PairingStage,
+};
+use lg_buddy::settings_view::{
+    EnvironmentSettingsBackend, SettingsBackend, SettingsIntent, SettingsMutationOperation,
+    SettingsReadError, SettingsReadOperation, SettingsTransition,
+};
+use lg_buddy::tvs::{
+    EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
+    TvsReadOperation, TvsTransition,
+};
 
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
 pub const APPLICATION_NAME: &str = "LG Buddy";
 
+fn register_resources() {
+    static RESOURCES: std::sync::Once = std::sync::Once::new();
+    RESOURCES.call_once(|| {
+        gtk::gio::resources_register_include!("lg-buddy-gui.gresource")
+            .expect("bundled GUI resources must be valid");
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiCommand {
+    Overview,
     Brightness,
     Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuiParseError {
-    MissingCommand,
     UnknownCommand(String),
     UnexpectedArguments(Vec<String>),
 }
@@ -35,7 +62,6 @@ pub enum GuiParseError {
 impl fmt::Display for GuiParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingCommand => write!(f, "missing command; expected `brightness`"),
             Self::UnknownCommand(command) => write!(f, "unknown command `{command}`"),
             Self::UnexpectedArguments(arguments) => {
                 write!(f, "unexpected arguments: {}", arguments.join(" "))
@@ -54,24 +80,22 @@ where
         Some(command) if command.as_ref() == "brightness" => GuiCommand::Brightness,
         Some(command) if matches!(command.as_ref(), "--version" | "-V") => GuiCommand::Version,
         Some(command) => return Err(GuiParseError::UnknownCommand(command.as_ref().to_string())),
-        None => return Err(GuiParseError::MissingCommand),
+        None => GuiCommand::Overview,
     };
-
     let unexpected: Vec<String> = args.map(|argument| argument.as_ref().to_string()).collect();
     if !unexpected.is_empty() {
         return Err(GuiParseError::UnexpectedArguments(unexpected));
     }
-
     Ok(command)
 }
 
 pub fn help(program: &str) -> String {
-    format!("Usage: {program} brightness\n       {program} --version\n")
+    format!("Usage: {program} [brightness]\n       {program} --version\n")
 }
 
 pub fn run(command: GuiCommand) -> glib::ExitCode {
     match command {
-        GuiCommand::Brightness => run_brightness_application(),
+        GuiCommand::Overview | GuiCommand::Brightness => run_application(command),
         GuiCommand::Version => {
             print!("{}", lg_buddy::version::version_text());
             glib::ExitCode::SUCCESS
@@ -79,164 +103,499 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
     }
 }
 
-fn run_brightness_application() -> glib::ExitCode {
+fn run_application(command: GuiCommand) -> glib::ExitCode {
     glib::set_application_name(APPLICATION_NAME);
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
-    install_application_actions(&application);
-    connect_brightness_application(
+    let controller = Rc::new(RefCell::new(None::<Rc<ApplicationController>>));
+    install_application_actions(&application, Rc::clone(&controller));
+    connect_application(
         &application,
-        Arc::new(EnvironmentBrightnessReader),
-        Arc::new(EnvironmentBrightnessWriter),
+        Rc::clone(&controller),
+        Arc::new(EnvironmentOverviewBackend),
+        Arc::new(EnvironmentTvsBackend),
+        Arc::new(EnvironmentSettingsBackend),
     );
-    application.run_with_args(&["lg-buddy-gui"])
+    let arguments: &[&str] = match command {
+        GuiCommand::Brightness => &["lg-buddy-gui", "brightness"],
+        _ => &["lg-buddy-gui"],
+    };
+    application.run_with_args(arguments)
 }
 
-fn install_application_actions(application: &adw::Application) {
+fn install_application_actions(
+    application: &adw::Application,
+    controller: Rc<RefCell<Option<Rc<ApplicationController>>>>,
+) {
     let quit = gtk::gio::SimpleAction::new("quit", None);
+    let application_for_quit = application.clone();
     quit.connect_activate({
-        let application = application.clone();
-        move |_, _| application.quit()
+        let controller = Rc::clone(&controller);
+        move |_, _| {
+            if let Some(controller) = controller.borrow().as_ref() {
+                ApplicationController::handle_intent(controller, OverviewIntent::Cancel);
+            } else {
+                application_for_quit.quit();
+            }
+        }
     });
     application.add_action(&quit);
     application.set_accels_for_action("app.quit", &["<Primary>q"]);
+    let escape = gtk::gio::SimpleAction::new("escape", None);
+    let application_for_escape = application.clone();
+    escape.connect_activate(move |_, _| {
+        if let Some(controller) = controller.borrow().as_ref() {
+            if !controller.window.dismiss_dialog() {
+                ApplicationController::handle_intent(controller, OverviewIntent::Cancel);
+            }
+        } else {
+            application_for_escape.quit();
+        }
+    });
+    application.add_action(&escape);
+    application.set_accels_for_action("app.escape", &["Escape"]);
 }
 
-struct BrightnessController {
-    application: RefCell<BrightnessApplication>,
+struct ApplicationController {
+    application: RefCell<Application>,
     gtk_application: adw::Application,
-    window: brightness::BrightnessWindow,
-    reader: Arc<dyn BrightnessReader>,
-    writer: Arc<dyn BrightnessWriter>,
+    window: window::ApplicationWindow,
+    tvs_backend: Arc<dyn TvsBackend>,
+    pairing_backend: Arc<dyn PairingBackend>,
+    settings_backend: Arc<dyn SettingsBackend>,
+    navigation: RefCell<Navigation>,
+    backend: Arc<dyn OverviewBackend>,
+    closed: Cell<bool>,
 }
 
-impl BrightnessController {
+impl ApplicationController {
     fn new(
         gtk_application: &adw::Application,
-        reader: Arc<dyn BrightnessReader>,
-        writer: Arc<dyn BrightnessWriter>,
-    ) -> (Rc<Self>, BrightnessTransition) {
-        let (application, opening) = BrightnessApplication::open();
+        backend: Arc<dyn OverviewBackend>,
+        tvs_backend: Arc<dyn TvsBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
+    ) -> (Rc<Self>, ApplicationTransition) {
+        Self::with_backends(
+            gtk_application,
+            backend,
+            tvs_backend,
+            Arc::new(EnvironmentPairingBackend),
+            settings_backend,
+        )
+    }
+
+    fn with_backends(
+        gtk_application: &adw::Application,
+        backend: Arc<dyn OverviewBackend>,
+        tvs_backend: Arc<dyn TvsBackend>,
+        pairing_backend: Arc<dyn PairingBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
+    ) -> (Rc<Self>, ApplicationTransition) {
+        let (application, opening) = Application::open();
         let controller = Rc::new_cyclic(|controller| {
-            let on_intent: brightness::IntentHandler = Rc::new({
+            let on_intent: overview::IntentHandler = Rc::new({
                 let controller = controller.clone();
                 move |intent| {
                     if let Some(controller) = controller.upgrade() {
-                        BrightnessController::handle_intent(&controller, intent);
+                        Self::handle_intent(&controller, intent);
+                    }
+                }
+            });
+            let on_tvs = Rc::new({
+                let controller = controller.clone();
+                move |intent| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::handle_tvs_intent(&controller, intent);
+                    }
+                }
+            });
+            let on_navigation = Rc::new({
+                let controller = controller.clone();
+                move |page| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::navigate(&controller, page);
+                    }
+                }
+            });
+            let on_settings = Rc::new({
+                let controller = controller.clone();
+                move |intent| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::handle_settings_intent(&controller, intent);
                     }
                 }
             });
             Self {
+                tvs_backend,
+                pairing_backend,
+                settings_backend,
+                navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
-                window: brightness::BrightnessWindow::new(gtk_application, on_intent),
-                reader,
-                writer,
+                window: window::ApplicationWindow::new(
+                    gtk_application,
+                    on_intent,
+                    on_tvs,
+                    on_settings,
+                    on_navigation,
+                ),
+                backend,
+                closed: Cell::new(false),
             }
         });
         (controller, opening)
     }
 
     fn present(&self) {
-        self.window.present();
-    }
-
-    fn handle_intent(controller: &Rc<Self>, intent: BrightnessIntent) {
-        let transition = controller.application.borrow_mut().handle_intent(intent);
-        if let Some(transition) = transition {
-            Self::apply_transition(controller, transition);
+        if !self.closed.get() {
+            self.window.present();
         }
     }
 
-    fn complete_read(
-        controller: &Rc<Self>,
-        operation: BrightnessReadOperation,
-        result: Result<lg_buddy::tv::OledBrightness, BrightnessReadError>,
-    ) {
+    fn handle_intent(controller: &Rc<Self>, intent: OverviewIntent) {
         let transition = controller
             .application
             .borrow_mut()
-            .complete_read(operation, result);
+            .handle_overview_intent(intent);
         if let Some(transition) = transition {
             Self::apply_transition(controller, transition);
         }
     }
 
-    fn complete_write(
-        controller: &Rc<Self>,
-        operation: BrightnessWriteOperation,
-        result: Result<lg_buddy::brightness::BrightnessWriteOutcome, BrightnessWriteError>,
-    ) {
-        let transition = controller
-            .application
-            .borrow_mut()
-            .complete_write(operation, result);
-        if let Some(transition) = transition {
-            Self::apply_transition(controller, transition);
+    fn apply_transition(controller: &Rc<Self>, transition: ApplicationTransition) {
+        if let Some(settings) = transition.settings() {
+            Self::render_settings_transition(controller, settings);
+        }
+        if let Some(tvs) = transition.tvs() {
+            Self::render_tvs_transition(controller, tvs);
+        }
+        if let Some(overview) = transition.overview() {
+            Self::render_overview_transition(controller, overview);
         }
     }
 
-    fn apply_transition(controller: &Rc<Self>, transition: BrightnessTransition) {
+    fn render_overview_transition(controller: &Rc<Self>, transition: &OverviewTransition) {
         if let Some(diagnostic) = transition.diagnostic() {
             eprintln!("LG Buddy GUI: {diagnostic}");
         }
         match transition.update() {
-            BrightnessFrontendUpdate::Present(presentation) => {
+            OverviewFrontendUpdate::Present(presentation) => {
                 controller.window.render(presentation);
-                controller.window.present();
             }
-            BrightnessFrontendUpdate::Close => controller.window.close(),
+            OverviewFrontendUpdate::Close => {
+                controller.closed.set(true);
+                controller.window.close();
+            }
         }
-
-        if let Some(operation) = transition.read_operation() {
-            Self::start_read(controller, operation);
-        }
-        if let Some(operation) = transition.write_operation() {
-            Self::start_write(controller, operation);
+        for operation in transition.operations() {
+            Self::start_operation(controller, *operation);
         }
     }
 
-    fn start_read(controller: &Rc<Self>, operation: BrightnessReadOperation) {
-        let reader = Arc::clone(&controller.reader);
+    fn navigate(controller: &Rc<Self>, page: ApplicationPage) {
+        if !controller.closed.get() {
+            controller.navigation.borrow_mut().select(page);
+            controller
+                .window
+                .navigate(controller.navigation.borrow().selected());
+            let transition = controller.application.borrow_mut().select_page(page);
+            if let Some(transition) = transition {
+                Self::apply_transition(controller, transition);
+            }
+        }
+    }
+
+    fn handle_settings_intent(controller: &Rc<Self>, intent: SettingsIntent) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_settings_intent(intent);
+        if let Some(transition) = transition {
+            Self::apply_transition(controller, transition);
+        }
+    }
+
+    fn render_settings_transition(controller: &Rc<Self>, transition: &SettingsTransition) {
+        if let Some(diagnostic) = transition.diagnostic() {
+            eprintln!("LG Buddy GUI: {diagnostic}");
+        }
+        if !controller.closed.get() {
+            controller.window.render_settings(transition.presentation());
+        }
+        if let Some(operation) = transition.read_operation() {
+            Self::start_settings_read(controller, operation);
+        }
+        if let Some(operation) = transition.mutation_operation() {
+            Self::start_settings_mutation(controller, operation.clone());
+        }
+    }
+
+    fn start_settings_mutation(controller: &Rc<Self>, operation: SettingsMutationOperation) {
+        let backend = Arc::clone(&controller.settings_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        // Keep the controller and application alive until accepted writes drain.
+        let application_hold = controller.gtk_application.hold();
+        thread::spawn(move || {
+            let result = backend.write_setting(worker_operation, &mut |_| {});
+            let _ = sender.send(result);
+        });
+        let controller = Rc::clone(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let transition = match receiver.try_recv() {
+                Ok(result) => controller
+                    .application
+                    .borrow_mut()
+                    .complete_settings_mutation(&operation, result),
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => controller
+                    .application
+                    .borrow_mut()
+                    .settings_mutation_worker_stopped(&operation),
+            };
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            let _ = &application_hold;
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn start_settings_read(controller: &Rc<Self>, operation: SettingsReadOperation) {
+        let backend = Arc::clone(&controller.settings_backend);
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
-            let _ = sender.send(reader.read_current_brightness());
+            let _ = sender.send(backend.read_settings());
         });
-
-        let controller = Rc::downgrade(controller);
+        let controller = Rc::clone(controller);
+        let application_hold = controller.gtk_application.hold();
         glib::timeout_add_local(Duration::from_millis(10), move || {
-            match receiver.try_recv() {
-                Ok(result) => {
-                    if let Some(controller) = controller.upgrade() {
-                        BrightnessController::complete_read(&controller, operation, result);
-                    }
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    if let Some(controller) = controller.upgrade() {
-                        BrightnessController::complete_read(
-                            &controller,
-                            operation,
-                            Err(BrightnessReadError::new(
-                                lg_buddy::brightness::BrightnessReadFailure::Internal,
-                                "brightness reader stopped without returning a result",
-                            )),
-                        );
-                    }
-                    glib::ControlFlow::Break
-                }
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(SettingsReadError::stopped()),
+            };
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_settings_read(operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
             }
+            let _ = &application_hold;
+            glib::ControlFlow::Break
         });
     }
 
-    fn start_write(controller: &Rc<Self>, operation: BrightnessWriteOperation) {
-        let writer = Arc::clone(&controller.writer);
+    fn handle_tvs_intent(controller: &Rc<Self>, intent: TvsIntent) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_tvs_intent(intent);
+        if let Some(transition) = transition {
+            Self::apply_transition(controller, transition);
+        }
+    }
+
+    fn render_tvs_transition(controller: &Rc<Self>, transition: &TvsTransition) {
+        if let Some(diagnostic) = transition.diagnostic() {
+            eprintln!("LG Buddy GUI: {diagnostic}");
+        }
+        if !controller.closed.get() {
+            controller.window.render_tvs(transition.presentation());
+            if let Some(message) = transition.toast_message() {
+                controller.window.show_toast(message);
+            }
+        }
+        if let Some(operation) = transition.read_operation() {
+            Self::start_tvs_read(controller, operation);
+        }
+        if let Some(operation) = transition.model_read_operation() {
+            Self::start_tvs_model_read(controller, operation.clone());
+        }
+        if let Some(operation) = transition.pairing_operation() {
+            Self::start_pairing(controller, operation.clone());
+        }
+        if let Some(operation) = transition.management_operation() {
+            Self::start_tvs_management(controller, operation.clone());
+        }
+    }
+
+    fn start_tvs_management(
+        controller: &Rc<Self>,
+        operation: lg_buddy::tvs::TvsManagementOperation,
+    ) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let worker_operation = operation.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
+        let application_hold = controller.gtk_application.hold();
+        thread::spawn(move || {
+            let _ = sender.send(backend.manage(&worker_operation));
+        });
+        let controller = Rc::clone(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(lg_buddy::tvs::TvsManagementError::stopped())
+                }
+            };
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_tvs_management(&operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            let _ = &application_hold;
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn start_pairing(controller: &Rc<Self>, operation: PairingOperation) {
+        enum Update {
+            Progress(PairingStage),
+            Done(Result<lg_buddy::tvs::TvProfile, PairingError>),
+            Stopped,
+        }
+        let backend = Arc::clone(&controller.pairing_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::channel();
+        // A started publication must finish even if the window closes.
         let mut application_hold = Some(controller.gtk_application.hold());
         thread::spawn(move || {
-            let _ = sender.send(writer.write_brightness(operation.brightness()));
+            let result = backend.pair(&worker_operation, &mut |stage| {
+                let _ = sender.send(Update::Progress(stage));
+            });
+            let _ = sender.send(Update::Done(result));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || loop {
+            let update = match receiver.try_recv() {
+                Ok(update) => update,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Update::Stopped,
+            };
+            let done = matches!(update, Update::Done(_) | Update::Stopped);
+            if let Some(controller) = controller.upgrade() {
+                let transition = match update {
+                    Update::Progress(stage) => controller
+                        .application
+                        .borrow_mut()
+                        .pairing_progress(&operation, stage),
+                    Update::Done(result) => controller
+                        .application
+                        .borrow_mut()
+                        .complete_pairing(&operation, result),
+                    Update::Stopped => controller
+                        .application
+                        .borrow_mut()
+                        .pairing_worker_stopped(&operation),
+                };
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            if done {
+                drop(application_hold.take());
+                return glib::ControlFlow::Break;
+            }
+        });
+    }
+
+    fn start_tvs_model_read(controller: &Rc<Self>, operation: TvsModelReadOperation) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let profile = operation.profile().clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.read_model_name(&profile));
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(TvsReadError::internal(
+                    "the TV model operation stopped before returning a result",
+                )),
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller
+                    .application
+                    .borrow_mut()
+                    .complete_tvs_model_read(operation.clone(), result);
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn start_tvs_read(controller: &Rc<Self>, operation: TvsReadOperation) {
+        let backend = Arc::clone(&controller.tvs_backend);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.read_profiles());
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(TvsReadError::internal(
+                    "the TV profile operation stopped before returning a result",
+                )),
+            };
+            if let Some(controller) = controller.upgrade() {
+                let transition = controller
+                    .application
+                    .borrow_mut()
+                    .complete_tvs_read(operation, result);
+                if let Some(transition) = transition {
+                    Self::apply_transition(&controller, transition);
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn start_operation(controller: &Rc<Self>, operation: OverviewOperation) {
+        let backend = Arc::clone(&controller.backend);
+        let operation_for_error = operation;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let write_operation = matches!(
+            operation,
+            OverviewOperation::WriteBrightness(_) | OverviewOperation::WriteAudio(_)
+        );
+        let mut application_hold = write_operation.then(|| controller.gtk_application.hold());
+
+        thread::spawn(move || {
+            let result = match operation {
+                OverviewOperation::ReadSummary(operation) => {
+                    OverviewCompletion::Summary(operation, backend.read_summary())
+                }
+                OverviewOperation::ReadBrightness(operation) => {
+                    OverviewCompletion::BrightnessRead(operation, backend.read_brightness())
+                }
+                OverviewOperation::ReadAudio(operation) => {
+                    OverviewCompletion::AudioRead(operation, backend.read_audio())
+                }
+                OverviewOperation::WriteBrightness(operation) => {
+                    OverviewCompletion::BrightnessWrite(
+                        operation,
+                        backend.write_brightness(operation.brightness()),
+                    )
+                }
+                OverviewOperation::WriteAudio(operation) => OverviewCompletion::AudioWrite(
+                    operation,
+                    backend.write_audio(operation.operation()),
+                ),
+            };
+            let _ = sender.send(result);
         });
 
         let controller = Rc::downgrade(controller);
@@ -244,7 +603,7 @@ impl BrightnessController {
             match receiver.try_recv() {
                 Ok(result) => {
                     if let Some(controller) = controller.upgrade() {
-                        BrightnessController::complete_write(&controller, operation, result);
+                        Self::complete(&controller, result);
                     }
                     drop(application_hold.take());
                     glib::ControlFlow::Break
@@ -252,20 +611,65 @@ impl BrightnessController {
                 Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if let Some(controller) = controller.upgrade() {
-                        BrightnessController::complete_write(
-                            &controller,
-                            operation,
-                            Err(BrightnessWriteError::new(
-                                lg_buddy::brightness::BrightnessWriteFailure::Internal,
-                                "brightness writer stopped without returning a result",
-                            )),
-                        );
+                        Self::complete(&controller, Self::disconnected_result(operation_for_error));
                     }
                     drop(application_hold.take());
                     glib::ControlFlow::Break
                 }
             }
         });
+    }
+
+    fn disconnected_result(operation: OverviewOperation) -> OverviewCompletion {
+        let message = "the Overview operation stopped before returning a result";
+        match operation {
+            OverviewOperation::ReadSummary(operation) => OverviewCompletion::Summary(
+                operation,
+                Err(OverviewSummaryError::new(
+                    lg_buddy::overview::OverviewSummaryFailure::Internal,
+                    message,
+                )),
+            ),
+            OverviewOperation::ReadBrightness(operation) => OverviewCompletion::BrightnessRead(
+                operation,
+                Err(BrightnessReadError::new(
+                    BrightnessReadFailure::Internal,
+                    message,
+                )),
+            ),
+            OverviewOperation::ReadAudio(operation) => OverviewCompletion::AudioRead(
+                operation,
+                Err(lg_buddy::overview::AudioReadError::new(
+                    lg_buddy::overview::AudioReadFailure::Internal,
+                    message,
+                )),
+            ),
+            OverviewOperation::WriteBrightness(operation) => OverviewCompletion::BrightnessWrite(
+                operation,
+                Err(BrightnessWriteError::new(
+                    BrightnessWriteFailure::Internal,
+                    message,
+                )),
+            ),
+            OverviewOperation::WriteAudio(operation) => OverviewCompletion::AudioWrite(
+                operation,
+                Err(AudioWriteError::new(
+                    AudioWriteFailure::Internal,
+                    message.to_string(),
+                    None,
+                )),
+            ),
+        }
+    }
+
+    fn complete(controller: &Rc<Self>, result: OverviewCompletion) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .complete_overview(result);
+        if let Some(transition) = transition {
+            Self::apply_transition(controller, transition);
+        }
     }
 
     fn shutdown(&self) {
@@ -273,26 +677,54 @@ impl BrightnessController {
     }
 }
 
-fn connect_brightness_application(
+fn connect_application(
     application: &adw::Application,
-    reader: Arc<dyn BrightnessReader>,
-    writer: Arc<dyn BrightnessWriter>,
+    controller: Rc<RefCell<Option<Rc<ApplicationController>>>>,
+    backend: Arc<dyn OverviewBackend>,
+    tvs_backend: Arc<dyn TvsBackend>,
+    settings_backend: Arc<dyn SettingsBackend>,
 ) {
-    let controller = Rc::new(RefCell::new(None::<Rc<BrightnessController>>));
     application.connect_activate({
         let controller = Rc::clone(&controller);
-        let reader = Arc::clone(&reader);
-        let writer = Arc::clone(&writer);
+        let backend = Arc::clone(&backend);
+        let tvs_backend = Arc::clone(&tvs_backend);
+        let settings_backend = Arc::clone(&settings_backend);
         move |application| {
             if let Some(controller) = controller.borrow().as_ref() {
+                ApplicationController::navigate(controller, ApplicationPage::Overview);
                 controller.present();
                 return;
             }
-
-            let (brightness, opening) =
-                BrightnessController::new(application, Arc::clone(&reader), Arc::clone(&writer));
-            controller.replace(Some(Rc::clone(&brightness)));
-            BrightnessController::apply_transition(&brightness, opening);
+            let (overview, opening) = ApplicationController::new(
+                application,
+                Arc::clone(&backend),
+                Arc::clone(&tvs_backend),
+                Arc::clone(&settings_backend),
+            );
+            controller.replace(Some(Rc::clone(&overview)));
+            ApplicationController::apply_transition(&overview, opening);
+            overview.present();
+        }
+    });
+    // GApplication forwards the request to the existing instance as well.
+    application.connect_command_line({
+        let controller = Rc::clone(&controller);
+        move |application, command_line| {
+            let arguments = command_line.arguments();
+            let command =
+                match parse_args(arguments.iter().skip(1).map(|arg| arg.to_string_lossy())) {
+                    Ok(command @ (GuiCommand::Overview | GuiCommand::Brightness)) => command,
+                    _ => return glib::ExitCode::FAILURE,
+                };
+            application.activate();
+            if command == GuiCommand::Brightness {
+                if let Some(controller) = controller.borrow().as_ref() {
+                    if !controller.closed.get() {
+                        controller.window.focus_brightness();
+                    }
+                }
+            }
+            glib::ExitCode::SUCCESS
         }
     });
     application.connect_shutdown(move |_| {
@@ -304,63 +736,16 @@ fn connect_brightness_application(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
-    use std::sync::{mpsc, Arc, Mutex};
-    use std::time::Duration;
-
-    use gtk::glib;
-    use gtk::prelude::*;
-    use lg_buddy::brightness::{
-        BrightnessApplication, BrightnessReadError, BrightnessReader, BrightnessWriteError,
-        BrightnessWriteOutcome, BrightnessWriter,
-    };
-    use lg_buddy::presentation::brightness::BrightnessFrontendUpdate;
-    use lg_buddy::tv::OledBrightness;
-
-    use super::{connect_brightness_application, help, parse_args, GuiCommand, GuiParseError};
-
-    struct BlockingReader {
-        results: Mutex<mpsc::Receiver<Result<OledBrightness, BrightnessReadError>>>,
-    }
-
-    struct BlockingWriter {
-        calls: mpsc::Sender<OledBrightness>,
-        results: Mutex<mpsc::Receiver<Result<BrightnessWriteOutcome, BrightnessWriteError>>>,
-    }
-
-    impl BrightnessReader for BlockingReader {
-        fn read_current_brightness(&self) -> Result<OledBrightness, BrightnessReadError> {
-            self.results
-                .lock()
-                .expect("reader lock")
-                .recv()
-                .expect("test read result")
-        }
-    }
-
-    impl BrightnessWriter for BlockingWriter {
-        fn write_brightness(
-            &self,
-            brightness: OledBrightness,
-        ) -> Result<BrightnessWriteOutcome, BrightnessWriteError> {
-            self.calls.send(brightness).expect("record write call");
-            self.results
-                .lock()
-                .expect("writer lock")
-                .recv()
-                .expect("test write result")
-        }
-    }
+    use super::{help, parse_args, GuiCommand, GuiParseError};
 
     #[test]
-    fn parses_the_brightness_command() {
+    fn parses_overview_and_brightness_entrypoints() {
         assert_eq!(parse_args(["brightness"]), Ok(GuiCommand::Brightness));
         assert_eq!(parse_args(["--version"]), Ok(GuiCommand::Version));
         assert_eq!(parse_args(["-V"]), Ok(GuiCommand::Version));
         assert_eq!(
             parse_args(std::iter::empty::<&str>()),
-            Err(GuiParseError::MissingCommand)
+            Ok(GuiCommand::Overview)
         );
         assert_eq!(
             parse_args(["settings"]),
@@ -374,295 +759,990 @@ mod tests {
         );
         assert_eq!(
             help("lg-buddy-gui"),
-            "Usage: lg-buddy-gui brightness\n       lg-buddy-gui --version\n"
+            "Usage: lg-buddy-gui [brightness]\n       lg-buddy-gui --version\n"
         );
     }
+}
 
-    #[test]
-    fn display_backed_application_remains_responsive_through_read_and_write() {
-        let (result_sender, result_receiver) = mpsc::channel();
-        let reader = Arc::new(BlockingReader {
-            results: Mutex::new(result_receiver),
-        });
-        let (write_call_sender, write_call_receiver) = mpsc::channel();
-        let write_call_receiver = Rc::new(RefCell::new(write_call_receiver));
-        let (write_result_sender, write_result_receiver) = mpsc::channel();
-        let writer = Arc::new(BlockingWriter {
-            calls: write_call_sender,
-            results: Mutex::new(write_result_receiver),
-        });
-        let application_id = format!(
-            "io.github.staphylococcus.LGBuddy.Test{}",
-            std::process::id()
-        );
+#[cfg(test)]
+pub(crate) mod controller_test_support {
+    use std::cell::Cell;
+    use std::net::Ipv4Addr;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use gtk::glib;
+    use gtk::prelude::*;
+    use lg_buddy::audio::{AudioWriteError, AudioWriteFailure, AudioWriteOutcome};
+    use lg_buddy::brightness::{BrightnessReadError, BrightnessWriteError, BrightnessWriteOutcome};
+    use lg_buddy::config::{HdmiInput, TvPlatform};
+    use lg_buddy::overview::{
+        AudioReadError, OverviewBackend, OverviewIntent, OverviewOperation, OverviewSummaryError,
+        OverviewTvIdentity,
+    };
+    use lg_buddy::tv::{AudioStatus, CurrentVolume, OledBrightness, VolumeLevel};
+
+    use super::{ApplicationController, APPLICATION_ID};
+
+    struct EmptyTvsBackend;
+    struct DefaultSettingsBackend;
+
+    impl lg_buddy::settings_view::SettingsBackend for DefaultSettingsBackend {
+        fn write_setting(
+            &self,
+            _operation: lg_buddy::settings_view::SettingsMutationOperation,
+            _progress: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+        ) -> Result<
+            lg_buddy::settings::SettingsMutationOutcome,
+            lg_buddy::settings::SettingsMutationFailure,
+        > {
+            panic!("unexpected write in a read-only test backend")
+        }
+
+        fn read_settings(
+            &self,
+        ) -> Result<
+            Vec<lg_buddy::presentation::settings::SettingsGroup>,
+            lg_buddy::settings_view::SettingsReadError,
+        > {
+            let store = lg_buddy::settings::ConfigEnvReader::parse("/unused/config.env", "");
+            Ok(
+                lg_buddy::presentation::settings::SettingsPresentation::from_store(
+                    &lg_buddy::settings::SettingsStore::from_reader(store),
+                )
+                .groups()
+                .to_vec(),
+            )
+        }
+    }
+    impl lg_buddy::tvs::TvsBackend for EmptyTvsBackend {
+        fn read_profiles(
+            &self,
+        ) -> Result<Vec<lg_buddy::tvs::TvProfile>, lg_buddy::tvs::TvsReadError> {
+            Ok(Vec::new())
+        }
+
+        fn read_model_name(
+            &self,
+            _: &lg_buddy::tvs::TvProfile,
+        ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+            panic!("an empty collection must not query a TV model")
+        }
+    }
+
+    struct BlockingTvsBackend {
+        profiles: Mutex<mpsc::Receiver<Vec<lg_buddy::tvs::TvProfile>>>,
+        model: Mutex<mpsc::Receiver<String>>,
+    }
+
+    impl lg_buddy::tvs::TvsBackend for BlockingTvsBackend {
+        fn read_profiles(
+            &self,
+        ) -> Result<Vec<lg_buddy::tvs::TvProfile>, lg_buddy::tvs::TvsReadError> {
+            Ok(self.profiles.lock().unwrap().recv().unwrap())
+        }
+
+        fn read_model_name(
+            &self,
+            _: &lg_buddy::tvs::TvProfile,
+        ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+            Ok(self.model.lock().unwrap().recv().unwrap())
+        }
+    }
+
+    type SummaryResult = Result<OverviewTvIdentity, OverviewSummaryError>;
+    type BrightnessResult = Result<OledBrightness, BrightnessReadError>;
+    type AudioResult = Result<AudioStatus, AudioReadError>;
+    type BrightnessWriteResult = Result<BrightnessWriteOutcome, BrightnessWriteError>;
+
+    pub(crate) struct BackendControls {
+        summary: mpsc::Sender<SummaryResult>,
+        brightness: mpsc::Sender<BrightnessResult>,
+        audio: mpsc::Sender<AudioResult>,
+        brightness_write: mpsc::Sender<BrightnessWriteResult>,
+        write_started: mpsc::Receiver<()>,
+    }
+
+    struct BlockingBackend {
+        summary: Mutex<mpsc::Receiver<SummaryResult>>,
+        brightness: Mutex<mpsc::Receiver<BrightnessResult>>,
+        audio: Mutex<mpsc::Receiver<AudioResult>>,
+        brightness_write: Mutex<mpsc::Receiver<BrightnessWriteResult>>,
+        write_started: mpsc::Sender<()>,
+    }
+
+    impl BlockingBackend {
+        fn new() -> (Self, BackendControls) {
+            let (summary_tx, summary_rx) = mpsc::channel();
+            let (brightness_tx, brightness_rx) = mpsc::channel();
+            let (audio_tx, audio_rx) = mpsc::channel();
+            let (brightness_write_tx, brightness_write_rx) = mpsc::channel();
+            let (write_started_tx, write_started_rx) = mpsc::channel();
+            (
+                Self {
+                    summary: Mutex::new(summary_rx),
+                    brightness: Mutex::new(brightness_rx),
+                    audio: Mutex::new(audio_rx),
+                    brightness_write: Mutex::new(brightness_write_rx),
+                    write_started: write_started_tx,
+                },
+                BackendControls {
+                    summary: summary_tx,
+                    brightness: brightness_tx,
+                    audio: audio_tx,
+                    brightness_write: brightness_write_tx,
+                    write_started: write_started_rx,
+                },
+            )
+        }
+    }
+
+    impl OverviewBackend for BlockingBackend {
+        fn read_summary(&self) -> SummaryResult {
+            self.summary
+                .lock()
+                .expect("summary receiver lock")
+                .recv()
+                .expect("summary test result")
+        }
+
+        fn read_brightness(&self) -> BrightnessResult {
+            self.brightness
+                .lock()
+                .expect("brightness receiver lock")
+                .recv()
+                .expect("brightness test result")
+        }
+
+        fn read_audio(&self) -> AudioResult {
+            self.audio
+                .lock()
+                .expect("audio receiver lock")
+                .recv()
+                .expect("audio test result")
+        }
+
+        fn write_brightness(&self, _brightness: OledBrightness) -> BrightnessWriteResult {
+            self.write_started.send(()).expect("write start receiver");
+            self.brightness_write
+                .lock()
+                .expect("brightness write receiver lock")
+                .recv()
+                .expect("brightness write test result")
+        }
+
+        fn write_audio(
+            &self,
+            _operation: lg_buddy::audio::AudioOperation,
+        ) -> Result<AudioWriteOutcome, AudioWriteError> {
+            Err(AudioWriteError::new(
+                AudioWriteFailure::Internal,
+                "audio write is not part of this controller scenario".to_string(),
+                None,
+            ))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct PanicBackend;
+
+    impl OverviewBackend for PanicBackend {
+        fn read_summary(&self) -> SummaryResult {
+            panic!("simulated summary worker panic")
+        }
+
+        fn read_brightness(&self) -> BrightnessResult {
+            unreachable!("scenario starts only the summary operation")
+        }
+
+        fn read_audio(&self) -> AudioResult {
+            unreachable!("scenario starts only the summary operation")
+        }
+
+        fn write_brightness(&self, _brightness: OledBrightness) -> BrightnessWriteResult {
+            unreachable!("scenario does not write brightness")
+        }
+
+        fn write_audio(
+            &self,
+            _operation: lg_buddy::audio::AudioOperation,
+        ) -> Result<AudioWriteOutcome, AudioWriteError> {
+            unreachable!("scenario does not write audio")
+        }
+    }
+
+    fn test_application(suffix: &str) -> adw::Application {
         let application = adw::Application::builder()
-            .application_id(application_id)
+            .application_id(format!("{APPLICATION_ID}.Controller{suffix}"))
             .build();
-        connect_brightness_application(&application, reader, writer);
-
-        let activation_count = Rc::new(Cell::new(0));
-        let first_window = Rc::new(RefCell::new(None));
-        application.connect_activate({
-            let activation_count = Rc::clone(&activation_count);
-            let first_window = Rc::clone(&first_window);
-            let write_call_receiver = Rc::clone(&write_call_receiver);
-            let write_result_sender = write_result_sender.clone();
-            move |application| {
-                let current_count = activation_count.get() + 1;
-                activation_count.set(current_count);
-
-                let windows = application.windows();
-                assert_eq!(windows.len(), 1);
-                let window = windows[0].clone();
-                if current_count == 1 {
-                    super::brightness::assert_loading_window(
-                        &window,
-                        &lg_buddy::presentation::brightness::BrightnessPresentation::loading(),
-                    );
-                    super::brightness::assert_renderer_contract(application);
-                    first_window.replace(Some(window.clone()));
-                    let sender = result_sender.clone();
-                    glib::idle_add_local_once(move || {
-                        sender
-                            .send(Ok(OledBrightness::new(72).expect("valid brightness")))
-                            .expect("send read result");
-                    });
-                    wait_for_ready_then_apply(application.clone(), window);
-                } else {
-                    assert_eq!(first_window.borrow().as_ref(), Some(&window));
-                    let presentation = applying_presentation(72, 65);
-                    super::brightness::assert_applying_window(&window, &presentation);
-                    wait_for_write_then_complete(
-                        Rc::clone(&write_call_receiver),
-                        write_result_sender.clone(),
-                    );
-                }
-            }
-        });
-
-        let exit_code = application.run_with_args(&["lg-buddy-gui-test"]);
-
-        assert_eq!(exit_code, glib::ExitCode::SUCCESS);
-        assert_eq!(activation_count.get(), 2);
-        assert!(application.windows().is_empty());
-
-        assert_cancel_waits_for_an_in_flight_write_to_settle();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .expect("register controller application");
+        application
     }
 
-    fn assert_cancel_waits_for_an_in_flight_write_to_settle() {
-        let (read_result_sender, read_result_receiver) = mpsc::channel();
-        let reader = Arc::new(BlockingReader {
-            results: Mutex::new(read_result_receiver),
-        });
-        let (write_call_sender, write_call_receiver) = mpsc::channel();
-        let write_call_receiver = Rc::new(RefCell::new(write_call_receiver));
-        let (write_result_sender, write_result_receiver) = mpsc::channel();
-        let writer = Arc::new(BlockingWriter {
-            calls: write_call_sender,
-            results: Mutex::new(write_result_receiver),
-        });
-        let application_id = format!(
-            "io.github.staphylococcus.LGBuddy.CancelTest{}",
-            std::process::id()
+    pub(crate) fn pump_until(mut ready: impl FnMut() -> bool) {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready() {
+            while context.pending() {
+                context.iteration(false);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for GTK operation"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn pump_for(duration: Duration) {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            while context.pending() {
+                context.iteration(false);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn widget_contains_text(widget: &gtk::Widget, expected: &str) -> bool {
+        if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+            if label.label().contains(expected) {
+                return true;
+            }
+        }
+        if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+            if entry.text() == expected {
+                return true;
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if widget_contains_text(&current, expected) {
+                return true;
+            }
+            child = current.next_sibling();
+        }
+        false
+    }
+
+    fn scale_count(widget: &gtk::Widget) -> usize {
+        let own =
+            usize::from(widget.is_visible() && widget.clone().downcast::<gtk::Scale>().is_ok());
+        let mut total = own;
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            total += scale_count(&current);
+            child = current.next_sibling();
+        }
+        total
+    }
+
+    fn find_operation(
+        operations: &[OverviewOperation],
+        matches: impl Fn(OverviewOperation) -> bool,
+    ) -> OverviewOperation {
+        operations
+            .iter()
+            .copied()
+            .find(|operation| matches(*operation))
+            .expect("expected Overview operation")
+    }
+
+    pub(crate) fn run_scenario() {
+        assert!(
+            gtk::is_initialized(),
+            "renderer test must initialize GTK first"
         );
-        let application = adw::Application::builder()
-            .application_id(application_id)
-            .build();
-        connect_brightness_application(&application, reader, writer);
+        run_pairing_scenario();
+        run_settings_scenario();
+        run_settings_write_scenario();
 
-        let completion_sent = Rc::new(Cell::new(false));
-        application.connect_activate({
-            let write_call_receiver = Rc::clone(&write_call_receiver);
-            let completion_sent = Rc::clone(&completion_sent);
-            move |application| {
-                let windows = application.windows();
-                assert_eq!(windows.len(), 1);
-                let window = windows[0].clone();
-                let sender = read_result_sender.clone();
-                glib::idle_add_local_once(move || {
-                    sender
-                        .send(Ok(OledBrightness::new(72).expect("valid brightness")))
-                        .expect("send read result");
-                });
-                wait_for_ready_then_cancel(
-                    application.clone(),
-                    window,
-                    Rc::clone(&write_call_receiver),
-                    write_result_sender.clone(),
-                    Rc::clone(&completion_sent),
-                );
-            }
-        });
+        let (backend, controls) = BlockingBackend::new();
+        let application = test_application("Blocking");
+        let (profiles_tx, profiles_rx) = mpsc::channel();
+        let (model_tx, model_rx) = mpsc::channel();
+        let (controller, opening) = ApplicationController::new(
+            &application,
+            Arc::new(backend),
+            Arc::new(BlockingTvsBackend {
+                profiles: Mutex::new(profiles_rx),
+                model: Mutex::new(model_rx),
+            }),
+            Arc::new(DefaultSettingsBackend),
+        );
+        ApplicationController::apply_transition(&controller, opening.clone());
+        let native_window = controller.window.window();
+        controller.present();
+        controller.present();
+        assert_eq!(controller.window.window(), native_window);
+        assert_eq!(application.windows().len(), 1);
 
-        let exit_code = application.run_with_args(&["lg-buddy-gui-cancel-test"]);
-
-        assert_eq!(exit_code, glib::ExitCode::SUCCESS);
-        assert!(completion_sent.get());
-        assert!(application.windows().is_empty());
-    }
-
-    fn wait_for_ready_then_apply(application: adw::Application, window: gtk::Window) {
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            let Some(scale) = window.child().and_then(|content| find_scale(&content)) else {
-                return glib::ControlFlow::Continue;
-            };
-            if scale.is_sensitive() {
-                scale.set_value(65.0);
-                let apply = window
-                    .child()
-                    .and_then(|content| find_button(&content, "_Apply"))
-                    .expect("ready window should have Apply");
-                assert!(apply.is_sensitive());
-                apply.emit_clicked();
-                super::brightness::assert_applying_window(&window, &applying_presentation(72, 65));
-                application.activate();
-                glib::ControlFlow::Break
-            } else {
+        let heartbeat = std::rc::Rc::new(Cell::new(0usize));
+        let heartbeat_source = glib::timeout_add_local(Duration::from_millis(5), {
+            let heartbeat = std::rc::Rc::clone(&heartbeat);
+            move || {
+                heartbeat.set(heartbeat.get() + 1);
                 glib::ControlFlow::Continue
             }
         });
-    }
+        pump_until(|| heartbeat.get() >= 2);
 
-    fn wait_for_write_then_complete(
-        calls: Rc<RefCell<mpsc::Receiver<OledBrightness>>>,
-        results: mpsc::Sender<Result<BrightnessWriteOutcome, BrightnessWriteError>>,
-    ) {
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            match calls.borrow().try_recv() {
-                Ok(brightness) => {
-                    assert_eq!(brightness.as_percent(), 65);
-                    assert!(calls.borrow().try_recv().is_err());
-                    results
-                        .send(Ok(BrightnessWriteOutcome::applied()))
-                        .expect("send write result");
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    panic!("writer disconnected before recording a call")
-                }
-            }
+        controls
+            .summary
+            .send(Ok(OverviewTvIdentity::new(
+                Ipv4Addr::new(192, 0, 2, 1),
+                HdmiInput::Hdmi1,
+                TvPlatform::LgWebOs,
+            )))
+            .expect("summary result receiver");
+        pump_until(|| widget_contains_text(&controller.window.window().upcast(), "192.0.2.1"));
+
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        pump_for(Duration::from_millis(30));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Tvs
+        );
+        profiles_tx
+            .send(vec![lg_buddy::tvs::TvProfile::new(
+                "primary",
+                "Primary TV",
+                Ipv4Addr::new(192, 0, 2, 1),
+                "aa:bb:cc:dd:ee:ff".parse().unwrap(),
+                HdmiInput::Hdmi1,
+                TvPlatform::LgWebOs,
+                lg_buddy::tvs::TvCredentialState::Stored,
+            )])
+            .unwrap();
+        pump_until(|| widget_contains_text(&native_window.clone().upcast(), "Primary TV"));
+        let tvs_focus = gtk::prelude::GtkWindowExt::focus(&native_window);
+
+        controls
+            .brightness
+            .send(Ok(OledBrightness::new(50).expect("valid brightness")))
+            .expect("brightness result receiver");
+        pump_until(|| scale_count(&controller.window.window().upcast()) == 1);
+
+        controls
+            .audio
+            .send(Ok(AudioStatus::new(
+                CurrentVolume::Level(VolumeLevel::new(20).expect("valid volume")),
+                true,
+            )))
+            .expect("audio result receiver");
+        pump_until(|| scale_count(&controller.window.window().upcast()) == 2);
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Tvs
+        );
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&native_window),
+            tvs_focus,
+            "background Overview reads must preserve focus on TVs"
+        );
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Overview);
+        model_tx.send("OLED42C2".to_string()).unwrap();
+        pump_until(|| widget_contains_text(&native_window.clone().upcast(), "OLED42C2"));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Overview,
+            "a background model result must not change the active page"
+        );
+        assert!(
+            heartbeat.get() >= 2,
+            "GTK heartbeat must run while reads are pending"
+        );
+
+        ApplicationController::handle_intent(&controller, OverviewIntent::SetBrightness(55));
+        pump_until(|| controls.write_started.try_recv().is_ok());
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Overview);
+        assert!(
+            controls.write_started.try_recv().is_err(),
+            "navigation must not submit another write"
+        );
+
+        let heartbeat_before_close = heartbeat.get();
+        ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
+        assert!(controller.closed.get(), "Cancel closes the view");
+        controller.present();
+        assert!(controller.closed.get(), "closed view must not reactivate");
+        pump_for(Duration::from_millis(30));
+        assert!(
+            heartbeat.get() > heartbeat_before_close,
+            "pending write keeps GTK alive"
+        );
+
+        controls
+            .brightness_write
+            .send(Ok(BrightnessWriteOutcome::applied()))
+            .expect("write result receiver");
+        pump_for(Duration::from_millis(40));
+        assert!(
+            controller.closed.get(),
+            "late completion must not reopen view"
+        );
+        heartbeat_source.remove();
+
+        let panic_application = test_application("Panic");
+        let (panic_controller, panic_opening) = ApplicationController::new(
+            &panic_application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            Arc::new(DefaultSettingsBackend),
+        );
+        let panic_opening = panic_opening.overview().unwrap();
+        let initial = match panic_opening.update() {
+            super::OverviewFrontendUpdate::Present(presentation) => presentation.clone(),
+            super::OverviewFrontendUpdate::Close => panic!("opening must present"),
+        };
+        panic_controller.window.render(&initial);
+        let summary_operation = find_operation(panic_opening.operations(), |operation| {
+            matches!(operation, OverviewOperation::ReadSummary(_))
         });
+        ApplicationController::start_operation(&panic_controller, summary_operation);
+        pump_until(|| {
+            widget_contains_text(
+                &panic_controller.window.window().upcast(),
+                "LG Buddy could not load the primary TV.",
+            )
+        });
+        panic_controller.window.close();
+        assert_cancel_waits_for_write_in_application_loop();
     }
 
-    fn wait_for_ready_then_cancel(
-        application: adw::Application,
-        window: gtk::Window,
-        calls: Rc<RefCell<mpsc::Receiver<OledBrightness>>>,
-        results: mpsc::Sender<Result<BrightnessWriteOutcome, BrightnessWriteError>>,
-        completion_sent: Rc<Cell<bool>>,
-    ) {
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            let Some(scale) = window.child().and_then(|content| find_scale(&content)) else {
-                return glib::ControlFlow::Continue;
-            };
-            if !scale.is_sensitive() {
-                return glib::ControlFlow::Continue;
+    fn run_settings_scenario() {
+        use lg_buddy::presentation::settings::{SettingsGroup, SettingsPresentation};
+        use lg_buddy::settings::ConfigEnvReader;
+        use lg_buddy::settings_view::{SettingsBackend, SettingsReadError};
+
+        struct SettingsMock(
+            Mutex<std::collections::VecDeque<Result<Vec<SettingsGroup>, SettingsReadError>>>,
+        );
+        impl SettingsBackend for SettingsMock {
+            fn write_setting(
+                &self,
+                _operation: lg_buddy::settings_view::SettingsMutationOperation,
+                _progress: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+            ) -> Result<
+                lg_buddy::settings::SettingsMutationOutcome,
+                lg_buddy::settings::SettingsMutationFailure,
+            > {
+                panic!("unexpected write in a read-only test backend")
             }
 
-            scale.set_value(65.0);
-            window
-                .child()
-                .and_then(|content| find_button(&content, "_Apply"))
-                .expect("ready window should have Apply")
-                .emit_clicked();
-            wait_for_write_then_cancel(
-                application.clone(),
-                window.clone(),
-                Rc::clone(&calls),
-                results.clone(),
-                Rc::clone(&completion_sent),
+            fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("expected settings read")
+            }
+        }
+        fn settings(timeout: u32) -> Vec<SettingsGroup> {
+            let store = ConfigEnvReader::parse(
+                "/unused/config.env",
+                &format!("screen_idle_timeout={timeout}\n"),
+            )
+            .into_store();
+            SettingsPresentation::from_store(&store).groups().to_vec()
+        }
+        fn retry_button(widget: &gtk::Widget) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                if button.label().as_deref() == Some("Retry") && button.is_visible() {
+                    return Some(button.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(button) = retry_button(&current) {
+                    return Some(button);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+
+        let application = test_application("Settings");
+        let backend = std::sync::Arc::new(SettingsMock(Mutex::new(
+            std::collections::VecDeque::from([
+                Err(SettingsReadError::unreadable("test settings read failure")),
+                Ok(settings(600)),
+                Ok(settings(120)),
+            ]),
+        )));
+        let (controller, opening) = ApplicationController::new(
+            &application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            backend,
+        );
+        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        controller.present();
+        let native = controller.window.window();
+        pump_until(|| {
+            widget_contains_text(native.upcast_ref(), "LG Buddy could not read its settings")
+        });
+        retry_button(native.upcast_ref())
+            .expect("visible Retry button")
+            .emit_clicked();
+        pump_until(|| widget_contains_text(native.upcast_ref(), "600"));
+        assert_eq!(
+            controller.navigation.borrow().selected(),
+            super::ApplicationPage::Settings
+        );
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        pump_until(|| widget_contains_text(native.upcast_ref(), "120"));
+        controller.shutdown();
+        controller.window.close();
+    }
+
+    fn run_settings_write_scenario() {
+        use adw::prelude::{ComboRowExt, PreferencesRowExt};
+        use lg_buddy::settings::{
+            execute_settings_mutation, SettingsApplier, SettingsMutation, SettingsMutationFailure,
+            SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
+        };
+        use lg_buddy::settings_view::{
+            BehaviorSetting, SettingsMutationOperation, SettingsMutationRequest,
+        };
+        struct SettingsWriter {
+            path: std::path::PathBuf,
+            started: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            panic_after_save: bool,
+        }
+        impl lg_buddy::settings_view::SettingsBackend for SettingsWriter {
+            fn read_settings(
+                &self,
+            ) -> Result<
+                Vec<lg_buddy::presentation::settings::SettingsGroup>,
+                lg_buddy::settings_view::SettingsReadError,
+            > {
+                Ok(
+                    lg_buddy::presentation::settings::SettingsPresentation::from_store(
+                        &SettingsStore::load(&self.path).unwrap(),
+                    )
+                    .groups()
+                    .to_vec(),
+                )
+            }
+            fn write_setting(
+                &self,
+                operation: SettingsMutationOperation,
+                progress: &mut dyn FnMut(SettingsMutationStage),
+            ) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
+                progress(SettingsMutationStage::Validating);
+                self.started.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                let SettingsMutationRequest::Set(value) = operation.request() else {
+                    unreachable!()
+                };
+                let mutation = SettingsMutation::set(
+                    &SettingsStore::load(&self.path).unwrap(),
+                    operation.key_name(),
+                    value,
+                )
+                .unwrap();
+                // updates.channel has no systemd action, so this fake never touches host services.
+                let result = execute_settings_mutation(
+                    &self.path,
+                    mutation,
+                    &SettingsApplier::from_env(),
+                    progress,
+                );
+                assert!(
+                    !self.panic_after_save,
+                    "test worker stopped after publication"
+                );
+                result
+            }
+        }
+        fn update_channel(widget: &gtk::Widget) -> Option<adw::ComboRow> {
+            if let Some(row) = widget.downcast_ref::<adw::ComboRow>() {
+                if row.title() == "Update channel" {
+                    return Some(row.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(row) = update_channel(&current) {
+                    return Some(row);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        for (suffix, panic_after_save, close_pending, queued) in [
+            ("SettingsWrite", false, false, false),
+            ("SettingsStopped", true, false, false),
+            ("SettingsClose", false, true, false),
+            ("SettingsQueuedClose", false, true, true),
+        ] {
+            let path =
+                std::env::temp_dir().join(format!("lg-buddy-{suffix}-{}.env", std::process::id()));
+            std::fs::write(&path, "updates_channel=stable\n").unwrap();
+            let application = test_application(suffix);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (controller, opening) = ApplicationController::new(
+                &application,
+                Arc::new(PanicBackend),
+                Arc::new(EmptyTvsBackend),
+                Arc::new(SettingsWriter {
+                    path: path.clone(),
+                    started: started_tx,
+                    release: Mutex::new(release_rx),
+                    panic_after_save,
+                }),
             );
-            glib::ControlFlow::Break
-        });
+            ApplicationController::render_settings_transition(
+                &controller,
+                opening.settings().unwrap(),
+            );
+            controller
+                .window
+                .choose_page(super::ApplicationPage::Settings);
+            controller.present();
+            let native = controller.window.window();
+            pump_until(|| widget_contains_text(native.upcast_ref(), "Stable"));
+            ApplicationController::handle_settings_intent(
+                &controller,
+                lg_buddy::settings_view::SettingsIntent::Commit {
+                    setting: BehaviorSetting::UpdatesChannel,
+                    value: "prerelease".into(),
+                },
+            );
+            pump_until(|| started_rx.try_recv().is_ok());
+            assert!(std::fs::read_to_string(&path).unwrap().contains("stable"));
+            assert!(update_channel(native.upcast_ref()).unwrap().is_sensitive());
+            if queued {
+                ApplicationController::handle_settings_intent(
+                    &controller,
+                    lg_buddy::settings_view::SettingsIntent::Commit {
+                        setting: BehaviorSetting::UpdatesChannel,
+                        value: "stable".into(),
+                    },
+                );
+            }
+            pump_for(Duration::from_millis(20));
+            if close_pending {
+                ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
+                assert!(controller.closed.get());
+            }
+            release_tx.send(()).unwrap();
+            pump_until(|| {
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("prerelease")
+            });
+            if queued {
+                pump_until(|| started_rx.try_recv().is_ok());
+                release_tx.send(()).unwrap();
+                pump_until(|| std::fs::read_to_string(&path).unwrap().contains("stable"));
+            }
+            if close_pending {
+                pump_for(Duration::from_millis(30));
+                assert!(
+                    controller.closed.get(),
+                    "late completion must not reopen Settings"
+                );
+            } else {
+                pump_until(|| widget_contains_text(native.upcast_ref(), "Prerelease"));
+                if panic_after_save {
+                    pump_until(|| {
+                        widget_contains_text(native.upcast_ref(), "The setting was saved, but runtime apply could not be confirmed. Retry apply.")
+                    });
+                } else {
+                    pump_until(|| {
+                        update_channel(native.upcast_ref())
+                            .is_some_and(|row| row.selected() == 1 && row.is_sensitive())
+                    });
+                }
+                controller.shutdown();
+            }
+            controller.window.close();
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
-    fn wait_for_write_then_cancel(
-        application: adw::Application,
-        window: gtk::Window,
-        calls: Rc<RefCell<mpsc::Receiver<OledBrightness>>>,
-        results: mpsc::Sender<Result<BrightnessWriteOutcome, BrightnessWriteError>>,
-        completion_sent: Rc<Cell<bool>>,
-    ) {
-        glib::timeout_add_local(Duration::from_millis(10), move || {
-            match calls.borrow().try_recv() {
-                Ok(brightness) => {
-                    assert_eq!(brightness.as_percent(), 65);
-                    window
-                        .child()
-                        .and_then(|content| find_button(&content, "_Cancel"))
-                        .expect("applying window should have Cancel")
-                        .emit_clicked();
+    fn run_pairing_scenario() {
+        use lg_buddy::pairing::{
+            PairingBackend, PairingError, PairingFailure, PairingIntent, PairingOperation,
+            PairingStage,
+        };
+        use lg_buddy::tvs::{TvCredentialState, TvId, TvProfile, TvsIntent};
+        struct PairingMock {
+            release: Mutex<mpsc::Receiver<()>>,
+            reject: bool,
+            panic: bool,
+        }
+        impl PairingBackend for PairingMock {
+            fn pair(
+                &self,
+                operation: &PairingOperation,
+                progress: &mut dyn FnMut(PairingStage),
+            ) -> Result<TvProfile, PairingError> {
+                assert!(!gtk::is_initialized_main_thread());
+                progress(PairingStage::WaitingForConfirmation);
+                self.release.lock().unwrap().recv().unwrap();
+                if operation.is_cancelled() {
+                    return Err(PairingError::new(PairingFailure::Cancelled));
+                }
+                assert!(!self.panic, "injected pairing worker failure");
+                if self.reject {
+                    return Err(PairingError::new(PairingFailure::Rejected));
+                }
+                progress(PairingStage::Verifying);
+                let request = operation.request();
+                Ok(TvProfile::new(
+                    TvId::primary(),
+                    "Primary TV",
+                    request.address(),
+                    request.mac(),
+                    request.input(),
+                    TvPlatform::LgWebOs,
+                    TvCredentialState::Stored,
+                ))
+            }
+        }
+        struct TvsMock;
+        impl lg_buddy::tvs::TvsBackend for TvsMock {
+            fn read_profiles(&self) -> Result<Vec<TvProfile>, lg_buddy::tvs::TvsReadError> {
+                Ok(vec![])
+            }
+            fn read_model_name(
+                &self,
+                _: &TvProfile,
+            ) -> Result<String, lg_buddy::tvs::TvsReadError> {
+                Ok("Test OLED".into())
+            }
+        }
+        for (cancel, reject, panic, name) in [
+            (false, false, false, "PairSuccess"),
+            (true, false, false, "PairCancel"),
+            (false, true, false, "PairRejected"),
+            (false, false, true, "PairWorkerStopped"),
+        ] {
+            let application = test_application(name);
+            let (backend, controls) = BlockingBackend::new();
+            let (release, receiver) = mpsc::channel();
+            let (controller, opening) = ApplicationController::with_backends(
+                &application,
+                Arc::new(backend),
+                Arc::new(TvsMock),
+                Arc::new(PairingMock {
+                    release: Mutex::new(receiver),
+                    reject,
+                    panic,
+                }),
+                Arc::new(DefaultSettingsBackend),
+            );
+            ApplicationController::render_tvs_transition(&controller, opening.tvs().unwrap());
+            controller.present();
+            ApplicationController::navigate(
+                &controller,
+                lg_buddy::navigation::ApplicationPage::Tvs,
+            );
+            pump_until(|| {
+                widget_contains_text(controller.window.window().upcast_ref(), "No TV configured")
+            });
+            for intent in [
+                TvsIntent::PairTv,
+                TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
+                TvsIntent::Pairing(PairingIntent::SetMac("02:11:22:33:44:55".into())),
+                TvsIntent::Pairing(PairingIntent::Submit),
+            ] {
+                ApplicationController::handle_tvs_intent(&controller, intent);
+            }
+            pump_until(|| {
+                widget_contains_text(
+                    controller.window.window().upcast_ref(),
+                    "Confirm on Your TV",
+                )
+            });
+            assert!(!widget_contains_text(
+                controller.window.window().upcast_ref(),
+                "TV paired successfully",
+            ));
+            if cancel {
+                assert!(controller.window.dismiss_dialog());
+                assert!(!controller.closed.get());
+                release.send(()).unwrap();
+                pump_for(Duration::from_millis(60));
+                assert!(!controller.application.borrow().is_pairing());
+            } else if reject || panic {
+                release.send(()).unwrap();
+                pump_until(|| {
+                    widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Could Not Pair TV",
+                    )
+                });
+                assert!(controller.application.borrow().is_pairing());
+                if panic {
+                    assert!(widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Pairing stopped unexpectedly",
+                    ));
+                    assert!(!widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Check the IP address",
+                    ));
+                }
+            } else {
+                release.send(()).unwrap();
+                controls
+                    .summary
+                    .send(Ok(OverviewTvIdentity::new(
+                        "192.0.2.10".parse().unwrap(),
+                        HdmiInput::Hdmi1,
+                        TvPlatform::LgWebOs,
+                    )))
+                    .unwrap();
+                controls
+                    .brightness
+                    .send(Ok(OledBrightness::new(50).unwrap()))
+                    .unwrap();
+                controls
+                    .audio
+                    .send(Ok(AudioStatus::new(
+                        CurrentVolume::Level(VolumeLevel::new(25).unwrap()),
+                        false,
+                    )))
+                    .unwrap();
+                pump_until(|| {
+                    widget_contains_text(controller.window.window().upcast_ref(), "Test OLED")
+                });
+                assert!(!controller.application.borrow().is_pairing());
+                assert_eq!(
+                    controller.navigation.borrow().selected(),
+                    lg_buddy::navigation::ApplicationPage::Tvs
+                );
+            }
+            assert_eq!(
+                widget_contains_text(
+                    controller.window.window().upcast_ref(),
+                    "TV paired successfully",
+                ),
+                !cancel && !reject && !panic,
+                "only successful pairing should show the confirmation toast",
+            );
+            ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
+            assert!(controller.closed.get());
+        }
+    }
+
+    fn assert_cancel_waits_for_write_in_application_loop() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let (backend, controls) = BlockingBackend::new();
+        let application = test_application("WriteHold");
+        let controller = Rc::new(RefCell::new(None));
+        super::install_application_actions(&application, Rc::clone(&controller));
+        super::connect_application(
+            &application,
+            Rc::clone(&controller),
+            Arc::new(backend),
+            Arc::new(EmptyTvsBackend),
+            Arc::new(DefaultSettingsBackend),
+        );
+        controls
+            .summary
+            .send(Ok(OverviewTvIdentity::new(
+                Ipv4Addr::LOCALHOST,
+                HdmiInput::Hdmi1,
+                TvPlatform::Bscpylgtv,
+            )))
+            .unwrap();
+        controls
+            .brightness
+            .send(Ok(OledBrightness::new(50).unwrap()))
+            .unwrap();
+        controls
+            .audio
+            .send(Ok(AudioStatus::new(CurrentVolume::Unknown, false)))
+            .unwrap();
+
+        let controls = Rc::new(controls);
+        let completion_sent = Rc::new(Cell::new(false));
+        let activations = Rc::new(Cell::new(0));
+        application.connect_activate({
+            let controller = Rc::clone(&controller);
+            let controls = Rc::clone(&controls);
+            let completion_sent = Rc::clone(&completion_sent);
+            let activations = Rc::clone(&activations);
+            move |application| {
+                activations.set(activations.get() + 1);
+                if activations.get() > 1 {
+                    return;
+                }
+                assert_eq!(application.windows().len(), 1);
+                let application = application.clone();
+                let controller = Rc::clone(&controller);
+                let controls = Rc::clone(&controls);
+                let completion_sent = Rc::clone(&completion_sent);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut issued = false;
+                glib::timeout_add_local(Duration::from_millis(5), move || {
+                    assert!(Instant::now() < deadline, "write did not start");
+                    let controller = controller.borrow().as_ref().unwrap().clone();
+                    if !issued && scale_count(&controller.window.window().upcast()) == 1 {
+                        ApplicationController::handle_intent(
+                            &controller,
+                            OverviewIntent::SetBrightness(55),
+                        );
+                        issued = true;
+                    }
+                    if controls.write_started.try_recv().is_err() {
+                        return glib::ControlFlow::Continue;
+                    }
+                    application.activate();
+                    assert_eq!(application.windows().len(), 1);
+                    application.activate_action("quit", None);
                     assert!(application.windows().is_empty());
-                    let results = results.clone();
+                    application.activate();
+                    assert!(
+                        application.windows().is_empty(),
+                        "closed view must not reopen while write settles"
+                    );
+                    let controls = Rc::clone(&controls);
                     let completion_sent = Rc::clone(&completion_sent);
-                    glib::timeout_add_local_once(Duration::from_millis(25), move || {
+                    glib::timeout_add_local_once(Duration::from_millis(30), move || {
                         completion_sent.set(true);
-                        results
-                            .send(Ok(BrightnessWriteOutcome::applied()))
-                            .expect("send write result after cancellation");
+                        controls
+                            .brightness_write
+                            .send(Ok(BrightnessWriteOutcome::Applied))
+                            .unwrap();
                     });
                     glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    panic!("writer disconnected before recording a call")
-                }
+                });
             }
         });
-    }
-
-    fn find_scale(widget: &gtk::Widget) -> Option<gtk::Scale> {
-        if widget.is::<gtk::Scale>() {
-            return widget.clone().downcast().ok();
-        }
-        let mut child = widget.first_child();
-        while let Some(current) = child {
-            if let Some(scale) = find_scale(&current) {
-                return Some(scale);
-            }
-            child = current.next_sibling();
-        }
-        None
-    }
-
-    fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
-        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
-            if button.label().as_deref() == Some(label) {
-                return Some(button);
-            }
-        }
-        let mut child = widget.first_child();
-        while let Some(current) = child {
-            if let Some(button) = find_button(&current, label) {
-                return Some(button);
-            }
-            child = current.next_sibling();
-        }
-        None
-    }
-
-    fn applying_presentation(
-        current: u8,
-        proposed: u8,
-    ) -> lg_buddy::presentation::brightness::BrightnessPresentation {
-        let (mut application, opening) = BrightnessApplication::open();
-        let read = opening.read_operation().expect("opening read");
-        application
-            .complete_read(
-                read,
-                Ok(OledBrightness::new(current).expect("valid brightness")),
-            )
-            .expect("ready transition");
-        application
-            .handle_intent(lg_buddy::presentation::brightness::BrightnessIntent::Propose(proposed))
-            .expect("proposal transition");
-        let transition = application
-            .handle_intent(lg_buddy::presentation::brightness::BrightnessIntent::Apply)
-            .expect("applying transition");
-        let BrightnessFrontendUpdate::Present(presentation) = transition.update() else {
-            panic!("applying transition should present");
-        };
-        presentation.clone()
+        assert_eq!(
+            application.run_with_args(&["overview-write-hold-test"]),
+            glib::ExitCode::SUCCESS
+        );
+        assert!(
+            completion_sent.get(),
+            "application exited before the dispatched write settled"
+        );
+        assert_eq!(activations.get(), 3);
+        assert!(application.windows().is_empty());
     }
 }

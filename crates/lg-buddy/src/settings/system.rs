@@ -17,7 +17,7 @@ pub(super) const SLEEP_WAKE_POLICY: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RuntimePolicyOnly,
-    description: "System sleep and wake policy for lifecycle hooks.",
+    description: "Power off the TV before the computer sleeps and restore it after waking.",
 };
 
 #[cfg(test)]

@@ -9,6 +9,15 @@ use super::{
 pub struct SettingsFormatter;
 
 impl SettingsFormatter {
+    pub fn write_mutation_outcome<W: io::Write>(
+        &self,
+        writer: &mut W,
+        outcome: &super::SettingsMutationOutcome,
+    ) -> Result<(), SettingsError> {
+        let apply = outcome.apply().as_ref().map_err(Clone::clone)?;
+        self.write_change(writer, outcome.change(), apply)
+    }
+
     pub fn write_get<W: io::Write>(
         &self,
         writer: &mut W,

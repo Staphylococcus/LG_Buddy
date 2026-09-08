@@ -14,7 +14,7 @@ REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="$(mktemp -d)"
 STATE_FILE="$WORK_DIR/tv-state.json"
 MOCK_COMMAND="$WORK_DIR/bscpylgtvcommand"
-WINDOW_TITLE="LG TV Brightness"
+WINDOW_TITLE="LG Buddy"
 GUI_PID=""
 WINDOW_ID=""
 ACCESSIBILITY_BUS_PID=""
@@ -27,6 +27,10 @@ fail() {
 }
 
 cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ -f "$WORK_DIR/gui.output" ]; then
+        cat "$WORK_DIR/gui.output" >&2
+    fi
     if [ -n "$GUI_PID" ] && kill -0 "$GUI_PID" 2>/dev/null; then
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
@@ -48,6 +52,7 @@ trap cleanup EXIT
 [ -n "${DISPLAY:-}" ] || fail "DISPLAY is required for GUI behavior smoke."
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || fail "A D-Bus session is required for GUI behavior smoke."
 command -v xdotool >/dev/null || fail "xdotool is required for GUI behavior smoke."
+command -v flock >/dev/null || fail "flock is required to serialize the state-file mock."
 
 cp "$CONFIG_FILE" "$WORK_DIR/config.env"
 CONFIG_FILE="$WORK_DIR/config.env"
@@ -59,16 +64,29 @@ fi
 
 cat >"$MOCK_COMMAND" <<EOF
 #!/bin/sh
-exec python3 "$REPOSITORY_ROOT/tools/mock_bscpylgtvcommand.py" --state "$STATE_FILE" "\$@"
+exec flock "$STATE_FILE.lock" python3 "$REPOSITORY_ROOT/tools/mock_bscpylgtvcommand.py" --state "$STATE_FILE" "\$@"
 EOF
 chmod 755 "$MOCK_COMMAND"
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
 export LG_BUDDY_BSCPYLGTV_COMMAND="$MOCK_COMMAND"
 
+reset_tv_state() {
+    # Cancelled reads may still finish after the GUI exits. Serialize resets
+    # with their writes so an old snapshot cannot replace the next scenario.
+    flock "$STATE_FILE.lock" tee "$STATE_FILE" >/dev/null
+}
+
 start_gui() {
     local accessibility="${1:-disabled}"
     local color_scheme="${2:-}"
     local scale="${3:-}"
+    local entrypoint="${4:-brightness}"
+    local -a gui_arguments=()
+    if [ "$entrypoint" = "brightness" ]; then
+        gui_arguments=(brightness)
+    elif [ "$entrypoint" != "normal" ]; then
+        fail "Unknown GUI smoke entrypoint: $entrypoint"
+    fi
     local -a gui_environment=(
         ADW_DISABLE_PORTAL=1
         GDK_BACKEND=x11
@@ -79,10 +97,10 @@ start_gui() {
     WINDOW_ID=""
     if [ "$accessibility" = "enabled" ]; then
         env -u NO_AT_BRIDGE "${gui_environment[@]}" \
-            "$RUNTIME_BINARY" brightness >"$WORK_DIR/gui.output" 2>&1 &
+            "$RUNTIME_BINARY" "${gui_arguments[@]}" >"$WORK_DIR/gui.output" 2>&1 &
     else
         env "${gui_environment[@]}" NO_AT_BRIDGE=1 \
-            "$RUNTIME_BINARY" brightness >"$WORK_DIR/gui.output" 2>&1 &
+            "$RUNTIME_BINARY" "${gui_arguments[@]}" >"$WORK_DIR/gui.output" 2>&1 &
     fi
     GUI_PID=$!
     for ((attempt = 0; attempt < 300; attempt++)); do
@@ -128,9 +146,9 @@ finish_gui() {
     done
     if kill -0 "$GUI_PID" 2>/dev/null; then
         if xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" >/dev/null 2>&1; then
-            echo "Brightness window remained visible; the closing action was not observed." >&2
+            echo "Overview remained visible; the closing action was not observed." >&2
         else
-            echo "Brightness window closed, but the GUI process remained alive." >&2
+            echo "Overview closed, but the GUI process remained alive." >&2
         fi
         if [ -s "$WORK_DIR/gui.output" ]; then
             echo "GUI output for $scenario:" >&2
@@ -202,20 +220,86 @@ observe_gui_state() {
         --timeout 30 "$@"
 }
 
-# Read current state, reach the slider through the focus chain, edit it through
-# the keyboard, and apply it through its mnemonic.
-printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
+# A plain installed launch opens Overview. An explicit brightness activation
+# from TVs returns to the same window and focuses the slider after the read.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 50}","delay_seconds":2}]}}' | reset_tv_state
 start_accessibility_bus
+start_gui enabled "" "" normal
+NORMAL_GUI_PID="$GUI_PID"
+NORMAL_WINDOW_ID="$WINDOW_ID"
+observe_gui_state --select-page TVs
+env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+    "$RUNTIME_BINARY" brightness
+kill -0 "$NORMAL_GUI_PID" 2>/dev/null || fail "Brightness activation replaced the running GUI process."
+REACTIVATED_WINDOW_ID="$(xdotool search --onlyvisible --name "$WINDOW_TITLE" 2>/dev/null | head -n1 || true)"
+[ "$REACTIVATED_WINDOW_ID" = "$NORMAL_WINDOW_ID" ] || fail "Brightness activation replaced the Overview window."
+observe_gui_state --expected-state ready --expected-slider-value 50 --require-brightness-focus
+observe_gui_state --select-page Settings
+env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+    "$RUNTIME_BINARY"
+kill -0 "$NORMAL_GUI_PID" 2>/dev/null || fail "Normal activation replaced the running GUI process."
+observe_gui_state --expected-state ready --expected-slider-value 50
+send_closing_mnemonic Escape
+finish_gui "brightness and normal activation from other views"
+
+# Read current state, edit the initially focused brightness slider through the
+# keyboard. Movement submits automatically and keeps Overview open.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' | reset_tv_state
 start_gui enabled
 wait_for_calls get_picture_settings 1
-observe_gui_state --expected-state ready --expected-slider-value 50
 xdotool windowfocus --sync "$WINDOW_ID"
-for _ in 1 2 3; do
-    xdotool key --window "$WINDOW_ID" Tab Right
-done
-send_closing_mnemonic alt+a
+observe_gui_state --expected-state ready --expected-slider-value 50 \
+    --expected-volume 20 --expected-muted true --require-brightness-focus
+xdotool key --window "$WINDOW_ID" Right
 wait_for_calls set_settings 1
-finish_gui "successful apply"
+observe_gui_state --expected-state ready --expected-slider-value 55
+# Volume uses the CLI's set-then-unmute behavior. Mute remains independently
+# available, and both audio operations leave the brightness control usable.
+observe_gui_state --expected-volume 20 --expected-muted true
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_volume 1
+wait_for_calls set_mute 1
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted false
+observe_gui_state --activate-control "Mute TV"
+wait_for_calls set_mute 2
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
+# Native tab navigation shows the configured profile and preserves live controls.
+observe_gui_state --select-page TVs
+TV_ADDRESS="$(sed -n 's/^tvs_primary_ip=//p' "$CONFIG_FILE" | tail -n1)"
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+# Settings reads the shared store without changing it, including invalid values.
+cp "$CONFIG_FILE" "$WORK_DIR/before-settings.env"
+printf '%s\n' 'screen_idle_timeout=600' 'updates_channel=not-a-channel' >> "$CONFIG_FILE"
+cp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env"
+observe_gui_state --select-page Settings
+observe_gui_state --expected-settings-state invalid --expected-settings-timeout 600
+xdotool windowsize --sync "$WINDOW_ID" 700 780
+observe_gui_state --focus-control "Desktop integration" --window-id "$WINDOW_ID"
+observe_gui_state --expected-settings-state invalid --expected-settings-timeout 600
+cmp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env" || fail "Inspecting Settings changed configuration."
+# Returning to Settings reloads changes made outside the GUI.
+observe_gui_state --select-page TVs
+printf '%s\n' 'screen_idle_timeout=120' 'updates_channel=stable' >> "$CONFIG_FILE"
+observe_gui_state --select-page Settings
+observe_gui_state --expected-settings-state ready --expected-settings-timeout 120
+# The timeout draft remains local until Enter.
+cp "$CONFIG_FILE" "$WORK_DIR/before-settings-edit.env"
+observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
+cmp "$CONFIG_FILE" "$WORK_DIR/before-settings-edit.env" || fail "Typing a timeout saved before finalization."
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-settings-state ready --expected-settings-timeout 720
+[ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Finalized timeout was not saved."
+observe_gui_state --edit-settings-timeout invalid --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-settings-state ready --expected-settings-timeout 720
+[ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Invalid timeout changed configuration."
+cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
+observe_gui_state --select-page Overview
+observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
+xdotool windowfocus --sync "$WINDOW_ID"
+send_closing_mnemonic Escape
+finish_gui "cancellation after successful apply"
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -223,28 +307,148 @@ import sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 assert state["backlight"] != 50, state
 assert any(call.get("command") == "set_settings" for call in state["calls"]), state
+assert state["volume"] == 21 and state["muted"] is True, state
+audio_calls = [call["command"] for call in state["calls"] if call["command"] in ("set_volume", "set_mute")]
+assert audio_calls == ["set_volume", "set_mute", "set_mute"], audio_calls
+PY
+
+# TV management uses native controls and the real local persistence backend.
+cp "$CONFIG_FILE" "$WORK_DIR/before-management.env"
+mkdir -p "$WORK_DIR/tvs/primary"
+printf '%s\n' '{"access_token":"management-smoke-token"}' > "$WORK_DIR/tvs/primary/access-token.json"
+chmod 600 "$WORK_DIR/tvs/primary/access-token.json"
+start_gui enabled
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+observe_gui_state --focus-control "HDMI input" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" --delay 60 space Home Down Down Return
+for ((attempt = 0; attempt < 100; attempt++)); do
+    [ "$("$RUNTIME_BINARY" settings get tv.input)" = "HDMI_3" ] && break
+    sleep 0.1
+done
+[ "$("$RUNTIME_BINARY" settings get tv.input)" = "HDMI_3" ] || fail "Input selection was not saved."
+cp "$CONFIG_FILE" "$WORK_DIR/before-unpair.env"
+observe_gui_state --activate-control "Unpair TV…"
+observe_gui_state --expected-tvs-state unpair
+xdotool key --window "$WINDOW_ID" Escape
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
+cmp -s "$CONFIG_FILE" "$WORK_DIR/before-unpair.env" || fail "Cancelling Unpair changed the configuration."
+[ -f "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Cancelling Unpair removed the credential."
+observe_gui_state --activate-control "Unpair TV…"
+observe_gui_state --expected-tvs-state unpair
+observe_gui_state --activate-control Unpair
+observe_gui_state --expected-tvs-state empty
+[ ! -e "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Unpair left the native credential."
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+observe_gui_state --activate-control Cancel
+observe_gui_state --expected-tvs-state empty
+send_closing_mnemonic Escape
+finish_gui "input editing and confirmed unpairing"
+cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
+
+# An absent profile has a standard empty state and never contacts the TV.
+export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
+cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
+start_gui enabled "" "" normal
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state empty
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+xdotool key --window "$WINDOW_ID" Return
+observe_gui_state --expected-tvs-state pairing-invalid
+xdotool key --window "$WINDOW_ID" Escape
+observe_gui_state --expected-tvs-state empty
+# A second opening starts with a fresh form and uses the header's Cancel button.
+observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state pairing
+observe_gui_state --activate-control Cancel
+observe_gui_state --expected-tvs-state empty
+send_closing_mnemonic Escape
+finish_gui "empty TVs view"
+cmp -s "$STATE_FILE" "$WORK_DIR/before-empty.json" || fail "Empty profile performed a TV operation."
+export LG_BUDDY_CONFIG="$CONFIG_FILE"
+
+# A failed optional model read retains the local TV details.
+printf '%s\n' '{"backlight":50,"calls":[],"plan":{"get_system_info":[{"result":"error","status":1,"stderr":"planned model read failure"}]}}' | reset_tv_state
+start_gui enabled
+wait_for_calls get_system_info 1
+observe_gui_state --select-page TVs
+observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS"
+send_closing_mnemonic Escape
+finish_gui "unavailable TV model"
+
+# A slow write must not disable the slider or discard subsequent movement.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' | reset_tv_state
+start_gui enabled
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --expected-slider-value 50 --expected-volume 20 --require-brightness-focus
+xdotool key --window "$WINDOW_ID" --repeat 5 --delay 20 Right
+observe_gui_state --expected-slider-value 75
+wait_for_calls set_settings 2
+send_closing_mnemonic Escape
+finish_gui "rapid slider movement"
+python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["backlight"] == 75, state
+assert sum(call["command"] == "set_settings" for call in state["calls"]) == 2, state
 PY
 
 # A failed read stays visible and Retry performs a fresh read. Observe each
 # rendered presentation before sending the action that depends on it.
-printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' | reset_tv_state
 start_gui enabled
 wait_for_calls get_picture_settings 1
-observe_gui_state --expected-state read-failed
+observe_gui_state --expected-state read-failed --expected-volume 20 --expected-muted false
 xdotool windowfocus --sync "$WINDOW_ID"
-xdotool key --window "$WINDOW_ID" alt+r
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_volume 1
+observe_gui_state --expected-state read-failed --expected-volume 21 --expected-muted false
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --activate-control "Retry OLED Pixel Brightness"
 wait_for_calls get_picture_settings 2
 observe_gui_state --expected-state ready --expected-slider-value 64
 xdotool windowfocus --sync "$WINDOW_ID"
-send_closing_mnemonic alt+c
+send_closing_mnemonic Escape
 finish_gui "read-failure cancellation"
 
+# Volume succeeded but unmuting failed: show the changed level and recover the
+# remaining mute operation without repeating the successful volume write.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"set_mute":[{"result":"error","status":1,"stderr":"planned unmute failure"}]}}' | reset_tv_state
+start_gui enabled
+observe_gui_state --expected-volume 20 --expected-muted true
+xdotool windowfocus --sync "$WINDOW_ID"
+observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
+xdotool key --window "$WINDOW_ID" Right
+wait_for_calls set_mute 1
+observe_gui_state --expected-volume 21 --expected-muted true --require-audio-retry
+observe_gui_state --activate-control "Retry Audio"
+wait_for_calls set_mute 2
+observe_gui_state --expected-volume 21 --expected-muted false
+send_closing_mnemonic Escape
+finish_gui "audio recovery cancellation"
+python3 - "$STATE_FILE" <<'PY'
+import json
+import sys
+
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert state["volume"] == 21 and state["muted"] is False, state
+assert sum(call["command"] == "set_volume" for call in state["calls"]) == 1, state
+PY
+
 # Cancelling the loading window never writes a value.
-printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' >"$STATE_FILE"
+printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' | reset_tv_state
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
-send_closing_mnemonic alt+c
+send_closing_mnemonic Escape
 finish_gui "loading cancellation"
+# Wait for the delayed brightness read before checking for writes. Other read
+# workers may still be finishing when the next scenario resets the state.
+wait_for_calls get_picture_settings 1
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -266,7 +470,7 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         local geometry=""
         local screenshot="$WORK_DIR/$label.xwd"
 
-        printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' >"$STATE_FILE"
+        printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' | reset_tv_state
         start_gui enabled "$color_scheme" "$scale"
         wait_for_calls get_picture_settings 1
         observe_gui_state --expected-state ready --expected-slider-value 50
@@ -276,8 +480,11 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         xwd -silent -id "$WINDOW_ID" -out "$screenshot"
         PLATFORM_MEAN="$(python3 "$SCRIPT_DIR/xwd_mean.py" "$screenshot")"
 
+        observe_gui_state --select-page Settings
+        observe_gui_state --expected-settings-state ready
+
         xdotool windowfocus --sync "$WINDOW_ID"
-        send_closing_mnemonic alt+c
+        send_closing_mnemonic Escape
         finish_gui "$label platform-state cancellation"
     }
 

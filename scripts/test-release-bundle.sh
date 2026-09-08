@@ -75,16 +75,16 @@ assert_hidden_compatibility_alias() {
 assert_cli_surface() {
     local binary="$1"
     local help_output=""
-    local no_args_output=""
+    local help_alias_output=""
     local removed_channel_output=""
     local removed_channel_status=0
     local install_argument_output=""
     local install_argument_status=0
 
     help_output="$("$binary" --help)"
-    no_args_output="$("$binary")"
-    if [ "$no_args_output" != "$help_output" ]; then
-        echo "No-argument output did not match global help: $binary"
+    help_alias_output="$("$binary" help)"
+    if [ "$help_alias_output" != "$help_output" ]; then
+        echo "Explicit help output did not match --help: $binary"
         exit 1
     fi
 
@@ -334,6 +334,8 @@ assert_file "$BUNDLE_ICON"
 assert_mode "$BUNDLE_ICON" 644
 grep -F -q 'Name=LG Buddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 grep -F -q 'Icon=io.github.staphylococcus.LGBuddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+grep -F -x -q 'Exec=/usr/bin/lg-buddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+grep -F -x -q 'Terminal=false' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"
 assert_file "$BUNDLE_DIR/release-manifest.json"
@@ -341,6 +343,28 @@ assert_mode "$BUNDLE_DIR/release-manifest.json" 644
 assert_file "$BUNDLE_DIR/docs/architecture-overview.md"
 assert_file "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 assert_file "$BUNDLE_DIR/docs/user-guide.md"
+python3 - "$BUNDLE_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+bundle = Path(sys.argv[1])
+for name in ("README.md", "docs/user-guide.md"):
+    document = bundle / name
+    images = re.findall(
+        r'!\[[^\]]*\]\(([^)\s]+)\)|<img\b[^>]*\bsrc="([^"]+)"',
+        document.read_text(encoding="utf-8"),
+    )
+    for markdown_source, html_source in images:
+        source = markdown_source or html_source
+        url = urlsplit(source)
+        if not url.scheme and not url.netloc:
+            assert (document.parent / unquote(url.path)).is_file(), (
+                f"Broken bundled documentation image in {name}: {source}"
+            )
+print("Bundled documentation image links verified.")
+PY
 assert_file "$BUNDLE_DIR/docs/development.md"
 assert_file "$BUNDLE_DIR/docs/release-process.md"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"
@@ -574,9 +598,6 @@ grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
-grep -F -q 'TV control at boot, shutdown, sleep, and wake' "$BUNDLE_DIR/README.md"
-grep -q 'cooperative suspend rail' "$BUNDLE_DIR/docs/architecture-overview.md"
-grep -q 'NetworkManager and logind cooperate through one suspend rail' "$BUNDLE_DIR/docs/runtime-event-handler-map.md"
 
 if [ "$SKIP_PIP_INSTALL" -eq 0 ]; then
     assert_executable "$INSTALLED_BSCPYLGTV"

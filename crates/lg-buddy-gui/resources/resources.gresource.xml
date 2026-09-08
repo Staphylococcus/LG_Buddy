@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/staphylococcus/LGBuddy">
+    <file>icons/edit-delete-symbolic.svg</file>
+    <file alias="icons/scalable/apps/io.github.staphylococcus.LGBuddy.svg">icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg</file>
+  </gresource>
+</gresources>

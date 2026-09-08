@@ -33,6 +33,7 @@ const TEST_CERTIFICATE_DER: &str = "MIIBkzCCATmgAwIBAgIUGCxGaL477t4FECFewoE+24e3
 const TEST_PRIVATE_KEY_DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgRQOBcIAKtXbi9IkKmq6PBMKSMlLega0uR6twK6hSmYmhRANCAARPEPqVcY6xma+aEHzgscgO65ez1cyPVO7pBhKdzyO6/HVg5ZnK0+RnTVVyIY82u8ovWEUY8OujWlgJULHdc8WV";
 
 const GET_FOREGROUND_APP_URI: &str = "ssap://com.webos.applicationManager/getForegroundAppInfo";
+const GET_SYSTEM_INFO_URI: &str = "ssap://system/getSystemInfo";
 const GET_POWER_STATE_URI: &str = "ssap://com.webos.service.tvpower/power/getPowerState";
 const GET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/getSystemSettings";
 const SET_SYSTEM_SETTINGS_URI: &str = "ssap://settings/setSystemSettings";
@@ -59,7 +60,7 @@ static TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WRITE_SETTINGS_SIGNED_ENVELOPE: OnceLock<Value> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestScenario {
+pub(crate) enum WebOsTestScenario {
     StatefulTv,
     ProtocolEcho,
     UnrelatedFrameBeforeResponse,
@@ -82,7 +83,7 @@ pub(in crate::web_os) enum WebOsTestScenario {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestVersion {
+pub(crate) enum WebOsTestVersion {
     // Local hardware baseline: webOS24 / 9.2.2-61.
     WebOs24Version92261,
     // External hardware observation: webOS26 firmware 43.21.60.
@@ -96,7 +97,7 @@ enum WebOsTestTransport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::web_os) enum WebOsTestInput {
+pub(crate) enum WebOsTestInput {
     Hdmi2,
     Hdmi3,
 }
@@ -181,6 +182,18 @@ impl WebOsTestTv {
             .expect("webOS request payload must be present");
 
         match uri {
+            GET_SYSTEM_INFO_URI => {
+                assert_eq!(payload, &json!({}));
+                response(
+                    request_id,
+                    json!({
+                        "features": {"3d": true},
+                        "modelName": "OLED42C2",
+                        "receiverType": "dvb",
+                        "returnValue": true,
+                    }),
+                )
+            }
             GET_POWER_STATE_URI => {
                 require_top_level_permission(permissions, "READ_POWER_STATE", uri);
                 assert_eq!(payload, &json!({}));
@@ -557,7 +570,7 @@ struct WebOsTestRuntime {
     restore_session_interruption_injected: bool,
 }
 
-pub(in crate::web_os) struct WebOsTestServer {
+pub(crate) struct WebOsTestServer {
     endpoint: WebOsEndpoint,
     address: std::net::SocketAddr,
     runtime: Arc<Mutex<WebOsTestRuntime>>,
@@ -587,10 +600,7 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn for_scenario(
-        version: WebOsTestVersion,
-        scenario: WebOsTestScenario,
-    ) -> Self {
+    pub(crate) fn for_scenario(version: WebOsTestVersion, scenario: WebOsTestScenario) -> Self {
         Self::spawn(
             version,
             WebOsPowerState::Active,
@@ -729,7 +739,7 @@ impl WebOsTestServer {
         )
     }
 
-    pub(in crate::web_os) fn endpoint(&self) -> WebOsEndpoint {
+    pub(crate) fn endpoint(&self) -> WebOsEndpoint {
         self.endpoint
     }
 
@@ -786,7 +796,7 @@ impl WebOsTestServer {
         }
     }
 
-    pub(in crate::web_os) fn finish(mut self) {
+    pub(crate) fn finish(mut self) {
         self.stop_and_join().expect("webOS test server thread");
     }
 
