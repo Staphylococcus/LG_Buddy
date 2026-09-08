@@ -252,11 +252,21 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/commands.rs` | Runtime command entrypoints and dependency assembly |
 | `crates/lg-buddy/src/brightness.rs` | Toolkit-neutral brightness read/write flow and production adapters |
 | `crates/lg-buddy/src/overview.rs` | Toolkit-neutral Overview state, intents, and capability operations |
-| `crates/lg-buddy/src/tvs.rs` | Read-only TV collection, selection, and local profile operations |
+| `crates/lg-buddy/src/tvs.rs` | TV collection, selection, pairing coordination, and local profile operations |
+| `crates/lg-buddy/src/pairing.rs` | First-TV pairing workflow, validation, and cancellation |
+| `crates/lg-buddy/src/pairing_store.rs` | TV profile and native credential persistence with rollback |
+| `crates/lg-buddy/src/settings_view.rs` | Settings presentation, intents, reads, and serialized mutations |
 | `crates/lg-buddy/src/navigation.rs` | Desktop destinations and selected view |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |
+| `crates/lg-buddy/src/application.rs` | Cross-view application coordinator and typed transitions |
+| `crates/lg-buddy-gui/src/lib.rs` | GTK application controller, worker bridge, and command-line reactivation |
+| `crates/lg-buddy-gui/src/window.rs` | Adwaita window, navigation stack, About dialog, and shared dialogs |
+| `crates/lg-buddy-gui/src/overview.rs` | Overview summary, brightness, volume, mute, and focus rendering |
+| `crates/lg-buddy-gui/src/tvs.rs` | TV list/details rendering, adaptive navigation, and unpair dialog |
+| `crates/lg-buddy-gui/src/pairing.rs` | Native first-TV pairing dialog and progress rendering |
+| `crates/lg-buddy-gui/src/settings.rs` | Native settings rows, editors, and feedback rendering |
 | `crates/lg-buddy/src/screen.rs` | Session screen blank/restore policy |
 | `crates/lg-buddy/src/lifecycle.rs` | Startup, shutdown, system sleep, and system resume policy |
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
@@ -297,7 +307,7 @@ the branch contract and recovery process, see
 | `docs/architecture-overview.md` | Runtime architecture |
 | `docs/defaults-and-configuration.md` | Product defaults and persistent configuration guidance |
 | `docs/gamepad-subsystem.md` | Gamepad activity architecture and adapter guidance |
-| `docs/gui-target-architecture.md` | Target declarative application contract and GTK renderer boundary |
+| `docs/gui-target-architecture.md` | Current application-owned presentation and GTK renderer boundary |
 | `docs/runtime-event-handler-map.md` | Top-level system, desktop, and runtime event handler map |
 | `docs/session-backend-model.md` | Session source semantics, ownership, and observation contract |
 | `docs/testing-strategy.md` | Test strategy and scope |

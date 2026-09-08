@@ -9,189 +9,140 @@
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
-LG Buddy handles your TV's power and panel alongside your PC, with everyday
-controls close at hand.
+Use your LG webOS TV as a Linux PC display with less reaching for the remote.
 
-## 1.6 Beta Preview
-
-**1.6.0-beta.1** introduces Overview, the TVs view, and native first-TV pairing.
-This is an early preview of 1.6; further GUI work is still being developed.
-The released beta does not include GUI Settings. Development builds also include
-TV input changes, local unpairing, and editable Settings controls. The latest
-stable 1.5 release does not include this expanded interface. See the
-[beta release notes](docs/releases/1.6.0-beta.1.md) for scope and installation
-details. Current development builds also use the bare `lg-buddy` entrypoint for
-normal Overview; the released beta's desktop entry still invokes `brightness`.
-Screenshots use sample TV data.
+- **Start and stop with your PC.** Turn the TV on at boot and wake, and off at
+  shutdown and before system sleep.
+- **Give the panel a break.** Blank it when you step away, restore it when you
+  return, and power off after five more minutes without activity.
+- **Keep playing.** Supported gamepad activity keeps the panel awake on GNOME
+  and compatible native Wayland sessions.
+- **Get comfortable.** Adjust brightness and sound from your desktop.
 
 ![LG Buddy Overview with a connected TV, brightness and volume sliders, and connection status](docs/screenshots/overview.png)
 
 Move a slider to apply its value, or click the sound icon to toggle mute.
-[Take the GUI tour →](docs/user-guide.md#desktop-app)
-
-- **Power with your PC.** Turn the TV on at boot and wake, and off at shutdown
-  and before system sleep.
-- **Give the panel a break.** Blank it when you're away, restore it when you
-  return, and power off after five more minutes without activity.
-- **Keep playing.** Supported gamepad activity keeps the panel awake.
-- **Adjust from the desktop.** Change brightness and volume, toggle mute, and
-  see connection status in Overview.
-- **Pair your first TV.** Follow the pairing dialog, then view the TV's model
-  and saved connection details in the TVs tab.
-
-GNOME is not required. Official release bundles include prebuilt binaries, so
-normal installation does not require a Rust toolchain. The stable CLI remains
-available for headless controls, settings, and updates.
+[Adjust brightness and sound →](docs/user-guide.md#adjust-brightness-and-sound)
+Screenshots use sample TV data.
 
 ## Desktop Compatibility
 
-| Functionality | GNOME | Compatible native Wayland | Wayland with `swayidle` | Other Linux sessions |
+| What you can do | GNOME | Compatible native Wayland | Wayland with `swayidle` | Other Linux sessions |
 | --- | --- | --- | --- | --- |
-| TV control at boot, shutdown, sleep, and wake | ✅ | ✅ | ✅ | ✅ |
-| Idle blank and activity restore | ✅ | ✅ | ✅ | ❌ |
-| Gamepad activity keeps the panel awake | ✅ | ✅ | ❌ | ❌ |
-| Brightness, volume, settings, and update commands | ✅ | ✅ | ✅ | ✅ |
-| Overview with brightness, volume, and mute | ✅ | ✅ | ✅ | ✅ |
+| Turn the TV on and off with your PC | ✅ | ✅ | ✅ | ✅ |
+| Blank the panel while away and restore it on return | ✅ | ✅ | ✅ | ❌ |
+| Keep the panel awake while using a gamepad | ✅ | ✅ | ❌ | ❌ |
+| Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ | ✅ |
+| Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ | ✅ |
 
-The default `auto` backend prefers a complete GNOME session, then native
-Wayland when the compositor provides `ext_idle_notifier_v1` version 2 or newer
-and at least one seat. It uses `swayidle` only as a deprecated compatibility
-fallback when native monitoring is unavailable. Inspect the decision with:
-
-```bash
-lg-buddy settings describe screen.backend
-```
-
-See the [user guide](docs/user-guide.md#automatic-screen-blanking) for backend
-selection and troubleshooting. Protocol and event details are documented in the
-[session backend model](docs/session-backend-model.md).
+Most modern Linux desktop environments are supported. Automatic desktop detection is the default; most users
+can leave it selected. If the TV does not blank or restore as expected, follow
+the [screen behavior and troubleshooting guide](docs/user-guide.md#automatic-screen-blanking).
 
 ## Before You Install
 
-Fresh installation selects the native `lg_webos` control path, which does not
-require Python. Native-only packages can omit the Python client, `venv`, and
-`pip`. The release-bundle installer still provisions `bscpylgtv` as an explicit
-compatibility fallback, so it checks for Python 3 with a `venv` that provisions
-`pip`, plus `zenity`. Official release bundles target the Ubuntu 24.04 runtime
-baseline: GTK 4.14, libadwaita 1.5, and glibc 2.39 or newer. Before executing
-the GUI, the installer checks the installed GTK and libadwaita runtime versions.
-On apt, dnf, and pacman systems it can install the mapped runtime packages after
-explicit confirmation; refusal and noninteractive operation without that opt-in
-leave package installation to the user. The installer then verifies that the GUI
-executable can load and has the same release identity as the runtime before
-changing the LG Buddy installation.
-Zenity remains the compatibility fallback for `lg-buddy brightness` when the
-GUI executable is absent. The normal no-argument `lg-buddy` launch requires the
-installed GUI.
-`swayidle` is needed only by an existing explicit selection or as the deprecated
-compatibility fallback.
+LG Buddy manages one TV. Connect it to the same network as your PC and enable
+**TV On With Mobile / Wake-on-LAN**. A static IP address and **Always Ready**
+are strongly recommended so the saved address stays valid and the TV remains
+ready to respond.
+
+Official bundles contain prebuilt binaries. They require GTK 4.14,
+libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
+The release installer also needs Python 3 with `venv`/`pip` support and Zenity
+for its compatibility tools. Install the prerequisites for your distribution:
+
+<details>
+<summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
 
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
 sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0
-# Deprecated compatibility fallback only:
-sudo apt install swayidle
 ```
 
 ### Fedora
 
 ```bash
 sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita
-# Deprecated compatibility fallback only:
-sudo dnf install swayidle
 ```
 
 ### Arch Linux
 
 ```bash
 sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita
-# Deprecated compatibility fallback only:
-sudo pacman -S swayidle
 ```
 
-Source builds also require a Rust toolchain and a working C toolchain because
-the vendored D-Bus library is compiled during the build. See the
-[development guide](docs/development.md) for build instructions.
+</details>
+
+The installer can also offer to install missing GTK/libadwaita packages on
+these distributions, with your confirmation. Older desktops that need the
+deprecated `swayidle` integration must install `swayidle` separately.
+
+The shell installer supports conventional Linux installations with writable
+system locations. First-class NixOS packaging is tracked in
+[issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
 
 ## Install
 
 1. Download and extract the [release archive](https://github.com/Staphylococcus/LG_Buddy/releases)
    for your platform.
-2. Run the installer as your regular user:
+2. Run the installer as your regular user (no sudo):
+
+   ```bash
+   chmod +x ./install.sh
+   ./install.sh
+   ```
+
+   The installer requests elevated access when needed.
+
+3. Follow the setup prompts for your TV's IP address, MAC address, HDMI input,
+   and desktop behavior. Keep the TV on and approve its pairing request with
+   the remote.
+4. Open **LG Buddy** from your app launcher. Automatic power and screen
+   behavior runs in the background after setup; the window is there when you
+   want to adjust something.
+
+<a id="quick-start"></a>
+
+## Make It Work for You
+
+- [Adjust brightness and sound](docs/user-guide.md#adjust-brightness-and-sound) without using
+  the TV remote.
+- [Choose when the screen blanks and the TV sleeps](docs/user-guide.md#settings)
+  to suit your desk routine.
+- [Pair a TV](docs/user-guide.md#pair-your-first-tv) if the app has no saved
+  connection, or [change its HDMI input](docs/user-guide.md#tvs) after moving
+  your PC's cable.
+- [Use terminal commands](docs/user-guide.md#common-commands) for shortcuts,
+  scripts, or a desktop without the GUI.
+
+To rerun setup or change installed service wiring, run `./configure.sh` from
+the extracted release archive.
+
+## Update
+
+Read what changed in the [release notes on GitHub](https://github.com/Staphylococcus/LG_Buddy/releases).
+
+To install the next release while keeping your settings and pairing, run as
+your regular user:
 
 ```bash
-chmod +x ./install.sh
-./install.sh
-```
-
-Do not run the installer with `sudo`; it requests elevated access when needed.
-
-The installer asks for the TV's IP address, MAC address, HDMI input, control
-platform, and desktop idle preferences, then installs the required services.
-
-Fresh setup defaults to the native `lg_webos` platform and verifies pairing
-before saving the configuration, so accept the prompt on the TV. You can
-instead select the explicit `bscpylgtv` compatibility fallback; its prompt may
-appear on first use. See the
-[bscpylgtv first-use guide](https://github.com/chros73/bscpylgtv/blob/master/docs/guides/first_use.md).
-
-To check, verify, and install the next release from your saved update channel,
-run `lg-buddy updates install` as your regular user. It checks host
-compatibility, shows the exact target identity, asks for explicit confirmation,
-and then runs the verified bundle's upgrade installer. Upgrade mode preserves
-configuration and credentials and does not repeat setup or pairing;
-incompatible and legacy layouts are refused rather than migrated.
-
-`v1.4.0-beta.2` is the first release with `updates install`; older versions
-need one normal manual release-bundle installation before assisted upgrades are
-available.
-
-The shell installer targets conventional Linux installations with mutable
-system locations. First-class NixOS packaging is tracked in
-[issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
-
-## Quick Start
-
-LG Buddy's services run automatically after installation. Open **LG Buddy**
-from your app launcher to open the normal Overview. The desktop entry runs
-`lg-buddy` with no arguments. For a brightness-focused Overview, run:
-
-```bash
-lg-buddy brightness
-```
-
-The command line also provides direct controls, settings, and updates:
-
-```bash
-lg-buddy brightness set 65
-lg-buddy volume 20
-lg-buddy volume mute
-lg-buddy settings set screen.idle_timeout 600
-lg-buddy updates check
 lg-buddy updates install
 ```
 
-Run `lg-buddy <command> --help` for scoped syntax; `lg-buddy --help` and
-`lg-buddy help` show CLI help. To revisit the current interactive setup, run
-`./configure.sh` from the extracted release archive. The complete GUI first-run,
-service, and update journey remains tracked in
-[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+Review the offered version and confirm to proceed. For preview releases,
+automatic check preferences, or older installations, see
+[Update LG Buddy](docs/user-guide.md#updates).
 
-The [user guide](docs/user-guide.md) covers the desktop app, commands, settings,
-service checks, and uninstalling.
+<a id="documentation"></a>
 
-## Documentation
+## Contribute
 
-- [User guide](docs/user-guide.md)
-- [Development guide](docs/development.md)
-- [Architecture overview](docs/architecture-overview.md)
-- [Session backend model](docs/session-backend-model.md)
-- [Gamepad activity subsystem](docs/gamepad-subsystem.md)
-- [Defaults and configuration](docs/defaults-and-configuration.md)
-- [Runtime event handler map](docs/runtime-event-handler-map.md)
-- [Contributing](CONTRIBUTING.md)
-- [Release process](docs/release-process.md)
+To build LG Buddy or work on a change, start with the
+[development guide](docs/development.md) and [contribution guidelines](CONTRIBUTING.md).
+The [architecture overview](docs/architecture-overview.md) explains how the
+pieces fit together; the [release process](docs/release-process.md) covers
+publishing a version.
 
 ## Credits
 
