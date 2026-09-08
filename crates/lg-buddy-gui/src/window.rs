@@ -40,6 +40,19 @@ impl ApplicationWindow {
             .width_request(280)
             .height_request(240)
             .build();
+        crate::register_resources();
+        gtk::IconTheme::for_display(&gtk::prelude::WidgetExt::display(&window))
+            .add_resource_path("/io/github/staphylococcus/LGBuddy/icons");
+        let about = gtk::gio::SimpleAction::new("about", None);
+        about.connect_activate({
+            let window = window.downgrade();
+            move |_, _| {
+                if let Some(window) = window.upgrade() {
+                    show_about(&window);
+                }
+            }
+        });
+        window.add_action(&about);
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
         let pairing = crate::pairing::PairingView::new(on_tvs);
@@ -78,6 +91,16 @@ impl ApplicationWindow {
             .policy(adw::ViewSwitcherPolicy::Wide)
             .build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+        let menu = gtk::gio::Menu::new();
+        menu.append(Some("About LG Buddy"), Some("win.about"));
+        let menu_button = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .primary(true)
+            .tooltip_text("Main Menu")
+            .menu_model(&menu)
+            .build();
+        menu_button.update_property(&[gtk::accessible::Property::Label("Main Menu")]);
+        header.pack_end(&menu_button);
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&stack));
@@ -188,6 +211,40 @@ impl ApplicationWindow {
     pub(crate) fn choose_page(&self, page: ApplicationPage) {
         self.stack.set_visible_child_name(page_name(page));
     }
+}
+
+fn show_about(window: &adw::ApplicationWindow) {
+    // ponytail: let Adwaita own the About layout, subpages, links, and dismissal.
+    let dialog = adw::AboutDialog::builder()
+        .application_name(crate::APPLICATION_NAME)
+        .application_icon(crate::APPLICATION_ID)
+        .developer_name("LG Buddy Contributors")
+        .version(lg_buddy::version::VersionInfo::current().version())
+        .website("https://github.com/Staphylococcus/LG_Buddy")
+        .issue_url("https://github.com/Staphylococcus/LG_Buddy/issues/new/choose")
+        .developers([
+            "Vas Zayarskiy https://github.com/Staphylococcus",
+            "Faceless3882 https://github.com/Faceless3882",
+            "Contributors https://github.com/Staphylococcus/LG_Buddy/graphs/contributors",
+        ])
+        .license_type(gtk::License::Gpl30Only)
+        .debug_info(lg_buddy::version::version_text())
+        .debug_info_filename("lg-buddy-version.txt")
+        .build();
+    dialog.add_acknowledgement_section(
+        Some("With Thanks"),
+        &[
+            "chros73 — bscpylgtv https://github.com/chros73/bscpylgtv",
+            "JPersson77 — LGTV Companion https://github.com/JPersson77/LGTVCompanion",
+        ],
+    );
+    dialog.add_legal_section(
+        "GNOME edit-delete icon",
+        None,
+        gtk::License::Custom,
+        Some("By Jakub Steiner, dedicated to the public domain under <a href=\"https://creativecommons.org/publicdomain/zero/1.0/\">CC0 1.0 Universal</a>."),
+    );
+    dialog.present(Some(window));
 }
 
 fn page_name(page: ApplicationPage) -> &'static str {

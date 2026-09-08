@@ -50,6 +50,12 @@ With no TV configured, choose **Pair a TV** to get started.
 
 ![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
 
+### About LG Buddy
+
+Development builds provide **About LG Buddy** in the main menu. It shows
+the app version, project and issue links, credits, license, and build information
+that can be saved when reporting a problem.
+
 ### Settings
 
 The released **1.6.0-beta.1** does not include GUI Settings. Development builds

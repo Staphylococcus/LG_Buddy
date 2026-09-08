@@ -515,11 +515,7 @@ struct UnpairButton {
 
 impl UnpairButton {
     fn new(on_intent: &IntentHandler) -> Self {
-        static RESOURCES: std::sync::Once = std::sync::Once::new();
-        RESOURCES.call_once(|| {
-            gtk::gio::resources_register_include!("lg-buddy-gui.gresource")
-                .expect("bundled GUI resources must be valid");
-        });
+        crate::register_resources();
         let icon = gtk::gio::FileIcon::new(&gtk::gio::File::for_uri(
             "resource:///io/github/staphylococcus/LGBuddy/icons/edit-delete-symbolic.svg",
         ));
