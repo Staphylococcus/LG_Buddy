@@ -745,7 +745,7 @@ if [ "$UPGRADE_MODE" -eq 0 ]; then
     run_privileged install -d "$SYSTEM_LIB_DIR"
     run_privileged install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
 fi
-echo "Installing brightness control desktop entry..."
+echo "Installing LG Buddy desktop entry..."
 run_privileged install -d "$APPLICATIONS_DIR"
 run_privileged install -m 644 "$DESKTOP_ENTRY_SOURCE" "$DESKTOP_ENTRY_PATH"
 run_privileged rm -f "$LEGACY_DESKTOP_ENTRY_PATH"

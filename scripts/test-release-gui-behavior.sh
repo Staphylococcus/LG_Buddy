@@ -80,6 +80,13 @@ start_gui() {
     local accessibility="${1:-disabled}"
     local color_scheme="${2:-}"
     local scale="${3:-}"
+    local entrypoint="${4:-brightness}"
+    local -a gui_arguments=()
+    if [ "$entrypoint" = "brightness" ]; then
+        gui_arguments=(brightness)
+    elif [ "$entrypoint" != "normal" ]; then
+        fail "Unknown GUI smoke entrypoint: $entrypoint"
+    fi
     local -a gui_environment=(
         ADW_DISABLE_PORTAL=1
         GDK_BACKEND=x11
@@ -90,10 +97,10 @@ start_gui() {
     WINDOW_ID=""
     if [ "$accessibility" = "enabled" ]; then
         env -u NO_AT_BRIDGE "${gui_environment[@]}" \
-            "$RUNTIME_BINARY" brightness >"$WORK_DIR/gui.output" 2>&1 &
+            "$RUNTIME_BINARY" "${gui_arguments[@]}" >"$WORK_DIR/gui.output" 2>&1 &
     else
         env "${gui_environment[@]}" NO_AT_BRIDGE=1 \
-            "$RUNTIME_BINARY" brightness >"$WORK_DIR/gui.output" 2>&1 &
+            "$RUNTIME_BINARY" "${gui_arguments[@]}" >"$WORK_DIR/gui.output" 2>&1 &
     fi
     GUI_PID=$!
     for ((attempt = 0; attempt < 300; attempt++)); do
@@ -213,10 +220,31 @@ observe_gui_state() {
         --timeout 30 "$@"
 }
 
+# A plain installed launch opens Overview. An explicit brightness activation
+# from TVs returns to the same window and focuses the slider after the read.
+printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 50}","delay_seconds":2}]}}' | reset_tv_state
+start_accessibility_bus
+start_gui enabled "" "" normal
+NORMAL_GUI_PID="$GUI_PID"
+NORMAL_WINDOW_ID="$WINDOW_ID"
+observe_gui_state --select-page TVs
+env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+    "$RUNTIME_BINARY" brightness
+kill -0 "$NORMAL_GUI_PID" 2>/dev/null || fail "Brightness activation replaced the running GUI process."
+REACTIVATED_WINDOW_ID="$(xdotool search --onlyvisible --name "$WINDOW_TITLE" 2>/dev/null | head -n1 || true)"
+[ "$REACTIVATED_WINDOW_ID" = "$NORMAL_WINDOW_ID" ] || fail "Brightness activation replaced the Overview window."
+observe_gui_state --expected-state ready --expected-slider-value 50 --require-brightness-focus
+observe_gui_state --select-page Settings
+env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+    "$RUNTIME_BINARY"
+kill -0 "$NORMAL_GUI_PID" 2>/dev/null || fail "Normal activation replaced the running GUI process."
+observe_gui_state --expected-state ready --expected-slider-value 50
+send_closing_mnemonic Escape
+finish_gui "brightness and normal activation from other views"
+
 # Read current state, edit the initially focused brightness slider through the
 # keyboard. Movement submits automatically and keeps Overview open.
 printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' | reset_tv_state
-start_accessibility_bus
 start_gui enabled
 wait_for_calls get_picture_settings 1
 xdotool windowfocus --sync "$WINDOW_ID"
@@ -322,7 +350,7 @@ cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 # An absent profile has a standard empty state and never contacts the TV.
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
 cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
-start_gui enabled
+start_gui enabled "" "" normal
 observe_gui_state --select-page TVs
 observe_gui_state --expected-tvs-state empty
 observe_gui_state --activate-control "Pair a TV"

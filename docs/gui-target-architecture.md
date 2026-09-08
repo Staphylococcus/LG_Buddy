@@ -120,16 +120,20 @@ application-owned. It depends on `lg-buddy`, GTK, and libadwaita, never the
 reverse. The GUI crate should consume one public application entrypoint rather
 than assembling TV or configuration dependencies itself.
 
-The installed graphical executable is `lg-buddy-gui`. The desktop entry keeps
-the stable `lg-buddy brightness` command surface, which locates the matching GUI
-beside the running CLI executable and launches `lg-buddy-gui brightness`.
-`lg-buddy brightness get` and `lg-buddy brightness set` remain direct headless
-commands and never inspect or launch the GUI. During the compatibility window,
-an absent GUI executable falls back to the retained Zenity flow. A present but
-invalid GUI installation, or a GUI process that starts and fails, is reported
-without opening Zenity or performing a second TV operation. That launcher
-handoff does not become the frontend/backend contract: once `lg-buddy-gui`
-starts, GTK and the application communicate only through in-process Rust types.
+The installed graphical executable is `lg-buddy-gui`. The desktop entry runs
+`/usr/bin/lg-buddy` with no arguments; the runtime locates the matching GUI
+beside it and launches `lg-buddy-gui` with no arguments for normal Overview.
+`lg-buddy brightness` remains a brightness-focused deep link: it launches
+`lg-buddy-gui brightness` and selects the brightness control even when another
+view is already open. `lg-buddy brightness get` and `lg-buddy brightness set`
+remain direct headless commands and never inspect or launch the GUI. During the
+compatibility window, only an absent GUI on the `brightness` path falls back to
+the retained Zenity flow; a plain no-argument launch requires the GUI. A present
+but invalid GUI installation, or a GUI process that starts and fails, is
+reported directly without opening Zenity or performing a second TV operation.
+That launcher handoff does not become the frontend/backend contract: once
+`lg-buddy-gui` starts, GTK and the application communicate only through
+in-process Rust types.
 
 This split also keeps GTK runtime linkage out of systemd services and the
 headless CLI. Release bundles and packages must ship the GUI executable and
@@ -454,7 +458,9 @@ but TV and network dependencies remain mocked at their existing boundaries.
 
 A small acceptance layer proves only the user-visible boundary:
 
-- the desktop entry opens the brightness window without a terminal
+- the desktop entry opens normal Overview without a terminal
+- `lg-buddy brightness` focuses the brightness control, including from another
+  selected view
 - the current value becomes visible
 - changing and applying a value reaches the application once
 - cancellation performs no write
@@ -462,10 +468,12 @@ A small acceptance layer proves only the user-visible boundary:
 - the window remains responsive during blocking TV work
 
 Installed-GUI smoke proves that both executables and the desktop entry are
-installed together, the stable launcher opens the window without a terminal,
-and removal preserves user state. Release-bundle smoke separately proves that
-the distributed archive contains both executables and declares the required
-GTK runtime dependencies. Neither layer should duplicate the application
+installed together, the no-argument launcher opens normal Overview without a
+terminal, the brightness deep link selects its control, and removal preserves
+user state. A missing GUI fails the plain launcher while retaining the Zenity
+fallback for `brightness`. Release-bundle smoke separately proves that the
+distributed archive contains both executables and declares the required GTK
+runtime dependencies. Neither layer should duplicate the application
 state-machine matrix.
 
 Screenshots may support design review, but they are not the primary contract:
@@ -681,6 +689,23 @@ and narrow layout. The installed AT-SPI smoke verifies the third tab, direct
 keyboard access to editors, numeric draft and Enter validation, externally
 changed configuration, and preservation of the settings file.
 
+## Installed Overview Entrypoint Increment
+
+[#178](https://github.com/Staphylococcus/LG_Buddy/issues/178) makes the normal
+installed application entrypoint the no-argument `lg-buddy` command. The desktop
+entry therefore runs `/usr/bin/lg-buddy`, which launches `lg-buddy-gui` with no
+arguments and opens normal Overview. Direct `lg-buddy-gui` invocation with no
+arguments has the same behavior. `lg-buddy brightness` remains the focused
+brightness deep link and must reselect brightness from another view. Only that
+deep link keeps the missing-GUI Zenity fallback; the plain app launch requires
+the GUI. `lg-buddy --help` and `lg-buddy help` remain CLI help, and existing
+headless CLI, service, and update paths remain unchanged.
+
+This is an unreleased entrypoint change. The released `1.6.0-beta.1` desktop
+entry still invokes `brightness`. The complete GUI first-run, service, and
+update journey remains tracked in
+[#129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+
 ## Evolution Rules
 
 Later GUI areas follow the same method:
@@ -705,9 +730,11 @@ instead of teaching the renderer the rule.
 - a custom theme, widget set, or design system
 - a local daemon or frontend protocol
 - moving existing domain or policy behavior into GUI code
-- replacing the CLI or service entrypoints
+- replacing existing operational CLI or service entrypoints
 - implementing settings, pairing, diagnostics, or first-run setup in the
   brightness MVP
+- implementing the complete GUI first-run, service, or update journey tracked
+  in [#129](https://github.com/Staphylococcus/LG_Buddy/issues/129)
 - removing Zenity in the MVP
 
 GTK templates or builder files may be used internally by the GTK renderer.

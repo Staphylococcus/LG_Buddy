@@ -48,13 +48,13 @@ fn register_resources() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiCommand {
+    Overview,
     Brightness,
     Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuiParseError {
-    MissingCommand,
     UnknownCommand(String),
     UnexpectedArguments(Vec<String>),
 }
@@ -62,7 +62,6 @@ pub enum GuiParseError {
 impl fmt::Display for GuiParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingCommand => write!(f, "missing command; expected `brightness`"),
             Self::UnknownCommand(command) => write!(f, "unknown command `{command}`"),
             Self::UnexpectedArguments(arguments) => {
                 write!(f, "unexpected arguments: {}", arguments.join(" "))
@@ -81,7 +80,7 @@ where
         Some(command) if command.as_ref() == "brightness" => GuiCommand::Brightness,
         Some(command) if matches!(command.as_ref(), "--version" | "-V") => GuiCommand::Version,
         Some(command) => return Err(GuiParseError::UnknownCommand(command.as_ref().to_string())),
-        None => return Err(GuiParseError::MissingCommand),
+        None => GuiCommand::Overview,
     };
     let unexpected: Vec<String> = args.map(|argument| argument.as_ref().to_string()).collect();
     if !unexpected.is_empty() {
@@ -91,12 +90,12 @@ where
 }
 
 pub fn help(program: &str) -> String {
-    format!("Usage: {program} brightness\n       {program} --version\n")
+    format!("Usage: {program} [brightness]\n       {program} --version\n")
 }
 
 pub fn run(command: GuiCommand) -> glib::ExitCode {
     match command {
-        GuiCommand::Brightness => run_application(),
+        GuiCommand::Overview | GuiCommand::Brightness => run_application(command),
         GuiCommand::Version => {
             print!("{}", lg_buddy::version::version_text());
             glib::ExitCode::SUCCESS
@@ -104,10 +103,11 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
     }
 }
 
-fn run_application() -> glib::ExitCode {
+fn run_application(command: GuiCommand) -> glib::ExitCode {
     glib::set_application_name(APPLICATION_NAME);
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
     let controller = Rc::new(RefCell::new(None::<Rc<ApplicationController>>));
     install_application_actions(&application, Rc::clone(&controller));
@@ -118,7 +118,11 @@ fn run_application() -> glib::ExitCode {
         Arc::new(EnvironmentTvsBackend),
         Arc::new(EnvironmentSettingsBackend),
     );
-    application.run_with_args(&["lg-buddy-gui"])
+    let arguments: &[&str] = match command {
+        GuiCommand::Brightness => &["lg-buddy-gui", "brightness"],
+        _ => &["lg-buddy-gui"],
+    };
+    application.run_with_args(arguments)
 }
 
 fn install_application_actions(
@@ -687,6 +691,7 @@ fn connect_application(
         let settings_backend = Arc::clone(&settings_backend);
         move |application| {
             if let Some(controller) = controller.borrow().as_ref() {
+                ApplicationController::navigate(controller, ApplicationPage::Overview);
                 controller.present();
                 return;
             }
@@ -701,6 +706,27 @@ fn connect_application(
             overview.present();
         }
     });
+    // GApplication forwards the request to the existing instance as well.
+    application.connect_command_line({
+        let controller = Rc::clone(&controller);
+        move |application, command_line| {
+            let arguments = command_line.arguments();
+            let command =
+                match parse_args(arguments.iter().skip(1).map(|arg| arg.to_string_lossy())) {
+                    Ok(command @ (GuiCommand::Overview | GuiCommand::Brightness)) => command,
+                    _ => return glib::ExitCode::FAILURE,
+                };
+            application.activate();
+            if command == GuiCommand::Brightness {
+                if let Some(controller) = controller.borrow().as_ref() {
+                    if !controller.closed.get() {
+                        controller.window.focus_brightness();
+                    }
+                }
+            }
+            glib::ExitCode::SUCCESS
+        }
+    });
     application.connect_shutdown(move |_| {
         if let Some(controller) = controller.borrow().as_ref() {
             controller.shutdown();
@@ -713,13 +739,13 @@ mod tests {
     use super::{help, parse_args, GuiCommand, GuiParseError};
 
     #[test]
-    fn parses_the_brightness_command() {
+    fn parses_overview_and_brightness_entrypoints() {
         assert_eq!(parse_args(["brightness"]), Ok(GuiCommand::Brightness));
         assert_eq!(parse_args(["--version"]), Ok(GuiCommand::Version));
         assert_eq!(parse_args(["-V"]), Ok(GuiCommand::Version));
         assert_eq!(
             parse_args(std::iter::empty::<&str>()),
-            Err(GuiParseError::MissingCommand)
+            Ok(GuiCommand::Overview)
         );
         assert_eq!(
             parse_args(["settings"]),
@@ -733,7 +759,7 @@ mod tests {
         );
         assert_eq!(
             help("lg-buddy-gui"),
-            "Usage: lg-buddy-gui brightness\n       lg-buddy-gui --version\n"
+            "Usage: lg-buddy-gui [brightness]\n       lg-buddy-gui --version\n"
         );
     }
 }

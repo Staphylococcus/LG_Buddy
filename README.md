@@ -20,7 +20,9 @@ The released beta does not include GUI Settings. Development builds also include
 TV input changes, local unpairing, and editable Settings controls. The latest
 stable 1.5 release does not include this expanded interface. See the
 [beta release notes](docs/releases/1.6.0-beta.1.md) for scope and installation
-details. Screenshots use sample TV data.
+details. Current development builds also use the bare `lg-buddy` entrypoint for
+normal Overview; the released beta's desktop entry still invokes `brightness`.
+Screenshots use sample TV data.
 
 ![LG Buddy Overview with a connected TV, brightness and volume sliders, and connection status](docs/screenshots/overview.png)
 
@@ -78,7 +80,9 @@ explicit confirmation; refusal and noninteractive operation without that opt-in
 leave package installation to the user. The installer then verifies that the GUI
 executable can load and has the same release identity as the runtime before
 changing the LG Buddy installation.
-Zenity remains the compatibility fallback when the GUI executable is absent.
+Zenity remains the compatibility fallback for `lg-buddy brightness` when the
+GUI executable is absent. The normal no-argument `lg-buddy` launch requires the
+installed GUI.
 `swayidle` is needed only by an existing explicit selection or as the deprecated
 compatibility fallback.
 
@@ -150,7 +154,8 @@ system locations. First-class NixOS packaging is tracked in
 ## Quick Start
 
 LG Buddy's services run automatically after installation. Open **LG Buddy**
-from your app launcher, or run:
+from your app launcher to open the normal Overview. The desktop entry runs
+`lg-buddy` with no arguments. For a brightness-focused Overview, run:
 
 ```bash
 lg-buddy brightness
@@ -167,8 +172,11 @@ lg-buddy updates check
 lg-buddy updates install
 ```
 
-Run `lg-buddy <command> --help` for scoped syntax. To revisit the complete
-interactive setup, run `./configure.sh` from the extracted release archive.
+Run `lg-buddy <command> --help` for scoped syntax; `lg-buddy --help` and
+`lg-buddy help` show CLI help. To revisit the current interactive setup, run
+`./configure.sh` from the extracted release archive. The complete GUI first-run,
+service, and update journey remains tracked in
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 The [user guide](docs/user-guide.md) covers the desktop app, commands, settings,
 service checks, and uninstalling.

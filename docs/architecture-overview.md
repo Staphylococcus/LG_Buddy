@@ -98,11 +98,13 @@ The main runtime consumers are:
 - desktop environment and session integrations, including GNOME, native
   Wayland, `swayidle`, and Linux input activity sources
 - TTY users invoking the CLI directly
-- the stable `lg-buddy brightness` launcher, which opens the matching installed
-  GTK executable and uses Zenity only when that executable is absent
-- the `lg-buddy-gui brightness` GTK window, which asynchronously reads and
-  writes OLED brightness and renders application-owned Loading, Ready,
-  Applying, or Failed presentation state
+- the installed `lg-buddy` launcher with no arguments, which opens normal
+  Overview through the matching GTK executable
+- the `lg-buddy brightness` launcher, which opens the matching GTK executable
+  focused on brightness and uses Zenity only when that executable is absent
+- the `lg-buddy-gui` GTK window, which asynchronously reads and writes Overview
+  state and renders application-owned Loading, Ready, Applying, or Failed
+  presentation state
 
 ```mermaid
 flowchart LR
@@ -193,8 +195,8 @@ flowchart LR
     LOGINDADAPTER -->|"lock SessionObservation"| RUNNER
     NM --> MAIN
     TERMINAL --> MAIN
-    MAIN -->|"brightness launcher"| GTK
-    MAIN -.->|"GUI absent"| ZENITY
+    MAIN -->|"normal / brightness launcher"| GTK
+    MAIN -.->|"brightness only; GUI absent"| ZENITY
     ZENITY --> MAIN
     GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
     BRIGHTNESS --> PRESENTATION
@@ -429,6 +431,13 @@ The intended public user-action surface is:
 - `updates check [--notify]`
 - `updates install`
 
+The installed application entrypoint is `lg-buddy` with no arguments. It
+locates `lg-buddy-gui` beside the runtime and launches it with no arguments for
+normal Overview. `lg-buddy-gui` with no arguments has the same normal Overview
+behavior. `lg-buddy brightness` remains a brightness-focused deep link;
+`lg-buddy --help` and `lg-buddy help` remain CLI help. These launch routes do
+not change the operational CLI, service, or update paths listed above.
+
 The binary also retains package-owned and compatibility entrypoints during the
 public-surface migration:
 
@@ -469,17 +478,20 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The `brightness` command locates `lg-buddy-gui` beside the running CLI and
-launches its `brightness` entrypoint. Only an absent GUI executable selects the
-temporary Zenity compatibility flow; an invalid installation or failed GUI
-process is returned directly without a second prompt. The `brightness get` and
-`brightness set` commands never enter that launcher and use the TV picture
-abstraction in `tv.rs` for typed OLED brightness validation and live TV
-read/write operations. The interactive Zenity brightness dialog delegates its
-TV operations back through those direct CLI commands. The GTK entrypoint opens
-one Overview focused on brightness, alongside the primary TV summary, volume,
-and mute. Two icon-and-slider rows submit changes as the sliders move; the
-sound icon toggles mute. The core Overview application owns its declarations and semantic
+The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the running CLI
+and launches its no-argument entrypoint for normal Overview. A missing GUI is an
+error on this path. The `brightness` command locates the same executable and
+launches its `brightness` entrypoint, which selects the brightness control even
+when another view is already open. Only an absent GUI on this focused path
+selects the temporary Zenity compatibility flow; an invalid installation or
+failed GUI process is returned directly without a second prompt. The
+`brightness get` and `brightness set` commands never enter either launcher and
+use the TV picture abstraction in `tv.rs` for typed OLED brightness validation
+and live TV read/write operations. The interactive Zenity brightness dialog
+delegates its TV operations back through those direct CLI commands. The GTK
+entrypoint opens one Overview alongside the primary TV summary, volume, and
+mute. Two icon-and-slider rows submit changes as the sliders move; the sound
+icon toggles mute. The core Overview application owns its declarations and semantic
 intents; GTK renders them without adding TV or configuration policy. Workers
 keep blocking operations off the GTK main loop. Capability state is independent,
 and opaque operation identity prevents late results from replacing newer or
@@ -1013,4 +1025,8 @@ What is still not implemented:
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes
 
-So the current architecture should be read as a Rust-owned runtime with a thin shell setup surface.
+The no-argument launcher opens the installed application but does not replace
+the shell setup surface. The complete GUI first-run, service, and update journey
+remains tracked in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+So the current architecture should be read as a Rust-owned runtime with a thin
+shell setup surface.

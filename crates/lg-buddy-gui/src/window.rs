@@ -195,6 +195,12 @@ impl ApplicationWindow {
         self.window.present();
     }
 
+    pub(crate) fn focus_brightness(&self) {
+        if self.window.visible_dialog().is_none() {
+            self.overview.focus_brightness();
+        }
+    }
+
     pub(crate) fn close(&self) {
         self.allow_close.set(true);
         if !self.close_requested.get() {

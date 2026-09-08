@@ -327,13 +327,24 @@ credentials byte-for-byte, conditionally preserves or repairs the Python
 environment, replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
+The installed GUI smoke also verifies the desktop entry's no-argument
+`lg-buddy` launch opens normal Overview, while `lg-buddy brightness` selects the
+brightness control even when another view is already open. A missing GUI fails
+the plain launcher; only the brightness path retains the Zenity fallback.
+Parser coverage keeps bare launch separate from `--help` and `help`, which
+remain global CLI help. Existing headless CLI, service, and update paths remain
+covered by their current tests. The complete GUI first-run, service, and update
+journey is outside this slice and remains tracked in
+[#129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity
 formats, archive layout, and runtime/GUI target and identity mismatches. The
 bundle smoke test exercises the same validator against both generated and
 installed executables, verifies their static/dynamic linkage split, and drives
-the installed GTK window through mocked read, apply, failure/retry, and cancel
-paths under Xvfb. Fedora and Arch lanes repeat installed launch checks with
+the installed GTK window through normal launch and brightness deep-link paths
+plus mocked read, apply, failure/retry, and cancel paths under Xvfb. Fedora and
+Arch lanes repeat installed launch checks with
 keyboard-only behavior, external AT-SPI role/name/value checks, visibly distinct
 light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
 renderer suite separately asserts the same GTK semantics directly at the widget

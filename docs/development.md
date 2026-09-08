@@ -61,20 +61,32 @@ Build the GTK frontend from source with:
 cargo build --release -p lg-buddy-gui
 ```
 
-Open Overview focused on brightness with:
+Run the normal Overview directly with:
+
+```bash
+cargo run -p lg-buddy-gui
+```
+
+Run the brightness deep link directly with:
 
 ```bash
 cargo run -p lg-buddy-gui -- brightness
 ```
 
-After building both workspace binaries, the stable launcher can be exercised
-with `cargo run -p lg-buddy -- brightness`; it resolves `lg-buddy-gui` beside
-the running CLI executable. `LG_BUDDY_GUI` overrides that companion path for
-relocation and subprocess tests. Only a missing path selects the temporary
-Zenity compatibility flow.
+After building both workspace binaries, the installed app launcher can be
+exercised with `cargo run -p lg-buddy`; it resolves `lg-buddy-gui` beside the
+running CLI executable and launches its normal Overview entrypoint.
+`cargo run -p lg-buddy -- brightness` remains the brightness-focused deep link.
+`LG_BUDDY_GUI` overrides that companion path for relocation and subprocess
+tests. Only the brightness path selects the temporary Zenity compatibility flow
+when the GUI path is missing; the no-argument launcher requires the GUI.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
 Official release bundles ship and verify both.
+
+The GUI launch does not replace `install.sh` or `configure.sh`. The complete GUI
+first-run, service, and update journey remains tracked in
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 Official release builds inject version identity into the binary:
 
@@ -126,6 +138,10 @@ bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-r
 python3 scripts/test_release_promotion.py
 python3 scripts/test_record_github_release_responses.py
 ```
+
+The GUI launch checks cover both no-argument normal Overview launch and the
+brightness deep link, including focus handoff from another view. Installed
+smoke keeps the desktop entry, runtime, and GUI together.
 
 Optional hardware smoke for gamepad activity:
 
