@@ -15,22 +15,71 @@ use support::{
 };
 
 #[test]
-fn brightness_desktop_entry_uses_the_stable_headless_launcher() {
+fn desktop_entry_opens_the_application_through_the_stable_launcher() {
     let desktop_entry = fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("io.github.staphylococcus.LGBuddy.desktop"),
     )
-    .expect("read brightness desktop entry");
+    .expect("read application desktop entry");
     let lines = desktop_entry.lines().collect::<Vec<_>>();
 
     assert!(lines.contains(&"Name=LG Buddy"));
     assert!(lines.contains(&"Icon=io.github.staphylococcus.LGBuddy"));
-    assert!(lines.contains(&"Exec=/usr/bin/lg-buddy brightness"));
+    assert!(lines.contains(&"Exec=/usr/bin/lg-buddy"));
     assert!(lines.contains(&"Terminal=false"));
     assert!(!lines
         .iter()
         .any(|line| line.starts_with("Exec=") && line.contains("lg-buddy-gui")));
+}
+
+#[test]
+fn graphical_entrypoints_forward_the_destination_before_loading_tv_configuration() {
+    let gui = ExecutableScript::new(
+        "entrypoint-gui",
+        "lg-buddy-gui",
+        "#!/bin/sh\nprintf '%s' \"$*\" > \"$LG_BUDDY_TEST_GUI_CALLS\"\n",
+    );
+    let calls = gui.path().with_file_name("calls");
+    let config = TestConfigFile::new("entrypoint-gui-no-config");
+    for (arguments, expected) in [(&[][..], ""), (&["brightness"][..], "brightness")] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+            .args(arguments)
+            .env("LG_BUDDY_GUI", gui.path())
+            .env("LG_BUDDY_CONFIG", config.path())
+            .env("LG_BUDDY_TEST_GUI_CALLS", &calls)
+            .output()
+            .expect("launch application");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(fs::read_to_string(&calls).unwrap(), expected);
+        fs::remove_file(&calls).unwrap();
+    }
+    assert!(
+        !config.path().exists(),
+        "opening the GUI must not create TV configuration"
+    );
+}
+
+#[test]
+fn normal_launch_requires_the_gui_while_explicit_help_stays_headless() {
+    let config = TestConfigFile::new("entrypoint-missing-gui");
+    let invoke = |arguments: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+            .args(arguments)
+            .env("LG_BUDDY_GUI", config.path().with_file_name("missing-gui"))
+            .env("LG_BUDDY_CONFIG", config.path())
+            .output()
+            .expect("invoke application")
+    };
+    let missing = invoke(&[]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("LG Buddy GUI is not installed"));
+    let help = invoke(&["--help"]);
+    let explicit_help = invoke(&["help"]);
+    assert!(help.status.success());
+    assert!(explicit_help.status.success());
+    assert_eq!(help.stdout, explicit_help.stdout);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("brightness get"));
 }
 
 #[test]

@@ -75,16 +75,16 @@ assert_hidden_compatibility_alias() {
 assert_cli_surface() {
     local binary="$1"
     local help_output=""
-    local no_args_output=""
+    local help_alias_output=""
     local removed_channel_output=""
     local removed_channel_status=0
     local install_argument_output=""
     local install_argument_status=0
 
     help_output="$("$binary" --help)"
-    no_args_output="$("$binary")"
-    if [ "$no_args_output" != "$help_output" ]; then
-        echo "No-argument output did not match global help: $binary"
+    help_alias_output="$("$binary" help)"
+    if [ "$help_alias_output" != "$help_output" ]; then
+        echo "Explicit help output did not match --help: $binary"
         exit 1
     fi
 
@@ -334,6 +334,8 @@ assert_file "$BUNDLE_ICON"
 assert_mode "$BUNDLE_ICON" 644
 grep -F -q 'Name=LG Buddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 grep -F -q 'Icon=io.github.staphylococcus.LGBuddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+grep -F -x -q 'Exec=/usr/bin/lg-buddy' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
+grep -F -x -q 'Terminal=false' "$BUNDLE_DIR/LG_Buddy_Brightness.desktop"
 assert_file "$BUNDLE_DIR/README.md"
 assert_file "$BUNDLE_DIR/LICENSE"
 assert_file "$BUNDLE_DIR/release-manifest.json"

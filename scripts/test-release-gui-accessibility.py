@@ -268,14 +268,18 @@ def main() -> int:
     args = parse_args()
     if args.select_page:
         deadline = time.monotonic() + args.timeout
+        # Native button activation may finish after the AT-SPI call returns.
+        activated = False
         while time.monotonic() < deadline:
             for item in accessible_tree():
                 try:
                     if (normalized_name(item) == args.select_page
                             and role(item) == pyatspi.ROLE_PAGE_TAB
-                            and item.getState().contains(pyatspi.STATE_SHOWING)
-                            and item.queryAction().doAction(0)):
-                        return 0
+                            and item.getState().contains(pyatspi.STATE_SHOWING)):
+                        if item.getState().contains(pyatspi.STATE_SELECTED):
+                            return 0
+                        if not activated:
+                            activated = item.queryAction().doAction(0)
                 except Exception:
                     continue
             time.sleep(0.1)

@@ -13,7 +13,10 @@ preview of 1.6. They are not included in the stable 1.5 release. See the
 [beta release notes](releases/1.6.0-beta.1.md) for the scope of this preview.
 Screenshots use sample TV data.
 
-Open **LG Buddy** from your app launcher, or run `lg-buddy brightness`.
+Current development builds open the normal Overview when you open **LG Buddy**
+from your app launcher. Run `lg-buddy brightness` for a brightness-focused
+Overview. The released **1.6.0-beta.1** desktop entry still invokes
+`brightness`.
 
 ### Overview
 
@@ -126,6 +129,9 @@ The installed command is:
 lg-buddy <command>
 ```
 
+Running the installed command with no arguments opens the normal Overview
+through `lg-buddy-gui`.
+
 Common commands include:
 
 ```bash
@@ -147,17 +153,18 @@ lg-buddy --version
 ```
 
 Use `lg-buddy <command> --help` or `lg-buddy help <command>` for command-specific
-syntax.
+syntax. `lg-buddy --help` and `lg-buddy help` show global CLI help.
 
 - `power on` wakes the TV and restores the configured input.
 - `power off` powers off the TV when it is on the configured input and no reboot
   is pending.
 - `screen off` blanks the TV output while remembering that LG Buddy blanked it.
 - `screen on` restores the output according to the configured restore policy.
-- `brightness` opens LG Buddy Overview focused on brightness. `brightness get`
-  and `brightness set <0-100>` remain headless and read or change OLED
-  brightness directly. If the GUI executable is absent, a transitional
-  installation falls back to the retained Zenity brightness dialog.
+- `lg-buddy` with no command opens normal Overview through the installed GUI.
+  `brightness` opens Overview focused on brightness, including when another
+  view is already selected. `brightness get` and `brightness set <0-100>` remain
+  headless and read or change OLED brightness directly. Only `brightness` falls
+  back to the retained Zenity dialog when the GUI executable is absent.
 - `volume` prints the current level, `mute` when muted, or `unknown` when the TV
   does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
   down` change the volume and unmute the TV. `volume mute [on|off]` toggles or
@@ -167,6 +174,11 @@ syntax.
 
 LG Buddy's services normally run automatically, so most users only need these
 commands and the settings described below.
+
+The app launcher only opens the installed application; setup remains in the
+installer and `./configure.sh`. The complete GUI first-run, service, and update
+journey remains tracked in
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Configuration
 

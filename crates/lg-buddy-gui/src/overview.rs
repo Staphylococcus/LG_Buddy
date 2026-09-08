@@ -321,6 +321,19 @@ impl OverviewView {
     pub(crate) fn leave(&self) {
         self.initial_brightness_focus.set(false);
     }
+
+    pub(crate) fn focus_brightness(&self) {
+        self.initial_brightness_focus.set(true);
+        if self.brightness.scale.is_visible()
+            && self.brightness.scale.is_sensitive()
+            && self.brightness.scale.grab_focus()
+        {
+            self.initial_brightness_focus.set(false);
+        } else {
+            // Let the deferred request yield only to focus chosen after activation.
+            gtk::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk::Widget>);
+        }
+    }
 }
 
 struct RetryButton {
@@ -440,13 +453,17 @@ mod tests {
     }
 
     fn late_brightness_respects_focus(application: &adw::Application) {
-        // Keep the default deep-link focus unless another control was chosen,
-        // including during a retry or after the idle callback was queued.
-        for (retry_read, focus_after_render) in [
-            (false, None),
-            (false, Some(false)),
-            (true, Some(false)),
-            (false, Some(true)),
+        // An explicit activation replaces earlier focus, but later user choices
+        // win, including during a retry or after the idle callback was queued.
+        for (retry_read, explicit_request, focus_after_render) in [
+            (false, false, None),
+            (false, false, Some(false)),
+            (true, false, Some(false)),
+            (false, false, Some(true)),
+            (false, true, None),
+            (true, true, None),
+            (false, true, Some(false)),
+            (false, true, Some(true)),
         ] {
             let view = test_view(application, Rc::new(|_| {}));
             let (mut app, opening) = OverviewApplication::open();
@@ -492,6 +509,10 @@ mod tests {
             while gtk::glib::MainContext::default().pending() {
                 gtk::glib::MainContext::default().iteration(false);
             }
+            if explicit_request {
+                assert!(view.volume.scale.grab_focus());
+                view.focus_brightness();
+            }
             if focus_after_render == Some(false) {
                 assert!(view.volume.scale.grab_focus());
             }
@@ -507,11 +528,11 @@ mod tests {
                 gtk::glib::MainContext::default().iteration(false);
             }
             if focus_after_render.is_some() {
-                assert!(view.volume.scale.has_focus(), "brightness stole volume focus: retry={retry_read}, focus_after_render={focus_after_render:?}");
+                assert!(view.volume.scale.has_focus(), "brightness stole volume focus: retry={retry_read}, explicit_request={explicit_request}, focus_after_render={focus_after_render:?}");
             } else {
                 assert!(
                     view.brightness.scale.has_focus(),
-                    "initial brightness focus was lost"
+                    "brightness focus was lost: retry={retry_read}, explicit_request={explicit_request}"
                 );
             }
             view.window.close();

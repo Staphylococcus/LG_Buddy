@@ -105,7 +105,8 @@ impl RuntimeEventKind {
             Command::Screen(ScreenCommand::On) => Some(Self::ScreenRestoreRequested),
             Command::ScreenOff => Some(Self::ScreenBlankRequested),
             Command::ScreenOn => Some(Self::ScreenRestoreRequested),
-            Command::Monitor
+            Command::Overview
+            | Command::Monitor
             | Command::Lifecycle
             | Command::DetectBackend
             | Command::Dev(_)
@@ -225,6 +226,7 @@ mod tests {
 
     #[test]
     fn source_loop_and_diagnostic_commands_are_not_policy_events() {
+        assert_eq!(RuntimeEvent::from_command(Command::Overview), None);
         assert_eq!(RuntimeEvent::from_command(Command::Monitor), None);
         assert_eq!(RuntimeEvent::from_command(Command::Lifecycle), None);
         assert_eq!(RuntimeEvent::from_command(Command::DetectBackend), None);

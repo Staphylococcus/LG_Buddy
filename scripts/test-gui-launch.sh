@@ -29,7 +29,7 @@ command -v gapplication >/dev/null || fail "gapplication is required for the GUI
 command -v xdotool >/dev/null || fail "xdotool is required for the GUI launch smoke test."
 
 ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
-    "$GUI_BINARY" brightness &
+    "$GUI_BINARY" &
 GUI_PID=$!
 
 for ((attempt = 0; attempt < 300; attempt++)); do
@@ -51,6 +51,7 @@ done
 
 ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$GUI_BINARY" brightness
+kill -0 "$GUI_PID" 2>/dev/null || fail "Reactivation replaced the running GUI process."
 mapfile -t WINDOW_IDS < <(
     xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" 2>/dev/null || true
 )

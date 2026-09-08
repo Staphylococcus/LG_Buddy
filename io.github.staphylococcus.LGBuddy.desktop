@@ -2,8 +2,8 @@
 Version=1.0
 Type=Application
 Name=LG Buddy
-Comment=Control LG TV OLED Pixel Brightness
-Exec=/usr/bin/lg-buddy brightness
+Comment=Control your LG TV and manage LG Buddy
+Exec=/usr/bin/lg-buddy
 Icon=io.github.staphylococcus.LGBuddy
 Terminal=false
 Categories=Utility;
