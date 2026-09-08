@@ -1,481 +1,256 @@
 # <img src="../data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" alt="" width="44" height="44"> LG Buddy User Guide
 
-This guide covers day-to-day LG Buddy use after installation. For implementation
-details and package integration, see [Technical references](#technical-references).
+Use this guide to make your TV comfortable to work on, choose when it blanks
+and wakes, and get it working again if something goes wrong. If you are setting
+up LG Buddy for the first time, start with the [installation instructions](../README.md#install).
 
-[Desktop app](#desktop-app) · [Commands](#common-commands) ·
-[Settings](#configuration) · [Updates](#updates)
+[Open the app](#open-lg-buddy) · [Adjust brightness and sound](#adjust-brightness-and-sound) · [Pair or fix a TV](#tvs) ·
+[Choose blanking and wake behavior](#settings) · [Use a terminal](#common-commands) ·
+[Updates](#updates)
 
-## Desktop App
+<a id="desktop-app"></a>
+## Open LG Buddy
 
-Overview, TVs, and the pairing dialog are included in **1.6.0-beta.1**, an early
-preview of 1.6. They are not included in the stable 1.5 release. See the
-[beta release notes](releases/1.6.0-beta.1.md) for the scope of this preview.
-Screenshots use sample TV data.
+Open **LG Buddy** from your application launcher, or run `lg-buddy` with no
+arguments. Both open **Overview**. If no TV is configured, go to
+[TVs to pair one](#pair-your-first-tv). For a keyboard shortcut straight to
+brightness, bind `lg-buddy brightness` to your preferred key combination.
 
-Current development builds open the normal Overview when you open **LG Buddy**
-from your app launcher. Run `lg-buddy brightness` for a brightness-focused
-Overview. The released **1.6.0-beta.1** desktop entry still invokes
-`brightness`.
+LG Buddy manages one TV. Screenshots use sample TV data.
 
-### Overview
+## Adjust brightness and sound
+
+In **Overview**, use the upper slider to adjust OLED pixel brightness and the
+lower slider to change volume. Changes take effect as you move each slider.
+Click the speaker icon to mute or unmute; changing volume also unmutes the TV.
+If a control fails, follow the error message beside it and retry.
 
 ![Overview showing a connected TV with brightness and volume sliders](screenshots/overview.png)
 
-Overview shows the primary TV's address, managed HDMI input, and connection
-state, with controls for OLED pixel brightness, TV volume, and mute. Move a
-slider to apply its value; click the sound icon to toggle mute. Changing volume
-also unmutes the TV. If a control cannot be loaded, its feedback and retry action
-appear alongside it.
-
-### TVs
-
-The TVs tab shows the configured TV's address, MAC address, HDMI input, control
-platform, and credential status. In 1.6.0-beta.1 these details are read-only. A saved credential
-does not mean the TV is currently connected; check Overview for connection
-status. When available, the model reported by the TV replaces the generic
-profile heading. If it cannot be read, the saved details remain visible.
-
-Development builds also let you change **HDMI input** directly in TVs. The
-selection saves immediately and changes which input LG Buddy manages; it does
-not switch the TV’s current source. If saving fails, the previous selection is
-restored.
-
-To remove the connection or recover from pairing problems, click the **Unpair
-TV…** icon beside the TV model name and confirm. This removes the saved TV
-profile and its local native credential, while keeping other settings. It does
-not revoke authorization on
-the TV or remove compatibility credential storage. Cancelling the confirmation
-keeps the connection. Once unpaired, use **Pair a TV** to reconnect through
-native webOS. Cancelling or failing this new pairing leaves no TV configured.
-
-With no TV configured, choose **Pair a TV** to get started.
-
-![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
-
-### About LG Buddy
-
-Development builds provide **About LG Buddy** in the main menu. It shows
-the app version, project and issue links, credits, license, and build information
-that can be saved when reporting a problem.
-
-### Settings
-
-The released **1.6.0-beta.1** does not include GUI Settings. Development builds
-add a **Settings** tab with **Screen**, **Sleep & Wake**, and **Updates** groups.
-It exposes seven behavior settings shared with the [settings commands](#configuration). Settings remains independent of TV
-availability; it can load and edit configuration even when no TV is paired.
-Settings reloads when you enter the tab. Invalid saved values remain visible as
-invalid and are not silently replaced with defaults.
-
-Each setting shows a description and its current value:
-
-- toggles for idle blanking, TV sleep & wake, and automatic update checks, plus
-  bounded choices for the desktop backend, restore policy, and update channel,
-  apply on change. Click a choice row to open its available values;
-- the numeric idle timeout commits when you press Enter or leave the field;
-- errors and runtime-application warnings appear only when an operation needs
-  attention, with **Retry apply** offered when runtime application fails.
-
-Each change is validated, saved, and applied automatically, without a separate
-**Save** or **Cancel** button. Successful changes need no notification and keep
-the layout stable. Settings stay responsive while changes are saved in order.
-TV management waits until those changes finish. A validation or persistence failure
-restores the previous value and explains the error. If saving succeeds but
-runtime application fails, the saved value remains, a warning is shown, and
-**Retry apply** repeats only the runtime step.
-
-If the screen integration or automatic update checks are not installed or
-running, the row explains that condition. Changing a setting does not install
-or repair these services. TV identity, HDMI input, and pairing remain in **TVs**.
+<a id="tvs"></a>
+## Pair or fix a TV connection
 
 ### Pair Your First TV
 
-Open **TVs → Pair a TV**. The dialog pairs your first TV using native webOS.
+Open **TVs → Pair a TV**. Before starting, turn on the TV, connect it to the
+same network as the computer, and find its IPv4 and MAC addresses. Enable
+**TV On With Mobile / Wake-on-LAN** on the TV. A static IP and **Always Ready**
+are strongly recommended.
 
-![Pair a TV dialog with TV setup guidance, address fields, and HDMI input selection](screenshots/pairing.png)
+![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
 
-Before starting:
+In the dialog:
 
-- Turn on the TV and connect it to the same network as the computer.
-- Find the TV's IPv4 address and MAC address in its network settings.
-- Required: enable **TV On With Mobile / Wake-on-LAN**.
-- Strongly recommended: use a static IP address and enable **Always Ready**.
+1. Enter the TV's IP and MAC addresses.
+2. Select the HDMI input connected to the computer. This sets the input LG
+   Buddy manages; it does not switch the TV's current source.
+3. Choose **Pair**, then approve the native webOS pairing request with the
+   remote.
 
-Then pair the TV:
+Cancel is available until saving starts; once saving starts, the dialog stays
+open until the operation finishes. When verification and saving finish, the
+dialog closes, the TV appears in the app, and a **TV paired successfully** toast
+confirms the result. A failed attempt shows an error you can correct and submit
+again; a cancelled attempt does not save a TV.
 
-1. Enter the TV's IP and MAC addresses, then select the HDMI input connected to
-   your PC.
-2. Choose **Pair** and approve the request on the TV using its remote.
-3. Wait while LG Buddy checks access and saves the connection. The progress bar
-   tracks each stage. When pairing succeeds, the dialog closes, the TV appears
-   in the app, and a **TV paired successfully** toast confirms the result.
+![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 
-If pairing fails, the dialog shows an actionable error and can be submitted
-again after correcting the details or TV state. You can cancel until saving
-begins; once saving starts, the dialog stays open until the operation finishes.
-A cancelled attempt does not save a TV.
+Pairing saves the TV connection. Automatic power and idle behavior also require
+the [installer’s setup](../README.md#install).
 
-Pairing saves the TV connection. To set up automatic idle, sleep, and wake
-behavior on a fresh installation, use the [installer](../README.md#install)
-and `./configure.sh` from the release archive. Use [settings](#configuration)
-for individual changes.
+### Move the HDMI cable
 
-## Common Commands
+After moving the cable, open **TVs** and choose the new value in **HDMI input**.
+The choice saves immediately and changes which input LG Buddy manages;
+you may still need to switch the TV's current source with its remote. If saving
+fails, the previous choice is restored.
 
-The installed command is:
+![The TVs tab with a configured TV and editable HDMI input](screenshots/tvs-configured.png)
 
-```bash
-lg-buddy <command>
-```
+### Fix a pairing problem
 
-Running the installed command with no arguments opens the normal Overview
-through `lg-buddy-gui`.
+<a id="fix-pairing-problem"></a>
+If the TV is disconnected, first check that it is on, on the same network, and
+still has the address shown in **TVs**. Also check that **TV On With Mobile /
+Wake-on-LAN** is enabled.
 
-Common commands include:
+If the TV rejects LG Buddy’s authorization, pair it again: open **TVs**, choose
+**Unpair TV…** beside the TV name, and confirm. This removes the saved TV details
+and local native credential while keeping other settings. It does not revoke
+authorization on the TV or remove compatibility credentials.
 
-```bash
-lg-buddy power on
-lg-buddy power off
-lg-buddy screen off
-lg-buddy screen on
-lg-buddy brightness
-lg-buddy brightness get
-lg-buddy brightness set 65
-lg-buddy volume
-lg-buddy volume 20
-lg-buddy volume up
-lg-buddy volume mute
-lg-buddy settings list
-lg-buddy settings describe screen.backend
-lg-buddy updates check
-lg-buddy --version
-```
+After unpairing, use **Pair a TV** and approve native webOS pairing again.
+Cancelling the unpair confirmation keeps the connection. Cancelling or failing
+the new pairing leaves no TV configured.
 
-Use `lg-buddy <command> --help` or `lg-buddy help <command>` for command-specific
-syntax. `lg-buddy --help` and `lg-buddy help` show global CLI help.
+For a terminal-only repair or reconfiguration, run `./configure.sh` from the
+release archive. To select native control for an existing profile and verify it
+before saving, use `lg-buddy settings set tv.platform lg_webos`. The explicit
+`bscpylgtv` value remains available as a compatibility fallback when native
+control cannot be used.
 
-- `power on` wakes the TV and restores the configured input.
-- `power off` powers off the TV when it is on the configured input and no reboot
-  is pending.
-- `screen off` blanks the TV output while remembering that LG Buddy blanked it.
-- `screen on` restores the output according to the configured restore policy.
-- `lg-buddy` with no command opens normal Overview through the installed GUI.
-  `brightness` opens Overview focused on brightness, including when another
-  view is already selected. `brightness get` and `brightness set <0-100>` remain
-  headless and read or change OLED brightness directly. Only `brightness` falls
-  back to the retained Zenity dialog when the GUI executable is absent.
-- `volume` prints the current level, `mute` when muted, or `unknown` when the TV
-  does not expose a numeric level. `volume <0-100>`, `volume up`, and `volume
-  down` change the volume and unmute the TV. `volume mute [on|off]` toggles or
-  explicitly sets mute.
-- `--version` reports the installed version and, for official builds, release
-  metadata.
+<a id="settings"></a>
+<a id="automatic-screen-blanking"></a>
+## Choose when the TV blanks, sleeps, and wakes
 
-LG Buddy's services normally run automatically, so most users only need these
-commands and the settings described below.
+Open **Settings** to adapt the TV to your routine:
 
-The app launcher only opens the installed application; setup remains in the
-installer and `./configure.sh`. The complete GUI first-run, service, and update
-journey remains tracked in
-[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+- To wait longer before blanking, increase **Screen → Idle timeout**. The value
+  is in seconds: `600` gives you ten minutes. The default is five minutes.
+- To keep the panel on while you are away, turn off **Idle blanking**.
+- To stop the TV following PC sleep and wake, turn off
+  **Sleep & Wake → TV sleep & wake**. Enable it to power the TV off before
+  sleep and restore it after wake.
 
-## Configuration
+![The Settings tab with screen, sleep and wake, and update behavior controls](screenshots/settings.png)
 
-Run the configurator from the extracted release archive to change TV identity,
-control platform, idle behavior, or installed service wiring:
+After blanking the panel for inactivity or a locked session, LG Buddy powers
+the TV off after five more minutes without activity. Returning before then
+restores the panel.
 
-```bash
-./configure.sh
-```
+Leave **Restore policy** at **Conservative** to restore only a TV that LG Buddy
+blanked or powered off. Choose **Aggressive** if activity or system wake should
+also attempt to restore a TV turned off another way.
 
-For individual changes, use the settings commands:
+Changes save and apply automatically; for **Idle timeout**, press Enter or leave
+the field to finish editing. If a change cannot be saved, the previous value is
+restored. If it was saved but could not take effect, the value stays saved and
+**Retry apply** retries that step. A warning about a missing or inactive service
+means its setup needs attention before the saved behavior can take effect;
+see [troubleshooting](#troubleshooting).
 
-```bash
-lg-buddy settings list
-lg-buddy settings describe screen.restore_policy
-lg-buddy settings get screen.idle_timeout
-lg-buddy settings set tv.input HDMI_2
-lg-buddy settings set screen.idle_timeout 600
-lg-buddy settings unset screen.restore_policy
-```
+Leave **Desktop integration** at **Automatic** unless you need to select a
+particular compatible desktop. See the [session backend model](session-backend-model.md)
+for compatibility details, including the deprecated `swayidle` option.
 
-`settings describe` shows a setting's current value, default, accepted values,
-and where the current value came from. `settings unset` restores the default
-when the setting supports it.
+<a id="gamepad-activity"></a>
+## Keep the screen awake with a gamepad
 
-Current settings are:
+Supported controller activity counts as normal activity with the GNOME and
+native Wayland backends, so no extra setting is needed. With the deprecated
+`swayidle` backend, controller activity can restore a screen LG Buddy already
+blanked, but it does not reset swayidle's initial timeout.
 
-| Setting | Purpose |
+If a controller is ignored, check that the user running the screen service can
+read the controller's Linux input device, then see the [gamepad subsystem
+guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
+
+<a id="common-commands"></a>
+<a id="configuration"></a>
+## Use commands for shortcuts, scripts, or a headless setup
+
+These commands work without opening the GUI:
+
+| Task | Command |
 | --- | --- |
-| `tv.ip` | TV network address. |
-| `tv.mac` | TV MAC address used for Wake-on-LAN. |
-| `tv.input` | Input LG Buddy manages, such as `HDMI_2`. |
-| `tv.platform` | TV control implementation: native `lg_webos` or the `bscpylgtv` compatibility fallback. |
-| `screen.backend` | Desktop idle backend: `auto`, `gnome`, `wayland`, or deprecated compatibility value `swayidle`. |
-| `screen.idle_blank` | Enable or disable automatic idle blanking. |
-| `screen.idle_timeout` | Seconds of inactivity before blanking; defaults to 300. |
-| `screen.restore_policy` | `conservative` or `aggressive` restore behavior. |
-| `system.sleep_wake_policy` | Enable or disable TV handling around system sleep. |
-| `updates.auto_check` | Enable or disable automatic update checks. |
-| `updates.channel` | Check the `stable` or `prerelease` release channel. |
+| Wake the TV and select the PC's configured input | `lg-buddy power on` |
+| Turn off the TV while it is on that input | `lg-buddy power off` |
+| Blank the panel | `lg-buddy screen off` |
+| Restore the panel using your restore policy | `lg-buddy screen on` |
+| Read the current OLED brightness | `lg-buddy brightness get` |
+| Set OLED brightness to 65% | `lg-buddy brightness set 65` |
+| Set volume to 20 and unmute | `lg-buddy volume 20` |
+| Toggle mute | `lg-buddy volume mute` |
+| Inspect all settings | `lg-buddy settings list` |
+| Explain the selected desktop integration | `lg-buddy settings describe screen.backend` |
+| Wait ten minutes before blanking | `lg-buddy settings set screen.idle_timeout 600` |
+| Restore the default idle timeout | `lg-buddy settings unset screen.idle_timeout` |
 
-Changes that affect desktop monitoring automatically restart the user service
-when it is installed and active or enabled. Update settings also apply to the
-installed update timer.
+For more commands and accepted values, run `lg-buddy --help` or scoped help such
+as `lg-buddy volume --help`. Use `lg-buddy settings describe <KEY>` before
+changing an unfamiliar setting; it explains the value, default, and available
+choices.
 
-LG Buddy stores these settings in `config.env`, normally at
-`$XDG_CONFIG_HOME/lg-buddy/config.env`, or `~/.config/lg-buddy/config.env` when
-`XDG_CONFIG_HOME` is unset. The settings CLI, configurator, installer, and
-manual edits all use this file. Prefer the settings CLI for ordinary changes
-because it validates values and applies any required service changes.
+GUI and terminal changes use the same saved configuration. See
+[Defaults and configuration](defaults-and-configuration.md) for its location,
+format, and compatibility behavior.
 
-If a manual edit leaves an invalid value, `settings list` and
-`settings describe` identify it. Repair it with `settings set`, `settings
-unset`, or another manual edit.
+<a id="updates"></a>
+## Install an update
 
-## Automatic Screen Blanking
-
-Automatic blanking is enabled by default. Change its main settings with:
-
-```bash
-lg-buddy settings set screen.idle_blank enabled
-lg-buddy settings set screen.idle_timeout 600
-lg-buddy settings set screen.restore_policy conservative
-```
-
-Set `screen.idle_blank` to `disabled` to stop idle-driven TV blanking and
-restoring. The user service remains available for update notifications.
-
-When an automatic idle or session-lock action successfully blanks the screen,
-LG Buddy powers the TV off after five more minutes without activity. This grace
-period is a fixed safety default rather than a setting. After a session-lock
-blank, desktop and gamepad activity is ignored for one second so incidental
-input while stepping away does not immediately restore the screen. The first
-activity at or after that boundary cancels the pending power-off and restores
-the screen, even while the session remains locked. Idle-triggered blanks retain
-their immediate activity restore behavior. Before powering off, LG Buddy
-rechecks its ownership marker, the configured input, and machine lifecycle
-state; it skips safely if those checks no longer permit the action.
-
-The restore policies are:
-
-- `conservative`: restore only when LG Buddy previously blanked or powered off
-  the TV. This is the default.
-- `aggressive`: also attempt to restore the TV on activity or system wake when
-  no LG Buddy marker exists.
-
-### Choosing a Desktop Backend
-
-| Backend | When to use it |
-| --- | --- |
-| `auto` | Default. Prefers compatible GNOME, then compatible native Wayland, then the deprecated `swayidle` fallback when installed. |
-| `gnome` | A GNOME Shell session with the required GNOME idle services. |
-| `wayland` | Force native monitoring on a compositor that advertises `ext_idle_notifier_v1` version 2 or newer and at least one `wl_seat`. |
-| `swayidle` | Deprecated compatibility backend for existing installations and older compositors. Fresh interactive configuration does not offer it. |
-
-Select a backend persistently:
-
-```bash
-lg-buddy settings set screen.backend wayland
-```
-
-Return to automatic selection:
-
-```bash
-lg-buddy settings unset screen.backend
-```
-
-An explicitly selected backend reports a compatibility error rather than
-silently switching to another backend. `auto` reports why it moved past GNOME
-or native Wayland. Existing explicit `swayidle` selections remain valid and are
-never silently rewritten, but emit a deprecation notice.
-
-Check the selected backend and user service:
-
-```bash
-lg-buddy settings describe screen.backend
-systemctl --user status LG_Buddy_screen.service
-journalctl --user -u LG_Buddy_screen.service --since today
-```
-
-For `auto`, `settings describe` prints the configured selection, resolved
-backend, and fallback reason separately. Unsupported native sessions report
-the compositor connection or protocol limitation before using `swayidle` or
-reporting that no backend is available.
-
-The `swayidle` compatibility window lasts through the 1.x release line, with
-removal planned for 2.0.0. Removal requires native Wayland monitoring to remain
-field-validated on supported non-GNOME compositors, precise unsupported-session
-diagnostics, and a released migration window in which existing configurations
-continue to run without being rewritten.
-
-### Gamepad Activity
-
-With the `gnome` and `wayland` backends, supported controller activity resets
-the same idle timer as desktop activity. On the deprecated `swayidle` backend,
-controller activity can restore an already blanked screen and cancel its
-pending timed power-off, but it does not reset swayidle's initial timeout. No
-additional setting is required.
-
-If controller activity is ignored, verify that the user running
-`LG_Buddy_screen.service` can read the controller's Linux input devices. Normal
-desktop sessions usually receive this access automatically through seat device
-permissions. See [gamepad-subsystem.md](gamepad-subsystem.md) for supported
-input paths and hardware troubleshooting.
-
-## TV Control Platform
-
-`tv.platform` selects the TV control implementation:
-
-- `lg_webos`: the native Rust implementation and fresh-profile default.
-- `bscpylgtv`: the explicit Python compatibility fallback.
-
-Fresh configuration verifies native pairing before it saves the profile.
-Existing profiles retain their selected platform. If an older profile has no
-platform key, it continues to resolve to `bscpylgtv`; rewriting that profile
-through the configurator materializes the compatibility choice instead of
-silently moving it to native control.
-
-Move an existing profile to the native implementation with:
-
-```bash
-lg-buddy settings set tv.platform lg_webos
-```
-
-LG Buddy connects to the TV and verifies the credential before saving this
-choice. Accept the pairing prompt on the TV if one appears. Foreground TV
-commands can pair or repair credentials when necessary; unattended startup,
-shutdown, suspend, and resume handling use an existing credential and do not
-open a pairing prompt.
-
-Select and persist the compatibility fallback with:
-
-```bash
-lg-buddy settings set tv.platform bscpylgtv
-```
-
-`settings unset tv.platform` removes the explicit choice and therefore resolves
-to `bscpylgtv` for legacy compatibility; it does not apply the fresh-profile
-default.
-
-For support and troubleshooting, inspect the effective platform, its source,
-and accepted values with:
-
-```bash
-lg-buddy settings describe tv.platform
-```
-
-If native pairing or its power-state verification fails, setup leaves the
-profile unsaved. Confirm that the TV is reachable and accept its pairing prompt,
-then rerun configuration or `settings set tv.platform lg_webos`. Select
-`bscpylgtv` explicitly if native control is not usable on that TV.
-
-## System Sleep And Wake
-
-Default installs power off the TV before system sleep and restore it after
-wake. Disable this behavior without removing the integration:
-
-```bash
-lg-buddy settings set system.sleep_wake_policy disabled
-```
-
-Re-enable it with:
-
-```bash
-lg-buddy settings set system.sleep_wake_policy enabled
-```
-
-While system sleep is pending, desktop idle events do not issue competing TV
-commands.
-
-Check the lifecycle service with:
-
-```bash
-systemctl status LG_Buddy_lifecycle.service
-journalctl -u LG_Buddy_lifecycle.service --since today
-```
-
-## Updates
-
-Check for updates manually:
+To see whether an update is available, run:
 
 ```bash
 lg-buddy updates check
-lg-buddy updates check --notify
-lg-buddy settings set updates.channel prerelease
-lg-buddy updates check
+```
+
+To check again and install the offered release, run as your regular user:
+
+```bash
 lg-buddy updates install
 ```
 
-The saved `updates.channel` setting controls every check, regardless of the
-installed binary's own release channel. `stable` checks stable releases only;
-`prerelease` accepts GitHub's newest published stable or prerelease. Release
-promotion requires every version to advance both release-channel heads, so the
-newest published release is also the highest semantic version.
+Review the offered version and type `yes` to download, verify, and install it.
+Your settings and pairing are preserved. Both commands use your saved update
+channel. If the upgrade is refused, follow the reported reason before retrying.
 
-`updates install` is an assisted, foreground upgrade. It checks whether the
-current host and installation are safely upgradeable before discovery, shows
-the current and target version/channel/commit, and requires you to type `yes`
-in a terminal before downloading the release bundle. It then verifies the
-bundle, reruns preflight from the candidate, invokes `install.sh --upgrade`,
-and verifies the installed release identity. It does not accept channel or
-version arguments, downgrade, migrate legacy installations, or run unattended.
+If the installed version predates `v1.4.0-beta.2`, install one updater-capable
+release bundle manually before using `updates install`.
 
-Before a fresh installation or upgrade executes the bundled GUI, the installer
-checks for GTK 4.14 or newer and libadwaita 1.5 or newer. If either is missing,
-apt systems offer `libgtk-4-1` and `libadwaita-1-0`; dnf and pacman systems offer
-`gtk4` and `libadwaita`. Installing them requires a separate explicit
-confirmation. Declining, running noninteractively without that opt-in, using an
-unsupported package manager, or remaining below the required versions aborts
-before LG Buddy installation files are changed and prints a manual command.
+## Choose preview releases and automatic checks
 
-`v1.4.0-beta.2` is the first release that contains `updates install`. Older
-installations require one normal manual installation of an updater-capable
-release before this assisted path is available.
+In **Settings → Updates**, turn automatic checks on or off and choose the
+release channel. Changes apply immediately. `stable` checks stable releases;
+`prerelease` also considers published previews. Choosing `prerelease` does not
+install anything by itself.
 
-`--notify` sends a desktop notification through the running user service. When
-supported by the desktop, the notification includes actions to open the release
-or disable future automatic notifications. LG Buddy does not repeatedly notify
-for the same release.
+For a terminal-only setup, use one setting at a time:
 
-Control scheduled checks with:
+| Preference | Command |
+| --- | --- |
+| Enable automatic checks | `lg-buddy settings set updates.auto_check enabled` |
+| Disable automatic checks | `lg-buddy settings set updates.auto_check disabled` |
+| Use stable releases | `lg-buddy settings set updates.channel stable` |
+| Consider preview releases | `lg-buddy settings set updates.channel prerelease` |
+
+<a id="troubleshooting"></a>
+## Find your version, report a problem, or troubleshoot
+
+Open **About LG Buddy** from the app menu to see the version, save build
+information, and open the project issue form. The terminal equivalent is:
 
 ```bash
-lg-buddy settings set updates.auto_check disabled
-lg-buddy settings set updates.auto_check enabled
-lg-buddy settings set updates.channel prerelease
+lg-buddy --version
 ```
 
-Disabling automatic checks does not disable manual `updates check` or
-`updates install` commands. Both use the saved `updates.channel` setting.
+When reporting a problem, include the version, what you expected, what happened,
+and the relevant command output. These checks usually identify the next step:
 
-## Technical References
+| Problem | Check |
+| --- | --- |
+| The TV is disconnected | Check its power, network, saved address, and Wake-on-LAN setting. For rejected authorization, follow [Fix a pairing problem](#fix-pairing-problem). |
+| Idle blanking does not work | `lg-buddy settings describe screen.backend`<br>`systemctl --user status LG_Buddy_screen.service`<br>`journalctl --user -u LG_Buddy_screen.service --since today` |
+| A setting shows an error | Follow its message, then use **Retry apply** when offered. If the integration is missing or disabled, rerun `./configure.sh` from the release archive. Use `lg-buddy settings describe <KEY>` to inspect an invalid saved value. |
+| System sleep/wake behavior is wrong | `systemctl status LG_Buddy_lifecycle.service`<br>`journalctl -u LG_Buddy_lifecycle.service --since today` |
+| An update cannot be installed | Keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |
 
-These documents cover details intentionally omitted from this user guide:
+For deeper behavior and integration details, see [Technical references](#technical-references).
 
-- [Session backend model](session-backend-model.md): source observations,
-  event semantics, protocol requirements, and idle-timeout ownership.
-- [Gamepad activity subsystem](gamepad-subsystem.md): device discovery,
-  permissions, adapters, and hardware testing.
-- [Defaults and configuration](defaults-and-configuration.md): configuration
-  storage, defaults, compatibility, and installer policy.
-- [Runtime event handler map](runtime-event-handler-map.md): service
-  entrypoints and lifecycle event routing.
-- [Architecture overview](architecture-overview.md): runtime boundaries and
-  TV integration architecture.
-- [Development guide](development.md): building, installing, and validating a
-  local binary.
+## Technical references
 
-## Uninstall
+- [Session backend model](session-backend-model.md): desktop idle, activity,
+  lock, and wake behavior.
+- [Gamepad activity subsystem](gamepad-subsystem.md): device access and
+  supported controller paths.
+- [Defaults and configuration](defaults-and-configuration.md): settings
+  storage, defaults, and compatibility.
+- [Runtime event handler map](runtime-event-handler-map.md): service entrypoints
+  and lifecycle routing.
+- [Architecture overview](architecture-overview.md): runtime and TV integration
+  boundaries.
+- [Development guide](development.md): building and validating local binaries.
 
-To remove LG Buddy:
+<a id="uninstall"></a>
+## Remove LG Buddy
+
+From the extracted release archive, run:
 
 ```bash
 chmod +x ./uninstall.sh
 ./uninstall.sh
 ```
 
-This removes the installed services, desktop entry, Rust runtime binary, and
-Python TV-control environment. If you choose to remove user configuration, it
-also removes the config file and profile-scoped native TV credentials.
+The uninstaller stops LG Buddy’s automatic behavior and removes the app. Keep
+the configuration when prompted if you plan to reinstall with the same settings
+and pairing. Choosing to remove it also deletes the saved TV details and local
+native credential.

@@ -7,10 +7,8 @@ It is not a product roadmap. It is a map of what exists today and how the main p
 For the top-level system, desktop, and service event paths that enter the
 runtime, see [Runtime event handler map](runtime-event-handler-map.md).
 
-For the application-owned presentation contract and GTK renderer boundary,
-including the target beyond the currently delivered slice, see
-[GUI target architecture](gui-target-architecture.md). The architecture below
-describes the current implementation.
+For the current application-owned presentation contract and GTK renderer
+boundary, see [Frontend architecture](gui-target-architecture.md).
 
 ## Repository Shape
 
@@ -102,9 +100,9 @@ The main runtime consumers are:
   Overview through the matching GTK executable
 - the `lg-buddy brightness` launcher, which opens the matching GTK executable
   focused on brightness and uses Zenity only when that executable is absent
-- the `lg-buddy-gui` GTK window, which asynchronously reads and writes Overview
-  state and renders application-owned Loading, Ready, Applying, or Failed
-  presentation state
+- the `lg-buddy-gui` GTK window, which renders Overview, TVs, pairing, and
+  Settings from typed application state and sends semantic user intents through
+  the in-process Rust API
 
 ```mermaid
 flowchart LR
@@ -128,7 +126,7 @@ flowchart LR
 
     subgraph Frontend["Frontend"]
         ZENITY["zenity brightness dialog<br/>interactive prompt"]
-        GTK["lg-buddy-gui<br/>libadwaita / GTK Overview"]
+        GTK["lg-buddy-gui<br/>Overview / TVs / Settings / dialogs"]
     end
 
     subgraph Rust["Rust Runtime"]
@@ -143,8 +141,12 @@ flowchart LR
         PHASE["runtime_phase.rs<br/>machine sleep phase provider"]
         CONFIG["config.rs<br/>config.env parsing"]
         STATE["state.rs<br/>runtime markers"]
-        BRIGHTNESS["brightness.rs<br/>brightness application flow"]
-        PRESENTATION["presentation/brightness.rs<br/>Loading / Ready / Applying / Failed declarations"]
+        APPLICATION["application.rs<br/>cross-view coordination"]
+        VIEWS["overview.rs / tvs.rs / settings_view.rs<br/>view state + typed operations"]
+        PRESENTATION["presentation/*<br/>typed content / controls / feedback"]
+        BRIGHTNESS["brightness.rs / audio.rs<br/>TV control operations"]
+        PAIRING["pairing.rs / pairing_store.rs<br/>native pairing + credential persistence"]
+        SETTINGS["settings/*<br/>registry / validation / persistence / apply"]
 
         subgraph SessionSubsystem["Session Integration Subsystem"]
             BACKEND["backend.rs<br/>backend selection"]
@@ -198,10 +200,20 @@ flowchart LR
     MAIN -->|"normal / brightness launcher"| GTK
     MAIN -.->|"brightness only; GUI absent"| ZENITY
     ZENITY --> MAIN
-    GTK -->|"Propose / Apply / Retry / Cancel intents"| BRIGHTNESS
-    BRIGHTNESS --> PRESENTATION
-    PRESENTATION --> GTK
+    GTK -->|"semantic intents / worker completions"| APPLICATION
+    APPLICATION --> VIEWS
+    VIEWS --> PRESENTATION
+    PRESENTATION -->|"render"| GTK
+    VIEWS --> BRIGHTNESS
+    VIEWS --> PAIRING
+    VIEWS --> SETTINGS
+    VIEWS --> CONFIG
+    VIEWS --> TV
+    SETTINGS --> CONFIG
+    PAIRING --> CONFIG
+    PAIRING --> WEBOS
     MAIN --> COMMANDS
+    COMMANDS --> SETTINGS
     COMMANDS --> EVENTS
     COMMANDS --> NMGATE
     COMMANDS --> NOTIFICATIONS
@@ -244,7 +256,7 @@ flowchart LR
     WOL -->|"magic packet"| LGTV
 ```
 
-The intended split is:
+The current split is:
 
 - `lib.rs`
   - public entry surface for the binary
@@ -254,13 +266,30 @@ The intended split is:
   - CLI/API command entrypoints
   - config, state, and dependency loading for command execution
   - command output handoff
-- `brightness.rs`
-  - toolkit-neutral brightness read/write application flow
-  - typed brightness dependencies and production TV/config/notification adapters
-  - opaque operation identities, single-write enforcement, and stale-completion rejection
-- `presentation/brightness.rs`
-  - toolkit-neutral Loading, Ready, Applying, and Failed declarations
-  - semantic Propose, Apply, Retry, and Cancel intents
+- `application.rs`
+  - toolkit-neutral coordination between Overview, TVs, and Settings
+  - cross-view refresh and operation availability after pairing, unpairing, or
+    settings changes
+- `overview.rs`, `tvs.rs`, and `settings_view.rs`
+  - view state, semantic intents, typed operations, and completion handling
+  - retry decisions, progress, cancellation boundaries, and stale-completion
+    rejection
+- `brightness.rs` and `audio.rs`
+  - brightness and audio read/write operations over shared TV/config adapters
+  - the brightness application contract and operation identities reused by
+    Overview
+- `pairing.rs` and `pairing_store.rs`
+  - native webOS pairing and profile/credential persistence with rollback
+- `settings/*`
+  - the canonical settings registry, descriptions, validation, persistence, and
+    runtime apply behavior shared by CLI and GUI
+- `presentation/*`
+  - typed screen content, values, availability, progress, and user-facing errors
+  - brightness declarations reused inside the combined Overview presentation
+- `crates/lg-buddy-gui/src/*`
+  - persistent native widgets, navigation, focus, accessibility, and dialogs
+  - workers that execute application operations and return typed completions
+  - no separate validation, persistence, retry policy, or TV workflow
 - `events.rs`
   - canonical runtime event envelope and source classification
 - `policy.rs`
@@ -528,6 +557,18 @@ refreshes Overview with fresh operation identities after success. The applicatio
 backend selects the capability checks; the webOS client supplies authentication
 and cancellable reads. GTK forwards unexpected worker termination to the core
 as an internal failure. This does not install or activate services.
+
+Settings reads the seven behavior settings from the shared registry, including
+their descriptions, value choices, and validation. Toggle and choice changes
+submit immediately; the numeric timeout commits on Enter or focus loss.
+`SettingsApplication` serializes mutations through the same persistence and
+runtime apply path as the CLI. Successful changes are silent. Validation and
+persistence failures restore the prior value; an apply failure retains the
+saved value and offers a retry of the runtime step. Missing or inactive services
+are reported after the apply attempt, rather than monitored continuously.
+Persistent native rows keep focus and layout stable across refreshes. About is
+a native informational dialog reached from the main menu.
+
 The `volume` family uses the TV audio abstraction for typed volume and mute
 operations. Setting or stepping volume explicitly unmutes after the volume
 operation; mute toggle reads the current state before writing its inverse.
@@ -1011,6 +1052,9 @@ The Rust runtime currently owns:
 - screen on
 - brightness control
 - volume and mute control
+- application coordination for Overview, TVs, native pairing, and Settings
+- TV profile and credential persistence, including confirmed unpairing
+- the shared settings registry, validation, persistence, and runtime apply path
 - `monitor` command with GNOME, native Wayland, and `swayidle` paths
 
 The shell layer still owns:
@@ -1026,7 +1070,14 @@ What is still not implemented:
   writes
 
 The no-argument launcher opens the installed application but does not replace
-the shell setup surface. The complete GUI first-run, service, and update journey
-remains tracked in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
-So the current architecture should be read as a Rust-owned runtime with a thin
-shell setup surface.
+the shell setup surface. v1.6 exposes TV connection/capability status and
+actionable control, pairing, and settings errors. A resolved screen backend
+display is not a GUI requirement; the existing CLI diagnostics remain available.
+
+The complete GUI first-run, service, and update journey, including runtime/service
+state and update state, belongs to v1.7.0 under
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The contents of
+runtime/service state remain to be defined. The current architecture is a
+Rust-owned runtime and application with a thin GTK renderer and shell setup
+surface. See [Frontend architecture](gui-target-architecture.md) for the current
+view and renderer boundaries.
