@@ -22,8 +22,9 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 BUNDLE="$WORK_DIR/bundle"
 STUB_DIR="$WORK_DIR/stubs"
-mkdir -p "$BUNDLE/docs" "$BUNDLE/systemd" "$STUB_DIR"
+mkdir -p "$BUNDLE/docs" "$BUNDLE/systemd" "$BUNDLE/bin" "$STUB_DIR"
 cp "$INSTALL_SCRIPT" "$BUNDLE/install.sh"
+cp "$REPOSITORY_ROOT/bin/LG_Buddy_Common" "$BUNDLE/bin/LG_Buddy_Common"
 chmod 755 "$BUNDLE/install.sh"
 
 cat >"$BUNDLE/lg-buddy" <<'EOF'
