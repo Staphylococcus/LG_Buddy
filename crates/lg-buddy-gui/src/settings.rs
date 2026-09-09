@@ -6,8 +6,7 @@ use lg_buddy::presentation::settings::{
     SettingsCommitPolicy, SettingsEditStatus, SettingsEditor, SettingsFeedbackSeverity,
     SettingsPresentation, SettingsRow, SettingsStatus,
 };
-use lg_buddy::presentation::update_check::UpdateCheckPresentation;
-use lg_buddy::presentation::update_install::UpdateInstallPresentation;
+use lg_buddy::presentation::updater::UpdaterPresentation;
 use lg_buddy::settings_view::SettingsIntent;
 
 /// Stable native controls render application-owned values and commit policies.
@@ -20,7 +19,7 @@ pub(crate) struct SettingsView {
     status: adw::StatusPage,
     retry: gtk::Button,
     retry_intent: Rc<RefCell<Option<SettingsIntent>>>,
-    update_check: UpdateCheckView,
+    updater: UpdaterView,
 }
 
 impl SettingsView {
@@ -53,7 +52,7 @@ impl SettingsView {
         root.add_named(&status, Some("status"));
         root.add_named(&page, Some("settings"));
         root.set_visible_child_name("status");
-        let update_check = UpdateCheckView::new(Rc::clone(&on_intent));
+        let updater = UpdaterView::new(Rc::clone(&on_intent));
         Self {
             root,
             page,
@@ -63,7 +62,7 @@ impl SettingsView {
             status,
             retry,
             retry_intent,
-            update_check,
+            updater,
         }
     }
 
@@ -109,11 +108,11 @@ impl SettingsView {
                             native.add(&row.feedback);
                             self.rows.borrow_mut().push(row);
                         }
-                        if group.title() == "Updates" {
-                            self.update_check.attach(&native);
-                        }
                         self.page.add(&native);
                         self.groups.borrow_mut().push(native);
+                        if group.title() == "Updates" {
+                            self.page.add(&self.updater.group);
+                        }
                     }
                 }
                 self.render_rows(presentation);
@@ -133,93 +132,74 @@ impl SettingsView {
                 row.render(current, presentation.row_visible(current.setting()));
             }
         }
-        self.update_check
-            .render(presentation.update_check(), presentation.update_install());
+        self.updater.render(&presentation.updater());
     }
 }
 
-struct UpdateCheckView {
-    installed: adw::ActionRow,
-    check: gtk::Button,
-    check_intent: Rc<RefCell<Option<SettingsIntent>>>,
-    spinner: gtk::Spinner,
-    result: adw::ActionRow,
+/// One stable card renders the current step of the application-owned workflow.
+struct UpdaterView {
+    group: adw::PreferencesGroup,
+    row: adw::ActionRow,
+    action: gtk::Button,
+    action_intent: Rc<RefCell<Option<SettingsIntent>>>,
+    cancel: gtk::Button,
+    cancel_intent: Rc<RefCell<Option<SettingsIntent>>>,
+    actions: gtk::Box,
+    footer: gtk::ListBoxRow,
     release: gtk::LinkButton,
-    error: adw::ActionRow,
-    warning: adw::ActionRow,
-    install: adw::ActionRow,
-    install_action: gtk::Button,
-    install_action_intent: Rc<RefCell<Option<SettingsIntent>>>,
-    install_cancel: gtk::Button,
-    install_cancel_intent: Rc<RefCell<Option<SettingsIntent>>>,
-    install_spinner: gtk::Spinner,
-    install_error: adw::ActionRow,
-    install_details: adw::ExpanderRow,
-    install_details_text: gtk::Label,
+    spinner: gtk::Spinner,
+    warning: gtk::Label,
+    details: adw::ExpanderRow,
+    details_text: gtk::Label,
 }
 
-impl UpdateCheckView {
+impl UpdaterView {
     fn new(on_intent: Rc<dyn Fn(SettingsIntent)>) -> Self {
-        let installed = detail_row("Installed version", "");
-        let check = gtk::Button::with_label("Check for updates");
-        check.add_css_class("suggested-action");
-        check.set_valign(gtk::Align::Center);
-        check.update_property(&[gtk::accessible::Property::Label("Check for updates")]);
-        let check_intent = Rc::new(RefCell::new(None));
-        check.connect_clicked({
-            let check_intent = Rc::clone(&check_intent);
-            let on_intent = Rc::clone(&on_intent);
-            move |_| {
-                let intent = check_intent.borrow().clone();
-                if let Some(intent) = intent {
-                    on_intent(intent);
-                }
-            }
-        });
+        let group = adw::PreferencesGroup::new();
+        let card = gtk::ListBox::new();
+        card.set_selection_mode(gtk::SelectionMode::None);
+        card.add_css_class("boxed-list");
+        let row = detail_row("", "");
+        row.set_title_lines(0);
+        row.set_accessible_role(gtk::AccessibleRole::Status);
         let spinner = gtk::Spinner::new();
         spinner.set_valign(gtk::Align::Center);
-        spinner.set_visible(false);
-        spinner.update_property(&[gtk::accessible::Property::Label("Checking for updates")]);
-        installed.add_suffix(&check);
-        installed.add_suffix(&spinner);
+        row.add_suffix(&spinner);
+        card.append(&row);
 
-        let result = detail_row("", "");
-        result.set_accessible_role(gtk::AccessibleRole::Status);
-        result.set_visible(false);
+        let warning = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(true)
+            .xalign(0.0)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_bottom(12)
+            .build();
+        warning.add_css_class("warning");
+        warning.set_accessible_role(gtk::AccessibleRole::Alert);
+        let footer_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        footer_content.append(&warning);
+
+        let actions = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .halign(gtk::Align::End)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_bottom(12)
+            .build();
         let release = gtk::LinkButton::builder()
             .label("View release")
             .uri("https://github.com/Staphylococcus/LG_Buddy/releases")
-            .valign(gtk::Align::Center)
-            .visible(false)
             .build();
         release.update_property(&[gtk::accessible::Property::Label("View available release")]);
-        result.add_suffix(&release);
-
-        let error = detail_row("", "");
-        error.add_css_class("error");
-        error.set_accessible_role(gtk::AccessibleRole::Alert);
-        error.set_visible(false);
-
-        let warning = detail_row("", "");
-        warning.add_css_class("warning");
-        warning.set_accessible_role(gtk::AccessibleRole::Alert);
-        warning.set_visible(false);
-
-        // This row is reused for the offer, explicit confirmation, progress,
-        // and post-install relaunch states. The presentation decides which
-        // controls are visible and enabled.
-        let install = detail_row("", "");
-        install.set_accessible_role(gtk::AccessibleRole::Status);
-        install.set_visible(false);
-        let install_action = gtk::Button::builder()
-            .visible(false)
-            .sensitive(false)
-            .build();
-        install_action.add_css_class("suggested-action");
-        install_action.set_valign(gtk::Align::Center);
-        let install_action_intent = Rc::new(RefCell::new(None));
-        install_action.connect_clicked({
-            let intent = Rc::clone(&install_action_intent);
+        actions.append(&release);
+        let cancel = gtk::Button::new();
+        cancel.add_css_class("flat");
+        let cancel_intent = Rc::new(RefCell::new(None));
+        cancel.connect_clicked({
+            let intent = Rc::clone(&cancel_intent);
             let on_intent = Rc::clone(&on_intent);
             move |_| {
                 let intent = intent.borrow().clone();
@@ -228,18 +208,12 @@ impl UpdateCheckView {
                 }
             }
         });
-        install.add_suffix(&install_action);
-
-        let install_cancel = gtk::Button::builder()
-            .visible(false)
-            .sensitive(false)
-            .build();
-        install_cancel.add_css_class("flat");
-        install_cancel.set_valign(gtk::Align::Center);
-        let install_cancel_intent = Rc::new(RefCell::new(None));
-        install_cancel.connect_clicked({
-            let intent = Rc::clone(&install_cancel_intent);
-            let on_intent = Rc::clone(&on_intent);
+        actions.append(&cancel);
+        let action = gtk::Button::new();
+        action.add_css_class("suggested-action");
+        let action_intent = Rc::new(RefCell::new(None));
+        action.connect_clicked({
+            let intent = Rc::clone(&action_intent);
             move |_| {
                 let intent = intent.borrow().clone();
                 if let Some(intent) = intent {
@@ -247,25 +221,20 @@ impl UpdateCheckView {
                 }
             }
         });
-        install.add_suffix(&install_cancel);
+        actions.append(&action);
+        footer_content.append(&actions);
+        let footer = gtk::ListBoxRow::builder()
+            .activatable(false)
+            .selectable(false)
+            .child(&footer_content)
+            .build();
+        card.append(&footer);
 
-        let install_spinner = gtk::Spinner::new();
-        install_spinner.set_valign(gtk::Align::Center);
-        install_spinner.set_visible(false);
-        install_spinner.update_property(&[gtk::accessible::Property::Label("Installing update")]);
-        install.add_suffix(&install_spinner);
-
-        let install_error = detail_row("", "");
-        install_error.add_css_class("error");
-        install_error.set_accessible_role(gtk::AccessibleRole::Alert);
-        install_error.set_visible(false);
-
-        let install_details = adw::ExpanderRow::builder()
-            .title("Failure details")
+        let details = adw::ExpanderRow::builder()
             .use_markup(false)
             .visible(false)
             .build();
-        let install_details_text = gtk::Label::builder()
+        let details_text = gtk::Label::builder()
             .selectable(true)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
@@ -275,160 +244,97 @@ impl UpdateCheckView {
             .margin_top(12)
             .margin_bottom(12)
             .build();
-        install_details.add_row(&install_details_text);
-
+        details.add_row(&details_text);
+        card.append(&details);
+        group.add(&card);
         Self {
-            installed,
-            check,
-            check_intent,
-            spinner,
-            result,
+            group,
+            row,
+            action,
+            action_intent,
+            cancel,
+            cancel_intent,
+            actions,
+            footer,
             release,
-            error,
+            spinner,
             warning,
-            install,
-            install_action,
-            install_action_intent,
-            install_cancel,
-            install_cancel_intent,
-            install_spinner,
-            install_error,
-            install_details,
-            install_details_text,
+            details,
+            details_text,
         }
     }
 
-    fn attach(&self, group: &adw::PreferencesGroup) {
-        group.add(&self.installed);
-        group.add(&self.result);
-        group.add(&self.install);
-        group.add(&self.install_error);
-        group.add(&self.install_details);
-        group.add(&self.error);
-        group.add(&self.warning);
-    }
-
-    fn render(
-        &self,
-        presentation: &UpdateCheckPresentation,
-        install_presentation: &UpdateInstallPresentation,
-    ) {
-        self.installed
-            .set_subtitle(presentation.installed_version_label());
-        let action = presentation.check_action();
-        self.check_intent.replace(Some(action.intent()));
-        self.check.set_label(action.label());
-        self.check.set_sensitive(action.enabled());
-        self.check
-            .update_property(&[gtk::accessible::Property::Label(action.label())]);
-        self.spinner.set_visible(presentation.checking());
-        self.spinner.set_spinning(presentation.checking());
-
-        if let Some(report) = presentation.result() {
-            self.result.set_visible(true);
-            self.result.set_title(&report.title());
-            self.result.set_subtitle(&report.description());
-            if let Some(release) = report.available_release.as_ref() {
-                self.release.set_uri(&release.url);
-                self.release.set_visible(true);
-            } else {
-                self.release.set_visible(false);
-            }
-            if let Some(warning) = report.warning.as_deref() {
-                self.warning.set_title("Cache warning");
-                self.warning.set_subtitle(warning);
-                self.warning.set_visible(true);
-            } else {
-                self.warning.set_visible(false);
-            }
-        } else {
-            self.result.set_visible(false);
-            self.release.set_visible(false);
-            self.warning.set_visible(false);
-        }
-
-        if let Some(error) = presentation.error() {
-            self.error.set_title(error.summary());
-            self.error.set_subtitle(error.detail());
-            self.error.set_visible(true);
-        } else {
-            self.error.set_visible(false);
-        }
-
-        self.render_install(install_presentation);
-    }
-
-    fn render_install(&self, presentation: &UpdateInstallPresentation) {
-        let title = presentation.title().unwrap_or("");
-        let description = presentation.description();
-        let action = presentation.action();
-        let cancel_action = presentation.cancel_action();
-        let visible = presentation.title().is_some()
-            || action.is_some()
-            || cancel_action.is_some()
-            || presentation.busy();
-
-        self.install.set_visible(visible);
-        self.install.set_title(title);
-        self.install.set_subtitle(description);
-        self.install.update_property(&[
-            gtk::accessible::Property::Label(title),
-            gtk::accessible::Property::Description(description),
+    fn render(&self, presentation: &UpdaterPresentation) {
+        let action_had_focus = self.action.has_focus();
+        let cancel_had_focus = self.cancel.has_focus();
+        let release_had_focus = self.release.has_focus();
+        self.row.set_title(presentation.title());
+        self.row.set_subtitle(presentation.description());
+        self.row.update_property(&[
+            gtk::accessible::Property::Label(presentation.title()),
+            gtk::accessible::Property::Description(presentation.description()),
         ]);
-
-        if let Some(action) = action {
-            self.install_action.set_visible(true);
-            self.install_action.set_label(action.label());
-            self.install_action.set_sensitive(action.enabled());
-            self.install_action
-                .update_property(&[gtk::accessible::Property::Label(action.label())]);
-            self.install_action_intent.replace(Some(action.intent()));
+        if presentation.is_error() {
+            self.row.add_css_class("error");
         } else {
-            self.install_action.set_visible(false);
-            self.install_action.set_sensitive(false);
-            self.install_action_intent.replace(None);
+            self.row.remove_css_class("error");
         }
-
-        if let Some(action) = cancel_action {
-            self.install_cancel.set_visible(true);
-            self.install_cancel.set_label(action.label());
-            self.install_cancel.set_sensitive(action.enabled());
-            self.install_cancel
-                .update_property(&[gtk::accessible::Property::Label(action.label())]);
-            self.install_cancel_intent.replace(Some(action.intent()));
-        } else {
-            self.install_cancel.set_visible(false);
-            self.install_cancel.set_sensitive(false);
-            self.install_cancel_intent.replace(None);
+        for (button, intent, action) in [
+            (&self.action, &self.action_intent, presentation.action()),
+            (
+                &self.cancel,
+                &self.cancel_intent,
+                presentation.cancel_action(),
+            ),
+        ] {
+            button.set_visible(action.is_some());
+            button.set_sensitive(action.is_some_and(|action| action.enabled()));
+            button.set_label(action.map_or("", |action| action.label()));
+            button.update_property(&[gtk::accessible::Property::Label(
+                action.map_or("", |action| action.label()),
+            )]);
+            intent.replace(action.map(|action| action.intent()));
         }
-
-        self.install_spinner.set_visible(presentation.busy());
-        self.install_spinner.set_spinning(presentation.busy());
-
-        if let Some(error) = presentation.error() {
-            self.install_error.set_title(error.summary());
-            self.install_error.set_subtitle(error.detail());
-            self.install_error.update_property(&[
-                gtk::accessible::Property::Label(error.summary()),
-                gtk::accessible::Property::Description(error.detail()),
-            ]);
-            self.install_error.set_visible(true);
-        } else {
-            self.install_error.set_visible(false);
+        self.spinner.set_visible(presentation.busy());
+        self.spinner.set_spinning(presentation.busy());
+        self.spinner
+            .update_property(&[gtk::accessible::Property::Label(presentation.title())]);
+        self.release.set_visible(presentation.release().is_some());
+        if let Some(release) = presentation.release() {
+            self.release.set_uri(&release.url);
         }
+        let has_actions = presentation.action().is_some()
+            || presentation.cancel_action().is_some()
+            || presentation.release().is_some();
+        self.actions.set_visible(has_actions);
+        self.warning.set_visible(presentation.warning().is_some());
+        self.warning.set_text(presentation.warning().unwrap_or(""));
+        self.footer
+            .set_visible(has_actions || presentation.warning().is_some());
 
-        if let Some(details) = presentation.failure_details() {
-            if self.install_details_text.text().as_str() != details {
-                self.install_details.set_expanded(false);
-                self.install_details_text.set_text(details);
+        if let Some(details) = presentation.details() {
+            if self.details_text.text().as_str() != details {
+                self.details.set_expanded(false);
+                self.details_text.set_text(details);
             }
-            self.install_details
-                .set_title(presentation.failure_details_title());
-            self.install_details.set_visible(true);
+            self.details.set_title(presentation.details_title());
+            self.details.set_visible(true);
         } else {
-            self.install_details.set_expanded(false);
-            self.install_details.set_visible(false);
-            self.install_details_text.set_text("");
+            self.details.set_expanded(false);
+            self.details.set_visible(false);
+            self.details_text.set_text("");
+        }
+        // Follow a disappearing action within this card, without taking focus
+        // from another setting when an asynchronous completion arrives.
+        if (action_had_focus && !self.action.is_visible())
+            || (cancel_had_focus && !self.cancel.is_visible())
+            || (release_had_focus && !self.release.is_visible())
+        {
+            if self.action.is_visible() && self.action.is_sensitive() {
+                self.action.grab_focus();
+            } else if self.cancel.is_visible() && self.cancel.is_sensitive() {
+                self.cancel.grab_focus();
+            }
         }
     }
 }
@@ -593,7 +499,6 @@ impl NativeSettingRow {
         row.set_title_lines(0);
         row.set_subtitle_lines(0);
         let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
-        row.add_prefix(&warning);
         let problem = detail_row("", "");
         problem.add_css_class("error");
         problem.set_accessible_role(gtk::AccessibleRole::Alert);
@@ -720,8 +625,15 @@ impl NativeSettingRow {
                 self.feedback.remove_css_class(class);
             }
         }
-        self.warning
-            .set_visible(current.problem().is_some() || is_warning);
+        let show_warning = current.problem().is_some() || is_warning;
+        // An empty prefix box still reserves spacing in Adwaita. Attach the
+        // icon only when needed so ordinary rows retain their native inset.
+        if show_warning && self.warning.parent().is_none() {
+            self.row.add_prefix(&self.warning);
+        } else if !show_warning && self.warning.parent().is_some() {
+            self.row.remove(&self.warning);
+        }
+        self.warning.set_visible(show_warning);
         self.warning
             .set_tooltip_text(current.problem().or(is_warning.then_some(message)));
         let action = current.retry_apply_action();
@@ -816,7 +728,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .map(|row| row.row.clone())
         .collect();
     assert!(!rows.iter().any(|row| row.is::<adw::ExpanderRow>()));
-    assert!(!view.update_check.install_details.is_visible());
+    assert!(!view.updater.details.is_visible());
     assert_eq!(view.groups.borrow().len(), 3);
     assert_eq!(rows.len(), 7);
     assert!(widgets
@@ -1084,7 +996,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     );
     window.close();
     choice_row_click_opens_the_value_menu(application);
-    update_check_renderer_scenarios(application);
+    updater_renderer_scenarios(application);
 }
 
 #[cfg(test)]
@@ -1200,11 +1112,11 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
 }
 
 #[cfg(test)]
-fn update_check_renderer_scenarios(application: &adw::Application) {
+fn updater_renderer_scenarios(application: &adw::Application) {
     use crate::controller_test_support::pump_until;
     use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
     use lg_buddy::settings::{ConfigEnvReader, SettingsStore};
-    use lg_buddy::settings_view::{SettingsApplication, SettingsIntent, UpdateCheckError};
+    use lg_buddy::settings_view::{BehaviorSetting, SettingsApplication, UpdateCheckError};
     use lg_buddy::update_flow::UpdateInstallOutcome;
     use lg_buddy::update_install::{
         InstalledUpdate, PreparedUpdateInstall, UpdateInstallError, UpdateInstallStage,
@@ -1212,15 +1124,55 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     use lg_buddy::updates::UpdateChannel;
     use lg_buddy::version::VersionInfo;
 
+    fn title_x(row: &adw::ActionRow, root: &impl IsA<gtk::Widget>) -> f32 {
+        fn find(widget: &gtk::Widget, title: &str) -> Option<gtk::Label> {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                if label.text() == title {
+                    return Some(label.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(label) = find(&current, title) {
+                    return Some(label);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        find(row.upcast_ref(), &row.title())
+            .unwrap()
+            .compute_bounds(root)
+            .unwrap()
+            .x()
+    }
+    fn prepared() -> PreparedUpdateInstall {
+        PreparedUpdateInstall::from_parts(
+            VersionInfo::current(),
+            "1.7.0".parse().unwrap(),
+            UpdateChannel::Stable,
+            "https://example.test/releases/v1.7.0",
+            "v1.7.0",
+            "x86_64-unknown-linux-gnu",
+            "newer-commit",
+        )
+    }
+    fn assert_narrow(view: &SettingsView) {
+        let (minimum, _, _, _) = view.widget().measure(gtk::Orientation::Horizontal, -1);
+        assert!(
+            minimum <= 360,
+            "updater card must fit a narrow window: {minimum}"
+        );
+    }
+
     let intents = Rc::new(RefCell::new(Vec::new()));
-    let on_intent: Rc<dyn Fn(SettingsIntent)> = Rc::new({
+    let view = SettingsView::new(Rc::new({
         let intents = Rc::clone(&intents);
         move |intent| intents.borrow_mut().push(intent)
-    });
-    let view = SettingsView::new(on_intent);
+    }));
     let window = adw::ApplicationWindow::builder()
         .application(application)
-        .title("LG Buddy Update Check Renderer Test")
+        .title("LG Buddy Updater Renderer Test")
         .default_width(900)
         .default_height(700)
         .content(view.widget())
@@ -1230,63 +1182,65 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
         "/unused/config.env",
         "updates_channel=stable\n",
     ));
-    let ready = model
+    model
         .complete_read(
             opening.read_operation().unwrap(),
             Ok(SettingsPresentation::from_store(&store).groups().to_vec()),
         )
         .unwrap();
-    view.render(ready.presentation());
+    view.render(model.presentation());
     window.present();
-    pump_until(|| view.page.is_mapped() && view.groups.borrow().len() == 3);
-
+    pump_until(|| view.updater.row.is_mapped() && view.updater.row.width() > 0);
     let stable_rows: Vec<_> = view
         .rows
         .borrow()
         .iter()
         .map(|row| row.row.clone())
         .collect();
+    let card_row = view.updater.row.clone();
+    let action = view.updater.action.clone();
     assert_eq!(stable_rows.len(), 7);
-    assert_eq!(
-        view.update_check.installed.title().as_str(),
-        "Installed version"
-    );
-    assert!(!view.update_check.spinner.is_visible());
-    assert!(!view.update_check.result.is_visible());
-    assert!(!view.update_check.error.is_visible());
-    assert!(!view.update_check.warning.is_visible());
-    assert!(!view.update_check.install.is_visible());
-    assert!(!view.update_check.install_error.is_visible());
-    assert!(!view.update_check.install_details.is_visible());
+    assert_eq!(card_row.title().as_str(), "Installed version");
+    assert_eq!(action.label().as_deref(), Some("Check for updates"));
+    assert!(!view.updater.spinner.is_visible());
+    assert!(!view.updater.details.is_visible());
+    assert!(!view.updater.release.is_visible());
+    assert!(!view.updater.warning.is_visible());
+    assert_eq!(card_row.accessible_role(), gtk::AccessibleRole::Status);
 
-    let check = view.update_check.check.clone();
-    assert_eq!(check.accessible_role(), gtk::AccessibleRole::Button);
-    assert!(check.grab_focus());
+    // Compare native label allocations, not hard-coded padding or widget types.
+    let rows = view.rows.borrow();
+    for row in rows.iter().filter(|row| {
+        matches!(
+            row.presentation.borrow().setting(),
+            BehaviorSetting::UpdatesAutoCheck | BehaviorSetting::UpdatesChannel
+        )
+    }) {
+        assert!(row.warning.parent().is_none());
+        assert!(
+            (title_x(&row.row, &window) - title_x(&card_row, &window)).abs() < 1.0,
+            "updater and normal settings text must share their left edge: setting={}, updater={}",
+            title_x(&row.row, &window),
+            title_x(&card_row, &window)
+        );
+    }
+    drop(rows);
+
+    assert!(action.grab_focus());
+    action.emit_clicked();
+    assert_eq!(*intents.borrow(), vec![SettingsIntent::CheckForUpdates]);
     intents.borrow_mut().clear();
-    check.emit_clicked();
-    assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::CheckForUpdates],
-        "only activating Check should submit an update-check intent"
-    );
     let checking = model
-        .handle_intent(intents.borrow_mut().pop().unwrap())
+        .handle_intent(SettingsIntent::CheckForUpdates)
         .unwrap();
-    let operation = checking.update_check_operation().unwrap();
     view.render(checking.presentation());
-    assert!(view.update_check.spinner.is_visible());
-    assert_eq!(check.label().as_deref(), Some("Checking…"));
-    assert!(!check.is_sensitive());
-    assert!(
-        check.is_focusable(),
-        "checking must leave the Check button available to the keyboard focus ring"
-    );
-    assert!(
-        intents.borrow().is_empty(),
-        "rendering must not submit an intent"
-    );
+    assert!(view.updater.spinner.is_visible());
+    assert!(!action.is_sensitive());
+    assert_eq!(action.label().as_deref(), Some("Checking…"));
+    assert!(action.is_focusable());
+    assert!(intents.borrow().is_empty());
 
-    let available = UpdateCheckReport {
+    let report = UpdateCheckReport {
         installed_version: "1.6.0".into(),
         channel: UpdateChannel::Stable,
         available_release: Some(AvailableUpdate {
@@ -1295,109 +1249,100 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
         }),
         warning: Some("Cache <could not>& be refreshed.".into()),
     };
-    let success = model
-        .complete_update_check(operation, Ok(available))
+    model
+        .complete_update_check(checking.update_check_operation().unwrap(), Ok(report))
         .unwrap();
-    view.render(success.presentation());
-    assert!(!view.update_check.spinner.is_visible());
-    assert!(check.is_sensitive());
-    assert_eq!(check.label().as_deref(), Some("Check for updates"));
-    assert!(view.update_check.result.is_visible());
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Update available: 1.7.0");
+    assert_eq!(action.label().as_deref(), Some("Install update…"));
+    assert!(view.updater.release.is_visible());
     assert_eq!(
-        view.update_check.result.title().as_str(),
-        "Update available: 1.7.0"
-    );
-    assert!(view
-        .update_check
-        .result
-        .subtitle()
-        .is_some_and(|text| text.contains("stable") && text.contains("1.6.0")));
-    assert!(view.update_check.release.is_visible());
-    assert_eq!(
-        view.update_check.release.uri().as_str(),
+        view.updater.release.uri().as_str(),
         "https://example.test/releases/v1.7.0?name=release%3C1%3E"
     );
     assert_eq!(
-        view.update_check.release.accessible_role(),
-        gtk::AccessibleRole::Link
+        view.updater.warning.text().as_str(),
+        "Cache <could not>& be refreshed."
     );
-    assert!(view.update_check.warning.is_visible());
-    assert_eq!(
-        view.update_check.warning.accessible_role(),
-        gtk::AccessibleRole::Alert
-    );
-    assert!(view
-        .update_check
-        .warning
-        .subtitle()
-        .is_some_and(|text| text == "Cache <could not>& be refreshed."));
-    assert!(
-        intents.borrow().is_empty(),
-        "rendering must not submit an intent"
-    );
+    assert!(view.updater.warning.is_visible());
+    assert!(!view.updater.spinner.is_visible());
+    assert_narrow(&view);
 
-    // An available release exposes the application-owned prepare action. The
-    // prepare state is busy and can be cancelled without the renderer making
-    // any workflow decisions of its own.
-    assert!(view.update_check.install.is_visible());
-    assert_eq!(
-        view.update_check.install_action.label().as_deref(),
-        Some("Install update…")
-    );
-    assert_eq!(
-        view.update_check.install.accessible_role(),
-        gtk::AccessibleRole::Status
-    );
-    assert_eq!(
-        view.update_check.install_action.accessible_role(),
-        gtk::AccessibleRole::Button
-    );
-    intents.borrow_mut().clear();
-    view.update_check.install_action.emit_clicked();
+    assert!(action.grab_focus());
+    action.emit_clicked();
     assert_eq!(
         *intents.borrow(),
-        vec![SettingsIntent::PrepareUpdateInstall],
-        "the available-release action must forward the prepare intent"
-    );
-    let preparing = model
-        .handle_intent(intents.borrow_mut().pop().unwrap())
-        .unwrap();
-    view.render(preparing.presentation());
-    assert!(view.update_check.install.is_visible());
-    assert!(view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_action.is_visible());
-    assert!(view.update_check.install_cancel.is_visible());
-    assert_eq!(
-        view.update_check.install_cancel.label().as_deref(),
-        Some("Cancel")
+        vec![SettingsIntent::PrepareUpdateInstall]
     );
     intents.borrow_mut().clear();
-    view.update_check.install_cancel.emit_clicked();
-    assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::CancelUpdateInstall],
-        "the inline cancel control must forward the cancel intent"
-    );
-    let cancelled = model
-        .handle_intent(intents.borrow_mut().pop().unwrap())
+    model
+        .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
-    view.render(cancelled.presentation());
-    assert!(view.update_check.install.is_visible());
-    assert!(!view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_error.is_visible());
-    assert_eq!(
-        view.update_check.install_action.label().as_deref(),
-        Some("Install update…")
-    );
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Preparing update…");
+    assert!(!action.is_visible());
+    assert!(view.updater.cancel.is_visible());
+    assert!(view.updater.cancel.has_focus());
+    assert!(!view.updater.release.is_visible());
+    assert!(!view.updater.warning.is_visible());
+    view.updater.cancel.emit_clicked();
+    assert_eq!(*intents.borrow(), vec![SettingsIntent::CancelUpdateInstall]);
+    intents.borrow_mut().clear();
+    model
+        .handle_intent(SettingsIntent::CancelUpdateInstall)
+        .unwrap();
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Update available: 1.7.0");
+    assert!(action.has_focus());
 
     let preparing = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
-    let install_operation = preparing.update_install_operation().unwrap().clone();
-    view.render(preparing.presentation());
-    let failed_install = model
+    model
         .complete_update_install(
-            &install_operation,
+            preparing.update_install_operation().unwrap(),
+            Ok(UpdateInstallOutcome::Prepared(prepared())),
+        )
+        .unwrap();
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Install LG Buddy 1.7.0?");
+    assert_eq!(action.label().as_deref(), Some("Install and restart"));
+    assert!(view.updater.cancel.is_visible());
+    assert!(!view.updater.release.is_visible());
+    assert!(!view.updater.spinner.is_visible());
+    assert_narrow(&view);
+    action.emit_clicked();
+    assert_eq!(
+        *intents.borrow(),
+        vec![SettingsIntent::ConfirmUpdateInstall]
+    );
+    intents.borrow_mut().clear();
+    let installing = model
+        .handle_intent(SettingsIntent::ConfirmUpdateInstall)
+        .unwrap();
+    let operation = installing.update_install_operation().unwrap();
+    model
+        .update_install_progress(operation, UpdateInstallStage::Acquiring)
+        .unwrap();
+    view.render(model.presentation());
+    assert_eq!(
+        card_row.title().as_str(),
+        "Downloading and verifying update…"
+    );
+    assert!(view.updater.spinner.is_visible());
+    assert!(view.updater.cancel.is_visible());
+    assert!(!action.is_visible());
+    model
+        .update_install_progress(operation, UpdateInstallStage::Installing)
+        .unwrap();
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Installing update…");
+    assert!(!view.updater.actions.is_visible());
+    assert!(!view.updater.cancel.is_visible());
+
+    model
+        .complete_update_install(
+            operation,
             Err(UpdateInstallError::InstallerFailedWithOutput {
                 code: Some(1),
                 output: "install: No space left on device\naccess_token=private-value".into(),
@@ -1406,115 +1351,51 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
             .into()),
         )
         .unwrap();
-    view.render(failed_install.presentation());
-    assert!(view.update_check.install.is_visible());
-    assert!(view.update_check.install_error.is_visible());
-    assert_eq!(
-        view.update_check.install_error.accessible_role(),
-        gtk::AccessibleRole::Alert
-    );
-    assert!(view.update_check.install_details.is_visible());
-    assert!(!view.update_check.install_details.is_expanded());
-    assert!(view.update_check.install_details_text.is_selectable());
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Could not install update");
+    assert!(card_row.has_css_class("error"));
+    assert_eq!(action.label().as_deref(), Some("Retry update"));
+    assert!(!view.updater.release.is_visible());
+    assert!(view.updater.details.is_visible());
+    assert!(!view.updater.details.is_expanded());
+    assert!(view.updater.details_text.is_selectable());
     assert!(view
-        .update_check
-        .install_details_text
+        .updater
+        .details_text
         .text()
         .contains("No space left on device"));
-    assert!(!view
-        .update_check
-        .install_details_text
-        .text()
-        .contains("private-value"));
-    view.update_check.install_details.set_expanded(true);
-    view.render(failed_install.presentation());
-    assert!(
-        view.update_check.install_details.is_expanded(),
-        "refresh must not collapse requested details"
-    );
-    assert!(
-        view.update_check.install_details_text.grab_focus(),
-        "details must be keyboard accessible for selection and copying"
-    );
-    assert!(view.update_check.install_action.is_visible());
-    assert_eq!(
-        view.update_check.install_action.label().as_deref(),
-        Some("Retry update")
-    );
-    intents.borrow_mut().clear();
-    view.update_check.install_action.emit_clicked();
+    assert!(!view.updater.details_text.text().contains("private-value"));
+    view.updater.details.set_expanded(true);
+    view.render(model.presentation());
+    assert!(view.updater.details.is_expanded());
+    assert!(view.updater.details_text.grab_focus());
+    assert_narrow(&view);
+    action.emit_clicked();
     assert_eq!(
         *intents.borrow(),
-        vec![SettingsIntent::PrepareUpdateInstall],
-        "an installation failure must expose the application retry action"
+        vec![SettingsIntent::PrepareUpdateInstall]
     );
-
+    intents.borrow_mut().clear();
     let preparing = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
-    let prepare_operation = preparing.update_install_operation().unwrap().clone();
-    view.render(preparing.presentation());
-    let prepared = PreparedUpdateInstall::from_parts(
-        VersionInfo::current(),
-        "1.7.0".parse().unwrap(),
-        UpdateChannel::Stable,
-        "https://example.test/releases/v1.7.0",
-        "v1.7.0",
-        "x86_64-unknown-linux-gnu",
-        "newer-commit",
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Preparing update…");
+    assert!(!card_row.has_css_class("error"));
+    assert_eq!(view.updater.details.title().as_str(), "Last update failure");
+    assert!(
+        view.updater.details_text.has_focus(),
+        "progress must not steal diagnostic selection focus"
     );
-    let confirmation = model
+    model
         .complete_update_install(
-            &prepare_operation,
-            Ok(UpdateInstallOutcome::Prepared(prepared)),
+            preparing.update_install_operation().unwrap(),
+            Ok(UpdateInstallOutcome::Prepared(prepared())),
         )
         .unwrap();
-    view.render(confirmation.presentation());
-    assert_eq!(
-        view.update_check.install.title().as_str(),
-        "Install LG Buddy 1.7.0?"
-    );
-    assert_eq!(
-        view.update_check.install_action.label().as_deref(),
-        Some("Install and restart")
-    );
-    assert!(view.update_check.install_action.is_visible());
-    assert!(view.update_check.install_cancel.is_visible());
-    assert!(!view.update_check.install_spinner.is_visible());
-
-    intents.borrow_mut().clear();
-    view.update_check.install_action.emit_clicked();
-    assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::ConfirmUpdateInstall],
-        "the confirmation control must forward the confirm intent"
-    );
     let installing = model
-        .handle_intent(intents.borrow_mut().pop().unwrap())
+        .handle_intent(SettingsIntent::ConfirmUpdateInstall)
         .unwrap();
-    let install_operation = installing.update_install_operation().unwrap().clone();
-    view.render(installing.presentation());
-    assert!(view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_action.is_visible());
-    assert!(view.update_check.install_cancel.is_visible());
-
-    let acquiring = model
-        .update_install_progress(&install_operation, UpdateInstallStage::Acquiring)
-        .unwrap();
-    view.render(acquiring.presentation());
-    assert!(view.update_check.install_spinner.is_visible());
-    assert!(view
-        .update_check
-        .install
-        .subtitle()
-        .is_some_and(|text| text.contains("cancel")));
-    let installing_stage = model
-        .update_install_progress(&install_operation, UpdateInstallStage::Installing)
-        .unwrap();
-    view.render(installing_stage.presentation());
-    assert!(view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_cancel.is_visible());
-
     let installed = InstalledUpdate::from_parts(
         "1.7.0".parse().unwrap(),
         UpdateChannel::Stable,
@@ -1526,98 +1407,65 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     );
     let restarting = model
         .complete_update_install(
-            &install_operation,
+            installing.update_install_operation().unwrap(),
             Ok(UpdateInstallOutcome::Installed(installed)),
         )
         .unwrap();
-    let relaunch_operation = restarting.update_install_operation().unwrap().clone();
-    view.render(restarting.presentation());
-    assert!(view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_action.is_visible());
-    assert!(!view.update_check.install_cancel.is_visible());
-    assert_eq!(
-        view.update_check.install.title().as_str(),
-        "Restarting LG Buddy…"
-    );
-    let relaunched = model
-        .complete_update_install(&relaunch_operation, Ok(UpdateInstallOutcome::Relaunched))
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Restarting LG Buddy…");
+    assert!(!view.updater.actions.is_visible());
+    assert!(view.updater.spinner.is_visible());
+    model
+        .complete_update_install(
+            restarting.update_install_operation().unwrap(),
+            Err(lg_buddy::update_flow::UpdateInstallFailure::stopped()),
+        )
         .unwrap();
-    view.render(relaunched.presentation());
-    assert!(view.update_check.install.is_visible());
-    assert!(!view.update_check.install_spinner.is_visible());
-    assert!(!view.update_check.install_error.is_visible());
-
-    let checking_again = model
-        .handle_intent(SettingsIntent::CheckForUpdates)
-        .unwrap();
-    let operation = checking_again.update_check_operation().unwrap();
-    view.render(checking_again.presentation());
-    assert!(view.update_check.result.is_visible());
-    assert!(view.update_check.warning.is_visible());
-    let current = UpdateCheckReport {
-        installed_version: "1.6.0".into(),
-        channel: UpdateChannel::Stable,
-        available_release: None,
-        warning: None,
-    };
-    let current = model.complete_update_check(operation, Ok(current)).unwrap();
-    view.render(current.presentation());
-    assert!(view.update_check.result.is_visible());
-    assert_eq!(
-        view.update_check.result.title().as_str(),
-        "No newer release available"
-    );
-    assert!(!view.update_check.release.is_visible());
-    assert!(!view.update_check.warning.is_visible());
-
-    let checking_again = model
-        .handle_intent(SettingsIntent::CheckForUpdates)
-        .unwrap();
-    let operation = checking_again.update_check_operation().unwrap();
-    view.render(checking_again.presentation());
-    let failed = model
-        .complete_update_check(operation, Err(UpdateCheckError::stopped()))
-        .unwrap();
-    view.render(failed.presentation());
-    assert!(view.update_check.result.is_visible());
-    assert_eq!(
-        view.update_check.result.title().as_str(),
-        "No newer release available"
-    );
-    assert!(view.update_check.error.is_visible());
-    assert_eq!(
-        view.update_check.error.accessible_role(),
-        gtk::AccessibleRole::Alert
-    );
-    assert_eq!(check.label().as_deref(), Some("Retry check"));
-    assert!(check.is_sensitive());
-
-    intents.borrow_mut().clear();
-    check.emit_clicked();
+    view.render(model.presentation());
+    assert_eq!(action.label().as_deref(), Some("Retry restart"));
+    action.emit_clicked();
     assert_eq!(
         *intents.borrow(),
-        vec![SettingsIntent::CheckForUpdates],
-        "Retry check must reuse the application-owned intent"
+        vec![SettingsIntent::RelaunchUpdatedApplication]
     );
     intents.borrow_mut().clear();
-    view.render(failed.presentation());
+
+    // A check replaces the prior result or failure in the same card.
+    let checking = model
+        .handle_intent(SettingsIntent::CheckForUpdates)
+        .unwrap();
+    view.render(checking.presentation());
+    assert!(view.updater.spinner.is_visible());
+    assert!(!card_row.has_css_class("error"));
+    assert!(!view.updater.release.is_visible());
+    model
+        .complete_update_check(
+            checking.update_check_operation().unwrap(),
+            Err(UpdateCheckError::stopped()),
+        )
+        .unwrap();
+    view.render(model.presentation());
+    assert_eq!(card_row.title().as_str(), "Update check stopped");
+    assert_eq!(action.label().as_deref(), Some("Retry check"));
+    assert!(card_row.has_css_class("error"));
+    action.emit_clicked();
+    assert_eq!(*intents.borrow(), vec![SettingsIntent::CheckForUpdates]);
+    intents.borrow_mut().clear();
+    view.render(model.presentation());
     assert!(
         intents.borrow().is_empty(),
-        "rendering must not submit an intent"
+        "rendering must not submit intents"
     );
+    assert_eq!(view.updater.row, card_row);
+    assert_eq!(view.updater.action, action);
     assert!(view
         .rows
         .borrow()
         .iter()
         .zip(&stable_rows)
         .all(|(current, original)| current.row == *original));
-
     window.set_default_size(360, 700);
     pump_until(|| window.width() <= 360);
-    let (minimum, _, _, _) = view.widget().measure(gtk::Orientation::Horizontal, -1);
-    assert!(
-        minimum <= 360,
-        "update-check controls must fit a narrow window: {minimum}"
-    );
+    assert_narrow(&view);
     window.close();
 }

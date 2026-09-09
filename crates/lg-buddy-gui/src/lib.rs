@@ -1638,7 +1638,7 @@ pub(crate) mod controller_test_support {
             native.upcast_ref(),
             "Could not check for updates"
         ));
-        assert!(widget_contains_text(
+        assert!(!widget_contains_text(
             native.upcast_ref(),
             "Update available: 1.7.0"
         ));

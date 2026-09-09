@@ -200,6 +200,14 @@ and a changed offer or saved channel requires another check and confirmation.
 GTK only renders actions and forwards worker results. Settings writes and TV
 profile changes are unavailable while an installation workflow is active.
 
+`SettingsPresentation::updater()` selects one current card presentation from
+the check and installation state. Its title, description, actions, and progress
+replace the prior step in place; an old release offer or duplicate failure
+summary is not rendered alongside the active step. Automatic checks and the
+saved channel remain ordinary preference rows above this card. The renderer
+uses native action-row text spacing, and settings warning prefixes are attached
+only while a warning is present so ordinary row labels keep the same left edge.
+
 The installer runs as the regular user. Its graphical upgrade mode requests
 one `pkexec` authorization for the existing system-file and system-service
 operations. User service/configuration work remains unprivileged. Cancellation
@@ -213,9 +221,9 @@ restart**, which does not repeat installation.
 
 The application retains bounded failure details for the current session,
 including across retries and Settings refreshes. A collapsed native expander
-exposes them on demand; normal error messages stay concise. Credential-bearing
-lines, URLs, and control characters are removed before retention. These details
-remain available through the application presentation for the future broader
+inside the updater card exposes them on demand; normal error messages stay
+concise. Credential-bearing lines, URLs, and control characters are removed
+before retention. These details remain available through the application presentation for the future broader
 diagnostics readout, independently of the launcher's handling of stderr.
 
 There is no separate GUI surface for a resolved screen backend, service health,

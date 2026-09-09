@@ -1,6 +1,7 @@
 use crate::presentation::brightness::UserFacingError;
 use crate::presentation::update_check::UpdateCheckPresentation;
 use crate::presentation::update_install::UpdateInstallPresentation;
+use crate::presentation::updater::UpdaterPresentation;
 use crate::settings::{EffectiveSetting, SettingSource, SettingType, SettingValue, SettingsStore};
 use crate::settings_view::{BehaviorSetting, SettingsIntent};
 
@@ -176,6 +177,13 @@ impl SettingsPresentation {
 
     pub fn update_install(&self) -> &UpdateInstallPresentation {
         &self.update_install
+    }
+
+    /// Compute the single update card from the check and installation facts.
+    /// The renderer receives the current workflow state with its precedence
+    /// already resolved by the application presentation layer.
+    pub fn updater(&self) -> UpdaterPresentation {
+        UpdaterPresentation::from_settings(self)
     }
 
     pub(crate) fn update_install_mut(&mut self) -> &mut UpdateInstallPresentation {

@@ -174,28 +174,32 @@ format, and compatibility behavior.
 ## Check for and install an update
 
 In **Settings → Updates**, choose **Check for updates**. This works even when
-automatic checks are off and uses your saved release channel. The app shows
-the installed version, then an available version with a release link or a
-message that no newer release is available. If a check fails, use **Retry check**.
+automatic checks are off and uses your saved release channel. One updater card
+below the update preferences shows the installed version, then replaces it with
+the check progress and result. An available version includes a release link and
+**Install update…**; otherwise the card reports that no newer release is available.
+If a check fails, its explanation and **Retry check** replace the previous result.
 
-The last successful result stays labelled with the channel and installed version
-it checked, including while you change channels or retry. A cache warning can
-appear alongside a successful result; it does not mean the release check failed.
+Completed results identify the channel and installed version they checked. After
+changing channels, use **Check for updates** before installing. A cache warning
+can appear inside the card alongside a successful result; it does not mean the
+release check failed.
 Checking does not install anything or change your update preferences.
 
 For a supported release-bundle installation, choose **Install update…**, review
 its version and channel, then choose **Install and restart**. Approve the desktop
 authorization prompt to replace the installed files. Pairing and settings are
-preserved. After verifying both installed executables, LG Buddy restarts into
+preserved. Confirmation, progress, and any failure replace each other in the same
+card. After verifying both installed executables, LG Buddy restarts into
 the updated application. If restarting fails, use **Retry restart**.
 
 You can cancel while the update is being prepared or downloaded. Once
 installation starts, keep the application open until it finishes; cancelling
 the authorization prompt leaves the installation unchanged. A failure after
 installation changes begin is reported as potentially incomplete. Follow the
-reported recovery guidance before retrying. Expand **Failure details** to inspect
-and select the retained error information without a terminal. The most recent
-failure remains available as **Last update failure** during retries in this
+reported recovery guidance before retrying. Expand **Failure details** inside
+the card to inspect and select the retained error information without a terminal.
+The most recent failure remains available as **Last update failure** during retries in this
 application session. If you change release channels,
 check again before installing an offer from the new channel.
 
