@@ -80,7 +80,7 @@ pub struct Application {
     tvs: TvsApplication,
     settings: SettingsApplication,
     navigation: Navigation,
-    pairing_defaults: Vec<BehaviorSetting>,
+    pairing_behaviors: Vec<BehaviorSetting>,
     pairing_settings_read: Option<SettingsReadOperation>,
     closed: bool,
 }
@@ -96,7 +96,7 @@ impl Application {
                 tvs,
                 settings,
                 navigation: Navigation::default(),
-                pairing_defaults: Vec::new(),
+                pairing_behaviors: Vec::new(),
                 pairing_settings_read: None,
                 closed: false,
             },
@@ -136,13 +136,13 @@ impl Application {
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
         if self.pairing_settings_read.is_some()
-            || (!self.pairing_defaults.is_empty()
+            || (!self.pairing_behaviors.is_empty()
                 && (self.tvs.is_managing() || self.tvs.is_pairing()))
         {
             return None;
         }
         let transition = self.settings.handle_intent(intent)?;
-        if !self.pairing_defaults.is_empty() && transition.read_operation().is_some() {
+        if !self.pairing_behaviors.is_empty() && transition.read_operation().is_some() {
             self.pairing_settings_read = transition.read_operation();
         }
         Some(self.settings_transition(transition))
@@ -176,8 +176,8 @@ impl Application {
                 transition.update_presentation_from(update);
             }
             if succeeded && !self.closed {
-                let defaults = std::mem::take(&mut self.pairing_defaults);
-                for setting in defaults {
+                let requested = std::mem::take(&mut self.pairing_behaviors);
+                for setting in requested {
                     if let Some(update) = self.settings.handle_intent(SettingsIntent::SetEnabled {
                         setting,
                         enabled: true,
@@ -313,9 +313,9 @@ impl Application {
         operation: &PairingOperation,
         result: Result<PairingOutcome, PairingError>,
     ) -> Option<ApplicationTransition> {
-        let defaults = result
+        let requested = result
             .as_ref()
-            .map(|outcome| outcome.default_behaviors().to_vec())
+            .map(|outcome| outcome.requested_behaviors().to_vec())
             .unwrap_or_default();
         let mut transition = self
             .tvs
@@ -326,9 +326,9 @@ impl Application {
         }
         let mut update = self.tvs_transition(transition);
         if paired {
-            self.pairing_defaults = defaults;
+            self.pairing_behaviors = requested;
             let settings = self.settings.profile_changed();
-            self.pairing_settings_read = (!self.pairing_defaults.is_empty())
+            self.pairing_settings_read = (!self.pairing_behaviors.is_empty())
                 .then(|| settings.read_operation())
                 .flatten();
             update = self.transition(update.overview, update.tvs, Some(settings));
@@ -365,7 +365,7 @@ impl Application {
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
         if transition.profile_changed() && transition.presentation().profiles().is_empty() {
-            self.pairing_defaults.clear();
+            self.pairing_behaviors.clear();
             self.pairing_settings_read = None;
         }
         self.navigation
@@ -548,7 +548,7 @@ mod tests {
             .groups()
             .to_vec()
         };
-        let defaults = vec![
+        let requested = vec![
             BehaviorSetting::ScreenIdleBlank,
             BehaviorSetting::SystemSleepWakePolicy,
         ];
@@ -556,7 +556,7 @@ mod tests {
         let paired = app
             .complete_pairing(
                 &operation,
-                Ok(PairingOutcome::new(profile(&operation), defaults.clone())),
+                Ok(PairingOutcome::new(profile(&operation), requested.clone())),
             )
             .unwrap();
         assert!(paired.navigation().tabs_visible());
@@ -574,7 +574,7 @@ mod tests {
                 Ok(groups()),
             )
             .unwrap();
-        for setting in defaults {
+        for setting in requested {
             let activation = update
                 .settings()
                 .unwrap()
@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_post_pair_read_keeps_defaults_for_retry_and_unpair_discards_them() {
+    fn failed_post_pair_read_keeps_requests_for_retry_and_unpair_discards_them() {
         use crate::presentation::settings::SettingsPresentation;
         use crate::settings::ConfigEnvReader;
         for unpair in [false, true] {

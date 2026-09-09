@@ -415,7 +415,7 @@ impl SettingsApplication {
 
     /// Re-read settings after pairing has published a profile. This also
     /// supersedes the initial read when it is still in flight, so onboarding
-    /// always queues defaults against the newly published configuration.
+    /// always queues requested behaviors against the newly published configuration.
     pub fn profile_changed(&mut self) -> SettingsTransition {
         self.begin_read()
     }

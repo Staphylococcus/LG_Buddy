@@ -52,11 +52,11 @@ Cancel is available until saving starts; once saving starts, the dialog stays
 open until the operation finishes. When verification and saving finish, the
 dialog closes and normal navigation becomes available. A fresh setup attempts
 the default Idle Blanking and TV Sleep & Wake behaviors; approve the desktop
-authorization prompt when a system operation needs it. Existing preferences
-are preserved. If a behavior cannot be activated or authorization is declined,
-that behavior stays off and can be enabled in **Settings** to retry. A failed
-pairing shows an error you can correct and submit again; a cancelled attempt
-does not save a TV.
+authorization prompt when a system operation needs it. Pairing again reactivates
+previously enabled behaviors and keeps disabled choices off. If a behavior cannot
+be activated or authorization is declined, that behavior stays off and can be
+enabled in **Settings** to retry. A failed pairing shows an error you can correct
+and submit again; a cancelled attempt does not save a TV.
 
 ![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 

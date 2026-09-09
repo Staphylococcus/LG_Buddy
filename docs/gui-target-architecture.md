@@ -171,12 +171,13 @@ edit as a `PairingIntent`. Its application stages are Editing, Connecting,
 WaitingForConfirmation, Verifying, Saving, and Failed. Pairing verifies power,
 audio, and OLED brightness before publishing the profile. It saves the token
 and configuration through `pairing_store.rs`; the GUI does not own those files.
-On success the application refreshes the other views and attempts the default
-Idle Blanking and TV Sleep & Wake behaviors. Existing saved preferences are
-preserved. A fresh setup starts each behavior disabled until its activation
-succeeds; an unavailable or declined behavior remains off, and its Settings
-toggle retries activation. Unpairing is a native destructive alert dialog and
-likewise delegates confirmation and removal to the application.
+On success the application refreshes the other views and activates each requested
+Idle Blanking and TV Sleep & Wake behavior, including saved enabled preferences
+when pairing again. Explicit off choices remain off. Requested behaviors are
+saved disabled until activation succeeds; an unavailable or declined behavior
+remains off, and its Settings toggle retries activation. Unpairing is a native
+destructive alert dialog and likewise delegates confirmation and removal to the
+application.
 
 The fresh installer creates an empty configuration only when absent and hands
 off to the installed foreground GUI. It enables the system units while deferring

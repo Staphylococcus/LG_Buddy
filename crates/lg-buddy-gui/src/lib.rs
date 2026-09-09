@@ -2138,7 +2138,7 @@ pub(crate) mod controller_test_support {
             release: Mutex<mpsc::Receiver<()>>,
             reject: bool,
             panic: bool,
-            default_behaviors: Vec<BehaviorSetting>,
+            requested_behaviors: Vec<BehaviorSetting>,
         }
         impl PairingBackend for PairingMock {
             fn pair(
@@ -2167,7 +2167,10 @@ pub(crate) mod controller_test_support {
                     TvPlatform::LgWebOs,
                     TvCredentialState::Stored,
                 );
-                Ok(PairingOutcome::new(profile, self.default_behaviors.clone()))
+                Ok(PairingOutcome::new(
+                    profile,
+                    self.requested_behaviors.clone(),
+                ))
             }
         }
         struct TvsMock;
@@ -2275,7 +2278,7 @@ pub(crate) mod controller_test_support {
             }
             None
         }
-        for (cancel, reject, panic, default_behaviors, name) in [
+        for (cancel, reject, panic, requested_behaviors, name) in [
             (
                 false,
                 false,
@@ -2332,7 +2335,7 @@ pub(crate) mod controller_test_support {
                 release: Mutex::new(receiver),
                 reject,
                 panic,
-                default_behaviors: default_behaviors.clone(),
+                requested_behaviors: requested_behaviors.clone(),
             });
             let settings_backend: Arc<dyn SettingsBackend> = Arc::new(ActivationSettingsBackend {
                 path: settings_path.clone(),
@@ -2429,7 +2432,7 @@ pub(crate) mod controller_test_support {
                     lg_buddy::navigation::ApplicationPage::Overview
                 );
                 assert!(controller.window.navigation_visible());
-                if !default_behaviors.is_empty() {
+                if !requested_behaviors.is_empty() {
                     pump_until(|| {
                         let requests = settings_requests.lock().unwrap();
                         requests.len() == 2
