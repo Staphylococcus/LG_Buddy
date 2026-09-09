@@ -135,10 +135,16 @@ impl Application {
         &mut self,
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
-        if self.pairing_settings_read.is_some() {
+        if self.pairing_settings_read.is_some()
+            || (!self.pairing_defaults.is_empty()
+                && (self.tvs.is_managing() || self.tvs.is_pairing()))
+        {
             return None;
         }
         let transition = self.settings.handle_intent(intent)?;
+        if !self.pairing_defaults.is_empty() && transition.read_operation().is_some() {
+            self.pairing_settings_read = transition.read_operation();
+        }
         Some(self.settings_transition(transition))
     }
 
@@ -169,8 +175,8 @@ impl Application {
             if let Some(update) = self.settings.set_controls_available(true) {
                 transition.update_presentation_from(update);
             }
-            let defaults = std::mem::take(&mut self.pairing_defaults);
             if succeeded && !self.closed {
+                let defaults = std::mem::take(&mut self.pairing_defaults);
                 for setting in defaults {
                     if let Some(update) = self.settings.handle_intent(SettingsIntent::SetEnabled {
                         setting,
@@ -358,6 +364,10 @@ impl Application {
     }
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
+        if transition.profile_changed() && transition.presentation().profiles().is_empty() {
+            self.pairing_defaults.clear();
+            self.pairing_settings_read = None;
+        }
         self.navigation
             .update_profiles(transition.presentation().status());
         let overview = if transition.management_operation().is_some() {
@@ -599,6 +609,64 @@ mod tests {
         }
         assert!(update.settings().unwrap().mutation_operation().is_none());
         assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
+    }
+
+    #[test]
+    fn failed_post_pair_read_keeps_defaults_for_retry_and_unpair_discards_them() {
+        use crate::presentation::settings::SettingsPresentation;
+        use crate::settings::ConfigEnvReader;
+        for unpair in [false, true] {
+            let (mut app, _, operation) = pairing();
+            let paired = app
+                .complete_pairing(
+                    &operation,
+                    Ok(PairingOutcome::new(
+                        profile(&operation),
+                        vec![BehaviorSetting::ScreenIdleBlank],
+                    )),
+                )
+                .unwrap();
+            let failed = app
+                .complete_settings_read(
+                    paired.settings().unwrap().read_operation().unwrap(),
+                    Err(SettingsReadError::unreadable("temporarily unreadable")),
+                )
+                .unwrap();
+            assert!(failed.navigation().tabs_visible());
+            if unpair {
+                app.handle_tvs_intent(TvsIntent::UnpairTv).unwrap();
+                let confirm = app.handle_tvs_intent(TvsIntent::ConfirmUnpair).unwrap();
+                assert!(app.handle_settings_intent(SettingsIntent::Retry).is_none());
+                app.complete_tvs_management(
+                    confirm.tvs().unwrap().management_operation().unwrap(),
+                    Ok(TvsManagementOutcome::Unpaired),
+                )
+                .unwrap();
+            }
+            let retry = app.handle_settings_intent(SettingsIntent::Retry).unwrap();
+            let ready = app
+                .complete_settings_read(
+                    retry.settings().unwrap().read_operation().unwrap(),
+                    Ok(SettingsPresentation::from_store(
+                        &ConfigEnvReader::parse(
+                            "/unused/config.env",
+                            "screen_idle_blank=disabled\n",
+                        )
+                        .into_store(),
+                    )
+                    .groups()
+                    .to_vec()),
+                )
+                .unwrap();
+            assert_eq!(
+                ready
+                    .settings()
+                    .unwrap()
+                    .mutation_operation()
+                    .map(|op| op.setting()),
+                (!unpair).then_some(BehaviorSetting::ScreenIdleBlank)
+            );
+        }
     }
 
     #[test]

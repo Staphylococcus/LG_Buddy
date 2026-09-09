@@ -12,7 +12,7 @@ use crate::config::{parse_config_entries, HdmiInput, MacAddress};
 use crate::platform_access_token::{
     PlatformAccessToken, PlatformAccessTokenStore, PlatformAccessTokenStoreError,
 };
-use crate::settings::{ConfigEnvEditor, ConfigEnvReader, SettingValue};
+use crate::settings::{ConfigEnvEditor, ConfigEnvReader, SettingSource, SettingValue};
 use crate::settings_view::BehaviorSetting;
 use std::error::Error;
 use std::fmt;
@@ -844,13 +844,15 @@ fn render_first_primary_config(
         let effective = store
             .effective_by_name(setting.key_name())
             .expect("known behavior");
-        if effective.value() == Some(SettingValue::Enum("enabled")) {
+        if effective.source() == SettingSource::Default
+            && effective.value() == Some(SettingValue::Enum("enabled"))
+        {
             defaults.push(setting);
             editor.set(effective.storage_key(), SettingValue::Enum("disabled"));
         }
     }
-    // Publish these policies off with the TV. Onboarding enables each only
-    // after its service is available, so interruption cannot claim activation.
+    // Publish new default policies off with the TV. Onboarding enables each
+    // after its service is available. Explicit saved choices stay authoritative.
     let mut contents = editor.render().into_bytes();
     if !contents.is_empty() && !contents.ends_with(b"\n") {
         contents.push(b'\n');
@@ -1403,19 +1405,12 @@ mod tests {
     }
 
     #[test]
-    fn pairing_preserves_opt_outs_and_reactivates_only_requested_behaviors() {
-        for (idle, sleep, expected) in [
-            ("disabled", "disabled", vec![]),
-            (
-                "enabled",
-                "disabled",
-                vec![BehaviorSetting::ScreenIdleBlank],
-            ),
-            (
-                "disabled",
-                "enabled",
-                vec![BehaviorSetting::SystemSleepWakePolicy],
-            ),
+    fn pairing_preserves_explicit_behavior_preferences() {
+        for (idle, sleep) in [
+            ("disabled", "disabled"),
+            ("enabled", "disabled"),
+            ("disabled", "enabled"),
+            ("enabled", "enabled"),
         ] {
             let dir = TestDir::new("behavior-preferences");
             fs::write(dir.config(), format!("# retained after unpairing\nscreen_idle_blank={idle}\nsystem_sleep_wake_policy={sleep}\nscreen_idle_timeout=42\n")).unwrap();
@@ -1428,15 +1423,12 @@ mod tests {
                     &token("secret"),
                 )
                 .unwrap();
-            assert_eq!(defaults, expected);
+            assert!(defaults.is_empty());
             let saved = ConfigEnvReader::load(dir.config()).unwrap().into_store();
-            assert_eq!(
-                saved.raw_storage_value("screen_idle_blank"),
-                Some("disabled")
-            );
+            assert_eq!(saved.raw_storage_value("screen_idle_blank"), Some(idle));
             assert_eq!(
                 saved.raw_storage_value("system_sleep_wake_policy"),
-                Some("disabled")
+                Some(sleep)
             );
             assert_eq!(saved.raw_storage_value("screen_idle_timeout"), Some("42"));
         }
