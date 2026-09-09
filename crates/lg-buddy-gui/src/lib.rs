@@ -1476,7 +1476,7 @@ pub(crate) mod controller_test_support {
     }
 
     fn run_manual_update_check_scenario() {
-        use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+        use lg_buddy::presentation::update_check::UpdateCheckReport;
         use lg_buddy::settings_view::{SettingsBackend, UpdateCheckError};
         use lg_buddy::updates::UpdateChannel;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1534,11 +1534,7 @@ pub(crate) mod controller_test_support {
                 Ok(UpdateCheckReport {
                     installed_version: "1.6.0".into(),
                     channel,
-                    available_release: available.then(|| AvailableUpdate {
-                        version: "1.7.0".into(),
-                        url: "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0"
-                            .into(),
-                    }),
+                    update_available: available,
                     warning: None,
                 })
             }
@@ -1619,7 +1615,7 @@ pub(crate) mod controller_test_support {
         pump_until(|| check.is_sensitive());
         assert_eq!(check.label().as_deref(), Some("Check for updates"));
         assert!(
-            !widget_contains_text(native.upcast_ref(), "Update available: 1.7.0"),
+            !widget_contains_text(native.upcast_ref(), "Update available"),
             "an old-channel result must not replace the current row"
         );
         assert_eq!(std::fs::read(&path).unwrap(), saved);
@@ -1644,7 +1640,7 @@ pub(crate) mod controller_test_support {
         ));
         assert!(!widget_contains_text(
             native.upcast_ref(),
-            "Update available: 1.7.0"
+            "Update available"
         ));
         find_button(native.upcast_ref(), "Check for updates")
             .unwrap()
@@ -1665,7 +1661,7 @@ pub(crate) mod controller_test_support {
 
     fn run_update_install_scenario() {
         use adw::prelude::AdwApplicationWindowExt;
-        use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+        use lg_buddy::presentation::update_check::UpdateCheckReport;
         use lg_buddy::update_flow::{
             UpdateInstallBackend, UpdateInstallFailure, UpdateInstallOperation,
             UpdateInstallOutcome, UpdateInstallTask,
@@ -1679,10 +1675,10 @@ pub(crate) mod controller_test_support {
         fn prepared() -> PreparedUpdateInstall {
             PreparedUpdateInstall::from_parts(
                 lg_buddy::version::VersionInfo::current(),
-                "1.7.0".parse().unwrap(),
+                "1.7.1".parse().unwrap(),
                 UpdateChannel::Stable,
-                "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0",
-                "v1.7.0",
+                "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.1",
+                "v1.7.1",
                 "x86_64-unknown-linux-musl",
                 "a".repeat(40),
             )
@@ -1712,10 +1708,7 @@ pub(crate) mod controller_test_support {
                 Ok(UpdateCheckReport {
                     installed_version: "1.6.0".into(),
                     channel: UpdateChannel::Stable,
-                    available_release: Some(AvailableUpdate {
-                        version: "1.7.0".into(),
-                        url: prepared().release().url().into(),
-                    }),
+                    update_available: true,
                     warning: None,
                 })
             }
@@ -1736,6 +1729,7 @@ pub(crate) mod controller_test_support {
         }
         struct Updater {
             replies: Mutex<mpsc::Receiver<WorkerReply>>,
+            preparations: AtomicUsize,
             installs: AtomicUsize,
             handoffs: AtomicUsize,
         }
@@ -1746,12 +1740,12 @@ pub(crate) mod controller_test_support {
                 progress: &mut dyn FnMut(UpdateInstallStage),
             ) -> Result<UpdateInstallOutcome, UpdateInstallFailure> {
                 match operation.task() {
-                    UpdateInstallTask::Prepare {
-                        version, channel, ..
-                    } => {
-                        assert_eq!(version, "1.7.0");
-                        assert_eq!(*channel, UpdateChannel::Stable);
-                        Ok(UpdateInstallOutcome::Prepared(prepared()))
+                    UpdateInstallTask::Prepare => {
+                        if self.preparations.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Ok(UpdateInstallOutcome::UpToDate)
+                        } else {
+                            Ok(UpdateInstallOutcome::Prepared(prepared()))
+                        }
                     }
                     UpdateInstallTask::Install { cancellation, .. } => {
                         self.installs.fetch_add(1, Ordering::SeqCst);
@@ -1769,9 +1763,9 @@ pub(crate) mod controller_test_support {
                                     progress(UpdateInstallStage::VerifyingInstalled);
                                     return Ok(UpdateInstallOutcome::Installed(
                                         InstalledUpdate::from_parts(
-                                            "1.7.0".parse().unwrap(),
+                                            "1.7.1".parse().unwrap(),
                                             UpdateChannel::Stable,
-                                            "v1.7.0",
+                                            "v1.7.1",
                                             "x86_64-unknown-linux-musl",
                                             "a".repeat(40),
                                             "/usr/bin/lg-buddy",
@@ -1790,7 +1784,7 @@ pub(crate) mod controller_test_support {
                     installed.gui_path(),
                     std::path::Path::new("/usr/bin/lg-buddy-gui")
                 );
-                assert_eq!(installed.identity().version().to_string(), "1.7.0");
+                assert_eq!(installed.identity().version().to_string(), "1.7.1");
                 self.handoffs.fetch_add(1, Ordering::SeqCst);
                 Err(UpdateInstallFailure::stopped())
             }
@@ -1813,6 +1807,7 @@ pub(crate) mod controller_test_support {
         let (reply_tx, reply_rx) = mpsc::channel();
         let updater = Arc::new(Updater {
             replies: Mutex::new(reply_rx),
+            preparations: AtomicUsize::new(0),
             installs: AtomicUsize::new(0),
             handoffs: AtomicUsize::new(0),
         });
@@ -1839,7 +1834,31 @@ pub(crate) mod controller_test_support {
         button(native.upcast_ref(), "Install update…")
             .unwrap()
             .emit_clicked();
+        pump_until(|| button(native.upcast_ref(), "Check for updates").is_some());
+        pump_until(|| {
+            native
+                .downcast_ref::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_none()
+        });
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Already up to date"
+        ));
+        assert_eq!(updater.installs.load(Ordering::SeqCst), 0);
+        button(native.upcast_ref(), "Check for updates")
+            .unwrap()
+            .emit_clicked();
+        pump_until(|| button(native.upcast_ref(), "Install update…").is_some());
+        button(native.upcast_ref(), "Install update…")
+            .unwrap()
+            .emit_clicked();
         pump_until(|| button(native.upcast_ref(), "Install and restart").is_some());
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Install LG Buddy 1.7.1?"
+        ));
         assert_eq!(updater.installs.load(Ordering::SeqCst), 0);
         button(native.upcast_ref(), "Cancel")
             .unwrap()

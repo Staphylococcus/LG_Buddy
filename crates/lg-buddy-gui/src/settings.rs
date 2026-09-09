@@ -319,14 +319,11 @@ impl UpdaterView {
         render_updater_button(&self.cancel, &self.cancel_intent, install.cancel_action());
         self.actions
             .set_visible(install.action().is_some() || install.cancel_action().is_some());
-        let release = settings
-            .update_check()
-            .result()
-            .and_then(|report| report.available_release.as_ref());
+        let release = install.release_url();
         self.release
             .set_visible(!install.busy() && release.is_some());
         if let Some(release) = release {
-            self.release.set_uri(&release.url);
+            self.release.set_uri(release);
         }
         if !self.presented.get() {
             if let Some(parent) = self.row.root().and_downcast::<gtk::Window>() {
@@ -1169,7 +1166,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
 #[cfg(test)]
 fn updater_renderer_scenarios(application: &adw::Application) {
     use crate::controller_test_support::pump_until;
-    use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+    use lg_buddy::presentation::update_check::UpdateCheckReport;
     use lg_buddy::settings::ConfigEnvReader;
     use lg_buddy::settings_view::{BehaviorSetting, SettingsApplication};
     use lg_buddy::update_flow::{UpdateInstallOutcome, UpdateInstallTask};
@@ -1276,7 +1273,7 @@ fn updater_renderer_scenarios(application: &adw::Application) {
             Ok(UpdateCheckReport {
                 installed_version: "1.6.0".into(),
                 channel: UpdateChannel::Stable,
-                available_release: None,
+                update_available: false,
                 warning: None,
             }),
         )
@@ -1301,16 +1298,13 @@ fn updater_renderer_scenarios(application: &adw::Application) {
             Ok(UpdateCheckReport {
                 installed_version: "1.6.0".into(),
                 channel: UpdateChannel::Stable,
-                available_release: Some(AvailableUpdate {
-                    version: "1.7.0".into(),
-                    url: "https://example.test/releases/v1.7.0".into(),
-                }),
+                update_available: true,
                 warning: None,
             }),
         )
         .unwrap();
     view.render(model.presentation());
-    assert_eq!(row.title(), "Update available: 1.7.0");
+    assert_eq!(row.title(), "Update available");
     assert_eq!(action.label().as_deref(), Some("Install update…"));
     action.emit_clicked();
     assert_eq!(
@@ -1361,6 +1355,7 @@ fn updater_renderer_scenarios(application: &adw::Application) {
     assert_eq!(view.updater.title.text(), "Install LG Buddy 1.7.0?");
     assert!(!view.updater.progress.is_visible());
     assert!(view.updater.release.is_visible());
+    assert_eq!(view.updater.release.uri(), prepared().release().url());
     assert_eq!(
         view.updater.install.label().as_deref(),
         Some("Install and restart")

@@ -183,11 +183,13 @@ governs restoration outside idle blanking. Invalid blanking values keep the
 dependent controls available for diagnosis.
 
 Settings exposes one native update row in the Updates group.
-`SettingsPresentation::updater()` projects its title, installed/available version,
+`SettingsPresentation::updater()` projects its title, installed version,
 and **Check for updates** or **Install update…** action. While a check runs, its
 button is disabled and labeled **Checking…**. Completed checks use the saved
-channel; an old-channel result cannot be installed. The check neither installs
-an update nor changes preferences or sends a desktop notification.
+channel and report only whether an update is available. The check retains no
+release version, URL, or installation target. A channel change requires a fresh
+availability check. Checking neither installs an update nor changes preferences
+or sends a desktop notification.
 
 `SettingsTransition::update_notice()` carries one-time completion feedback:
 already-current results, check errors, cache warnings, and installation errors.
@@ -198,7 +200,16 @@ for that particular completion.
 
 **Install update…** opens an `adw::Dialog` with confirmation, release link,
 current status, native progress bar, and the applicable action buttons.
-`update_flow.rs` owns preparing an offer, explicit confirmation, cancellation,
+Opening the dialog expresses intent to upgrade. Preparation reads the current
+saved channel and independently selects its latest qualifying release. That
+result supplies the confirmation version and release link, even if a newer
+release appeared since the availability check. If no newer release qualifies,
+the dialog closes, the row returns to **Check for updates**, and an **Already up
+to date** toast appears. The modal resolves the release identity before
+confirmation. Confirmation authorizes acquisition and installation of that
+exact release; later release changes cannot replace it.
+
+`update_flow.rs` owns preparation, explicit confirmation, cancellation,
 progress, failures, and handoff; `update_install.rs` shares discovery, pinned
 identity, acquisition, compatibility, and installation with the CLI. GTK only
 renders these facts and forwards semantic intents. The progress bar pulses

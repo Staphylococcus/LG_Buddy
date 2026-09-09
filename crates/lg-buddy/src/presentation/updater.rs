@@ -35,15 +35,17 @@ impl UpdaterPresentation {
             }
         }
         let report = check.result().filter(|_| {
-            (install.offer_channel_matches() == Some(true) && check.error().is_none()) || active
+            (install.check_channel_matches() == Some(true) && check.error().is_none()) || active
         });
-        let release = report.and_then(|report| report.available_release.as_ref());
+        let available = report.is_some_and(|report| report.update_available);
         let mut row = Self {
-            title: release.map_or_else(
-                || "Installed version".into(),
-                |release| format!("Update available: {}", release.version),
-            ),
-            description: report.filter(|_| release.is_some()).map_or_else(
+            title: if available {
+                "Update available"
+            } else {
+                "Installed version"
+            }
+            .into(),
+            description: report.filter(|_| available).map_or_else(
                 || check.installed_version_label().to_owned(),
                 |report| format!("Installed version: {}", report.installed_version),
             ),
@@ -61,7 +63,7 @@ impl UpdaterPresentation {
                 false,
                 SettingsIntent::PrepareUpdateInstall,
             );
-        } else if release.is_some() {
+        } else if available {
             if let Some(action) = install.action() {
                 row.action =
                     SettingsAction::new("Install update…", action.enabled(), action.intent());
@@ -86,7 +88,7 @@ impl UpdaterPresentation {
 #[cfg(test)]
 mod tests {
     use crate::presentation::settings::SettingsPresentation;
-    use crate::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+    use crate::presentation::update_check::UpdateCheckReport;
     use crate::settings::ConfigEnvReader;
     use crate::settings_view::{SettingsApplication, SettingsIntent};
     use crate::update_flow::{UpdateInstallFailure, UpdateInstallOutcome};
@@ -110,10 +112,7 @@ mod tests {
         UpdateCheckReport {
             installed_version: "1.6.0".into(),
             channel,
-            available_release: available.then(|| AvailableUpdate {
-                version: "1.7.0".into(),
-                url: "https://example.test/v1.7.0".into(),
-            }),
+            update_available: available,
             warning: None,
         }
     }
@@ -166,7 +165,7 @@ mod tests {
         )
         .unwrap();
         let offer = app.presentation().updater();
-        assert_eq!(offer.title(), "Update available: 1.7.0");
+        assert_eq!(offer.title(), "Update available");
         assert_eq!(offer.description(), "Installed version: 1.6.0");
         assert_eq!(offer.action().label(), "Install update…");
         assert!(offer.action().enabled());
@@ -191,7 +190,7 @@ mod tests {
             .handle_intent(SettingsIntent::PrepareUpdateInstall)
             .unwrap();
         let row = preparing.presentation().updater();
-        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.title(), "Update available");
         assert_eq!(row.action().label(), "Install update…");
         assert_eq!(row.action().intent(), SettingsIntent::PrepareUpdateInstall);
         assert!(!row.action().enabled());
@@ -200,7 +199,7 @@ mod tests {
         app.complete_update_install(&operation, Ok(UpdateInstallOutcome::Prepared(prepared())))
             .unwrap();
         let confirmation = app.presentation().updater();
-        assert_eq!(confirmation.title(), "Update available: 1.7.0");
+        assert_eq!(confirmation.title(), "Update available");
         assert_eq!(confirmation.action().label(), "Install update…");
         assert_eq!(
             confirmation.action().intent(),
@@ -215,7 +214,7 @@ mod tests {
         complete_check(&mut app, Ok(report(UpdateChannel::Stable, true)));
         let transition = app.set_controls_available(false).unwrap();
         let row = transition.presentation().updater();
-        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.title(), "Update available");
         assert_eq!(row.action().label(), "Install update…");
         assert!(!row.action().enabled());
     }
@@ -243,7 +242,7 @@ mod tests {
         )
         .unwrap();
         let row = app.presentation().updater();
-        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.title(), "Update available");
         assert_eq!(row.action().label(), "Install update…");
         assert_eq!(row.action().intent(), SettingsIntent::PrepareUpdateInstall);
         assert!(app.presentation().update_install().error().is_some());

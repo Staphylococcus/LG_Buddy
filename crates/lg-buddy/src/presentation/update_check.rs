@@ -4,36 +4,13 @@ use crate::settings_view::SettingsIntent;
 use crate::updates::UpdateChannel;
 use crate::version::VersionInfo;
 
-/// A completed check, including the channel actually used by discovery.
+/// Update availability on the checked channel, without an installation target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCheckReport {
     pub installed_version: String,
     pub channel: UpdateChannel,
-    pub available_release: Option<AvailableUpdate>,
+    pub update_available: bool,
     pub warning: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AvailableUpdate {
-    pub version: String,
-    pub url: String,
-}
-
-impl UpdateCheckReport {
-    pub fn title(&self) -> String {
-        match &self.available_release {
-            Some(release) => format!("Update available: {}", release.version),
-            None => "No newer release available".to_string(),
-        }
-    }
-
-    pub fn description(&self) -> String {
-        format!(
-            "Last successful check: {} channel, compared with installed version {}.",
-            self.channel.as_str(),
-            self.installed_version
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +76,11 @@ impl UpdateCheckPresentation {
 
     pub(crate) fn start(&mut self) {
         self.checking = true;
+        self.error = None;
+    }
+
+    pub(crate) fn clear_result(&mut self) {
+        self.result = None;
         self.error = None;
     }
 

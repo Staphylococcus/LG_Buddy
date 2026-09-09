@@ -11,7 +11,8 @@ pub struct UpdateInstallPresentation {
     pub(crate) busy: bool,
     pub(crate) error: Option<UserFacingError>,
     pub(crate) failure_details: Option<String>,
-    pub(crate) offer_channel_matches: Option<bool>,
+    pub(crate) check_channel_matches: Option<bool>,
+    pub(crate) release_url: Option<String>,
 }
 
 impl UpdateInstallPresentation {
@@ -53,7 +54,11 @@ impl UpdateInstallPresentation {
         }
     }
 
-    pub(crate) fn offer_channel_matches(&self) -> Option<bool> {
-        self.offer_channel_matches
+    pub(crate) fn check_channel_matches(&self) -> Option<bool> {
+        self.check_channel_matches
+    }
+
+    pub fn release_url(&self) -> Option<&str> {
+        self.release_url.as_deref()
     }
 }

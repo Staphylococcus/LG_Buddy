@@ -180,8 +180,11 @@ until the check finishes. If LG Buddy is current, a brief **Already up to date**
 message appears. An available release changes the same row to **Install update…**.
 Changing the saved channel requires a fresh check before installation.
 
-Choose **Install update…** to open the update dialog. After preparing the
-release, the dialog shows its version, channel, and release link. Choose
+Choose **Install update…** to open the update dialog. It retrieves the latest
+qualifying release using your saved channel preference, then shows its version,
+channel, and release link. This may be a newer release than the one available
+when you checked. If no update qualifies, the dialog closes with an **Already up
+to date** message. Choose
 **Install and restart** to authorize the system installation. Pairing and
 settings are preserved. A pulsing progress bar and short status describe the
 current work; the installer does not provide a percentage.

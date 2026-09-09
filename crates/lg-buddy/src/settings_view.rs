@@ -9,7 +9,7 @@ use crate::presentation::settings::{
     SettingsEditStatus, SettingsEditor, SettingsFeedback, SettingsFeedbackSeverity, SettingsGroup,
     SettingsPresentation, SettingsRow,
 };
-use crate::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+use crate::presentation::update_check::UpdateCheckReport;
 use crate::settings::{
     execute_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
     SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
@@ -312,10 +312,7 @@ impl SettingsBackend for EnvironmentSettingsBackend {
         Ok(UpdateCheckReport {
             installed_version: result.current_version().to_string(),
             channel: result.check_channel(),
-            available_release: result.update_available().then(|| AvailableUpdate {
-                version: result.latest().version().to_string(),
-                url: result.latest().url().to_owned(),
-            }),
+            update_available: result.update_available(),
             warning: (!outcome.warnings().is_empty()).then(|| {
                 "The release check succeeded, but its cache could not be read or saved. A later check may need to download the release information again.".into()
             }),
@@ -425,8 +422,7 @@ impl SettingsApplication {
                 | SettingsIntent::CancelUpdateInstall
                 | SettingsIntent::RelaunchUpdatedApplication
         ) {
-            let report = self.presentation.update_check().result().cloned();
-            let operation = self.update_install.handle(intent, report.as_ref())?;
+            let operation = self.update_install.handle(intent)?;
             let mut transition = self.transition(None, None, None);
             transition.update_install_operation = operation;
             return Some(transition);
@@ -731,18 +727,25 @@ impl SettingsApplication {
         if self.closed {
             return None;
         }
+        let up_to_date = matches!(result, Ok(UpdateInstallOutcome::UpToDate))
+            && matches!(operation.task(), UpdateInstallTask::Prepare);
         let (next, diagnostic) = self.update_install.complete(operation, result)?;
-        let notice = self.update_install.presentation().error().map(|error| {
-            let title = if matches!(operation.task(), UpdateInstallTask::Relaunch(_)) {
-                "Restart required"
-            } else {
-                error.summary()
-            };
-            UpdateNotice::new(
-                title,
-                notice_details(error, diagnostic.as_deref().unwrap_or("")),
-            )
-        });
+        let notice = if up_to_date {
+            self.presentation.update_check_mut().clear_result();
+            Some(UpdateNotice::new("Already up to date", None))
+        } else {
+            self.update_install.presentation().error().map(|error| {
+                let title = if matches!(operation.task(), UpdateInstallTask::Relaunch(_)) {
+                    "Restart required"
+                } else {
+                    error.summary()
+                };
+                UpdateNotice::new(
+                    title,
+                    notice_details(error, diagnostic.as_deref().unwrap_or("")),
+                )
+            })
+        };
         let mut transition = self.transition(None, None, diagnostic);
         transition.update_install_operation = next;
         transition.update_notice = notice;
@@ -860,7 +863,7 @@ impl SettingsApplication {
             && self.reconcile_mutation.is_none()
             && self.pending_update_check.is_none()
             && matches!(self.state, SettingsApplicationState::Ready);
-        self.update_install.refresh_offer(
+        self.update_install.refresh_availability(
             self.presentation.update_check().result(),
             channel,
             available,
@@ -897,7 +900,7 @@ fn update_check_notice(
 ) -> Option<UpdateNotice> {
     match result {
         Ok(report) => {
-            if report.available_release.is_none() {
+            if !report.update_available {
                 Some(UpdateNotice::new(
                     "Already up to date",
                     report.warning.as_deref().and_then(sanitized_notice_detail),
@@ -1077,10 +1080,7 @@ mod tests {
         UpdateCheckReport {
             installed_version: "1.6.0".into(),
             channel,
-            available_release: Some(AvailableUpdate {
-                version: "1.7.0".into(),
-                url: "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0".into(),
-            }),
+            update_available: true,
             warning: None,
         }
     }
@@ -1123,7 +1123,7 @@ mod tests {
             .unwrap();
         let result = completed.presentation().update_check().result().unwrap();
         assert_eq!(result.channel, UpdateChannel::Stable);
-        assert!(result.description().contains("stable channel"));
+        assert!(result.update_available);
         assert_eq!(
             completed
                 .presentation()
@@ -1215,14 +1215,14 @@ mod tests {
             .update_check_operation()
             .unwrap();
         let mut current = update_report(UpdateChannel::Prerelease);
-        current.available_release = None;
+        current.update_available = false;
         current.warning = Some("Cache could not be saved.".into());
         let done = app
             .complete_update_check(third, Ok(current.clone()))
             .unwrap();
         assert_eq!(done.presentation().update_check().result(), Some(&current));
         assert!(done.presentation().update_check().error().is_none());
-        assert_eq!(current.title(), "No newer release available");
+        assert!(!current.update_available);
         let last = app
             .handle_intent(SettingsIntent::CheckForUpdates)
             .unwrap()

@@ -16,11 +16,7 @@ use crate::updates::UpdateChannel;
 
 #[derive(Debug, Clone)]
 pub enum UpdateInstallTask {
-    Prepare {
-        version: String,
-        url: String,
-        channel: UpdateChannel,
-    },
+    Prepare,
     Install {
         prepared: PreparedUpdateInstall,
         cancellation: UpdateInstallCancellation,
@@ -50,6 +46,7 @@ impl UpdateInstallOperation {
 #[derive(Debug)]
 pub enum UpdateInstallOutcome {
     Prepared(PreparedUpdateInstall),
+    UpToDate,
     Installed(InstalledUpdate),
     Relaunched,
 }
@@ -128,12 +125,13 @@ impl UpdateInstallBackend for EnvironmentUpdateInstallBackend {
         progress: &mut dyn FnMut(UpdateInstallStage),
     ) -> Result<UpdateInstallOutcome, UpdateInstallFailure> {
         match operation.task() {
-            UpdateInstallTask::Prepare {
-                version,
-                url,
-                channel,
-            } => prepare_gui_update(version, url, *channel)
-                .map(UpdateInstallOutcome::Prepared)
+            UpdateInstallTask::Prepare => prepare_gui_update()
+                .map(|prepared| {
+                    prepared.map_or(
+                        UpdateInstallOutcome::UpToDate,
+                        UpdateInstallOutcome::Prepared,
+                    )
+                })
                 .map_err(Into::into),
             UpdateInstallTask::Install {
                 prepared,
@@ -186,7 +184,7 @@ impl UpdateInstallApplication {
         }
     }
 
-    pub(crate) fn refresh_offer(
+    pub(crate) fn refresh_availability(
         &mut self,
         report: Option<&UpdateCheckReport>,
         channel: Option<UpdateChannel>,
@@ -195,8 +193,8 @@ impl UpdateInstallApplication {
         if self.active() || self.installed.is_some() {
             return;
         }
-        let offered = report.is_some_and(|report| report.available_release.is_some());
-        self.presentation.offer_channel_matches =
+        let offered = report.is_some_and(|report| report.update_available);
+        self.presentation.check_channel_matches =
             offered.then(|| report.is_some_and(|report| Some(report.channel) == channel));
         self.presentation.action = offered.then(|| {
             SettingsAction::new(
@@ -235,6 +233,7 @@ impl UpdateInstallApplication {
         self.presentation.busy = true;
         self.presentation.action = None;
         self.presentation.error = None;
+        self.presentation.release_url = None;
         self.cancelling = false;
         operation
     }
@@ -250,7 +249,6 @@ impl UpdateInstallApplication {
     pub(crate) fn handle(
         &mut self,
         intent: SettingsIntent,
-        report: Option<&UpdateCheckReport>,
     ) -> Option<Option<UpdateInstallOperation>> {
         match intent {
             SettingsIntent::PrepareUpdateInstall
@@ -261,16 +259,10 @@ impl UpdateInstallApplication {
                         .as_ref()
                         .is_some_and(SettingsAction::enabled) =>
             {
-                let report = report?;
-                let release = report.available_release.as_ref()?;
-                let operation = self.start(UpdateInstallTask::Prepare {
-                    version: release.version.clone(),
-                    url: release.url.clone(),
-                    channel: report.channel,
-                });
+                let operation = self.start(UpdateInstallTask::Prepare);
                 self.presentation.title = Some("Preparing update…".into());
                 self.presentation.description =
-                    "Checking this release and installation before confirmation.".into();
+                    "Finding the latest update for your saved channel.".into();
                 self.presentation.cancel_action = Some(cancel_action());
                 Some(Some(operation))
             }
@@ -324,7 +316,7 @@ impl UpdateInstallApplication {
             return false;
         }
         let (title, detail, cancellable) = match stage {
-            UpdateInstallStage::InitialPreflight | UpdateInstallStage::Discovering | UpdateInstallStage::Resolving | UpdateInstallStage::Offered => ("Preparing update…", "Checking this release and installation before confirmation.", true),
+            UpdateInstallStage::InitialPreflight | UpdateInstallStage::Discovering | UpdateInstallStage::Resolving | UpdateInstallStage::Offered => ("Preparing update…", "Finding the latest update for your saved channel.", true),
             UpdateInstallStage::Acquiring => ("Downloading and verifying update…", "You can cancel before installation begins.", true),
             UpdateInstallStage::CandidatePreflight => ("Checking installation compatibility…", "You can cancel before installation begins.", true),
             UpdateInstallStage::Installing => ("Installing update…", "Authorize the update when prompted. Keep LG Buddy open until installation finishes.", false),
@@ -349,13 +341,14 @@ impl UpdateInstallApplication {
         self.presentation.cancel_action = None;
         match result {
             Ok(UpdateInstallOutcome::Prepared(prepared))
-                if matches!(operation.task, UpdateInstallTask::Prepare { .. }) =>
+                if matches!(operation.task, UpdateInstallTask::Prepare) =>
             {
                 self.presentation.title = Some(format!(
                     "Install LG Buddy {}?",
                     prepared.identity().version()
                 ));
                 self.presentation.description = format!("{} channel. LG Buddy will request authorization, install this release, and restart. Your TV pairing and settings will be kept.", prepared.channel().as_str());
+                self.presentation.release_url = Some(prepared.release().url().to_owned());
                 self.prepared = Some(prepared);
                 self.presentation.action = Some(SettingsAction::new(
                     "Install and restart",
@@ -363,6 +356,11 @@ impl UpdateInstallApplication {
                     SettingsIntent::ConfirmUpdateInstall,
                 ));
                 self.presentation.cancel_action = Some(cancel_action());
+            }
+            Ok(UpdateInstallOutcome::UpToDate)
+                if matches!(operation.task, UpdateInstallTask::Prepare) =>
+            {
+                self.clear_presentation();
             }
             Ok(UpdateInstallOutcome::Installed(installed))
                 if matches!(operation.task, UpdateInstallTask::Install { .. }) =>
@@ -475,7 +473,6 @@ fn cancel_action() -> SettingsAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::update_check::AvailableUpdate;
     use crate::settings::ConfigEnvReader;
     use crate::settings_view::{BehaviorSetting, SettingsApplication};
     use crate::version::VersionInfo;
@@ -514,10 +511,7 @@ mod tests {
             Ok(UpdateCheckReport {
                 installed_version: "1.6.0".into(),
                 channel: UpdateChannel::Stable,
-                available_release: Some(AvailableUpdate {
-                    version: "1.7.0".into(),
-                    url: prepared().release().url().into(),
-                }),
+                update_available: true,
                 warning: None,
             }),
         )
@@ -531,6 +525,83 @@ mod tests {
             .update_install_operation()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn modal_selects_a_fresh_release_and_pins_only_the_confirmed_target() {
+        let mut app = offered();
+        let operation = prepare(&mut app);
+        assert!(matches!(operation.task(), UpdateInstallTask::Prepare));
+        let latest = PreparedUpdateInstall::from_parts(
+            VersionInfo::current(),
+            "1.7.1".parse().unwrap(),
+            UpdateChannel::Stable,
+            "https://example.test/releases/v1.7.1",
+            "v1.7.1",
+            "x86_64-unknown-linux-musl",
+            "b".repeat(40),
+        );
+        let confirmation = app
+            .complete_update_install(
+                &operation,
+                Ok(UpdateInstallOutcome::Prepared(latest.clone())),
+            )
+            .unwrap();
+        let dialog = confirmation.presentation().update_install();
+        assert_eq!(dialog.title(), Some("Install LG Buddy 1.7.1?"));
+        assert_eq!(dialog.release_url(), Some(latest.release().url()));
+        assert!(confirmation.update_install_operation().is_none());
+        let confirmed = app
+            .handle_intent(SettingsIntent::ConfirmUpdateInstall)
+            .unwrap();
+        let UpdateInstallTask::Install { prepared, .. } =
+            confirmed.update_install_operation().unwrap().task()
+        else {
+            panic!("confirmation must start installation");
+        };
+        assert_eq!(prepared, &latest);
+    }
+
+    #[test]
+    fn no_qualifying_release_closes_the_modal_and_clears_old_availability_once() {
+        let mut app = offered();
+        let operation = prepare(&mut app);
+        let completion = app
+            .complete_update_install(&operation, Ok(UpdateInstallOutcome::UpToDate))
+            .unwrap();
+        assert!(completion.update_install_operation().is_none());
+        assert_eq!(
+            completion.update_notice().unwrap().title(),
+            "Already up to date"
+        );
+        assert!(completion.update_notice().unwrap().details().is_none());
+        assert!(!app.is_mutating());
+        assert!(!app.presentation().update_install().busy());
+        assert!(app
+            .presentation()
+            .update_install()
+            .cancel_action()
+            .is_none());
+        assert!(app.presentation().update_install().release_url().is_none());
+        assert!(app.presentation().update_check().result().is_none());
+        assert_eq!(
+            app.presentation().updater().action().intent(),
+            SettingsIntent::CheckForUpdates
+        );
+        assert!(app
+            .complete_update_install(&operation, Ok(UpdateInstallOutcome::UpToDate))
+            .is_none());
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let groups = app.presentation().groups().to_vec();
+        let refreshed = app
+            .complete_read(refresh.read_operation().unwrap(), Ok(groups))
+            .unwrap();
+        assert!(refreshed.update_notice().is_none());
+        assert_eq!(
+            refreshed.presentation().updater().action().label(),
+            "Check for updates"
+        );
     }
 
     #[test]

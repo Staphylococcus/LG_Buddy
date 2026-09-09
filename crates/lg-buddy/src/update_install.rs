@@ -39,14 +39,6 @@ pub enum UpdateInstallError {
     Cancelled,
     AuthorizationDeclined,
     AuthorizationUnavailable(Option<i32>),
-    OfferChanged {
-        expected_version: String,
-        expected_url: String,
-        expected_channel: crate::updates::UpdateChannel,
-        actual_version: Option<String>,
-        actual_url: Option<String>,
-        actual_channel: Option<crate::updates::UpdateChannel>,
-    },
     ChannelChanged {
         prepared: crate::updates::UpdateChannel,
         current: crate::updates::UpdateChannel,
@@ -102,21 +94,6 @@ impl fmt::Display for UpdateInstallError {
                 formatter,
                 "upgrade authorization was unavailable{}",
                 render_exit_code(*code)
-            ),
-            Self::OfferChanged {
-                expected_version,
-                expected_url,
-                expected_channel,
-                actual_version,
-                actual_url,
-                actual_channel,
-            } => write!(
-                formatter,
-                "the offered release changed (expected {expected_version} ({}) at {expected_url}, found {} ({}) at {})",
-                expected_channel.as_str(),
-                actual_version.as_deref().unwrap_or("no update"),
-                actual_channel.map_or("unknown channel", |channel| channel.as_str()),
-                actual_url.as_deref().unwrap_or("unknown URL")
             ),
             Self::ChannelChanged { prepared, current } => write!(
                 formatter,
@@ -208,7 +185,6 @@ impl Error for UpdateInstallError {
             | Self::Cancelled
             | Self::AuthorizationDeclined
             | Self::AuthorizationUnavailable(_)
-            | Self::OfferChanged { .. }
             | Self::ChannelChanged { .. }
             | Self::ConfirmationRequiresTerminal
             | Self::TargetChanged { .. }
@@ -249,8 +225,8 @@ impl UpdateInstallError {
             Self::AuthorizationUnavailable(_) => {
                 "The desktop authorization agent could not authorize the update. Start LG Buddy from a normal desktop session and try again.".to_string()
             }
-            Self::OfferChanged { .. } | Self::ChannelChanged { .. } => {
-                "The offered update changed before installation. Check for updates again."
+            Self::ChannelChanged { .. } => {
+                "The saved update channel changed. Start the update again using the current preference."
                     .to_string()
             }
             Self::CandidatePreflightFailed(_) => {
@@ -290,7 +266,7 @@ impl UpdateInstallError {
                 "The installed files did not match the verified update identity.".to_string()
             }
             Self::TargetChanged { .. } => {
-                "The verified update changed before installation. Check for updates again."
+                "The release changed after confirmation. Start the update again to review the current release."
                     .to_string()
             }
             Self::ConfirmationRequiresTerminal | Self::ConfirmationIo(_) => {
@@ -697,42 +673,14 @@ impl UpdateInstallRuntime for SystemUpdateInstallRuntime {
     }
 }
 
-/// Prepare a GUI-triggered update from the offer that is currently displayed.
-/// The release is discovered again and must still match the displayed version,
-/// URL, and channel before a prepared install is returned.
-pub fn prepare_gui_update(
-    expected_version: &str,
-    expected_url: &str,
-    expected_channel: crate::updates::UpdateChannel,
-) -> Result<PreparedUpdateInstall, UpdateInstallError> {
+/// Prepare a GUI-triggered update using the currently saved update channel.
+/// The release is discovered again so the confirmation dialog describes the
+/// latest qualifying release at the time it opens.
+pub fn prepare_gui_update() -> Result<Option<PreparedUpdateInstall>, UpdateInstallError> {
     let cancellation = UpdateInstallCancellation::new();
     let mut runtime = SystemUpdateInstallRuntime { require_gui: true };
     let current = runtime.current_version();
-    let prepared = prepare_update_install_with(&mut runtime, &cancellation, current)?;
-    let Some(prepared) = prepared else {
-        return Err(UpdateInstallError::OfferChanged {
-            expected_version: expected_version.to_string(),
-            expected_url: expected_url.to_string(),
-            expected_channel,
-            actual_version: None,
-            actual_url: None,
-            actual_channel: None,
-        });
-    };
-    if prepared.release.version().to_string() != expected_version
-        || prepared.release.url() != expected_url
-        || prepared.channel() != expected_channel
-    {
-        return Err(UpdateInstallError::OfferChanged {
-            expected_version: expected_version.to_string(),
-            expected_url: expected_url.to_string(),
-            expected_channel,
-            actual_version: Some(prepared.release.version().to_string()),
-            actual_url: Some(prepared.release.url().to_string()),
-            actual_channel: Some(prepared.channel()),
-        });
-    }
-    Ok(prepared)
+    prepare_gui_update_with(&mut runtime, &cancellation, current)
 }
 
 /// Install a previously prepared and explicitly confirmed GUI update.
@@ -743,6 +691,17 @@ pub fn install_gui_update(
 ) -> Result<InstalledUpdate, UpdateInstallError> {
     let mut runtime = SystemUpdateInstallRuntime { require_gui: true };
     install_prepared_update_with(prepared, &mut runtime, cancellation, progress)
+}
+
+fn prepare_gui_update_with<R: UpdateInstallRuntime>(
+    runtime: &mut R,
+    cancellation: &UpdateInstallCancellation,
+    current: VersionInfo,
+) -> Result<Option<PreparedUpdateInstall>, UpdateInstallError> {
+    match prepare_update_install_with(runtime, cancellation, current) {
+        Err(UpdateInstallError::DowngradeRefused { .. }) => Ok(None),
+        result => result,
+    }
 }
 
 fn prepare_update_install_with<R: UpdateInstallRuntime>(
@@ -1162,9 +1121,10 @@ mod tests {
     use super::{
         candidate_preflight_command, classify_gui_installer_output, confirmation_is_yes,
         install_prepared_update_with, installed_binary_path_for_root, installer_command,
-        prepare_update_install_with, run_bounded_command, run_update_install_with, BundleView,
-        CompatibilityReport, InstalledUpdate, UpdateInstallCancellation, UpdateInstallError,
-        UpdateInstallRuntime, UpdateInstallStage, GUI_TARGET,
+        prepare_gui_update_with, prepare_update_install_with, run_bounded_command,
+        run_update_install_with, BundleView, CompatibilityReport, InstalledUpdate,
+        UpdateInstallCancellation, UpdateInstallError, UpdateInstallRuntime, UpdateInstallStage,
+        GUI_TARGET,
     };
     use crate::release_bundle::{BundleAcquisitionError, ReleaseIdentity};
     use crate::updates::{ReleaseInfo, UpdateChannel};
@@ -1210,6 +1170,7 @@ mod tests {
         current_version: &'static str,
         candidate_version: &'static str,
         saved_channel: UpdateChannel,
+        discovered_channel: Option<UpdateChannel>,
         confirmed: bool,
         failure: Option<Failure>,
         recheck: bool,
@@ -1227,6 +1188,7 @@ mod tests {
                 current_version: "1.4.0",
                 candidate_version,
                 saved_channel: UpdateChannel::Stable,
+                discovered_channel: None,
                 confirmed: true,
                 failure: None,
                 recheck: false,
@@ -1269,9 +1231,10 @@ mod tests {
         fn discover_candidate(
             &mut self,
             _current: VersionInfo,
-            _channel: UpdateChannel,
+            channel: UpdateChannel,
         ) -> Result<ReleaseInfo, UpdateInstallError> {
             self.events.borrow_mut().push("discover");
+            self.discovered_channel = Some(channel);
             Ok(ReleaseInfo::from_github(
                 Version::parse(self.candidate_version).unwrap(),
                 UpdateChannel::Stable,
@@ -1530,6 +1493,50 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("already up to date"));
+    }
+
+    #[test]
+    fn gui_preparation_uses_saved_channel_and_resolves_latest_without_acquiring() {
+        let mut runtime = FakeRuntime::new("1.5.0");
+        runtime.saved_channel = UpdateChannel::Prerelease;
+        let cancellation = UpdateInstallCancellation::new();
+        let current = runtime.current_version();
+
+        let prepared = prepare_gui_update_with(&mut runtime, &cancellation, current)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(runtime.discovered_channel, Some(UpdateChannel::Prerelease));
+        assert_eq!(prepared.channel(), UpdateChannel::Prerelease);
+        assert_eq!(prepared.release_channel(), UpdateChannel::Stable);
+        assert_eq!(
+            prepared.identity().version(),
+            &Version::parse("1.5.0").unwrap()
+        );
+        assert_eq!(
+            runtime.event_names(),
+            ["current", "initial_preflight", "discover", "resolve"]
+        );
+    }
+
+    #[test]
+    fn gui_preparation_returns_none_for_equal_or_older_release() {
+        for candidate_version in ["1.4.0", "1.3.0"] {
+            let mut runtime = FakeRuntime::new(candidate_version);
+            let cancellation = UpdateInstallCancellation::new();
+            let current = runtime.current_version();
+
+            let prepared = prepare_gui_update_with(&mut runtime, &cancellation, current).unwrap();
+
+            assert!(
+                prepared.is_none(),
+                "candidate {candidate_version} should not be offered"
+            );
+            assert_eq!(
+                runtime.event_names(),
+                ["current", "initial_preflight", "discover"]
+            );
+        }
     }
 
     #[test]
