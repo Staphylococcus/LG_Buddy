@@ -168,6 +168,12 @@ impl PairingStore {
 
             let original = self.snapshot.as_deref().unwrap_or_default();
             let contents = render_first_primary_config(original, address, mac, input);
+            crate::setup::mark_pending(&self.config_path).map_err(|source| {
+                PairingStoreError::ConfigWrite {
+                    path: crate::setup::pending_path(&self.config_path),
+                    source,
+                }
+            })?;
             atomic_write_config(
                 &self.config_path,
                 &contents,
@@ -1353,6 +1359,15 @@ mod tests {
             .unwrap();
 
         let config = fs::read_to_string(dir.config()).unwrap();
+        let pending = crate::setup::pending_path(&dir.config());
+        assert!(
+            pending.is_file(),
+            "activation must remain resumable after profile publication"
+        );
+        assert!(
+            fs::read(pending).unwrap().is_empty(),
+            "setup state must not contain credentials"
+        );
         assert!(config.starts_with("# keep\nscreen_backend=gnome\n"));
         assert!(config.contains("tvs_primary_ip=192.0.2.42\n"));
         assert!(config.contains("tvs_primary_mac=aa:bb:cc:dd:ee:ff\n"));
@@ -1366,6 +1381,27 @@ mod tests {
             .config()
             .with_file_name(".config.env.pairing.lock")
             .exists());
+    }
+
+    #[test]
+    fn activation_marker_failure_does_not_publish_a_tv_profile() {
+        let dir = TestDir::new("setup-marker-failure");
+        let original = "screen_idle_timeout=720\nupdates_auto_check=disabled\n";
+        fs::write(dir.config(), original).unwrap();
+        let marker = crate::setup::pending_path(&dir.config());
+        fs::create_dir(&marker).unwrap();
+        let store = PairingStore::prepare(&dir.config()).unwrap();
+        assert!(store
+            .commit(
+                "192.0.2.42".parse().unwrap(),
+                mac(),
+                HdmiInput::Hdmi2,
+                &token("secret")
+            )
+            .is_err());
+        assert_eq!(fs::read_to_string(dir.config()).unwrap(), original);
+        assert!(!dir.0.join("tvs/primary/access-token.json").exists());
+        assert!(marker.is_dir());
     }
 
     #[test]
@@ -1384,6 +1420,7 @@ mod tests {
             .with_file_name(".config.env.pairing.lock")
             .exists());
         assert!(!dir.0.join("tvs").exists());
+        assert!(!crate::setup::pending_path(&dir.config()).exists());
     }
 
     #[test]

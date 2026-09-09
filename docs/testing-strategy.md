@@ -328,14 +328,19 @@ environment, replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
 The installed GUI smoke also verifies the desktop entry's no-argument
-`lg-buddy` launch opens normal Overview, while `lg-buddy brightness` selects the
+`lg-buddy` launch opens the existing pairing prompt without navigation for an
+unconfigured installation, and normal Overview for a saved TV. `lg-buddy brightness` selects the
 brightness control even when another view is already open. A missing GUI fails
 the plain launcher; only the brightness path retains the Zenity fallback.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
-covered by their current tests. The complete GUI first-run, service, and update
-journey is outside this slice and remains tracked in
-[#129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+covered by their current tests. First-run application tests cover saved-profile
+navigation, pending-activation read ordering, interruption, retry, and preserving
+settings. Storage and service-boundary tests verify that activation intent is
+durable before profile publication and is cleared only after successful service
+operations. Installer fixtures verify handoff to the installed executable and
+preservation of existing configuration. Complete assembled-journey verification
+remains tracked in [#201](https://github.com/Staphylococcus/LG_Buddy/issues/201).
 
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity

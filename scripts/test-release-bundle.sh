@@ -290,6 +290,9 @@ trap cleanup EXIT
 # smoke lane. The focused test uses isolated fixtures and never invokes the
 # host's authentication agent or installation paths.
 bash "$SCRIPT_DIR/test-installer-graphical-auth.sh"
+# Exercise fresh-install handoff and resumable marker behavior with an isolated
+# regular-user fixture before testing the extracted bundle's full payload.
+bash "$SCRIPT_DIR/test-installer-first-run.sh"
 
 EXTRACT_DIR="$WORK_DIR/extracted"
 INSTALL_ROOT="$WORK_DIR/root"
@@ -533,6 +536,25 @@ export LG_BUDDY_SCREEN_BACKEND="auto"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 export PIP_DISABLE_PIP_VERSION_CHECK="1"
 export PIP_NO_PYTHON_VERSION_WARNING="1"
+
+# Keep this release-installation smoke focused on payload wiring. The dedicated
+# first-run installer smoke covers the GUI handoff; a configured fixture here
+# lets the bundle continue into its existing lifecycle, upgrade, and CLI checks
+# without blocking on a foreground GUI.
+mkdir -p "$XDG_CONFIG_HOME/lg-buddy"
+cat >"$XDG_CONFIG_HOME/lg-buddy/config.env" <<'EOF'
+tvs_primary_ip=192.168.1.10
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
+tvs_primary_platform=bscpylgtv
+screen_idle_blank=enabled
+screen_backend=auto
+screen_idle_timeout=300
+screen_restore_policy=conservative
+system_sleep_wake_policy=enabled
+updates_auto_check=enabled
+updates_channel=stable
+EOF
 
 if [ "$SKIP_PIP_INSTALL" -eq 1 ]; then
     export LG_BUDDY_SKIP_PIP_INSTALL="1"

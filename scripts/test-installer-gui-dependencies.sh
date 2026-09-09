@@ -100,11 +100,18 @@ run_fresh_install() {
     local root="$WORK_DIR/$scenario/root"
     local home="$WORK_DIR/$scenario/home"
 
-    mkdir -p "$root" "$home/Desktop"
+    mkdir -p "$root" "$home/Desktop" "$home/.config/lg-buddy"
+    cat >"$home/.config/lg-buddy/config.env" <<'EOF'
+tvs_primary_ip=192.0.2.10
+tvs_primary_mac=02:00:00:00:00:10
+tvs_primary_input=HDMI_1
+tvs_primary_platform=bscpylgtv
+EOF
     (
         export PATH="$STUB_DIR:$PATH"
         export HOME="$home"
         export XDG_CONFIG_HOME="$home/.config"
+        unset LG_BUDDY_CONFIG
         export LG_BUDDY_INSTALL_ROOT="$root"
         export LG_BUDDY_SUDO_CMD="none"
         export LG_BUDDY_NONINTERACTIVE="1"

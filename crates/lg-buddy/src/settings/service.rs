@@ -59,6 +59,10 @@ pub trait ServiceController {
         false
     }
 
+    fn reload_user_manager(&self) -> Result<(), SettingsError> {
+        Ok(())
+    }
+
     fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError>;
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError>;
@@ -124,6 +128,10 @@ impl SystemdUserServiceController {
 }
 
 impl ServiceController for SystemdUserServiceController {
+    fn reload_user_manager(&self) -> Result<(), SettingsError> {
+        self.run_user_systemctl(&["daemon-reload"])
+    }
+
     fn systemd_actions_disabled(&self) -> bool {
         self.skip_systemd_actions
     }

@@ -351,7 +351,6 @@ cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
 cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
 start_gui enabled "" "" normal
-observe_gui_state --select-page TVs
 observe_gui_state --expected-tvs-state empty
 observe_gui_state --activate-control "Pair a TV"
 observe_gui_state --expected-tvs-state pairing

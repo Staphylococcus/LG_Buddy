@@ -35,6 +35,9 @@ SYSTEM_UPGRADE_CONFIG_OVERRIDE=""
 SYSTEM_UPGRADE_NM_HOOK=""
 SYSTEM_UPGRADE_REPAIR_PYTHON="0"
 SYSTEM_UPGRADE_SKIP_PIP="0"
+CONFIG_FILE=""
+SETUP_PENDING_PATH=""
+FRESH_SETUP_MODE=0
 SYSTEM_UPGRADE_SKIP_SYSTEMD="0"
 
 usage() {
@@ -127,9 +130,6 @@ if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ -n "$INSTALL_ROOT" ]; then
 fi
 
 MISSING_PKGS=()
-SCREEN_MONITOR_AVAILABLE=0
-SCREEN_MONITOR_CONFIGURED_BACKEND="auto"
-SCREEN_MONITOR_RUNTIME_BACKEND=""
 SCREEN_IDLE_BLANK="enabled"
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
@@ -216,6 +216,82 @@ initialize_install_paths() {
 
 initialize_install_paths
 
+if [ ! -r "$SCRIPT_DIR/bin/LG_Buddy_Common" ]; then
+    echo "LG Buddy common helper is not readable: $SCRIPT_DIR/bin/LG_Buddy_Common"
+    exit 1
+fi
+. "$SCRIPT_DIR/bin/LG_Buddy_Common"
+
+if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ]; then
+    CONFIG_FILE="$(lg_buddy_user_config_path)"
+    SETUP_PENDING_PATH="${CONFIG_FILE}.setup-pending"
+fi
+
+config_has_saved_tv_profile() {
+    local ip=""
+    local mac=""
+    local input=""
+
+    ip="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.ip 2>/dev/null)" || return 1
+    mac="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.mac 2>/dev/null)" || return 1
+    input="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.input 2>/dev/null)" || return 1
+    [ -n "$ip" ] && [ -n "$mac" ] && [ -n "$input" ]
+}
+
+ensure_user_file_if_absent() {
+    local path="$1"
+    local description="$2"
+
+    if [ -L "$path" ]; then
+        echo "LG Buddy $description is a symbolic link; refusing to replace it: $path" >&2
+        return 1
+    fi
+    if [ -e "$path" ]; then
+        if [ ! -f "$path" ]; then
+            echo "LG Buddy $description is not a regular file: $path" >&2
+            return 1
+        fi
+        if [ ! -r "$path" ]; then
+            echo "LG Buddy $description is not readable: $path" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    # noclobber makes the redirection itself the exclusive create operation;
+    # the second check handles a concurrent publisher that won the race.
+    if (umask 077; set -C; : >"$path") 2>/dev/null; then
+        return 0
+    fi
+    if [ -L "$path" ]; then
+        echo "LG Buddy $description became a symbolic link; refusing to replace it: $path" >&2
+        return 1
+    fi
+    if [ -f "$path" ]; then
+        return 0
+    fi
+    echo "Could not create the LG Buddy $description: $path" >&2
+    return 1
+}
+
+create_empty_config_if_absent() {
+    local config_dir=""
+
+    config_dir="$(dirname "$CONFIG_FILE")"
+    mkdir -p "$config_dir"
+    chmod 700 "$config_dir"
+    ensure_user_file_if_absent "$CONFIG_FILE" "configuration file"
+}
+
+create_setup_pending_marker() {
+    local marker_dir=""
+
+    marker_dir="$(dirname "$SETUP_PENDING_PATH")"
+    mkdir -p "$marker_dir"
+    chmod 700 "$marker_dir"
+    ensure_user_file_if_absent "$SETUP_PENDING_PATH" "setup marker"
+}
+
 check_dep() {
     local label="$1"
     local pkg="$2"
@@ -256,6 +332,32 @@ detect_package_manager() {
         PM=""
         INSTALL_CMD=()
     fi
+}
+
+pkexec_package() {
+    case "$PM" in
+        dnf|pacman) printf '%s\n' polkit ;;
+        *) printf '%s\n' pkexec ;;
+    esac
+}
+
+pkexec_available() {
+    local path=""
+
+    path="$(command -v pkexec 2>/dev/null || true)"
+    [ -n "$path" ] && [ -x "$path" ]
+}
+
+require_first_run_pkexec() {
+    [ "$FRESH_SETUP_MODE" -eq 1 ] || return 0
+    if pkexec_available; then
+        return 0
+    fi
+
+    echo "pkexec is required to activate LG Buddy's installed system services after pairing."
+    MISSING_PKGS=("$(pkexec_package)")
+    print_manual_install_command
+    return 1
 }
 
 gui_runtime_package() {
@@ -498,7 +600,11 @@ perform_privileged_services_installation() {
         run_system_mutation_command systemctl daemon-reload
         run_system_mutation_command systemctl enable LG_Buddy.service
         run_system_mutation_command systemctl enable LG_Buddy_lifecycle.service
-        run_system_mutation_command systemctl restart LG_Buddy_lifecycle.service
+        if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+            system_upgrade_message "System services enabled; lifecycle start is deferred until the first TV is paired."
+        else
+            run_system_mutation_command systemctl restart LG_Buddy_lifecycle.service
+        fi
     fi
     system_upgrade_message "Done."
 }
@@ -696,8 +802,12 @@ check_install_prerequisites() {
     if [ "$UPGRADE_MODE" -eq 0 ]; then
         check_dep "python3-venv" "python3-venv" "check_python3_venv"
         check_dep "zenity" "zenity" "command -v zenity"
+        if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+            check_dep "pkexec (required for first-run activation)" "$(pkexec_package)" "pkexec_available"
+        fi
     fi
     install_missing_prerequisites
+    require_first_run_pkexec
     if ! verify_gui_runtime_prerequisites; then
         echo "The installed packages do not satisfy the GUI runtime requirements."
         print_manual_install_command
@@ -739,12 +849,21 @@ load_upgrade_configuration() {
 
     TV_PLATFORM="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.platform)"
     SCREEN_IDLE_BLANK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.idle_blank)"
-    SCREEN_MONITOR_CONFIGURED_BACKEND="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.backend)"
     SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
     UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
     UPDATE_CHANNEL="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.channel)"
     echo "Using existing configuration file at $CONFIG_FILE"
     echo "Preserving update channel: $UPDATE_CHANNEL"
+}
+
+load_existing_configuration() {
+    TV_PLATFORM="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.platform)"
+    SCREEN_IDLE_BLANK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.idle_blank)"
+    SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
+    UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
+    UPDATE_CHANNEL="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.channel)"
+    echo "Using existing configuration file at $CONFIG_FILE"
+    echo "Preserving existing TV profile and policy settings."
 }
 
 prepare_installation_files() {
@@ -807,6 +926,10 @@ trap cleanup EXIT
 resolve_runtime_binary
 REPAIR_PYTHON_ENVIRONMENT=0
 
+if [ "$UPGRADE_MODE" -eq 0 ] && ! config_has_saved_tv_profile; then
+    FRESH_SETUP_MODE=1
+fi
+
 if [ "$UPGRADE_MODE" -eq 1 ]; then
     echo ""
     echo "Running candidate upgrade preflight..."
@@ -832,99 +955,16 @@ else
     check_install_prerequisites
     validate_candidate_binary_identity
 
-# CONFIGURE FRESH INSTALLATION
-echo ""
-echo "Running configuration script..."
-if [ ! -r "$SCRIPT_DIR/configure.sh" ]; then
-    echo "Configuration script is not readable: $SCRIPT_DIR/configure.sh"
-    exit 1
-fi
-LG_BUDDY_RUNTIME_BINARY="$RUNTIME_BINARY" bash "$SCRIPT_DIR/configure.sh"
-CONFIG_FILE="$(bash "$SCRIPT_DIR/bin/LG_Buddy_Common" --user-config-path)"
-SCREEN_IDLE_BLANK="$(sed -n 's/^screen_idle_blank=//p' "$CONFIG_FILE" | tail -n1)"
-case "$SCREEN_IDLE_BLANK" in
-    enabled|disabled) ;;
-    *) SCREEN_IDLE_BLANK="enabled" ;;
-esac
-SCREEN_MONITOR_CONFIGURED_BACKEND="$(sed -n 's/^screen_backend=//p' "$CONFIG_FILE" | tail -n1)"
-SCREEN_MONITOR_CONFIGURED_BACKEND="${SCREEN_MONITOR_CONFIGURED_BACKEND:-auto}"
-SYSTEM_SLEEP_WAKE_POLICY="$(sed -n 's/^system_sleep_wake_policy=//p' "$CONFIG_FILE" | tail -n1)"
-case "$SYSTEM_SLEEP_WAKE_POLICY" in
-    enabled|disabled) ;;
-    *) SYSTEM_SLEEP_WAKE_POLICY="enabled" ;;
-esac
-UPDATE_AUTO_CHECK="$(sed -n 's/^updates_auto_check=//p' "$CONFIG_FILE" | tail -n1)"
-case "$UPDATE_AUTO_CHECK" in
-    enabled|disabled) ;;
-    *) UPDATE_AUTO_CHECK="enabled" ;;
-esac
-echo "Using configuration file at $CONFIG_FILE"
-echo "Configuration complete."
-
-echo ""
-if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
-    echo "Screen idle blanking is disabled by config; user-session service will still run for notifications."
+if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+    create_empty_config_if_absent
+    create_setup_pending_marker
+    SCREEN_IDLE_BLANK="enabled"
+    SYSTEM_SLEEP_WAKE_POLICY="enabled"
+    UPDATE_AUTO_CHECK="enabled"
+    echo "Prepared an empty user configuration for first-run TV pairing."
+    echo "First-run setup will use the application defaults; no behavior choices are required."
 else
-    echo "Checking screen idle/resume backend for configured mode ($SCREEN_MONITOR_CONFIGURED_BACKEND)..."
-    case "$SCREEN_MONITOR_CONFIGURED_BACKEND" in
-        gnome)
-            SCREEN_MONITOR_AVAILABLE=1
-            SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=gnome "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
-            if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "gnome" ]; then
-                echo "  [OK]      current session satisfies the GNOME backend contract"
-            else
-                SCREEN_MONITOR_RUNTIME_BACKEND=""
-                echo "  [INFO]    current session did not verify the full GNOME backend contract"
-                echo "            GNOME requires GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor."
-                echo "            The user-session service will retry until a compatible session is available."
-            fi
-            ;;
-        wayland)
-            SCREEN_MONITOR_AVAILABLE=1
-            SCREEN_MONITOR_RUNTIME_BACKEND="$(LG_BUDDY_SCREEN_BACKEND=wayland "$RUNTIME_BINARY" detect-backend 2>/dev/null || true)"
-            if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "wayland" ]; then
-                echo "  [OK]      current session satisfies the native Wayland backend contract"
-            else
-                SCREEN_MONITOR_RUNTIME_BACKEND=""
-                echo "  [INFO]    current session did not verify the native Wayland backend contract"
-                echo "            Wayland requires ext_idle_notifier_v1 version 2 or newer and at least one advertised seat."
-                echo "            The user-session service will retry until a compatible session is available."
-            fi
-            ;;
-        swayidle)
-            echo "  [WARNING] swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0"
-            echo "            Select auto or wayland when the compositor supports ext_idle_notifier_v1 version 2 or newer."
-            if command -v swayidle >/dev/null 2>&1; then
-                echo "  [OK]      swayidle (configured compatibility backend)"
-                SCREEN_MONITOR_AVAILABLE=1
-                SCREEN_MONITOR_RUNTIME_BACKEND="swayidle"
-            else
-                echo "  [MISSING] swayidle (required for the configured backend)"
-                echo "            The user-session service will retry until swayidle is available."
-            fi
-            ;;
-        *)
-            SCREEN_MONITOR_DIAGNOSTICS="$("$RUNTIME_BINARY" settings describe screen.backend 2>/dev/null || true)"
-            SCREEN_MONITOR_RUNTIME_BACKEND="$(printf '%s\n' "$SCREEN_MONITOR_DIAGNOSTICS" | sed -n 's/^  resolved backend: //p' | tail -n1)"
-            SCREEN_MONITOR_FALLBACK_REASON="$(printf '%s\n' "$SCREEN_MONITOR_DIAGNOSTICS" | sed -n 's/^  fallback reason: //p' | tail -n1)"
-            if [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ] && [ "$SCREEN_MONITOR_RUNTIME_BACKEND" != "unavailable" ]; then
-                SCREEN_MONITOR_AVAILABLE=1
-                echo "  [OK]      current session backend: $SCREEN_MONITOR_RUNTIME_BACKEND"
-                if [ -n "$SCREEN_MONITOR_FALLBACK_REASON" ] && [ "$SCREEN_MONITOR_FALLBACK_REASON" != "none; preferred backend is available" ]; then
-                    echo "  [INFO]    fallback reason: $SCREEN_MONITOR_FALLBACK_REASON"
-                fi
-                if [ "$SCREEN_MONITOR_RUNTIME_BACKEND" = "swayidle" ]; then
-                    echo "  [WARNING] using deprecated swayidle compatibility fallback; planned for removal in LG Buddy 2.0.0"
-                fi
-            else
-                echo "  [INFO]    no supported backend detected in the current session"
-                if [ -n "$SCREEN_MONITOR_FALLBACK_REASON" ]; then
-                    echo "            $SCREEN_MONITOR_FALLBACK_REASON"
-                fi
-                echo "            The user-session service will retry until a supported backend is available."
-            fi
-            ;;
-    esac
+    load_existing_configuration
 fi
 fi
 
@@ -1007,15 +1047,13 @@ fi
 
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
     echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+elif [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+    echo "User services installed; activation is deferred until the first TV is paired."
 else
     systemctl --user enable LG_Buddy_screen.service
     systemctl --user restart LG_Buddy_screen.service
     if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
         echo "LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config."
-    elif [ -n "$SCREEN_MONITOR_RUNTIME_BACKEND" ]; then
-        echo "LG_Buddy_screen.service enabled and started using the $SCREEN_MONITOR_RUNTIME_BACKEND backend."
-    elif [ "$SCREEN_MONITOR_AVAILABLE" -eq 1 ]; then
-        echo "LG_Buddy_screen.service enabled and started; it will retry until the configured screen backend is available."
     else
         echo "LG_Buddy_screen.service enabled and started for session notifications."
         echo "It will retry idle blanking until a compatible screen backend is available."
@@ -1035,7 +1073,9 @@ else
     fi
 fi
 
-if [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
+if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+    echo "System sleep/wake integration installed; activation is deferred until the first TV is paired."
+elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
 else
     echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
@@ -1064,8 +1104,15 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
         system_upgrade_status complete
     fi
 else
-    echo "Installation complete!"
-    echo "The user-session service has been installed."
-    echo "Please restart your computer for all changes to take full effect."
-    echo "NOTE: On first use, you may need to accept a prompt on your TV to allow this application to connect."
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        require_first_run_pkexec
+        echo "Installation complete!"
+        echo "Opening LG Buddy to pair your first TV..."
+        LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_INSTALL_PATH"
+    else
+        echo "Installation complete!"
+        echo "The user-session service has been installed."
+        echo "Please restart your computer for all changes to take full effect."
+        echo "NOTE: On first use, you may need to accept a prompt on your TV to allow this application to connect."
+    fi
 fi

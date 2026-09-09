@@ -49,7 +49,8 @@ ready to respond.
 Official bundles contain prebuilt binaries. They require GTK 4.14,
 libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
 The release installer also needs Python 3 with `venv`/`pip` support and Zenity
-for its compatibility tools. Install the prerequisites for your distribution:
+for its compatibility tools. GUI service activation requires `pkexec` and a
+desktop authorization agent. Install the prerequisites for your distribution:
 
 <details>
 <summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
@@ -57,19 +58,19 @@ for its compatibility tools. Install the prerequisites for your distribution:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0
+sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0 pkexec
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita
+sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita polkit
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita
+sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita polkit
 ```
 
 </details>
@@ -95,12 +96,16 @@ system locations. First-class NixOS packaging is tracked in
 
    The installer requests elevated access when needed.
 
-3. Follow the setup prompts for your TV's IP address, MAC address, HDMI input,
-   and desktop behavior. Keep the TV on and approve its pairing request with
-   the remote.
-4. Open **LG Buddy** from your app launcher. Automatic power and screen
-   behavior runs in the background after setup; the window is there when you
-   want to adjust something.
+3. The installed app opens to **Pair a TV**. Enter the TV's IP address, MAC
+   address, and HDMI input. Keep the TV on and approve its pairing request
+   with the remote.
+4. Authorize service activation when prompted. LG Buddy uses the default
+   behavior settings; you can adjust them later in **Settings**. If activation
+   fails, use **Retry setup** without pairing again. You can close and reopen
+   the app to resume incomplete setup.
+
+For terminal-only setup, run `./configure.sh` before `./install.sh`. Installing
+with an existing TV configuration preserves its saved preferences.
 
 <a id="quick-start"></a>
 

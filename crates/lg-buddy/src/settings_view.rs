@@ -211,6 +211,9 @@ pub struct SettingsTransition {
 }
 
 impl SettingsTransition {
+    pub(crate) fn update_presentation_from(&mut self, other: Self) {
+        self.presentation = other.presentation;
+    }
     pub fn presentation(&self) -> &SettingsPresentation {
         &self.presentation
     }
