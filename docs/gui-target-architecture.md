@@ -176,6 +176,12 @@ changes are validated, persisted, and applied automatically; writes are
 serialized in application state, with accepted edits queued in order. There is
 no Save or Cancel button.
 
+The application presentation hides Desktop integration and Idle timeout when
+Idle blanking is explicitly disabled. GTK retains the native rows and their
+values while hiding them; Restore policy remains visible because it also
+governs restoration outside idle blanking. Invalid blanking values keep the
+dependent controls available for diagnosis.
+
 Settings displays configured values only; there is no separate GUI surface for
 a resolved screen backend, service health, runtime state, update availability,
 or update progress. Normal successful changes are silent. Feedback appears

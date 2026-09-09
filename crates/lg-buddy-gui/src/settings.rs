@@ -116,13 +116,13 @@ impl SettingsView {
 
     fn render_rows(&self, presentation: &SettingsPresentation) {
         for row in self.rows.borrow().iter() {
-            if let Some(presentation) = presentation
+            if let Some(current) = presentation
                 .groups()
                 .iter()
                 .flat_map(|group| group.rows())
                 .find(|value| value.setting() == row.presentation.borrow().setting())
             {
-                row.render(presentation);
+                row.render(current, presentation.row_visible(current.setting()));
             }
         }
     }
@@ -319,7 +319,7 @@ impl NativeSettingRow {
         };
         // Populate values without producing commit intents.
         native.render_editor(initial.editor());
-        native.render_state(initial);
+        native.render_state(initial, true);
         native
     }
 
@@ -353,9 +353,9 @@ impl NativeSettingRow {
         self.rendering.set(false);
     }
 
-    fn render(&self, current: &SettingsRow) {
+    fn render(&self, current: &SettingsRow, visible: bool) {
         let previous = self.presentation.borrow().clone();
-        if previous == *current {
+        if previous == *current && self.row.is_visible() == visible {
             return;
         }
         if current.edit_status() != SettingsEditStatus::Saving
@@ -364,11 +364,12 @@ impl NativeSettingRow {
         {
             self.render_editor(current.editor());
         }
-        self.render_state(current);
+        self.render_state(current, visible);
     }
 
-    fn render_state(&self, current: &SettingsRow) {
+    fn render_state(&self, current: &SettingsRow, visible: bool) {
         self.rendering.set(true);
+        self.row.set_visible(visible);
         self.row.set_sensitive(current.editor_enabled());
         self.row.update_property(&[
             gtk::accessible::Property::Label(current.title()),
@@ -378,7 +379,8 @@ impl NativeSettingRow {
                 current.value_label()
             )),
         ]);
-        self.problem.set_visible(current.problem().is_some());
+        self.problem
+            .set_visible(visible && current.problem().is_some());
         self.problem.set_subtitle(current.problem().unwrap_or(""));
         self.problem
             .update_property(&[gtk::accessible::Property::Label(
@@ -391,7 +393,7 @@ impl NativeSettingRow {
             severity,
             Some(SettingsFeedbackSeverity::Warning | SettingsFeedbackSeverity::Error)
         );
-        self.feedback.set_visible(feedback.is_some());
+        self.feedback.set_visible(visible && feedback.is_some());
         self.feedback.set_subtitle(message);
         self.feedback
             .update_property(&[gtk::accessible::Property::Label(message)]);
@@ -666,7 +668,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(entry.is_sensitive());
     assert!(view.rows.borrow()[2].feedback.is_visible());
     assert!(intents.borrow().is_empty(), "restoration emits no write");
-    match &view.rows.borrow()[1].editor {
+    match &view.rows.borrow()[0].editor {
         NativeEditor::Toggle(switch) => switch.set_active(false),
         _ => unreachable!(),
     }
@@ -728,6 +730,45 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     );
     assert_eq!(entry.position(), 1, "completion must not move the caret");
 
+    // An external settings refresh can hide the currently focused idle editor.
+    // Keep its native widget/draft and hide its associated errors too.
+    entry.grab_focus();
+    intents.borrow_mut().clear();
+    let disabled = SettingsPresentation::from_store(
+        &ConfigEnvReader::parse(
+            "/unused/config.env",
+            "screen_idle_blank=disabled\nscreen_backend=invalid\nscreen_idle_timeout=600\n",
+        )
+        .into_store(),
+    );
+    view.render(&disabled);
+    pump_until(|| !entry.is_mapped());
+    assert!(rows[0].is_visible(), "Idle blanking remains available");
+    assert!(!rows[1].is_visible(), "Desktop integration is hidden");
+    assert!(!rows[2].is_visible(), "Idle timeout is hidden");
+    assert!(rows[3].is_visible(), "Restore policy remains available");
+    assert!(!view.rows.borrow()[1].problem.is_visible());
+    assert!(!view.rows.borrow()[2].feedback.is_visible());
+    assert!(
+        intents.borrow().is_empty(),
+        "hiding rows must not save a draft"
+    );
+    window.child_focus(gtk::DirectionType::TabForward);
+    assert!(GtkWindowExt::focus(&window).is_some_and(|focus| focus.is_mapped()));
+
+    view.render(failed.presentation());
+    pump_until(|| entry.is_mapped());
+    assert!(rows[1].is_visible());
+    assert!(rows[2].is_visible());
+    assert!(view.rows.borrow()[2].feedback.is_visible());
+    assert_eq!(entry.text(), "721", "hiding must preserve the editor draft");
+    assert!(view
+        .rows
+        .borrow()
+        .iter()
+        .zip(&rows)
+        .all(|(native, row)| native.row == *row));
+
     window.set_default_size(360, 600);
     pump_until(|| window.width() <= 360);
     let (minimum, _, _, _) = view.widget().measure(gtk::Orientation::Horizontal, -1);
@@ -779,7 +820,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .content(view.widget())
         .build();
     window.present();
-    let choice = match &view.rows.borrow()[0].editor {
+    let choice = match &view.rows.borrow()[1].editor {
         NativeEditor::Choice(choice) => choice.clone(),
         _ => unreachable!(),
     };
@@ -833,7 +874,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .unwrap()
         .success());
     pump_until(|| !intents.borrow().is_empty());
-    let expected = ready.presentation().groups()[0].rows()[0]
+    let expected = ready.presentation().groups()[0].rows()[1]
         .editor()
         .choices()
         .unwrap()

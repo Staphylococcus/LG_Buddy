@@ -156,6 +156,19 @@ impl SettingsPresentation {
         self.retry_action.as_ref()
     }
 
+    /// Keep dependent settings intact while only presenting controls that apply.
+    /// Missing or invalid blanking values retain the controls for diagnosis.
+    pub fn row_visible(&self, setting: BehaviorSetting) -> bool {
+        !matches!(
+            setting,
+            BehaviorSetting::ScreenBackend | BehaviorSetting::ScreenIdleTimeout
+        ) || !matches!(
+            self.row(BehaviorSetting::ScreenIdleBlank)
+                .map(SettingsRow::editor),
+            Some(SettingsEditor::Toggle { value: Some(false) })
+        )
+    }
+
     pub(crate) fn row(&self, setting: BehaviorSetting) -> Option<&SettingsRow> {
         self.groups
             .iter()
@@ -446,8 +459,8 @@ pub(crate) fn groups_from_store(store: &SettingsStore) -> Vec<SettingsGroup> {
             "Screen",
             "Choose when LG Buddy blanks and restores your TV screen.",
             vec![
-                row_from_effective(setting("screen.backend")),
                 row_from_effective(setting("screen.idle_blank")),
+                row_from_effective(setting("screen.backend")),
                 row_from_effective(setting("screen.idle_timeout")),
                 row_from_effective(setting("screen.restore_policy")),
             ],

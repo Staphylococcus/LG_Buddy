@@ -123,6 +123,11 @@ Leave **Desktop integration** at **Automatic** unless you need to select a
 particular compatible desktop. See the [session backend model](session-backend-model.md)
 for compatibility details, including the deprecated `swayidle` option.
 
+Turning off **Idle blanking** hides **Desktop integration** and **Idle timeout**
+while keeping their saved values for when you turn it back on. **Restore policy**
+stays available because it also controls restoration after system sleep and
+explicit screen-on requests.
+
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad
 
