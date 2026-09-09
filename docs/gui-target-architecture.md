@@ -182,31 +182,33 @@ values while hiding them; Restore policy remains visible because it also
 governs restoration outside idle blanking. Invalid blanking values keep the
 dependent controls available for diagnosis.
 
-Settings also offers **Check for updates** in the Updates group, including the
-installed version. An explicit check uses the saved channel independently of
-automatic checks, reusing the CLI's discovery, comparison, and cache policy.
-The application owns checking, available-release, no-newer-release, failure,
-and cache-warning presentation. It rejects duplicate checks and retains the last
-successful result with the channel and version actually checked across settings
-refreshes and edits. GTK runs the declared operation off the UI thread and renders
-its result, retry action, and native release link. A check neither installs an
-update nor changes preferences or sends a desktop notification.
+Settings exposes one native update row in the Updates group.
+`SettingsPresentation::updater()` projects its title, installed/available version,
+and **Check for updates** or **Install update…** action. While a check runs, its
+button is disabled and labeled **Checking…**. Completed checks use the saved
+channel; an old-channel result cannot be installed. The check neither installs
+an update nor changes preferences or sends a desktop notification.
 
-An available update offers **Install update…**. `update_flow.rs` owns preparing
-an offer, explicit confirmation, cancellation, progress, failures, and handoff;
-`update_install.rs` shares discovery, identity, acquisition, compatibility, and
-installation orchestration with the CLI. The confirmed release stays pinned,
-and a changed offer or saved channel requires another check and confirmation.
-GTK only renders actions and forwards worker results. Settings writes and TV
-profile changes are unavailable while an installation workflow is active.
+`SettingsTransition::update_notice()` carries one-time completion feedback:
+already-current results, check errors, cache warnings, and installation errors.
+The window presents a toast with **Copy details** for failures. Refreshing or
+rerendering Settings does not replay notices, while a repeated failed operation
+produces a new notice. Toast actions copy the bounded, redacted details captured
+for that particular completion.
 
-`SettingsPresentation::updater()` selects one current card presentation from
-the check and installation state. Its title, description, actions, and progress
-replace the prior step in place; an old release offer or duplicate failure
-summary is not rendered alongside the active step. Automatic checks and the
-saved channel remain ordinary preference rows above this card. The renderer
-uses native action-row text spacing, and settings warning prefixes are attached
-only while a warning is present so ordinary row labels keep the same left edge.
+**Install update…** opens an `adw::Dialog` with confirmation, release link,
+current status, native progress bar, and the applicable action buttons.
+`update_flow.rs` owns preparing an offer, explicit confirmation, cancellation,
+progress, failures, and handoff; `update_install.rs` shares discovery, pinned
+identity, acquisition, compatibility, and installation with the CLI. GTK only
+renders these facts and forwards semantic intents. The progress bar pulses
+while work is pending; no percentage is invented. Dismissal requests application
+cancellation, which checks the actual installer boundary. Settings and TV
+profile changes stay unavailable during installation.
+
+The updater action occupies the same row as its status, using native text
+spacing. Empty warning prefixes are detached so ordinary setting labels retain
+the same left edge.
 
 The installer runs as the regular user. Its graphical upgrade mode requests
 one `pkexec` authorization for the existing system-file and system-service
@@ -216,15 +218,15 @@ stays open for the result. Verified success replaces the current GUI process
 with the installed GUI. The incumbent allows standard GApplication replacement,
 and the successor requests it so bus-name teardown cannot turn the new process
 into a remote activation. Normal launches still reuse the existing window.
-A failed process replacement leaves the current window open with **Retry
-restart**, which does not repeat installation.
+A failed process replacement closes the progress dialog and shows a failure
+toast. The Settings row identifies that a restart is required; its installation
+action retries process replacement without reinstalling.
 
 The application retains bounded failure details for the current session,
-including across retries and Settings refreshes. A collapsed native expander
-inside the updater card exposes them on demand; normal error messages stay
-concise. Credential-bearing lines, URLs, and control characters are removed
-before retention. These details remain available through the application presentation for the future broader
-diagnostics readout, independently of the launcher's handling of stderr.
+including across retries and Settings refreshes. Credential-bearing lines,
+URLs, and control characters are removed before retention. The error toast
+provides the details on demand, and the application presentation retains them
+for the future diagnostics readout independently of launcher stderr handling.
 
 There is no separate GUI surface for a resolved screen backend, service health,
 or runtime state. Normal successful setting changes

@@ -6,8 +6,8 @@ use lg_buddy::presentation::settings::{
     SettingsCommitPolicy, SettingsEditStatus, SettingsEditor, SettingsFeedbackSeverity,
     SettingsPresentation, SettingsRow, SettingsStatus,
 };
-use lg_buddy::presentation::updater::UpdaterPresentation;
 use lg_buddy::settings_view::SettingsIntent;
+use lg_buddy::settings_view::UpdateNotice;
 
 /// Stable native controls render application-owned values and commit policies.
 pub(crate) struct SettingsView {
@@ -108,17 +108,21 @@ impl SettingsView {
                             native.add(&row.feedback);
                             self.rows.borrow_mut().push(row);
                         }
+                        if group.title() == "Updates" {
+                            native.add(&self.updater.row);
+                        }
                         self.page.add(&native);
                         self.groups.borrow_mut().push(native);
-                        if group.title() == "Updates" {
-                            self.page.add(&self.updater.group);
-                        }
                     }
                 }
                 self.render_rows(presentation);
                 self.root.set_visible_child_name("settings");
             }
         }
+    }
+
+    pub(crate) fn show_update_notice(&self, notice: &UpdateNotice, overlay: &adw::ToastOverlay) {
+        self.updater.show_notice(notice, overlay);
     }
 
     fn render_rows(&self, presentation: &SettingsPresentation) {
@@ -132,211 +136,262 @@ impl SettingsView {
                 row.render(current, presentation.row_visible(current.setting()));
             }
         }
-        self.updater.render(&presentation.updater());
+        self.updater.render(presentation);
     }
 }
 
-/// One stable card renders the current step of the application-owned workflow.
+/// One native settings row launches the temporary installation dialog.
 struct UpdaterView {
-    group: adw::PreferencesGroup,
     row: adw::ActionRow,
     action: gtk::Button,
     action_intent: Rc<RefCell<Option<SettingsIntent>>>,
+    dialog: adw::Dialog,
+    title: gtk::Label,
+    description: gtk::Label,
+    progress: gtk::ProgressBar,
+    install: gtk::Button,
+    actions: gtk::Box,
+    install_intent: Rc<RefCell<Option<SettingsIntent>>>,
     cancel: gtk::Button,
     cancel_intent: Rc<RefCell<Option<SettingsIntent>>>,
-    actions: gtk::Box,
-    footer: gtk::ListBoxRow,
     release: gtk::LinkButton,
-    spinner: gtk::Spinner,
-    warning: gtk::Label,
-    details: adw::ExpanderRow,
-    details_text: gtk::Label,
+    presented: Cell<bool>,
+    pulse: RefCell<Option<gtk::glib::SourceId>>,
+    notice: RefCell<Option<adw::Toast>>,
 }
 
 impl UpdaterView {
     fn new(on_intent: Rc<dyn Fn(SettingsIntent)>) -> Self {
-        let group = adw::PreferencesGroup::new();
-        let card = gtk::ListBox::new();
-        card.set_selection_mode(gtk::SelectionMode::None);
-        card.add_css_class("boxed-list");
         let row = detail_row("", "");
         row.set_title_lines(0);
-        row.set_accessible_role(gtk::AccessibleRole::Status);
-        let spinner = gtk::Spinner::new();
-        spinner.set_valign(gtk::Align::Center);
-        row.add_suffix(&spinner);
-        card.append(&row);
+        let (action, action_intent) = updater_button(Rc::clone(&on_intent));
+        action.set_valign(gtk::Align::Center);
+        row.add_suffix(&action);
+        row.set_activatable_widget(Some(&action));
 
-        let warning = gtk::Label::builder()
+        let title = gtk::Label::builder()
+            .xalign(0.0)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .selectable(true)
-            .xalign(0.0)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(12)
             .build();
-        warning.add_css_class("warning");
-        warning.set_accessible_role(gtk::AccessibleRole::Alert);
-        let footer_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        footer_content.append(&warning);
-
+        title.add_css_class("title-2");
+        title.set_accessible_role(gtk::AccessibleRole::Status);
+        let description = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .build();
+        description.add_css_class("dim-label");
+        let progress = gtk::ProgressBar::new();
+        progress.set_pulse_step(0.08);
+        let release = gtk::LinkButton::with_label(
+            "https://github.com/Staphylococcus/LG_Buddy/releases",
+            "View release",
+        );
+        release.set_halign(gtk::Align::Start);
+        let (install, install_intent) = updater_button(Rc::clone(&on_intent));
+        install.add_css_class("suggested-action");
+        let (cancel, cancel_intent) = updater_button(Rc::clone(&on_intent));
         let actions = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
             .halign(gtk::Align::End)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(12)
-            .build();
-        let release = gtk::LinkButton::builder()
-            .label("View release")
-            .uri("https://github.com/Staphylococcus/LG_Buddy/releases")
-            .build();
-        release.update_property(&[gtk::accessible::Property::Label("View available release")]);
-        actions.append(&release);
-        let cancel = gtk::Button::new();
-        cancel.add_css_class("flat");
-        let cancel_intent = Rc::new(RefCell::new(None));
-        cancel.connect_clicked({
-            let intent = Rc::clone(&cancel_intent);
-            let on_intent = Rc::clone(&on_intent);
-            move |_| {
-                let intent = intent.borrow().clone();
-                if let Some(intent) = intent {
-                    on_intent(intent);
-                }
-            }
-        });
-        actions.append(&cancel);
-        let action = gtk::Button::new();
-        action.add_css_class("suggested-action");
-        let action_intent = Rc::new(RefCell::new(None));
-        action.connect_clicked({
-            let intent = Rc::clone(&action_intent);
-            move |_| {
-                let intent = intent.borrow().clone();
-                if let Some(intent) = intent {
-                    on_intent(intent);
-                }
-            }
-        });
-        actions.append(&action);
-        footer_content.append(&actions);
-        let footer = gtk::ListBoxRow::builder()
-            .activatable(false)
-            .selectable(false)
-            .child(&footer_content)
-            .build();
-        card.append(&footer);
-
-        let details = adw::ExpanderRow::builder()
-            .use_markup(false)
-            .visible(false)
-            .build();
-        let details_text = gtk::Label::builder()
-            .selectable(true)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .xalign(0.0)
-            .margin_start(12)
-            .margin_end(12)
+            .margin_start(24)
+            .margin_end(24)
             .margin_top(12)
-            .margin_bottom(12)
+            .margin_bottom(24)
             .build();
-        details.add_row(&details_text);
-        card.append(&details);
-        group.add(&card);
+        actions.append(&cancel);
+        actions.append(&install);
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(16)
+            .margin_start(24)
+            .margin_end(24)
+            .margin_top(12)
+            .margin_bottom(24)
+            .build();
+        for widget in [
+            title.upcast_ref::<gtk::Widget>(),
+            description.upcast_ref(),
+            progress.upcast_ref(),
+            release.upcast_ref(),
+        ] {
+            content.append(widget);
+        }
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .child(&content)
+            .build();
+        let header = adw::HeaderBar::builder()
+            .show_start_title_buttons(false)
+            .show_end_title_buttons(false)
+            .build();
+        let toolbar = adw::ToolbarView::builder().content(&scroller).build();
+        toolbar.add_top_bar(&header);
+        toolbar.add_bottom_bar(&actions);
+        let dialog = adw::Dialog::builder()
+            .title("Software update")
+            .content_width(440)
+            .content_height(360)
+            .child(&toolbar)
+            // Ask the application to cancel; the installer can cross its
+            // non-cancellable boundary before the next progress event arrives.
+            .can_close(false)
+            .build();
+        dialog.connect_close_attempt({
+            let cancel_intent = Rc::clone(&cancel_intent);
+            move |_| {
+                let intent = cancel_intent.borrow().clone();
+                if let Some(intent) = intent {
+                    on_intent(intent);
+                }
+            }
+        });
         Self {
-            group,
             row,
             action,
             action_intent,
+            dialog,
+            title,
+            description,
+            progress,
+            install,
+            actions,
+            install_intent,
             cancel,
             cancel_intent,
-            actions,
-            footer,
             release,
-            spinner,
-            warning,
-            details,
-            details_text,
+            presented: Cell::new(false),
+            pulse: RefCell::new(None),
+            notice: RefCell::new(None),
         }
     }
 
-    fn render(&self, presentation: &UpdaterPresentation) {
-        let action_had_focus = self.action.has_focus();
-        let cancel_had_focus = self.cancel.has_focus();
-        let release_had_focus = self.release.has_focus();
-        self.row.set_title(presentation.title());
-        self.row.set_subtitle(presentation.description());
-        self.row.update_property(&[
-            gtk::accessible::Property::Label(presentation.title()),
-            gtk::accessible::Property::Description(presentation.description()),
-        ]);
-        if presentation.is_error() {
-            self.row.add_css_class("error");
-        } else {
-            self.row.remove_css_class("error");
+    fn render(&self, settings: &SettingsPresentation) {
+        let row = settings.updater();
+        self.row.set_title(row.title());
+        self.row.set_subtitle(row.description());
+        render_updater_button(&self.action, &self.action_intent, Some(row.action()));
+
+        let install = settings.update_install();
+        let active = install.busy() || install.cancel_action().is_some();
+        if active || settings.update_check().checking() {
+            if let Some(previous) = self.notice.take() {
+                previous.dismiss();
+            }
         }
-        for (button, intent, action) in [
-            (&self.action, &self.action_intent, presentation.action()),
-            (
-                &self.cancel,
-                &self.cancel_intent,
-                presentation.cancel_action(),
-            ),
-        ] {
-            button.set_visible(action.is_some());
-            button.set_sensitive(action.is_some_and(|action| action.enabled()));
-            button.set_label(action.map_or("", |action| action.label()));
-            button.update_property(&[gtk::accessible::Property::Label(
-                action.map_or("", |action| action.label()),
-            )]);
-            intent.replace(action.map(|action| action.intent()));
+        self.progress.set_visible(install.busy());
+        // ponytail: the installer reports stages, so progress stays indeterminate.
+        if install.busy() && self.pulse.borrow().is_none() {
+            self.progress.pulse();
+            let progress = self.progress.downgrade();
+            self.pulse.replace(Some(gtk::glib::timeout_add_local(
+                std::time::Duration::from_millis(100),
+                move || {
+                    let Some(progress) = progress.upgrade() else {
+                        return gtk::glib::ControlFlow::Break;
+                    };
+                    progress.pulse();
+                    gtk::glib::ControlFlow::Continue
+                },
+            )));
+        } else if !install.busy() {
+            if let Some(pulse) = self.pulse.take() {
+                pulse.remove();
+            }
+            self.progress.set_fraction(0.0);
         }
-        self.spinner.set_visible(presentation.busy());
-        self.spinner.set_spinning(presentation.busy());
-        self.spinner
-            .update_property(&[gtk::accessible::Property::Label(presentation.title())]);
-        self.release.set_visible(presentation.release().is_some());
-        if let Some(release) = presentation.release() {
+        if !active {
+            if self.presented.replace(false) {
+                self.dialog.force_close();
+                self.action.grab_focus();
+            }
+            return;
+        }
+        let title = install.title().unwrap_or("Updating LG Buddy…");
+        self.title.set_text(title);
+        self.description.set_text(install.description());
+        self.progress
+            .update_property(&[gtk::accessible::Property::Label(title)]);
+        render_updater_button(&self.install, &self.install_intent, install.action());
+        render_updater_button(&self.cancel, &self.cancel_intent, install.cancel_action());
+        self.actions
+            .set_visible(install.action().is_some() || install.cancel_action().is_some());
+        let release = settings
+            .update_check()
+            .result()
+            .and_then(|report| report.available_release.as_ref());
+        self.release
+            .set_visible(!install.busy() && release.is_some());
+        if let Some(release) = release {
             self.release.set_uri(&release.url);
         }
-        let has_actions = presentation.action().is_some()
-            || presentation.cancel_action().is_some()
-            || presentation.release().is_some();
-        self.actions.set_visible(has_actions);
-        self.warning.set_visible(presentation.warning().is_some());
-        self.warning.set_text(presentation.warning().unwrap_or(""));
-        self.footer
-            .set_visible(has_actions || presentation.warning().is_some());
-
-        if let Some(details) = presentation.details() {
-            if self.details_text.text().as_str() != details {
-                self.details.set_expanded(false);
-                self.details_text.set_text(details);
-            }
-            self.details.set_title(presentation.details_title());
-            self.details.set_visible(true);
-        } else {
-            self.details.set_expanded(false);
-            self.details.set_visible(false);
-            self.details_text.set_text("");
-        }
-        // Follow a disappearing action within this card, without taking focus
-        // from another setting when an asynchronous completion arrives.
-        if (action_had_focus && !self.action.is_visible())
-            || (cancel_had_focus && !self.cancel.is_visible())
-            || (release_had_focus && !self.release.is_visible())
-        {
-            if self.action.is_visible() && self.action.is_sensitive() {
-                self.action.grab_focus();
-            } else if self.cancel.is_visible() && self.cancel.is_sensitive() {
+        if !self.presented.get() {
+            if let Some(parent) = self.row.root().and_downcast::<gtk::Window>() {
+                self.presented.set(true);
+                self.dialog.present(Some(&parent));
                 self.cancel.grab_focus();
             }
         }
     }
+
+    fn show_notice(&self, notice: &UpdateNotice, overlay: &adw::ToastOverlay) {
+        if let Some(previous) = self.notice.take() {
+            previous.dismiss();
+        }
+        let toast = adw::Toast::builder()
+            .title(notice.title())
+            .use_markup(false)
+            .build();
+        if let Some(details) = notice.details() {
+            toast.set_button_label(Some("Copy details"));
+            toast.set_timeout(0);
+            toast.set_priority(adw::ToastPriority::High);
+            let details = details.to_owned();
+            let clipboard = self.row.clipboard();
+            toast.connect_button_clicked(move |_| clipboard.set_text(&details));
+        }
+        self.notice.replace(Some(toast.clone()));
+        overlay.add_toast(toast);
+    }
+}
+
+impl Drop for UpdaterView {
+    fn drop(&mut self) {
+        if let Some(pulse) = self.pulse.take() {
+            pulse.remove();
+        }
+    }
+}
+
+fn updater_button(
+    on_intent: Rc<dyn Fn(SettingsIntent)>,
+) -> (gtk::Button, Rc<RefCell<Option<SettingsIntent>>>) {
+    let button = gtk::Button::new();
+    let intent = Rc::new(RefCell::new(None));
+    button.connect_clicked({
+        let intent = Rc::clone(&intent);
+        move |_| {
+            let intent = intent.borrow().clone();
+            if let Some(intent) = intent {
+                on_intent(intent);
+            }
+        }
+    });
+    (button, intent)
+}
+
+fn render_updater_button(
+    button: &gtk::Button,
+    intent: &RefCell<Option<SettingsIntent>>,
+    action: Option<&lg_buddy::presentation::settings::SettingsAction>,
+) {
+    button.set_visible(action.is_some());
+    button.set_sensitive(action.is_some_and(|action| action.enabled()));
+    button.set_label(action.map_or("", |action| action.label()));
+    intent.replace(action.map(|action| action.intent()));
 }
 
 enum NativeEditor {
@@ -728,7 +783,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .map(|row| row.row.clone())
         .collect();
     assert!(!rows.iter().any(|row| row.is::<adw::ExpanderRow>()));
-    assert!(!view.updater.details.is_visible());
+    assert!(!view.updater.presented.get());
     assert_eq!(view.groups.borrow().len(), 3);
     assert_eq!(rows.len(), 7);
     assert!(widgets
@@ -1115,12 +1170,10 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
 fn updater_renderer_scenarios(application: &adw::Application) {
     use crate::controller_test_support::pump_until;
     use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
-    use lg_buddy::settings::{ConfigEnvReader, SettingsStore};
-    use lg_buddy::settings_view::{BehaviorSetting, SettingsApplication, UpdateCheckError};
-    use lg_buddy::update_flow::UpdateInstallOutcome;
-    use lg_buddy::update_install::{
-        InstalledUpdate, PreparedUpdateInstall, UpdateInstallError, UpdateInstallStage,
-    };
+    use lg_buddy::settings::ConfigEnvReader;
+    use lg_buddy::settings_view::{BehaviorSetting, SettingsApplication};
+    use lg_buddy::update_flow::{UpdateInstallOutcome, UpdateInstallTask};
+    use lg_buddy::update_install::{PreparedUpdateInstall, UpdateInstallError, UpdateInstallStage};
     use lg_buddy::updates::UpdateChannel;
     use lg_buddy::version::VersionInfo;
 
@@ -1157,31 +1210,23 @@ fn updater_renderer_scenarios(application: &adw::Application) {
             "newer-commit",
         )
     }
-    fn assert_narrow(view: &SettingsView) {
-        let (minimum, _, _, _) = view.widget().measure(gtk::Orientation::Horizontal, -1);
-        assert!(
-            minimum <= 360,
-            "updater card must fit a narrow window: {minimum}"
-        );
-    }
-
     let intents = Rc::new(RefCell::new(Vec::new()));
     let view = SettingsView::new(Rc::new({
         let intents = Rc::clone(&intents);
         move |intent| intents.borrow_mut().push(intent)
     }));
+    let overlay = adw::ToastOverlay::new();
+    overlay.set_child(Some(view.widget()));
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .title("LG Buddy Updater Renderer Test")
         .default_width(900)
         .default_height(700)
-        .content(view.widget())
+        .content(&overlay)
         .build();
     let (mut model, opening) = SettingsApplication::open();
-    let store = SettingsStore::from_reader(ConfigEnvReader::parse(
-        "/unused/config.env",
-        "updates_channel=stable\n",
-    ));
+    let store =
+        ConfigEnvReader::parse("/unused/config.env", "updates_channel=stable\n").into_store();
     model
         .complete_read(
             opening.read_operation().unwrap(),
@@ -1191,156 +1236,188 @@ fn updater_renderer_scenarios(application: &adw::Application) {
     view.render(model.presentation());
     window.present();
     pump_until(|| view.updater.row.is_mapped() && view.updater.row.width() > 0);
-    let stable_rows: Vec<_> = view
-        .rows
-        .borrow()
-        .iter()
-        .map(|row| row.row.clone())
-        .collect();
-    let card_row = view.updater.row.clone();
+    let row = view.updater.row.clone();
     let action = view.updater.action.clone();
-    assert_eq!(stable_rows.len(), 7);
-    assert_eq!(card_row.title().as_str(), "Installed version");
+    assert_eq!(row.title(), "Installed version");
     assert_eq!(action.label().as_deref(), Some("Check for updates"));
-    assert!(!view.updater.spinner.is_visible());
-    assert!(!view.updater.details.is_visible());
-    assert!(!view.updater.release.is_visible());
-    assert!(!view.updater.warning.is_visible());
-    assert_eq!(card_row.accessible_role(), gtk::AccessibleRole::Status);
-
-    // Compare native label allocations, not hard-coded padding or widget types.
-    let rows = view.rows.borrow();
-    for row in rows.iter().filter(|row| {
+    assert!(!view.updater.presented.get());
+    assert!(view.updater.pulse.borrow().is_none());
+    assert_eq!(action.accessible_role(), gtk::AccessibleRole::Button);
+    for setting in view.rows.borrow().iter().filter(|row| {
         matches!(
             row.presentation.borrow().setting(),
             BehaviorSetting::UpdatesAutoCheck | BehaviorSetting::UpdatesChannel
         )
     }) {
-        assert!(row.warning.parent().is_none());
-        assert!(
-            (title_x(&row.row, &window) - title_x(&card_row, &window)).abs() < 1.0,
-            "updater and normal settings text must share their left edge: setting={}, updater={}",
-            title_x(&row.row, &window),
-            title_x(&card_row, &window)
-        );
+        assert!(setting.warning.parent().is_none());
+        assert!((title_x(&setting.row, &window) - title_x(&row, &window)).abs() < 1.0);
     }
-    drop(rows);
+    let bounds = action.compute_bounds(&row).unwrap();
+    assert!(
+        bounds.y() >= 0.0 && bounds.y() + bounds.height() <= row.height() as f32,
+        "the action must fit inside the same native row"
+    );
 
-    assert!(action.grab_focus());
     action.emit_clicked();
-    assert_eq!(*intents.borrow(), vec![SettingsIntent::CheckForUpdates]);
-    intents.borrow_mut().clear();
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::CheckForUpdates)
+    );
     let checking = model
         .handle_intent(SettingsIntent::CheckForUpdates)
         .unwrap();
     view.render(checking.presentation());
-    assert!(view.updater.spinner.is_visible());
     assert!(!action.is_sensitive());
     assert_eq!(action.label().as_deref(), Some("Checking…"));
-    assert!(action.is_focusable());
-    assert!(intents.borrow().is_empty());
+    assert!(!view.updater.presented.get());
+    let current = model
+        .complete_update_check(
+            checking.update_check_operation().unwrap(),
+            Ok(UpdateCheckReport {
+                installed_version: "1.6.0".into(),
+                channel: UpdateChannel::Stable,
+                available_release: None,
+                warning: None,
+            }),
+        )
+        .unwrap();
+    view.render(current.presentation());
+    view.show_update_notice(current.update_notice().unwrap(), &overlay);
+    assert_eq!(action.label().as_deref(), Some("Check for updates"));
+    assert_eq!(row.title(), "Installed version");
+    let current_toast = view.updater.notice.borrow().as_ref().unwrap().clone();
+    assert_eq!(current_toast.title().as_deref(), Some("Already up to date"));
+    view.render(model.presentation());
+    assert_eq!(view.updater.notice.borrow().as_ref(), Some(&current_toast));
 
-    let report = UpdateCheckReport {
-        installed_version: "1.6.0".into(),
-        channel: UpdateChannel::Stable,
-        available_release: Some(AvailableUpdate {
-            version: "1.7.0".into(),
-            url: "https://example.test/releases/v1.7.0?name=release%3C1%3E".into(),
-        }),
-        warning: Some("Cache <could not>& be refreshed.".into()),
-    };
+    let checking = model
+        .handle_intent(SettingsIntent::CheckForUpdates)
+        .unwrap();
+    view.render(checking.presentation());
+    assert!(view.updater.notice.borrow().is_none());
     model
-        .complete_update_check(checking.update_check_operation().unwrap(), Ok(report))
+        .complete_update_check(
+            checking.update_check_operation().unwrap(),
+            Ok(UpdateCheckReport {
+                installed_version: "1.6.0".into(),
+                channel: UpdateChannel::Stable,
+                available_release: Some(AvailableUpdate {
+                    version: "1.7.0".into(),
+                    url: "https://example.test/releases/v1.7.0".into(),
+                }),
+                warning: None,
+            }),
+        )
         .unwrap();
     view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Update available: 1.7.0");
+    assert_eq!(row.title(), "Update available: 1.7.0");
     assert_eq!(action.label().as_deref(), Some("Install update…"));
-    assert!(view.updater.release.is_visible());
-    assert_eq!(
-        view.updater.release.uri().as_str(),
-        "https://example.test/releases/v1.7.0?name=release%3C1%3E"
-    );
-    assert_eq!(
-        view.updater.warning.text().as_str(),
-        "Cache <could not>& be refreshed."
-    );
-    assert!(view.updater.warning.is_visible());
-    assert!(!view.updater.spinner.is_visible());
-    assert_narrow(&view);
-
-    assert!(action.grab_focus());
     action.emit_clicked();
     assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::PrepareUpdateInstall]
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::PrepareUpdateInstall)
     );
-    intents.borrow_mut().clear();
-    model
+    let preparation = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
-    view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Preparing update…");
-    assert!(!action.is_visible());
-    assert!(view.updater.cancel.is_visible());
-    assert!(view.updater.cancel.has_focus());
-    assert!(!view.updater.release.is_visible());
-    assert!(!view.updater.warning.is_visible());
-    view.updater.cancel.emit_clicked();
-    assert_eq!(*intents.borrow(), vec![SettingsIntent::CancelUpdateInstall]);
-    intents.borrow_mut().clear();
+    view.render(preparation.presentation());
+    pump_until(|| {
+        window.visible_dialog().as_ref() == Some(&view.updater.dialog)
+            && view.updater.cancel.is_mapped()
+            && view.updater.cancel.height() > 0
+    });
+    assert!(view.updater.progress.is_visible());
+    assert!(view.updater.pulse.borrow().is_some());
+    assert!(!action.is_sensitive());
+    assert_eq!(action.label().as_deref(), Some("Install update…"));
+    // Closing requests cancellation through the application; it cannot bypass
+    // a worker that already claimed the installer boundary.
+    view.updater.dialog.close();
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::CancelUpdateInstall)
+    );
     model
         .handle_intent(SettingsIntent::CancelUpdateInstall)
         .unwrap();
     view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Update available: 1.7.0");
+    pump_until(|| window.visible_dialog().is_none() && view.updater.dialog.parent().is_none());
+    assert!(view.updater.pulse.borrow().is_none());
     assert!(action.has_focus());
 
-    let preparing = model
+    let preparation = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
+    view.render(preparation.presentation());
+    pump_until(|| view.updater.dialog.child().unwrap().is_mapped());
     model
         .complete_update_install(
-            preparing.update_install_operation().unwrap(),
+            preparation.update_install_operation().unwrap(),
             Ok(UpdateInstallOutcome::Prepared(prepared())),
         )
         .unwrap();
     view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Install LG Buddy 1.7.0?");
-    assert_eq!(action.label().as_deref(), Some("Install and restart"));
-    assert!(view.updater.cancel.is_visible());
-    assert!(!view.updater.release.is_visible());
-    assert!(!view.updater.spinner.is_visible());
-    assert_narrow(&view);
-    action.emit_clicked();
+    pump_until(|| view.updater.dialog.child().unwrap().is_mapped());
+    assert_eq!(view.updater.title.text(), "Install LG Buddy 1.7.0?");
+    assert!(!view.updater.progress.is_visible());
+    assert!(view.updater.release.is_visible());
     assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::ConfirmUpdateInstall]
+        view.updater.install.label().as_deref(),
+        Some("Install and restart")
     );
-    intents.borrow_mut().clear();
+    assert!(view.updater.cancel.is_visible());
+    pump_until(|| {
+        if !view.updater.install.is_mapped() || view.updater.install.height() == 0 {
+            return false;
+        }
+        let bounds = view
+            .updater
+            .install
+            .compute_bounds(&view.updater.dialog)
+            .unwrap();
+        bounds.y() >= 0.0 && bounds.y() + bounds.height() <= view.updater.dialog.height() as f32
+    });
+    assert!(
+        view.updater.install.is_mapped(),
+        "confirmation must remain reachable without scrolling"
+    );
+    view.updater.install.emit_clicked();
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::ConfirmUpdateInstall)
+    );
     let installing = model
         .handle_intent(SettingsIntent::ConfirmUpdateInstall)
         .unwrap();
     let operation = installing.update_install_operation().unwrap();
-    model
-        .update_install_progress(operation, UpdateInstallStage::Acquiring)
-        .unwrap();
-    view.render(model.presentation());
+    view.render(installing.presentation());
+    assert!(view.updater.progress.is_visible());
+    assert!(!view.updater.install.is_visible());
+    assert!(!view.updater.release.is_visible());
+    if let UpdateInstallTask::Install { cancellation, .. } = operation.task() {
+        cancellation.claim_installer_boundary().unwrap();
+    } else {
+        panic!("expected install task");
+    }
+    view.updater.dialog.close();
     assert_eq!(
-        card_row.title().as_str(),
-        "Downloading and verifying update…"
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::CancelUpdateInstall)
     );
-    assert!(view.updater.spinner.is_visible());
-    assert!(view.updater.cancel.is_visible());
-    assert!(!action.is_visible());
+    assert!(model
+        .handle_intent(SettingsIntent::CancelUpdateInstall)
+        .is_none());
+    assert!(view.updater.dialog.is_mapped());
     model
         .update_install_progress(operation, UpdateInstallStage::Installing)
         .unwrap();
     view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Installing update…");
-    assert!(!view.updater.actions.is_visible());
     assert!(!view.updater.cancel.is_visible());
+    assert_eq!(view.updater.title.text(), "Installing update…");
+    view.updater.dialog.close();
+    assert!(intents.borrow().is_empty());
 
-    model
+    let failed = model
         .complete_update_install(
             operation,
             Err(UpdateInstallError::InstallerFailedWithOutput {
@@ -1351,121 +1428,39 @@ fn updater_renderer_scenarios(application: &adw::Application) {
             .into()),
         )
         .unwrap();
-    view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Could not install update");
-    assert!(card_row.has_css_class("error"));
-    assert_eq!(action.label().as_deref(), Some("Retry update"));
-    assert!(!view.updater.release.is_visible());
-    assert!(view.updater.details.is_visible());
-    assert!(!view.updater.details.is_expanded());
-    assert!(view.updater.details_text.is_selectable());
-    assert!(view
-        .updater
-        .details_text
-        .text()
-        .contains("No space left on device"));
-    assert!(!view.updater.details_text.text().contains("private-value"));
-    view.updater.details.set_expanded(true);
-    view.render(model.presentation());
-    assert!(view.updater.details.is_expanded());
-    assert!(view.updater.details_text.grab_focus());
-    assert_narrow(&view);
-    action.emit_clicked();
-    assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::PrepareUpdateInstall]
-    );
-    intents.borrow_mut().clear();
-    let preparing = model
-        .handle_intent(SettingsIntent::PrepareUpdateInstall)
-        .unwrap();
-    view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Preparing update…");
-    assert!(!card_row.has_css_class("error"));
-    assert_eq!(view.updater.details.title().as_str(), "Last update failure");
-    assert!(
-        view.updater.details_text.has_focus(),
-        "progress must not steal diagnostic selection focus"
-    );
-    model
-        .complete_update_install(
-            preparing.update_install_operation().unwrap(),
-            Ok(UpdateInstallOutcome::Prepared(prepared())),
-        )
-        .unwrap();
-    let installing = model
-        .handle_intent(SettingsIntent::ConfirmUpdateInstall)
-        .unwrap();
-    let installed = InstalledUpdate::from_parts(
-        "1.7.0".parse().unwrap(),
-        UpdateChannel::Stable,
-        "v1.7.0",
-        "x86_64-unknown-linux-gnu",
-        "newer-commit",
-        "/unused/lg-buddy",
-        "/unused/lg-buddy-gui",
-    );
-    let restarting = model
-        .complete_update_install(
-            installing.update_install_operation().unwrap(),
-            Ok(UpdateInstallOutcome::Installed(installed)),
-        )
-        .unwrap();
-    view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Restarting LG Buddy…");
-    assert!(!view.updater.actions.is_visible());
-    assert!(view.updater.spinner.is_visible());
-    model
-        .complete_update_install(
-            restarting.update_install_operation().unwrap(),
-            Err(lg_buddy::update_flow::UpdateInstallFailure::stopped()),
-        )
-        .unwrap();
-    view.render(model.presentation());
-    assert_eq!(action.label().as_deref(), Some("Retry restart"));
-    action.emit_clicked();
-    assert_eq!(
-        *intents.borrow(),
-        vec![SettingsIntent::RelaunchUpdatedApplication]
-    );
-    intents.borrow_mut().clear();
-
-    // A check replaces the prior result or failure in the same card.
-    let checking = model
-        .handle_intent(SettingsIntent::CheckForUpdates)
-        .unwrap();
-    view.render(checking.presentation());
-    assert!(view.updater.spinner.is_visible());
-    assert!(!card_row.has_css_class("error"));
-    assert!(!view.updater.release.is_visible());
-    model
-        .complete_update_check(
-            checking.update_check_operation().unwrap(),
-            Err(UpdateCheckError::stopped()),
-        )
-        .unwrap();
-    view.render(model.presentation());
-    assert_eq!(card_row.title().as_str(), "Update check stopped");
-    assert_eq!(action.label().as_deref(), Some("Retry check"));
-    assert!(card_row.has_css_class("error"));
-    action.emit_clicked();
-    assert_eq!(*intents.borrow(), vec![SettingsIntent::CheckForUpdates]);
-    intents.borrow_mut().clear();
-    view.render(model.presentation());
+    view.render(failed.presentation());
+    view.show_update_notice(failed.update_notice().unwrap(), &overlay);
+    pump_until(|| window.visible_dialog().is_none());
+    assert!(!view.updater.presented.get());
+    assert!(view.updater.pulse.borrow().is_none());
+    assert_eq!(action.label().as_deref(), Some("Install update…"));
+    assert!(!row.has_css_class("error"));
+    let toast = view.updater.notice.borrow().as_ref().unwrap().clone();
+    assert_eq!(toast.button_label().as_deref(), Some("Copy details"));
+    toast.emit_by_name::<()>("button-clicked", &[]);
+    let copied = Rc::new(RefCell::new(None));
+    action
+        .clipboard()
+        .read_text_async(None::<&gtk::gio::Cancellable>, {
+            let copied = Rc::clone(&copied);
+            move |result| {
+                copied.replace(Some(result.unwrap().unwrap().to_string()));
+            }
+        });
+    pump_until(|| copied.borrow().is_some());
+    let copied = copied.borrow();
+    let details = copied.as_deref().unwrap();
+    assert!(details.contains("No space left on device"));
+    assert!(!details.contains("private-value"));
+    assert!(details.contains("partial"));
+    assert_eq!(view.updater.row, row);
+    assert_eq!(view.updater.action, action);
     assert!(
         intents.borrow().is_empty(),
         "rendering must not submit intents"
     );
-    assert_eq!(view.updater.row, card_row);
-    assert_eq!(view.updater.action, action);
-    assert!(view
-        .rows
-        .borrow()
-        .iter()
-        .zip(&stable_rows)
-        .all(|(current, original)| current.row == *original));
     window.set_default_size(360, 700);
     pump_until(|| window.width() <= 360);
-    assert_narrow(&view);
+    assert!(view.widget().measure(gtk::Orientation::Horizontal, -1).0 <= 360);
     window.close();
 }

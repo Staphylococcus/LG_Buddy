@@ -80,7 +80,7 @@ impl UpdateInstallFailure {
 
     pub fn stopped() -> Self {
         Self {
-            presentation: UserFacingError::new("Update stopped", "The update did not finish. If installation had begun, the installation may be incomplete. Open Failure details before trying again."),
+            presentation: UserFacingError::new("Update stopped", "The update did not finish. If installation had begun, the installation may be incomplete. Review the error details before trying again."),
             diagnostic: "update installation worker stopped without a result".into(),
             cancelled: false,
         }
@@ -91,8 +91,15 @@ impl From<UpdateInstallError> for UpdateInstallFailure {
     fn from(error: UpdateInstallError) -> Self {
         let cancelled = matches!(error, UpdateInstallError::Cancelled);
         let detail = error.user_message();
+        let summary = match &error {
+            UpdateInstallError::InstallerFailedWithOutput {
+                mutation_started: true,
+                ..
+            } => "Update incomplete",
+            _ => "Could not install update",
+        };
         Self {
-            presentation: UserFacingError::new("Could not install update", &detail),
+            presentation: UserFacingError::new(summary, &detail),
             diagnostic: error.to_string(),
             cancelled,
         }
@@ -189,6 +196,8 @@ impl UpdateInstallApplication {
             return;
         }
         let offered = report.is_some_and(|report| report.available_release.is_some());
+        self.presentation.offer_channel_matches =
+            offered.then(|| report.is_some_and(|report| Some(report.channel) == channel));
         self.presentation.action = offered.then(|| {
             SettingsAction::new(
                 if self.presentation.error.is_some() {
@@ -406,7 +415,7 @@ impl UpdateInstallApplication {
 /// Retain only bounded plain text from updater diagnostics. The installer does
 /// not read TV credentials; also omit credential-bearing lines and URLs from
 /// subprocess/network errors so an on-demand view need not expose them.
-fn retained_failure_details(diagnostic: &str) -> String {
+pub(crate) fn retained_failure_details(diagnostic: &str) -> String {
     const LIMIT: usize = 64 * 1024;
     let mut result = String::new();
     for line in diagnostic.lines() {

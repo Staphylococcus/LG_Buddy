@@ -17,6 +17,7 @@ use crate::settings::{
 };
 use crate::update_flow::{
     UpdateInstallApplication, UpdateInstallFailure, UpdateInstallOperation, UpdateInstallOutcome,
+    UpdateInstallTask,
 };
 use crate::update_install::UpdateInstallStage;
 
@@ -168,6 +169,30 @@ impl From<crate::updates::UpdatesError> for UpdateCheckError {
     }
 }
 
+/// A one-shot update result for a toolkit renderer to show as a toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateNotice {
+    title: String,
+    details: Option<String>,
+}
+
+impl UpdateNotice {
+    fn new(title: impl Into<String>, details: Option<String>) -> Self {
+        Self {
+            title: title.into(),
+            details,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
+    }
+}
+
 impl SettingsReadOperation {
     pub(crate) fn new(id: u64) -> Self {
         Self(id)
@@ -181,6 +206,7 @@ pub struct SettingsTransition {
     mutation_operation: Option<SettingsMutationOperation>,
     update_check_operation: Option<UpdateCheckOperation>,
     update_install_operation: Option<UpdateInstallOperation>,
+    update_notice: Option<UpdateNotice>,
     diagnostic: Option<String>,
 }
 
@@ -203,6 +229,10 @@ impl SettingsTransition {
 
     pub fn update_install_operation(&self) -> Option<&UpdateInstallOperation> {
         self.update_install_operation.as_ref()
+    }
+
+    pub fn update_notice(&self) -> Option<&UpdateNotice> {
+        self.update_notice.as_ref()
     }
 
     pub fn diagnostic(&self) -> Option<&str> {
@@ -377,6 +407,7 @@ impl SettingsApplication {
                 mutation_operation: None,
                 update_check_operation: None,
                 update_install_operation: None,
+                update_notice: None,
                 diagnostic: None,
             },
         )
@@ -618,11 +649,14 @@ impl SettingsApplication {
             return None;
         }
         self.pending_update_check = None;
+        let update_notice = update_check_notice(&result);
         let diagnostic = result.as_ref().err().map(|error| error.diagnostic.clone());
         self.presentation
             .update_check_mut()
             .complete(result.map_err(|error| error.presentation));
-        Some(self.transition(None, None, diagnostic))
+        let mut transition = self.transition(None, None, diagnostic);
+        transition.update_notice = update_notice;
+        Some(transition)
     }
 
     pub fn mutation_worker_stopped(
@@ -698,8 +732,20 @@ impl SettingsApplication {
             return None;
         }
         let (next, diagnostic) = self.update_install.complete(operation, result)?;
+        let notice = self.update_install.presentation().error().map(|error| {
+            let title = if matches!(operation.task(), UpdateInstallTask::Relaunch(_)) {
+                "Restart required"
+            } else {
+                error.summary()
+            };
+            UpdateNotice::new(
+                title,
+                notice_details(error, diagnostic.as_deref().unwrap_or("")),
+            )
+        });
         let mut transition = self.transition(None, None, diagnostic);
         transition.update_install_operation = next;
+        transition.update_notice = notice;
         Some(transition)
     }
 
@@ -840,8 +886,47 @@ impl SettingsApplication {
             mutation_operation,
             update_check_operation: None,
             update_install_operation: None,
+            update_notice: None,
             diagnostic,
         }
+    }
+}
+
+fn update_check_notice(
+    result: &Result<UpdateCheckReport, UpdateCheckError>,
+) -> Option<UpdateNotice> {
+    match result {
+        Ok(report) => {
+            if report.available_release.is_none() {
+                Some(UpdateNotice::new(
+                    "Already up to date",
+                    report.warning.as_deref().and_then(sanitized_notice_detail),
+                ))
+            } else {
+                report.warning.as_deref().map(|warning| {
+                    UpdateNotice::new("Update check warning", sanitized_notice_detail(warning))
+                })
+            }
+        }
+        Err(error) => Some(UpdateNotice::new(
+            error.presentation.summary(),
+            notice_details(&error.presentation, &error.diagnostic),
+        )),
+    }
+}
+
+fn sanitized_notice_detail(detail: &str) -> Option<String> {
+    let detail = crate::update_flow::retained_failure_details(detail);
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn notice_details(error: &UserFacingError, diagnostic: &str) -> Option<String> {
+    let diagnostic = crate::update_flow::retained_failure_details(diagnostic);
+    match (error.detail().is_empty(), diagnostic.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(error.detail().to_string()),
+        (true, false) => Some(diagnostic),
+        (false, false) => Some(format!("{}\n\n{}", error.detail(), diagnostic)),
     }
 }
 

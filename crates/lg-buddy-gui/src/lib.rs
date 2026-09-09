@@ -358,6 +358,9 @@ impl ApplicationController {
         }
         if !controller.closed.get() {
             controller.window.render_settings(transition.presentation());
+            if let Some(notice) = transition.update_notice() {
+                controller.window.show_update_notice(notice);
+            }
         }
         if let Some(operation) = transition.read_operation() {
             Self::start_settings_read(controller, operation);
@@ -1613,11 +1616,12 @@ pub(crate) mod controller_test_support {
             .choose_page(super::ApplicationPage::Settings);
         pump_until(|| widget_contains_text(native.upcast_ref(), "Prerelease"));
         reply_tx.send(Ok(true)).unwrap();
-        pump_until(|| widget_contains_text(native.upcast_ref(), "Update available: 1.7.0"));
-        assert!(widget_contains_text(
-            native.upcast_ref(),
-            "Last successful check: stable channel, compared with installed version 1.6.0."
-        ));
+        pump_until(|| check.is_sensitive());
+        assert_eq!(check.label().as_deref(), Some("Check for updates"));
+        assert!(
+            !widget_contains_text(native.upcast_ref(), "Update available: 1.7.0"),
+            "an old-channel result must not replace the current row"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), saved);
 
         check.emit_clicked();
@@ -1633,7 +1637,7 @@ pub(crate) mod controller_test_support {
             }
             .into()))
             .unwrap();
-        pump_until(|| find_button(native.upcast_ref(), "Retry check").is_some());
+        pump_until(|| find_button(native.upcast_ref(), "Copy details").is_some());
         assert!(widget_contains_text(
             native.upcast_ref(),
             "Could not check for updates"
@@ -1642,15 +1646,16 @@ pub(crate) mod controller_test_support {
             native.upcast_ref(),
             "Update available: 1.7.0"
         ));
-        find_button(native.upcast_ref(), "Retry check")
+        find_button(native.upcast_ref(), "Check for updates")
             .unwrap()
             .emit_clicked();
         pump_until(|| backend.calls.load(Ordering::SeqCst) == 3);
         reply_tx.send(Ok(false)).unwrap();
-        pump_until(|| widget_contains_text(native.upcast_ref(), "No newer release available"));
-        assert!(widget_contains_text(
+        pump_until(|| widget_contains_text(native.upcast_ref(), "Already up to date"));
+        assert_eq!(check.label().as_deref(), Some("Check for updates"));
+        assert!(!widget_contains_text(
             native.upcast_ref(),
-            "Last successful check: prerelease channel, compared with installed version 1.6.0."
+            "No newer release available"
         ));
         assert_eq!(std::fs::read(&path).unwrap(), saved);
         controller.shutdown();
@@ -1659,6 +1664,7 @@ pub(crate) mod controller_test_support {
     }
 
     fn run_update_install_scenario() {
+        use adw::prelude::AdwApplicationWindowExt;
         use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
         use lg_buddy::update_flow::{
             UpdateInstallBackend, UpdateInstallFailure, UpdateInstallOperation,
@@ -1840,12 +1846,16 @@ pub(crate) mod controller_test_support {
             .emit_clicked();
         assert_eq!(updater.installs.load(Ordering::SeqCst), 0);
         for success in [false, true] {
-            let label = if success {
-                "Retry update"
-            } else {
-                "Install update…"
-            };
-            button(native.upcast_ref(), label).unwrap().emit_clicked();
+            pump_until(|| {
+                native
+                    .downcast_ref::<adw::ApplicationWindow>()
+                    .unwrap()
+                    .visible_dialog()
+                    .is_none()
+            });
+            button(native.upcast_ref(), "Install update…")
+                .unwrap()
+                .emit_clicked();
             pump_until(|| button(native.upcast_ref(), "Install and restart").is_some());
             button(native.upcast_ref(), "Install and restart")
                 .unwrap()
@@ -1869,20 +1879,18 @@ pub(crate) mod controller_test_support {
             assert!(button(native.upcast_ref(), "Cancel").is_none());
             reply_tx.send(WorkerReply::Done(success)).unwrap();
             pump_until(|| {
-                button(
-                    native.upcast_ref(),
-                    if success {
-                        "Retry restart"
-                    } else {
-                        "Retry update"
-                    },
-                )
-                .is_some()
+                native
+                    .downcast_ref::<adw::ApplicationWindow>()
+                    .unwrap()
+                    .visible_dialog()
+                    .is_none()
             });
+            pump_until(|| button(native.upcast_ref(), "Copy details").is_some());
+            assert!(button(native.upcast_ref(), "Install update…").is_some());
         }
         assert_eq!(updater.installs.load(Ordering::SeqCst), 2);
         assert_eq!(updater.handoffs.load(Ordering::SeqCst), 1);
-        button(native.upcast_ref(), "Retry restart")
+        button(native.upcast_ref(), "Install update…")
             .unwrap()
             .emit_clicked();
         assert_eq!(updater.handoffs.load(Ordering::SeqCst), 2);

@@ -41,10 +41,6 @@ pub struct UpdateCheckPresentation {
     installed_version_label: String,
     checking: bool,
     install_active: bool,
-    /// Whether the latest check was started after the current install state.
-    /// This lets the derived updater card distinguish a new successful check
-    /// from the older result that preceded an installation failure.
-    check_supersedes_install: bool,
     result: Option<UpdateCheckReport>,
     error: Option<UserFacingError>,
 }
@@ -60,7 +56,6 @@ impl Default for UpdateCheckPresentation {
             ),
             checking: false,
             install_active: false,
-            check_supersedes_install: false,
             result: None,
             error: None,
         }
@@ -99,19 +94,11 @@ impl UpdateCheckPresentation {
     }
 
     pub(crate) fn set_install_active(&mut self, active: bool) {
-        if active {
-            self.check_supersedes_install = false;
-        }
         self.install_active = active;
-    }
-
-    pub(crate) fn check_supersedes_install(&self) -> bool {
-        self.check_supersedes_install
     }
 
     pub(crate) fn start(&mut self) {
         self.checking = true;
-        self.check_supersedes_install = true;
         self.error = None;
     }
 

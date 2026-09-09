@@ -173,35 +173,31 @@ format, and compatibility behavior.
 <a id="updates"></a>
 ## Check for and install an update
 
-In **Settings → Updates**, choose **Check for updates**. This works even when
-automatic checks are off and uses your saved release channel. One updater card
-below the update preferences shows the installed version, then replaces it with
-the check progress and result. An available version includes a release link and
-**Install update…**; otherwise the card reports that no newer release is available.
-If a check fails, its explanation and **Retry check** replace the previous result.
+In **Settings → Updates**, the update row shows the installed version and
+**Check for updates**. Checking works even when automatic checks are off and
+uses your saved release channel. The button reads **Checking…** and is disabled
+until the check finishes. If LG Buddy is current, a brief **Already up to date**
+message appears. An available release changes the same row to **Install update…**.
+Changing the saved channel requires a fresh check before installation.
 
-Completed results identify the channel and installed version they checked. After
-changing channels, use **Check for updates** before installing. A cache warning
-can appear inside the card alongside a successful result; it does not mean the
-release check failed.
-Checking does not install anything or change your update preferences.
+Choose **Install update…** to open the update dialog. After preparing the
+release, the dialog shows its version, channel, and release link. Choose
+**Install and restart** to authorize the system installation. Pairing and
+settings are preserved. A pulsing progress bar and short status describe the
+current work; the installer does not provide a percentage.
 
-For a supported release-bundle installation, choose **Install update…**, review
-its version and channel, then choose **Install and restart**. Approve the desktop
-authorization prompt to replace the installed files. Pairing and settings are
-preserved. Confirmation, progress, and any failure replace each other in the same
-card. After verifying both installed executables, LG Buddy restarts into
-the updated application. If restarting fails, use **Retry restart**.
+You can cancel while preparing or downloading. Once installation starts, keep
+LG Buddy open until it finishes. Cancelling authorization leaves the
+installation unchanged. Success verifies both installed executables and
+restarts into the updated application.
 
-You can cancel while the update is being prepared or downloaded. Once
-installation starts, keep the application open until it finishes; cancelling
-the authorization prompt leaves the installation unchanged. A failure after
-installation changes begin is reported as potentially incomplete. Follow the
-reported recovery guidance before retrying. Expand **Failure details** inside
-the card to inspect and select the retained error information without a terminal.
-The most recent failure remains available as **Last update failure** during retries in this
-application session. If you change release channels,
-check again before installing an offer from the new channel.
+Check and installation errors appear as toasts with **Copy details**. This
+copies the explanation and diagnostic text for troubleshooting without a
+terminal. A failure after installation changes begin may leave a partial
+installation; follow the recovery guidance in those details before retrying.
+The installation dialog closes on failure, and **Install update…** offers
+another attempt. If installation succeeded but restarting failed, the row
+identifies the required restart and its action retries restarting only.
 
 This flow requires a compatible mutable release-bundle installation. Use the
 package manager for externally managed installations. Graphical authorization

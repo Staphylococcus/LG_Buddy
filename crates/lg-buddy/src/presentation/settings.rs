@@ -179,9 +179,7 @@ impl SettingsPresentation {
         &self.update_install
     }
 
-    /// Compute the single update card from the check and installation facts.
-    /// The renderer receives the current workflow state with its precedence
-    /// already resolved by the application presentation layer.
+    /// Project the compact update row and its current semantic action.
     pub fn updater(&self) -> UpdaterPresentation {
         UpdaterPresentation::from_settings(self)
     }

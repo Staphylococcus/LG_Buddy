@@ -11,6 +11,7 @@ pub struct UpdateInstallPresentation {
     pub(crate) busy: bool,
     pub(crate) error: Option<UserFacingError>,
     pub(crate) failure_details: Option<String>,
+    pub(crate) offer_channel_matches: Option<bool>,
 }
 
 impl UpdateInstallPresentation {
@@ -50,5 +51,9 @@ impl UpdateInstallPresentation {
         } else {
             "Last update failure"
         }
+    }
+
+    pub(crate) fn offer_channel_matches(&self) -> Option<bool> {
+        self.offer_channel_matches
     }
 }

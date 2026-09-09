@@ -279,11 +279,11 @@ impl UpdateInstallError {
             Self::InstallerFailedWithOutput {
                 mutation_started, ..
             } if *mutation_started => {
-                "The update installer failed after installation changes began. The installation may be partial. Open Failure details and address the cause before retrying."
+                "The update installer failed after installation changes began. The installation may be partial. Review the error details and address the cause before retrying."
                     .to_string()
             }
             Self::InstallerFailedWithOutput { .. } => {
-                "The update installer stopped before changing installed files. Open Failure details and address the cause before retrying."
+                "The update installer stopped before changing installed files. Review the error details and address the cause before retrying."
                     .to_string()
             }
             Self::InstalledIdentity(_) | Self::InstalledIdentityMismatch { .. } => {

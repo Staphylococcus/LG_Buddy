@@ -1,174 +1,73 @@
 use crate::presentation::settings::{SettingsAction, SettingsPresentation};
-use crate::presentation::update_check::AvailableUpdate;
 use crate::settings_view::SettingsIntent;
 
-/// The one update card rendered by the Settings view.
+/// The compact update row rendered in Settings.
 ///
-/// `UpdateCheckPresentation` and `UpdateInstallPresentation` remain the
-/// application-owned workflow facts. This type is a derived, renderer-facing
-/// snapshot that resolves which one is visible at a given moment.
+/// Installation confirmation and progress remain in
+/// [`crate::presentation::update_install::UpdateInstallPresentation`]. This projection only exposes the row's
+/// title, concise description, and one semantic action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdaterPresentation {
     title: String,
     description: String,
-    action: Option<SettingsAction>,
-    cancel_action: Option<SettingsAction>,
-    release: Option<AvailableUpdate>,
-    busy: bool,
-    is_error: bool,
-    warning: Option<String>,
-    details_title: String,
-    details: Option<String>,
+    action: SettingsAction,
 }
 
 impl UpdaterPresentation {
     pub(crate) fn from_settings(settings: &SettingsPresentation) -> Self {
         let check = settings.update_check();
         let install = settings.update_install();
-        let details = install.failure_details().map(str::to_owned);
-        let details_title =
-            if check.checking() || check.error().is_some() || check.check_supersedes_install() {
-                "Last update failure".to_string()
-            } else {
-                install.failure_details_title().to_string()
-            };
-
-        // A prepared confirmation, download, installation, or process
-        // replacement owns the card even if an older check result is still in
-        // memory.
-        if install.busy() || install.cancel_action().is_some() {
-            return Self {
-                title: install.title().unwrap_or("Updating LG Buddy…").to_string(),
-                description: install.description().to_string(),
-                action: install.action().cloned(),
-                cancel_action: install.cancel_action().cloned(),
-                release: None,
-                busy: install.busy(),
-                is_error: false,
-                warning: None,
-                details_title,
-                details,
-            };
-        }
-
-        // A newly started or failed check masks both the old successful result
-        // and an older installation failure. This keeps the card from showing
-        // two unrelated workflows at once.
-        if check.checking() {
-            return Self {
-                title: "Checking for updates…".to_string(),
-                description: format!(
-                    "Checking the saved update channel against installed version {}.",
-                    check.installed_version_label()
-                ),
-                action: Some(check.check_action()),
-                cancel_action: None,
-                release: None,
-                busy: true,
-                is_error: false,
-                warning: None,
-                details_title,
-                details,
-            };
-        }
-
-        if let Some(error) = check.error() {
-            return Self {
-                title: error.summary().to_string(),
-                description: error.detail().to_string(),
-                action: Some(check.check_action()),
-                cancel_action: None,
-                release: None,
-                busy: false,
-                is_error: true,
-                warning: None,
-                details_title,
-                details,
-            };
-        }
-
-        // A completed check started after an installation failure is now the
-        // current workflow. Keep the old diagnostic available below the card,
-        // but let the new report own the title, release, and primary action.
-        if check.check_supersedes_install() {
-            if let Some(report) = check.result() {
-                return Self::completed_check(check, install, report, details_title, details);
+        let active = install.busy() || install.cancel_action().is_some();
+        if let Some(action) = install
+            .action()
+            .filter(|action| action.intent() == SettingsIntent::RelaunchUpdatedApplication)
+        {
+            if !check.checking() {
+                return Self {
+                    title: "Restart required".into(),
+                    description: "The update is installed. Restart LG Buddy to finish.".into(),
+                    action: SettingsAction::new(
+                        "Install update…",
+                        action.enabled(),
+                        action.intent(),
+                    ),
+                };
             }
         }
-
-        // An installation failure is shown using its existing safe summary
-        // and detail. The internal "Update not completed" title is deliberately
-        // not surfaced as a second, duplicate failure row.
-        if let Some(error) = install.error() {
-            let action = install
-                .action()
-                .filter(|action| action.enabled())
-                .cloned()
-                .or_else(|| Some(check.check_action()));
-            return Self {
-                title: error.summary().to_string(),
-                description: error.detail().to_string(),
-                action,
-                cancel_action: None,
-                release: None,
-                busy: false,
-                is_error: true,
-                warning: None,
-                details_title,
-                details,
-            };
-        }
-
-        if let Some(report) = check.result() {
-            return Self::completed_check(check, install, report, details_title, details);
-        }
-
-        Self {
-            title: "Installed version".to_string(),
-            description: check.installed_version_label().to_string(),
-            action: Some(check.check_action()),
-            cancel_action: None,
-            release: None,
-            busy: false,
-            is_error: false,
-            warning: None,
-            details_title,
-            details,
-        }
-    }
-
-    fn completed_check(
-        check: &crate::presentation::update_check::UpdateCheckPresentation,
-        install: &crate::presentation::update_install::UpdateInstallPresentation,
-        report: &crate::presentation::update_check::UpdateCheckReport,
-        details_title: String,
-        details: Option<String>,
-    ) -> Self {
-        let can_install_offer = report.available_release.is_some()
-            && install.action().is_some_and(|action| {
-                action.enabled() && action.intent() == SettingsIntent::PrepareUpdateInstall
-            });
-        let action = if can_install_offer {
-            install.action().cloned()
-        } else {
-            // A changed channel, or a temporarily unavailable install action,
-            // must leave the user with a way to perform a fresh check instead
-            // of a disabled install control.
-            Some(check.check_action())
+        let report = check.result().filter(|_| {
+            (install.offer_channel_matches() == Some(true) && check.error().is_none()) || active
+        });
+        let release = report.and_then(|report| report.available_release.as_ref());
+        let mut row = Self {
+            title: release.map_or_else(
+                || "Installed version".into(),
+                |release| format!("Update available: {}", release.version),
+            ),
+            description: report.filter(|_| release.is_some()).map_or_else(
+                || check.installed_version_label().to_owned(),
+                |report| format!("Installed version: {}", report.installed_version),
+            ),
+            action: SettingsAction::new(
+                "Check for updates",
+                check.check_action().enabled(),
+                SettingsIntent::CheckForUpdates,
+            ),
         };
-
-        Self {
-            title: report.title(),
-            description: report.description(),
-            action,
-            cancel_action: None,
-            release: report.available_release.clone(),
-            busy: false,
-            is_error: false,
-            warning: report.warning.clone(),
-            details_title,
-            details,
+        if check.checking() {
+            row.action = SettingsAction::new("Checking…", false, SettingsIntent::CheckForUpdates);
+        } else if active {
+            row.action = SettingsAction::new(
+                "Install update…",
+                false,
+                SettingsIntent::PrepareUpdateInstall,
+            );
+        } else if release.is_some() {
+            if let Some(action) = install.action() {
+                row.action =
+                    SettingsAction::new("Install update…", action.enabled(), action.intent());
+            }
         }
+        row
     }
 
     pub fn title(&self) -> &str {
@@ -179,54 +78,24 @@ impl UpdaterPresentation {
         &self.description
     }
 
-    pub fn action(&self) -> Option<&SettingsAction> {
-        self.action.as_ref()
-    }
-
-    pub fn cancel_action(&self) -> Option<&SettingsAction> {
-        self.cancel_action.as_ref()
-    }
-
-    pub fn release(&self) -> Option<&AvailableUpdate> {
-        self.release.as_ref()
-    }
-
-    pub fn busy(&self) -> bool {
-        self.busy
-    }
-
-    pub fn is_error(&self) -> bool {
-        self.is_error
-    }
-
-    pub fn warning(&self) -> Option<&str> {
-        self.warning.as_deref()
-    }
-
-    pub fn details_title(&self) -> &str {
-        &self.details_title
-    }
-
-    pub fn details(&self) -> Option<&str> {
-        self.details.as_deref()
+    pub fn action(&self) -> &SettingsAction {
+        &self.action
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::presentation::settings::SettingsPresentation;
-    use crate::presentation::update_check::UpdateCheckReport;
+    use crate::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
     use crate::settings::ConfigEnvReader;
     use crate::settings_view::{SettingsApplication, SettingsIntent};
-    use crate::update_flow::{UpdateInstallFailure, UpdateInstallOperation, UpdateInstallOutcome};
-    use crate::update_install::{InstalledUpdate, UpdateInstallStage};
+    use crate::update_flow::{UpdateInstallFailure, UpdateInstallOutcome};
     use crate::updates::UpdateChannel;
     use crate::version::VersionInfo;
 
     fn groups(channel: &str) -> Vec<crate::presentation::settings::SettingsGroup> {
         let contents = format!("updates_channel={channel}\nupdates_auto_check=disabled\n");
-        let store = ConfigEnvReader::parse("/tmp/updater-card.env", &contents).into_store();
+        let store = ConfigEnvReader::parse("/tmp/updater-row.env", &contents).into_store();
         SettingsPresentation::from_store(&store).groups().to_vec()
     }
 
@@ -249,24 +118,16 @@ mod tests {
         }
     }
 
-    fn check(
+    fn complete_check(
         app: &mut SettingsApplication,
-        report: Result<UpdateCheckReport, crate::settings_view::UpdateCheckError>,
-    ) {
+        result: Result<UpdateCheckReport, crate::settings_view::UpdateCheckError>,
+    ) -> crate::settings_view::SettingsTransition {
         let operation = app
             .handle_intent(SettingsIntent::CheckForUpdates)
             .unwrap()
             .update_check_operation()
             .unwrap();
-        app.complete_update_check(operation, report).unwrap();
-    }
-
-    fn prepare(app: &mut SettingsApplication) -> UpdateInstallOperation {
-        app.handle_intent(SettingsIntent::PrepareUpdateInstall)
-            .unwrap()
-            .update_install_operation()
-            .unwrap()
-            .clone()
+        app.complete_update_check(operation, result).unwrap()
     }
 
     fn prepared() -> crate::update_install::PreparedUpdateInstall {
@@ -282,357 +143,143 @@ mod tests {
     }
 
     #[test]
-    fn application_transitions_render_one_card_through_install_failure_and_retry() {
+    fn row_has_only_check_and_install_states() {
         let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let idle = app.presentation().updater();
+        assert_eq!(idle.title(), "Installed version");
+        assert_eq!(
+            idle.description(),
+            app.presentation().update_check().installed_version_label()
+        );
+        assert_eq!(idle.action().label(), "Check for updates");
+        assert!(idle.action().enabled());
+
+        let checking = app.handle_intent(SettingsIntent::CheckForUpdates).unwrap();
+        let checking_row = checking.presentation().updater();
+        assert_eq!(checking_row.title(), "Installed version");
+        assert_eq!(checking_row.action().label(), "Checking…");
+        assert!(!checking_row.action().enabled());
+
+        app.complete_update_check(
+            checking.update_check_operation().unwrap(),
+            Ok(report(UpdateChannel::Stable, true)),
+        )
+        .unwrap();
         let offer = app.presentation().updater();
         assert_eq!(offer.title(), "Update available: 1.7.0");
-        assert_eq!(
-            offer.action().map(SettingsAction::label),
-            Some("Install update…")
-        );
-        assert_eq!(
-            offer.release().map(|release| release.version.as_str()),
-            Some("1.7.0")
-        );
+        assert_eq!(offer.description(), "Installed version: 1.6.0");
+        assert_eq!(offer.action().label(), "Install update…");
+        assert!(offer.action().enabled());
+    }
 
-        let preparation = prepare(&mut app);
-        let preparing = app.presentation().updater();
-        assert!(preparing.busy());
-        assert_eq!(
-            preparing.cancel_action().map(SettingsAction::label),
-            Some("Cancel")
-        );
-        app.complete_update_install(&preparation, Ok(UpdateInstallOutcome::Prepared(prepared())))
+    #[test]
+    fn channel_mismatch_keeps_installed_row_and_requires_check() {
+        let mut app = application("prerelease");
+        complete_check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let row = app.presentation().updater();
+        assert_eq!(row.title(), "Installed version");
+        assert_eq!(row.action().label(), "Check for updates");
+        assert_eq!(row.action().intent(), SettingsIntent::CheckForUpdates);
+        assert!(row.action().enabled());
+    }
+
+    #[test]
+    fn busy_or_confirmation_disables_install_row_while_modal_owns_flow() {
+        let mut app = application("stable");
+        complete_check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let preparing = app
+            .handle_intent(SettingsIntent::PrepareUpdateInstall)
+            .unwrap();
+        let row = preparing.presentation().updater();
+        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.action().label(), "Install update…");
+        assert_eq!(row.action().intent(), SettingsIntent::PrepareUpdateInstall);
+        assert!(!row.action().enabled());
+
+        let operation = preparing.update_install_operation().unwrap().clone();
+        app.complete_update_install(&operation, Ok(UpdateInstallOutcome::Prepared(prepared())))
             .unwrap();
         let confirmation = app.presentation().updater();
-        assert_eq!(confirmation.title(), "Install LG Buddy 1.7.0?");
-        assert!(!confirmation.busy());
+        assert_eq!(confirmation.title(), "Update available: 1.7.0");
+        assert_eq!(confirmation.action().label(), "Install update…");
         assert_eq!(
-            confirmation.action().map(SettingsAction::label),
-            Some("Install and restart")
+            confirmation.action().intent(),
+            SettingsIntent::PrepareUpdateInstall
         );
-        assert_eq!(
-            confirmation.cancel_action().map(SettingsAction::label),
-            Some("Cancel")
-        );
+        assert!(!confirmation.action().enabled());
+    }
 
-        let install = app
-            .handle_intent(SettingsIntent::ConfirmUpdateInstall)
+    #[test]
+    fn matching_offer_remains_visible_when_controls_are_temporarily_disabled() {
+        let mut app = application("stable");
+        complete_check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let transition = app.set_controls_available(false).unwrap();
+        let row = transition.presentation().updater();
+        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.action().label(), "Install update…");
+        assert!(!row.action().enabled());
+    }
+
+    #[test]
+    fn install_failure_row_returns_install_retry_without_modal_fields() {
+        let mut app = application("stable");
+        complete_check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let preparation = app
+            .handle_intent(SettingsIntent::PrepareUpdateInstall)
             .unwrap()
             .update_install_operation()
             .unwrap()
             .clone();
-        app.update_install_progress(&install, UpdateInstallStage::Acquiring)
-            .unwrap();
-        let progress = app.presentation().updater();
-        assert!(progress.busy());
-        assert_eq!(progress.action(), None);
-        assert_eq!(
-            progress.cancel_action().map(SettingsAction::label),
-            Some("Cancel")
-        );
-
-        app.update_install_progress(&install, UpdateInstallStage::Installing)
-            .unwrap();
-        assert_eq!(app.presentation().updater().cancel_action(), None);
-        let failed = app
-            .complete_update_install(
-                &install,
-                Err(UpdateInstallFailure {
-                    presentation: crate::presentation::brightness::UserFacingError::new(
-                        "Could not install update",
-                        "The installer failed.",
-                    ),
-                    diagnostic: "installer failed".into(),
-                    cancelled: false,
-                }),
-            )
-            .unwrap();
-        let failure = failed.presentation().updater();
-        assert!(failure.is_error());
-        assert_eq!(failure.title(), "Could not install update");
-        assert_eq!(failure.description(), "The installer failed.");
-        assert_eq!(
-            failure.action().map(SettingsAction::label),
-            Some("Retry update")
-        );
-        assert_eq!(failure.release(), None);
-        assert_eq!(failure.warning(), None);
-        assert_eq!(failure.details(), Some("installer failed"));
-
-        let details = failure.details().unwrap().to_owned();
-        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
-        let groups = app.presentation().groups().to_vec();
-        app.complete_read(refresh.read_operation().unwrap(), Ok(groups))
-            .unwrap();
-        assert_eq!(
-            app.presentation().updater().details(),
-            Some(details.as_str())
-        );
-        let retry_operation = prepare(&mut app);
-        assert_eq!(
-            app.presentation().updater().details(),
-            Some(details.as_str())
-        );
-        app.handle_intent(SettingsIntent::CancelUpdateInstall)
-            .unwrap();
-        assert_eq!(
-            app.presentation().updater().details_title(),
-            "Last update failure"
-        );
-        assert_eq!(
-            app.presentation().updater().details(),
-            Some(details.as_str())
-        );
-        assert!(app
-            .complete_update_install(
-                &retry_operation,
-                Ok(UpdateInstallOutcome::Prepared(prepared()))
-            )
-            .is_none());
-
-        let retry = app.presentation().updater();
-        assert_eq!(
-            retry.action().map(SettingsAction::intent),
-            Some(SettingsIntent::PrepareUpdateInstall)
-        );
-    }
-
-    #[test]
-    fn checking_and_check_failure_mask_stale_result_and_install_failure() {
-        let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        let preparation = prepare(&mut app);
         app.complete_update_install(
             &preparation,
             Err(UpdateInstallFailure {
                 presentation: crate::presentation::brightness::UserFacingError::new(
-                    "Install failed",
-                    "Try again.",
+                    "Could not install update",
+                    "The installer failed.",
                 ),
-                diagnostic: "details".into(),
+                diagnostic: "installer failed".into(),
                 cancelled: false,
             }),
         )
         .unwrap();
-        let check_operation = app.handle_intent(SettingsIntent::CheckForUpdates).unwrap();
-        let checking = check_operation.presentation().updater();
-        assert_eq!(checking.title(), "Checking for updates…");
-        assert!(!checking.is_error());
-        assert_eq!(checking.release(), None);
-        assert_eq!(checking.warning(), None);
-        assert_eq!(checking.details_title(), "Last update failure");
-
-        let operation = check_operation.update_check_operation().unwrap();
-        let failed = app
-            .complete_update_check(
-                operation,
-                Err(crate::settings_view::UpdateCheckError::stopped()),
-            )
-            .unwrap();
-        let check_failed = failed.presentation().updater();
-        assert!(check_failed.is_error());
-        assert_eq!(check_failed.title(), "Update check stopped");
-        assert_eq!(
-            check_failed.action().map(SettingsAction::label),
-            Some("Retry check")
-        );
-        assert_eq!(check_failed.details_title(), "Last update failure");
+        let row = app.presentation().updater();
+        assert_eq!(row.title(), "Update available: 1.7.0");
+        assert_eq!(row.action().label(), "Install update…");
+        assert_eq!(row.action().intent(), SettingsIntent::PrepareUpdateInstall);
+        assert!(app.presentation().update_install().error().is_some());
     }
 
     #[test]
-    fn channel_mismatch_uses_check_and_matching_channel_uses_install() {
-        let mut app = application("prerelease");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        let mismatch = app.presentation().updater();
-        assert_eq!(
-            mismatch.action().map(SettingsAction::label),
-            Some("Check for updates")
-        );
-        assert_eq!(
-            mismatch.release().map(|release| release.version.as_str()),
-            Some("1.7.0")
-        );
-
+    fn completed_check_notices_are_one_shot_and_repeated_failures_are_sanitized() {
         let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
+        let up_to_date = complete_check(&mut app, Ok(report(UpdateChannel::Stable, false)));
         assert_eq!(
-            app.presentation()
-                .updater()
-                .action()
-                .map(SettingsAction::label),
-            Some("Install update…")
+            up_to_date.update_notice().unwrap().title(),
+            "Already up to date"
         );
-    }
-
-    #[test]
-    fn completed_check_without_release_clears_the_old_offer() {
-        let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        assert_eq!(
-            app.presentation()
-                .updater()
-                .action()
-                .map(SettingsAction::label),
-            Some("Install update…")
-        );
-
-        let operation = app
-            .handle_intent(SettingsIntent::CheckForUpdates)
-            .unwrap()
-            .update_check_operation()
-            .unwrap();
-        let mut current = report(UpdateChannel::Stable, false);
-        current.warning = Some("Cache warning".into());
-        app.complete_update_check(operation, Ok(current)).unwrap();
-        let no_update = app.presentation().updater();
-        assert_eq!(no_update.title(), "No newer release available");
-        assert_eq!(no_update.release(), None);
-        assert_eq!(
-            no_update.action().map(SettingsAction::label),
-            Some("Check for updates")
-        );
-        assert_eq!(no_update.warning(), Some("Cache warning"));
-    }
-
-    #[test]
-    fn a_new_successful_check_owns_the_card_but_keeps_the_old_diagnostic() {
-        let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        let preparation = prepare(&mut app);
-        app.complete_update_install(
-            &preparation,
-            Err(UpdateInstallFailure {
-                presentation: crate::presentation::brightness::UserFacingError::new(
-                    "Install failed",
-                    "Try again.",
-                ),
-                diagnostic: "installer diagnostic".into(),
-                cancelled: false,
-            }),
-        )
-        .unwrap();
-
-        let operation = app
-            .handle_intent(SettingsIntent::CheckForUpdates)
-            .unwrap()
-            .update_check_operation()
-            .unwrap();
-        let mut current = report(UpdateChannel::Stable, false);
-        current.warning = Some("Cache warning".into());
-        app.complete_update_check(operation, Ok(current)).unwrap();
-
-        let card = app.presentation().updater();
-        assert_eq!(card.title(), "No newer release available");
-        assert!(!card.is_error());
-        assert_eq!(
-            card.action().map(SettingsAction::label),
-            Some("Check for updates")
-        );
-        assert_eq!(card.warning(), Some("Cache warning"));
-        assert_eq!(card.details_title(), "Last update failure");
-        assert_eq!(card.details(), Some("installer diagnostic"));
-    }
-
-    #[test]
-    fn failed_install_with_changed_channel_offers_a_fresh_check() {
-        let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        let preparation = prepare(&mut app);
-        app.complete_update_install(
-            &preparation,
-            Err(UpdateInstallFailure {
-                presentation: crate::presentation::brightness::UserFacingError::new(
-                    "Install failed",
-                    "Try again.",
-                ),
-                diagnostic: "installer diagnostic".into(),
-                cancelled: false,
-            }),
-        )
-        .unwrap();
+        assert!(up_to_date.update_notice().unwrap().details().is_none());
 
         let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
-        app.complete_read(refresh.read_operation().unwrap(), Ok(groups("prerelease")))
+        let refresh = app
+            .complete_read(refresh.read_operation().unwrap(), Ok(groups("stable")))
             .unwrap();
-        let card = app.presentation().updater();
-        assert!(card.is_error());
-        assert_eq!(
-            card.action().map(SettingsAction::label),
-            Some("Check for updates")
-        );
-        assert_eq!(
-            card.action().map(SettingsAction::intent),
-            Some(SettingsIntent::CheckForUpdates)
-        );
-    }
+        assert!(refresh.update_notice().is_none());
 
-    #[test]
-    fn warning_is_only_visible_with_completed_check_and_restart_failure_keeps_retry() {
-        let mut app = application("stable");
-        let operation = app
-            .handle_intent(SettingsIntent::CheckForUpdates)
-            .unwrap()
-            .update_check_operation()
-            .unwrap();
-        let mut checked = report(UpdateChannel::Stable, false);
-        checked.warning = Some("Cache warning".into());
-        app.complete_update_check(operation, Ok(checked)).unwrap();
-        assert_eq!(
-            app.presentation().updater().warning(),
-            Some("Cache warning")
-        );
+        let error = || {
+            crate::settings_view::UpdateCheckError::from(crate::updates::UpdatesError::Http {
+                url: "https://user:pass@example.test/release".into(),
+                message: "token=secret".into(),
+            })
+        };
+        let first = complete_check(&mut app, Err(error()));
+        let first_notice = first.update_notice().unwrap();
+        assert_eq!(first_notice.title(), "Could not check for updates");
+        let first_details = first_notice.details().unwrap();
+        assert!(first_details.contains("Check your internet connection"));
+        assert!(!first_details.contains("secret"));
+        assert!(!first_details.contains("user:pass"));
 
-        let operation = app
-            .handle_intent(SettingsIntent::CheckForUpdates)
-            .unwrap()
-            .update_check_operation()
-            .unwrap();
-        assert_eq!(app.presentation().updater().warning(), None);
-        app.complete_update_check(
-            operation,
-            Err(crate::settings_view::UpdateCheckError::stopped()),
-        )
-        .unwrap();
-        assert_eq!(app.presentation().updater().warning(), None);
-
-        let mut app = application("stable");
-        check(&mut app, Ok(report(UpdateChannel::Stable, true)));
-        let preparation = prepare(&mut app);
-        app.complete_update_install(&preparation, Ok(UpdateInstallOutcome::Prepared(prepared())))
-            .unwrap();
-        let install = app
-            .handle_intent(SettingsIntent::ConfirmUpdateInstall)
-            .unwrap()
-            .update_install_operation()
-            .unwrap()
-            .clone();
-        let installed = InstalledUpdate::from_parts(
-            "1.7.0".parse().unwrap(),
-            UpdateChannel::Stable,
-            "v1.7.0",
-            "x86_64-unknown-linux-musl",
-            "a".repeat(40),
-            "/unused/lg-buddy",
-            "/unused/lg-buddy-gui",
-        );
-        let restarting = app
-            .complete_update_install(&install, Ok(UpdateInstallOutcome::Installed(installed)))
-            .unwrap();
-        let relaunch = restarting.update_install_operation().unwrap().clone();
-        app.complete_update_install(&relaunch, Err(UpdateInstallFailure::stopped()))
-            .unwrap();
-        let restart_failure = app.presentation().updater();
-        assert!(restart_failure.is_error());
-        assert_eq!(restart_failure.title(), "Update stopped");
-        assert_eq!(
-            restart_failure.action().map(SettingsAction::label),
-            Some("Retry restart")
-        );
-        assert_eq!(
-            restart_failure.action().map(SettingsAction::intent),
-            Some(SettingsIntent::RelaunchUpdatedApplication)
-        );
+        let second = complete_check(&mut app, Err(error()));
+        assert_eq!(second.update_notice(), first.update_notice());
     }
 }
