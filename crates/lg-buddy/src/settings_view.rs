@@ -762,6 +762,26 @@ mod tests {
     }
 
     #[test]
+    fn idle_controls_are_hidden_only_for_explicitly_disabled_blanking() {
+        for (config, visible) in [
+            ("", true),
+            ("screen_idle_blank=enabled\n", true),
+            ("screen_idle_blank=disabled\n", false),
+            ("screen_idle_blank=invalid\n", true),
+        ] {
+            let presentation = SettingsPresentation::ready(groups(config));
+            for setting in [
+                BehaviorSetting::ScreenBackend,
+                BehaviorSetting::ScreenIdleTimeout,
+            ] {
+                assert_eq!(presentation.row_visible(setting), visible, "{config}");
+            }
+            assert!(presentation.row_visible(BehaviorSetting::ScreenIdleBlank));
+            assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
+        }
+    }
+
+    #[test]
     fn persisted_values_use_friendly_labels_and_sources() {
         let groups = groups(
             "screen_backend=wayland\nscreen_idle_blank=disabled\nscreen_idle_timeout=450\nscreen_restore_policy=aggressive\nsystem_sleep_wake_policy=disabled\nupdates_auto_check=disabled\nupdates_channel=prerelease\n",
@@ -819,16 +839,16 @@ screen_backend=wayland\n",
         );
         let expected = [
             (
-                "screen.backend",
-                "Desktop integration",
-                "Automatic",
-                "Automatic, GNOME, Wayland, swayidle (deprecated)",
-            ),
-            (
                 "screen.idle_blank",
                 "Idle blanking",
                 "Enabled",
                 "Enabled, Disabled",
+            ),
+            (
+                "screen.backend",
+                "Desktop integration",
+                "Automatic",
+                "Automatic, GNOME, Wayland, swayidle (deprecated)",
             ),
             (
                 "screen.idle_timeout",
@@ -1347,6 +1367,9 @@ screen_backend=wayland\n",
             })
             .unwrap();
         let operation = transition.mutation_operation().unwrap().clone();
+        assert!(transition
+            .presentation()
+            .row_visible(BehaviorSetting::ScreenIdleTimeout));
         let transition = app
             .complete_mutation(
                 &operation,
@@ -1360,6 +1383,9 @@ screen_backend=wayland\n",
             .row(BehaviorSetting::ScreenIdleBlank)
             .unwrap();
         assert_eq!(row.edit_status(), SettingsEditStatus::PersistenceFailed);
+        assert!(transition
+            .presentation()
+            .row_visible(BehaviorSetting::ScreenIdleTimeout));
         assert!(row.retry_apply_action().is_some());
         let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
         let refreshed = app

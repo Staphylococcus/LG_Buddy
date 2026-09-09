@@ -107,6 +107,73 @@ mod tests {
     use crate::settings::{SettingSource, SettingsCommandRunner};
 
     #[test]
+    fn idle_control_visibility_follows_persistence_even_when_runtime_apply_fails() {
+        use crate::presentation::settings::SettingsPresentation;
+        use crate::settings_view::{BehaviorSetting, SettingsApplication, SettingsIntent};
+
+        let path = unique_test_path("idle-visibility");
+        std::fs::write(&path, "screen_backend=wayland\nscreen_idle_timeout=600\n").unwrap();
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(
+            opening.read_operation().unwrap(),
+            Ok(
+                SettingsPresentation::from_store(&SettingsStore::load(&path).unwrap())
+                    .groups()
+                    .to_vec(),
+            ),
+        )
+        .unwrap();
+
+        for enabled in [false, true] {
+            let started = app
+                .handle_intent(SettingsIntent::SetEnabled {
+                    setting: BehaviorSetting::ScreenIdleBlank,
+                    enabled,
+                })
+                .unwrap();
+            let operation = started.mutation_operation().unwrap();
+            let mutation = SettingsMutation::set(
+                &SettingsStore::load(&path).unwrap(),
+                "screen.idle_blank",
+                if enabled { "enabled" } else { "disabled" },
+            )
+            .unwrap();
+            let controller = if enabled {
+                FakeServiceController::active_or_enabled()
+            } else {
+                FakeServiceController::failing_restart()
+            };
+            let result = execute_settings_mutation(
+                &path,
+                mutation,
+                &SettingsApplier::new(controller),
+                &mut |_| {},
+            );
+            let done = app.complete_mutation(operation, result).unwrap();
+            let presentation = done.presentation();
+            assert_eq!(
+                presentation.row_visible(BehaviorSetting::ScreenBackend),
+                enabled
+            );
+            assert_eq!(
+                presentation.row_visible(BehaviorSetting::ScreenIdleTimeout),
+                enabled
+            );
+            assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
+            let toggle = presentation.groups()[0]
+                .rows()
+                .iter()
+                .find(|row| row.setting() == BehaviorSetting::ScreenIdleBlank)
+                .unwrap();
+            assert_eq!(toggle.retry_apply_action().is_some(), !enabled);
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(saved.contains("screen_backend=wayland\n"));
+            assert!(saved.contains("screen_idle_timeout=600\n"));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn shared_executor_and_cli_write_the_same_values_and_runtime_actions() {
         for (key, value, restarts, enables, disables) in [
             ("screen.backend", "gnome", 1, 0, 0),
