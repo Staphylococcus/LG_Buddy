@@ -171,9 +171,19 @@ GUI and terminal changes use the same saved configuration. See
 format, and compatibility behavior.
 
 <a id="updates"></a>
-## Install an update
+## Check for and install an update
 
-To see whether an update is available, run:
+In **Settings → Updates**, choose **Check for updates**. This works even when
+automatic checks are off and uses your saved release channel. The app shows
+the installed version, then an available version with a release link or a
+message that no newer release is available. If a check fails, use **Retry check**.
+
+The last successful result stays labelled with the channel and installed version
+it checked, including while you change channels or retry. A cache warning can
+appear alongside a successful result; it does not mean the release check failed.
+Checking does not install anything or change your update preferences.
+
+The terminal equivalent is:
 
 ```bash
 lg-buddy updates check

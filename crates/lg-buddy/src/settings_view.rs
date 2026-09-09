@@ -9,6 +9,7 @@ use crate::presentation::settings::{
     SettingsEditStatus, SettingsEditor, SettingsFeedback, SettingsFeedbackSeverity, SettingsGroup,
     SettingsPresentation, SettingsRow,
 };
+use crate::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
 use crate::settings::{
     execute_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
     SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
@@ -57,6 +58,7 @@ impl BehaviorSetting {
 pub enum SettingsIntent {
     Retry,
     Refresh,
+    CheckForUpdates,
     SetEnabled {
         setting: BehaviorSetting,
         enabled: bool,
@@ -113,6 +115,51 @@ impl SettingsMutationOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsReadOperation(u64);
 
+/// Opaque identity for a manual check, independent of settings reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateCheckOperation(u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheckError {
+    presentation: UserFacingError,
+    diagnostic: String,
+}
+
+impl UpdateCheckError {
+    pub fn stopped() -> Self {
+        Self {
+            presentation: UserFacingError::new(
+                "Update check stopped",
+                "The check did not finish. Try again.",
+            ),
+            diagnostic: "the update check worker stopped before returning a result".into(),
+        }
+    }
+}
+
+impl From<crate::updates::UpdatesError> for UpdateCheckError {
+    fn from(error: crate::updates::UpdatesError) -> Self {
+        use crate::updates::UpdatesError;
+        let detail = match &error {
+            UpdatesError::Settings(_) | UpdatesError::SettingsInvariant(_) => {
+                "Check the saved Update channel in Settings, then try again."
+            }
+            UpdatesError::Http { .. } => "Check your internet connection, then try again.",
+            UpdatesError::ApiStatus { status: 403 | 429, .. } => {
+                "The release service refused the request. Try again later."
+            }
+            UpdatesError::InvalidLocalVersion { .. } => {
+                "The installed version could not be compared. Install a supported LG Buddy release."
+            }
+            _ => "Release information could not be retrieved. Try again; if this continues, check the LG Buddy logs.",
+        };
+        Self {
+            presentation: UserFacingError::new("Could not check for updates", detail),
+            diagnostic: error.to_string(),
+        }
+    }
+}
+
 impl SettingsReadOperation {
     pub(crate) fn new(id: u64) -> Self {
         Self(id)
@@ -124,6 +171,7 @@ pub struct SettingsTransition {
     presentation: SettingsPresentation,
     read_operation: Option<SettingsReadOperation>,
     mutation_operation: Option<SettingsMutationOperation>,
+    update_check_operation: Option<UpdateCheckOperation>,
     diagnostic: Option<String>,
 }
 
@@ -138,6 +186,10 @@ impl SettingsTransition {
 
     pub fn mutation_operation(&self) -> Option<&SettingsMutationOperation> {
         self.mutation_operation.as_ref()
+    }
+
+    pub fn update_check_operation(&self) -> Option<UpdateCheckOperation> {
+        self.update_check_operation
     }
 
     pub fn diagnostic(&self) -> Option<&str> {
@@ -198,6 +250,8 @@ impl Error for SettingsReadError {}
 pub trait SettingsBackend: Send + Sync + 'static {
     fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError>;
 
+    fn check_for_updates(&self) -> Result<UpdateCheckReport, UpdateCheckError>;
+
     fn write_setting(
         &self,
         operation: SettingsMutationOperation,
@@ -209,6 +263,22 @@ pub trait SettingsBackend: Send + Sync + 'static {
 pub struct EnvironmentSettingsBackend;
 
 impl SettingsBackend for EnvironmentSettingsBackend {
+    fn check_for_updates(&self) -> Result<UpdateCheckReport, UpdateCheckError> {
+        let outcome = crate::updates::check_for_updates()?;
+        let result = outcome.result();
+        Ok(UpdateCheckReport {
+            installed_version: result.current_version().to_string(),
+            channel: result.check_channel(),
+            available_release: result.update_available().then(|| AvailableUpdate {
+                version: result.latest().version().to_string(),
+                url: result.latest().url().to_owned(),
+            }),
+            warning: (!outcome.warnings().is_empty()).then(|| {
+                "The release check succeeded, but its cache could not be read or saved. A later check may need to download the release information again.".into()
+            }),
+        })
+    }
+
     fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
         let store = SettingsStore::load_from_env()
             .map_err(|error| SettingsReadError::unreadable(error.to_string()))?;
@@ -267,6 +337,7 @@ pub struct SettingsApplication {
     pending_mutation: Option<PendingMutation>,
     queued_mutations: VecDeque<PendingMutation>,
     reconcile_mutation: Option<PendingMutation>,
+    pending_update_check: Option<UpdateCheckOperation>,
 }
 
 impl SettingsApplication {
@@ -283,11 +354,13 @@ impl SettingsApplication {
                 pending_mutation: None,
                 queued_mutations: VecDeque::new(),
                 reconcile_mutation: None,
+                pending_update_check: None,
             },
             SettingsTransition {
                 presentation,
                 read_operation: Some(operation),
                 mutation_operation: None,
+                update_check_operation: None,
                 diagnostic: None,
             },
         )
@@ -298,6 +371,18 @@ impl SettingsApplication {
             return None;
         }
         match intent {
+            SettingsIntent::CheckForUpdates
+                if self.pending_update_check.is_none()
+                    && !self.presentation.groups().is_empty() =>
+            {
+                let operation = UpdateCheckOperation(self.next_operation_id);
+                self.next_operation_id += 1;
+                self.pending_update_check = Some(operation);
+                self.presentation.update_check_mut().start();
+                let mut transition = self.transition(None, None, None);
+                transition.update_check_operation = Some(operation);
+                Some(transition)
+            }
             SettingsIntent::Retry if matches!(self.state, SettingsApplicationState::Failed) => {
                 Some(self.begin_read())
             }
@@ -411,7 +496,9 @@ impl SettingsApplication {
                 )
             }
         };
+        let update_check = self.presentation.update_check().clone();
         self.presentation = presentation;
+        *self.presentation.update_check_mut() = update_check;
         if matches!(self.state, SettingsApplicationState::Ready) {
             self.finish_mutation(None, diagnostic)
         } else {
@@ -491,6 +578,22 @@ impl SettingsApplication {
         }
     }
 
+    pub fn complete_update_check(
+        &mut self,
+        operation: UpdateCheckOperation,
+        result: Result<UpdateCheckReport, UpdateCheckError>,
+    ) -> Option<SettingsTransition> {
+        if self.closed || self.pending_update_check != Some(operation) {
+            return None;
+        }
+        self.pending_update_check = None;
+        let diagnostic = result.as_ref().err().map(|error| error.diagnostic.clone());
+        self.presentation
+            .update_check_mut()
+            .complete(result.map_err(|error| error.presentation));
+        Some(self.transition(None, None, diagnostic))
+    }
+
     pub fn mutation_worker_stopped(
         &mut self,
         operation: &SettingsMutationOperation,
@@ -558,6 +661,7 @@ impl SettingsApplication {
             presentation: self.presentation.clone(),
             read_operation: Some(operation),
             mutation_operation: None,
+            update_check_operation: None,
             diagnostic: None,
         }
     }
@@ -569,7 +673,9 @@ impl SettingsApplication {
     ) -> Option<SettingsTransition> {
         let previous_row = self.presentation.row(setting)?.clone();
         if matches!(self.state, SettingsApplicationState::Loading(_)) {
+            let update_check = self.presentation.update_check().clone();
             self.presentation = SettingsPresentation::ready(self.presentation.groups().to_vec());
+            *self.presentation.update_check_mut() = update_check;
         }
         let operation = SettingsMutationOperation::new(self.next_operation_id, setting, request);
         self.next_operation_id += 1;
@@ -633,6 +739,7 @@ impl SettingsApplication {
             presentation: self.presentation.clone(),
             read_operation,
             mutation_operation,
+            update_check_operation: None,
             diagnostic,
         }
     }
@@ -779,6 +886,168 @@ mod tests {
             assert!(presentation.row_visible(BehaviorSetting::ScreenIdleBlank));
             assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
         }
+    }
+
+    fn update_report(channel: crate::updates::UpdateChannel) -> UpdateCheckReport {
+        UpdateCheckReport {
+            installed_version: "1.6.0".into(),
+            channel,
+            available_release: Some(AvailableUpdate {
+                version: "1.7.0".into(),
+                url: "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0".into(),
+            }),
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn manual_check_is_independent_of_auto_checks_edits_and_refreshes() {
+        use crate::updates::UpdateChannel;
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(
+            opening.read_operation().unwrap(),
+            Ok(groups(
+                "updates_auto_check=disabled\nupdates_channel=stable\n",
+            )),
+        )
+        .unwrap();
+        let checking = app.handle_intent(SettingsIntent::CheckForUpdates).unwrap();
+        let operation = checking.update_check_operation().unwrap();
+        assert!(checking.presentation().update_check().checking());
+        assert!(!checking
+            .presentation()
+            .update_check()
+            .check_action()
+            .enabled());
+        assert!(checking.mutation_operation().is_none());
+        assert!(!app.is_mutating());
+        assert!(app.handle_intent(SettingsIntent::CheckForUpdates).is_none());
+
+        // A refresh can observe a newer saved channel while discovery is in flight.
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        app.complete_read(
+            refresh.read_operation().unwrap(),
+            Ok(groups(
+                "updates_auto_check=disabled\nupdates_channel=prerelease\n",
+            )),
+        )
+        .unwrap();
+        assert!(app.presentation().update_check().checking());
+        let completed = app
+            .complete_update_check(operation, Ok(update_report(UpdateChannel::Stable)))
+            .unwrap();
+        let result = completed.presentation().update_check().result().unwrap();
+        assert_eq!(result.channel, UpdateChannel::Stable);
+        assert!(result.description().contains("stable channel"));
+        assert_eq!(
+            completed
+                .presentation()
+                .row(BehaviorSetting::UpdatesChannel)
+                .unwrap()
+                .value_label(),
+            "Prerelease"
+        );
+        assert_eq!(
+            completed
+                .presentation()
+                .row(BehaviorSetting::UpdatesAutoCheck)
+                .unwrap()
+                .value_label(),
+            "Disabled"
+        );
+
+        let previous = completed.presentation().update_check().clone();
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let edit = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::UpdatesChannel,
+                value: "stable".into(),
+            })
+            .unwrap();
+        assert_eq!(edit.presentation().update_check(), &previous);
+        assert!(app
+            .complete_read(refresh.read_operation().unwrap(), Ok(groups("")))
+            .is_none());
+        assert!(app
+            .complete_update_check(operation, Ok(update_report(UpdateChannel::Prerelease)))
+            .is_none());
+    }
+
+    #[test]
+    fn retry_retains_last_channel_result_and_ignores_stale_or_closed_checks() {
+        use crate::updates::UpdateChannel;
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let first = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        app.complete_update_check(first, Ok(update_report(UpdateChannel::Stable)))
+            .unwrap();
+        let second = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        assert!(app.presentation().update_check().result().is_some());
+        assert!(app
+            .complete_update_check(first, Err(UpdateCheckError::stopped()))
+            .is_none());
+        let failed = app
+            .complete_update_check(second, Err(UpdateCheckError::stopped()))
+            .unwrap();
+        assert!(failed.presentation().update_check().error().is_some());
+        assert!(failed
+            .presentation()
+            .update_check()
+            .check_action()
+            .enabled());
+        assert_eq!(
+            failed
+                .presentation()
+                .update_check()
+                .result()
+                .unwrap()
+                .channel,
+            UpdateChannel::Stable
+        );
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        app.complete_read(
+            refresh.read_operation().unwrap(),
+            Err(SettingsReadError::unreadable("test")),
+        )
+        .unwrap();
+        let retry = app.handle_intent(SettingsIntent::Retry).unwrap();
+        app.complete_read(retry.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        assert!(app.presentation().update_check().error().is_some());
+        let third = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        let mut current = update_report(UpdateChannel::Prerelease);
+        current.available_release = None;
+        current.warning = Some("Cache could not be saved.".into());
+        let done = app
+            .complete_update_check(third, Ok(current.clone()))
+            .unwrap();
+        assert_eq!(done.presentation().update_check().result(), Some(&current));
+        assert!(done.presentation().update_check().error().is_none());
+        assert_eq!(current.title(), "No newer release available");
+        let last = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        app.shutdown();
+        assert!(app
+            .complete_update_check(last, Err(UpdateCheckError::stopped()))
+            .is_none());
+        assert!(app.handle_intent(SettingsIntent::CheckForUpdates).is_none());
     }
 
     #[test]

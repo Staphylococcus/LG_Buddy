@@ -5,10 +5,9 @@ development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
 > The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
-> About. The broader GUI
-> first-run, runtime/service, and update state surface is deferred to
-> `v1.7.0` and [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129);
-> its runtime and service contents are still TBD.
+> About. The development tree also provides manual update checks in Settings.
+> First-run completion, update installation, and on-demand diagnostics remain
+> tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Boundary
 
@@ -182,12 +181,22 @@ values while hiding them; Restore policy remains visible because it also
 governs restoration outside idle blanking. Invalid blanking values keep the
 dependent controls available for diagnosis.
 
-Settings displays configured values only; there is no separate GUI surface for
-a resolved screen backend, service health, runtime state, update availability,
-or update progress. Normal successful changes are silent. Feedback appears
+Settings also offers **Check for updates** in the Updates group, including the
+installed version. An explicit check uses the saved channel independently of
+automatic checks, reusing the CLI's discovery, comparison, and cache policy.
+The application owns checking, available-release, no-newer-release, failure,
+and cache-warning presentation. It rejects duplicate checks and retains the last
+successful result with the channel and version actually checked across settings
+refreshes and edits. GTK runs the declared operation off the UI thread and renders
+its result, retry action, and native release link. A check neither installs an
+update nor changes preferences or sends a desktop notification.
+
+There is no separate GUI surface for a resolved screen backend, service health,
+runtime state, or update installation progress. Normal successful setting changes
+are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
 an apply warning keeps the saved value and can offer **Retry apply**. The
-broader runtime/service and update state UI is deferred as described at the top
+broader diagnostics and update installation UI is deferred as described at the top
 of this document.
 
 The main menu's **About LG Buddy** action is implemented by the native

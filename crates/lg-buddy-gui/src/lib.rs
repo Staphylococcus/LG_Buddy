@@ -28,7 +28,8 @@ use lg_buddy::pairing::{
 };
 use lg_buddy::settings_view::{
     EnvironmentSettingsBackend, SettingsBackend, SettingsIntent, SettingsMutationOperation,
-    SettingsReadError, SettingsReadOperation, SettingsTransition,
+    SettingsReadError, SettingsReadOperation, SettingsTransition, UpdateCheckError,
+    UpdateCheckOperation,
 };
 use lg_buddy::tvs::{
     EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
@@ -330,6 +331,37 @@ impl ApplicationController {
         if let Some(operation) = transition.mutation_operation() {
             Self::start_settings_mutation(controller, operation.clone());
         }
+        if let Some(operation) = transition.update_check_operation() {
+            Self::start_update_check(controller, operation);
+        }
+    }
+
+    fn start_update_check(controller: &Rc<Self>, operation: UpdateCheckOperation) {
+        let backend = Arc::clone(&controller.settings_backend);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.check_for_updates());
+        });
+        // A read must not keep the application alive after its window closes.
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let Some(controller) = controller.upgrade().filter(|value| !value.closed.get()) else {
+                return glib::ControlFlow::Break;
+            };
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(UpdateCheckError::stopped()),
+            };
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_update_check(operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn start_settings_mutation(controller: &Rc<Self>, operation: SettingsMutationOperation) {
@@ -789,6 +821,15 @@ pub(crate) mod controller_test_support {
     struct DefaultSettingsBackend;
 
     impl lg_buddy::settings_view::SettingsBackend for DefaultSettingsBackend {
+        fn check_for_updates(
+            &self,
+        ) -> Result<
+            lg_buddy::presentation::update_check::UpdateCheckReport,
+            lg_buddy::settings_view::UpdateCheckError,
+        > {
+            panic!("unexpected update check")
+        }
+
         fn write_setting(
             &self,
             _operation: lg_buddy::settings_view::SettingsMutationOperation,
@@ -1060,6 +1101,7 @@ pub(crate) mod controller_test_support {
         run_pairing_scenario();
         run_settings_scenario();
         run_settings_write_scenario();
+        run_manual_update_check_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -1228,6 +1270,15 @@ pub(crate) mod controller_test_support {
             Mutex<std::collections::VecDeque<Result<Vec<SettingsGroup>, SettingsReadError>>>,
         );
         impl SettingsBackend for SettingsMock {
+            fn check_for_updates(
+                &self,
+            ) -> Result<
+                lg_buddy::presentation::update_check::UpdateCheckReport,
+                lg_buddy::settings_view::UpdateCheckError,
+            > {
+                panic!("unexpected update check")
+            }
+
             fn write_setting(
                 &self,
                 _operation: lg_buddy::settings_view::SettingsMutationOperation,
@@ -1311,6 +1362,192 @@ pub(crate) mod controller_test_support {
         controller.window.close();
     }
 
+    fn run_manual_update_check_scenario() {
+        use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+        use lg_buddy::settings_view::{SettingsBackend, UpdateCheckError};
+        use lg_buddy::updates::UpdateChannel;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Checker {
+            path: std::path::PathBuf,
+            started: mpsc::Sender<UpdateChannel>,
+            replies: Mutex<mpsc::Receiver<Result<bool, UpdateCheckError>>>,
+            calls: AtomicUsize,
+        }
+        impl SettingsBackend for Checker {
+            fn read_settings(
+                &self,
+            ) -> Result<
+                Vec<lg_buddy::presentation::settings::SettingsGroup>,
+                lg_buddy::settings_view::SettingsReadError,
+            > {
+                Ok(
+                    lg_buddy::presentation::settings::SettingsPresentation::from_store(
+                        &lg_buddy::settings::SettingsStore::load(&self.path).unwrap(),
+                    )
+                    .groups()
+                    .to_vec(),
+                )
+            }
+
+            fn write_setting(
+                &self,
+                _: lg_buddy::settings_view::SettingsMutationOperation,
+                _: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+            ) -> Result<
+                lg_buddy::settings::SettingsMutationOutcome,
+                lg_buddy::settings::SettingsMutationFailure,
+            > {
+                panic!("checking must not change preferences or services")
+            }
+
+            fn check_for_updates(&self) -> Result<UpdateCheckReport, UpdateCheckError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let store = lg_buddy::settings::SettingsStore::load(&self.path).unwrap();
+                let channel = match store
+                    .effective_by_name("updates.channel")
+                    .unwrap()
+                    .required_value()
+                    .unwrap()
+                    .as_enum()
+                    .unwrap()
+                {
+                    "stable" => UpdateChannel::Stable,
+                    "prerelease" => UpdateChannel::Prerelease,
+                    _ => unreachable!(),
+                };
+                self.started.send(channel).unwrap();
+                let available = self.replies.lock().unwrap().recv().unwrap()?;
+                Ok(UpdateCheckReport {
+                    installed_version: "1.6.0".into(),
+                    channel,
+                    available_release: available.then(|| AvailableUpdate {
+                        version: "1.7.0".into(),
+                        url: "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0"
+                            .into(),
+                    }),
+                    warning: None,
+                })
+            }
+        }
+
+        fn find_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                if button.label().as_deref() == Some(label) && button.is_visible() {
+                    return Some(button.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(button) = find_button(&widget, label) {
+                    return Some(button);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+
+        let path =
+            std::env::temp_dir().join(format!("lg-buddy-update-check-{}.env", std::process::id()));
+        std::fs::write(
+            &path,
+            "updates_auto_check=disabled\nupdates_channel=stable\n",
+        )
+        .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let backend = Arc::new(Checker {
+            path: path.clone(),
+            started: started_tx,
+            replies: Mutex::new(reply_rx),
+            calls: AtomicUsize::new(0),
+        });
+        let application = test_application("ManualUpdates");
+        let (controller, opening) = ApplicationController::new(
+            &application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            backend.clone(),
+        );
+        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        controller.present();
+        let native = controller.window.window();
+        pump_until(|| find_button(native.upcast_ref(), "Check for updates").is_some());
+        let check = find_button(native.upcast_ref(), "Check for updates").unwrap();
+        check.emit_clicked();
+        pump_until(|| backend.calls.load(Ordering::SeqCst) == 1);
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            UpdateChannel::Stable
+        );
+        assert!(!check.is_sensitive());
+        ApplicationController::handle_settings_intent(
+            &controller,
+            lg_buddy::settings_view::SettingsIntent::CheckForUpdates,
+        );
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+
+        // Navigation and refresh remain responsive while the worker is blocked.
+        std::fs::write(
+            &path,
+            "updates_auto_check=disabled\nupdates_channel=prerelease\n",
+        )
+        .unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        controller.window.choose_page(super::ApplicationPage::Tvs);
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        pump_until(|| widget_contains_text(native.upcast_ref(), "Prerelease"));
+        reply_tx.send(Ok(true)).unwrap();
+        pump_until(|| widget_contains_text(native.upcast_ref(), "Update available: 1.7.0"));
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Last successful check: stable channel, compared with installed version 1.6.0."
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+
+        check.emit_clicked();
+        pump_until(|| backend.calls.load(Ordering::SeqCst) == 2);
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            UpdateChannel::Prerelease
+        );
+        reply_tx
+            .send(Err(lg_buddy::updates::UpdatesError::Http {
+                url: "https://api.github.com".into(),
+                message: "test offline".into(),
+            }
+            .into()))
+            .unwrap();
+        pump_until(|| find_button(native.upcast_ref(), "Retry check").is_some());
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Could not check for updates"
+        ));
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Update available: 1.7.0"
+        ));
+        find_button(native.upcast_ref(), "Retry check")
+            .unwrap()
+            .emit_clicked();
+        pump_until(|| backend.calls.load(Ordering::SeqCst) == 3);
+        reply_tx.send(Ok(false)).unwrap();
+        pump_until(|| widget_contains_text(native.upcast_ref(), "No newer release available"));
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Last successful check: prerelease channel, compared with installed version 1.6.0."
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+        controller.shutdown();
+        controller.window.close();
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn run_settings_write_scenario() {
         use adw::prelude::{ComboRowExt, PreferencesRowExt};
         use lg_buddy::settings::{
@@ -1327,6 +1564,15 @@ pub(crate) mod controller_test_support {
             panic_after_save: bool,
         }
         impl lg_buddy::settings_view::SettingsBackend for SettingsWriter {
+            fn check_for_updates(
+                &self,
+            ) -> Result<
+                lg_buddy::presentation::update_check::UpdateCheckReport,
+                lg_buddy::settings_view::UpdateCheckError,
+            > {
+                panic!("unexpected update check")
+            }
+
             fn read_settings(
                 &self,
             ) -> Result<

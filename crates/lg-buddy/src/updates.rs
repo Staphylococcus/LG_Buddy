@@ -849,6 +849,22 @@ pub struct UpdateCheckResult {
 }
 
 impl UpdateCheckResult {
+    pub fn check_channel(&self) -> UpdateChannel {
+        self.check_channel
+    }
+
+    pub fn current_version(&self) -> &Version {
+        &self.current_version
+    }
+
+    pub fn current_channel(&self) -> ReleaseChannel {
+        self.current_channel
+    }
+
+    pub fn latest(&self) -> &ReleaseInfo {
+        &self.latest
+    }
+
     pub fn update_available(&self) -> bool {
         self.latest.version > self.current_version
     }
@@ -883,6 +899,22 @@ impl UpdateCheckResult {
             self.latest.channel(),
             self.latest.url().to_string(),
         )
+    }
+}
+
+#[derive(Debug)]
+pub struct UpdateCheckOutcome {
+    result: UpdateCheckResult,
+    warnings: Vec<UpdatesDeferredFailure>,
+}
+
+impl UpdateCheckOutcome {
+    pub fn result(&self) -> &UpdateCheckResult {
+        &self.result
+    }
+
+    pub fn warnings(&self) -> &[UpdatesDeferredFailure] {
+        &self.warnings
     }
 }
 
@@ -1229,6 +1261,20 @@ pub fn run_updates_command<W: io::Write>(
     run_updates_command_with_update_settings(command, writer, context)
 }
 
+pub fn check_for_updates() -> Result<UpdateCheckOutcome, UpdatesError> {
+    let client = UreqGitHubReleasesClient::default();
+    let cache_store = DefaultUpdateCacheStore::from_env();
+    let update_settings = EnvUpdateSettings::from_env()?;
+
+    run_update_check(
+        VersionInfo::current(),
+        &client,
+        &cache_store,
+        &update_settings,
+        current_unix_seconds(),
+    )
+}
+
 pub(crate) fn discover_install_candidate(
     current: VersionInfo,
 ) -> Result<ReleaseInfo, UpdatesError> {
@@ -1282,6 +1328,63 @@ struct UpdatesRunContext<'a, C, N, S, U> {
     now_unix_seconds: u64,
 }
 
+struct PreparedUpdateCheck {
+    result: UpdateCheckResult,
+    cache: UpdateCheckCache,
+    deferred_failures: Vec<UpdatesDeferredFailure>,
+}
+
+fn prepare_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
+    version: VersionInfo,
+    client: &C,
+    cache_store: &S,
+    update_settings: &U,
+    now_unix_seconds: u64,
+) -> Result<PreparedUpdateCheck, UpdatesError> {
+    let channel = update_settings.channel()?;
+    let mut deferred_failures = Vec::new();
+    let mut cache = match cache_store.load() {
+        Ok(cache) => cache,
+        Err(err) => {
+            deferred_failures.push(UpdatesDeferredFailure::Cache(Box::new(err)));
+            UpdateCheckCache::default()
+        }
+    };
+    let result = check_updates_with_cache(channel, version, client, &mut cache, now_unix_seconds)?;
+
+    Ok(PreparedUpdateCheck {
+        result,
+        cache,
+        deferred_failures,
+    })
+}
+
+fn run_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
+    version: VersionInfo,
+    client: &C,
+    cache_store: &S,
+    update_settings: &U,
+    now_unix_seconds: u64,
+) -> Result<UpdateCheckOutcome, UpdatesError> {
+    let mut prepared = prepare_update_check(
+        version,
+        client,
+        cache_store,
+        update_settings,
+        now_unix_seconds,
+    )?;
+    if let Err(err) = cache_store.save(&prepared.cache) {
+        prepared
+            .deferred_failures
+            .push(UpdatesDeferredFailure::Cache(Box::new(err)));
+    }
+
+    Ok(UpdateCheckOutcome {
+        result: prepared.result,
+        warnings: prepared.deferred_failures,
+    })
+}
+
 fn run_updates_command_with_update_settings<
     W: io::Write,
     C: GitHubReleasesClient,
@@ -1300,22 +1403,14 @@ fn run_updates_command_with_update_settings<
         return Ok(());
     }
     let notify = command.notify();
-    let channel = context.update_settings.channel()?;
-    let mut deferred_failures = Vec::new();
-    let mut cache = match context.cache_store.load() {
-        Ok(cache) => cache,
-        Err(err) => {
-            deferred_failures.push(UpdatesDeferredFailure::Cache(Box::new(err)));
-            UpdateCheckCache::default()
-        }
-    };
-    let result = check_updates_with_cache(
-        channel,
+    let mut prepared = prepare_update_check(
         context.version,
         context.client,
-        &mut cache,
+        context.cache_store,
+        context.update_settings,
         context.now_unix_seconds,
     )?;
+    let result = &prepared.result;
 
     writer.write_all(result.render().as_bytes())?;
     let notification_decision =
@@ -1323,7 +1418,8 @@ fn run_updates_command_with_update_settings<
             notify_requested: notify,
             update_available: result.update_available(),
             latest: &result.latest,
-            last_notification: cache
+            last_notification: prepared
+                .cache
                 .entry(result.check_channel)
                 .and_then(|entry| entry.last_notification.as_ref()),
         });
@@ -1334,7 +1430,7 @@ fn run_updates_command_with_update_settings<
                 .and_then(|request| context.notifier.show_update_notification(&request));
             match notification_result {
                 Ok(_) => {
-                    cache.record_notification(
+                    prepared.cache.record_notification(
                         result.check_channel,
                         &result.latest,
                         context.now_unix_seconds,
@@ -1343,7 +1439,9 @@ fn run_updates_command_with_update_settings<
                 }
                 Err(err) => {
                     writer.write_all(render_update_notification_failure(reason).as_bytes())?;
-                    deferred_failures.push(UpdatesDeferredFailure::Notification(err));
+                    prepared
+                        .deferred_failures
+                        .push(UpdatesDeferredFailure::Notification(err));
                 }
             }
         }
@@ -1355,12 +1453,14 @@ fn run_updates_command_with_update_settings<
             }
         }
     }
-    if let Err(err) = context.cache_store.save(&cache) {
-        deferred_failures.push(UpdatesDeferredFailure::Cache(Box::new(err)));
+    if let Err(err) = context.cache_store.save(&prepared.cache) {
+        prepared
+            .deferred_failures
+            .push(UpdatesDeferredFailure::Cache(Box::new(err)));
     }
 
-    if !deferred_failures.is_empty() {
-        return Err(UpdatesError::DeferredFailures(deferred_failures));
+    if !prepared.deferred_failures.is_empty() {
+        return Err(UpdatesError::DeferredFailures(prepared.deferred_failures));
     }
 
     Ok(())
@@ -1545,15 +1645,15 @@ mod tests {
     use super::{
         atomic_write_file, check_updates, check_updates_with_cache,
         discover_install_candidate_with, evaluate_update_notification_policy,
-        parse_release_version, resolve_update_cache_path, run_updates_command_with,
-        run_updates_command_with_update_settings, CachedReleaseInfo, CachedUpdateCheck,
-        CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings, FileUpdateCacheStore,
-        GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset, ReleaseEndpoint, ReleaseInfo,
-        StaticUpdateSettings, UpdateCachePathError, UpdateCachePathSources, UpdateCacheStore,
-        UpdateChannel, UpdateCheckCache, UpdateNotificationDecision, UpdateNotificationPolicyInput,
-        UpdateNotificationReason, UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand,
-        UpdatesDeferredFailure, UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient,
-        MAX_GITHUB_RESPONSE_BYTES,
+        parse_release_version, resolve_update_cache_path, run_update_check,
+        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
+        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
+        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset,
+        ReleaseEndpoint, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
+        UpdateCachePathSources, UpdateCacheStore, UpdateChannel, UpdateCheckCache,
+        UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
+        UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand, UpdatesDeferredFailure,
+        UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -3185,6 +3285,243 @@ mod tests {
                 "lg-buddy/1.1.0".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn manual_update_outcome_uses_saved_channel_when_auto_check_is_disabled() {
+        for automatic_checks in ["disabled", "bogus"] {
+            for (channel, response, endpoint, expected_version) in [
+                (
+                    UpdateChannel::Stable,
+                    stable_release("v1.1.1"),
+                    "https://api.example.test/releases/latest",
+                    "1.1.1",
+                ),
+                (
+                    UpdateChannel::Prerelease,
+                    format!("[{}]", prerelease("v1.2.0-beta.1")),
+                    "https://api.example.test/releases?per_page=1",
+                    "1.2.0-beta.1",
+                ),
+            ] {
+                let config = format!(
+                    "updates_auto_check={automatic_checks}\nupdates_channel={}\n",
+                    channel.as_str()
+                );
+                let config_dir = unique_temp_dir("manual-update-settings");
+                let config_path = config_dir.join("config.env");
+                fs::write(&config_path, &config).expect("write update settings");
+                let settings = EnvUpdateSettings {
+                    store: SettingsStore::load(&config_path).expect("load update settings"),
+                };
+                let client = MockGitHubReleasesClient::new(vec![Ok(response)]);
+                let cache_store = MemoryUpdateCacheStore::default();
+
+                let outcome = run_update_check(
+                    version_info("1.1.0", ReleaseChannel::Stable),
+                    &client,
+                    &cache_store,
+                    &settings,
+                    TEST_NOW,
+                )
+                .expect("manual update check should use saved settings");
+
+                assert_eq!(outcome.result().check_channel(), channel);
+                assert_eq!(
+                    outcome.result().current_version(),
+                    &Version::parse("1.1.0").unwrap()
+                );
+                assert_eq!(outcome.result().current_channel(), ReleaseChannel::Stable);
+                assert_eq!(
+                    outcome.result().latest().version(),
+                    &Version::parse(expected_version).unwrap()
+                );
+                assert!(outcome.result().update_available());
+                assert!(outcome.warnings().is_empty());
+                assert_eq!(
+                    client.requests(),
+                    vec![(endpoint.to_string(), "lg-buddy/1.1.0".to_string())]
+                );
+
+                let cli_client =
+                    MockGitHubReleasesClient::new(vec![Ok(if channel == UpdateChannel::Stable {
+                        stable_release("v1.1.1")
+                    } else {
+                        format!("[{}]", prerelease("v1.2.0-beta.1"))
+                    })]);
+                let cli_notifier = RecordingNotifier::default();
+                let cli_cache_store = MemoryUpdateCacheStore::default();
+                let mut cli_output = Vec::new();
+                run_updates_command_with_update_settings(
+                    check(),
+                    &mut cli_output,
+                    updates_run_context(
+                        version_info("1.1.0", ReleaseChannel::Stable),
+                        &cli_client,
+                        &cli_notifier,
+                        &cli_cache_store,
+                        &settings,
+                        TEST_NOW,
+                    ),
+                )
+                .expect("equivalent CLI update check should succeed");
+                assert_eq!(rendered(&cli_output), outcome.result().render());
+                assert!(cli_notifier.notifications().is_empty());
+                assert_eq!(
+                    fs::read(&config_path).expect("read update settings"),
+                    config.as_bytes()
+                );
+
+                fs::remove_dir_all(config_dir).expect("remove update settings temp dir");
+            }
+        }
+    }
+
+    #[test]
+    fn manual_update_outcome_reuses_cached_not_modified_release() {
+        let client =
+            MockGitHubReleasesClient::new_responses(vec![Ok(GitHubReleaseResponse::NotModified)]);
+        let mut cache = UpdateCheckCache::default();
+        cache.set_entry(
+            UpdateChannel::Prerelease,
+            cached_entry(
+                Some("\"prerelease-etag\""),
+                "1.2.0-beta.1",
+                UpdateChannel::Prerelease,
+                "https://github.test/releases/tag/v1.2.0-beta.1",
+                TEST_NOW - 10,
+            ),
+        );
+        let cache_store = MemoryUpdateCacheStore::with_cache(cache);
+        let settings = StaticUpdateSettings::disabled(UpdateChannel::Prerelease);
+
+        let outcome = run_update_check(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &cache_store,
+            &settings,
+            TEST_NOW,
+        )
+        .expect("cached 304 update check should succeed");
+
+        assert_eq!(
+            outcome.result().latest().version(),
+            &Version::parse("1.2.0-beta.1").unwrap()
+        );
+        assert!(outcome.result().update_available());
+        assert!(outcome.warnings().is_empty());
+        assert_eq!(
+            client.requests_with_etags(),
+            vec![(
+                "https://api.example.test/releases?per_page=1".to_string(),
+                "lg-buddy/1.1.0".to_string(),
+                Some("\"prerelease-etag\"".to_string()),
+            )]
+        );
+        assert_eq!(
+            cache_store
+                .cache()
+                .entry(UpdateChannel::Prerelease)
+                .expect("prerelease cache entry")
+                .last_checked_at_unix_seconds,
+            TEST_NOW
+        );
+    }
+
+    #[test]
+    fn manual_update_outcome_preserves_result_when_cache_save_fails() {
+        let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
+        let cache_store = FailingSaveUpdateCacheStore::default();
+        let settings = StaticUpdateSettings::disabled(UpdateChannel::Stable);
+
+        let outcome = run_update_check(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &cache_store,
+            &settings,
+            TEST_NOW,
+        )
+        .expect("cache failures should be deferred until after a valid result");
+
+        assert_eq!(
+            outcome.result().latest().version(),
+            &Version::parse("1.1.1").unwrap()
+        );
+        assert_eq!(outcome.warnings().len(), 1);
+        assert!(matches!(
+            &outcome.warnings()[0],
+            UpdatesDeferredFailure::Cache(cache_err)
+                if matches!(cache_err.as_ref(), UpdatesError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn manual_update_outcome_preserves_result_when_cache_load_fails() {
+        let cache_dir = unique_temp_dir("manual-update-cache-load");
+        let cache_path = cache_dir.join("lg-buddy").join("update-check.json");
+        fs::create_dir_all(cache_path.parent().expect("cache path parent"))
+            .expect("create cache directory");
+        fs::write(&cache_path, "{").expect("write malformed cache");
+
+        let client = MockGitHubReleasesClient::new(vec![Ok(stable_release("v1.1.1"))]);
+        let cache_store = FileUpdateCacheStore::new(cache_path.clone());
+        let settings = StaticUpdateSettings::disabled(UpdateChannel::Stable);
+
+        let outcome = run_update_check(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &cache_store,
+            &settings,
+            TEST_NOW,
+        )
+        .expect("cache load failures should be deferred until after a valid result");
+
+        assert_eq!(
+            outcome.result().latest().version(),
+            &Version::parse("1.1.1").unwrap()
+        );
+        assert_eq!(outcome.warnings().len(), 1);
+        assert!(matches!(
+            &outcome.warnings()[0],
+            UpdatesDeferredFailure::Cache(cache_err)
+                if matches!(cache_err.as_ref(), UpdatesError::CacheDecode { path, .. } if path == &cache_path)
+        ));
+        assert_eq!(
+            cache_store
+                .load()
+                .expect("successful check should replace malformed cache")
+                .entry(UpdateChannel::Stable)
+                .expect("stable cache entry")
+                .latest
+                .version,
+            "1.1.1"
+        );
+
+        fs::remove_dir_all(cache_dir).expect("remove cache temp dir");
+    }
+
+    #[test]
+    fn manual_update_outcome_returns_network_failures_without_cache_warning() {
+        let client = MockGitHubReleasesClient::new(vec![Err(UpdatesError::ApiStatus {
+            url: "https://api.example.test/releases/latest".to_string(),
+            status: 503,
+            body: "unavailable".to_string(),
+        })]);
+        let cache_store = MemoryUpdateCacheStore::default();
+        let settings = StaticUpdateSettings::disabled(UpdateChannel::Stable);
+
+        let err = run_update_check(
+            version_info("1.1.0", ReleaseChannel::Stable),
+            &client,
+            &cache_store,
+            &settings,
+            TEST_NOW,
+        )
+        .expect_err("network failures should remain check errors");
+
+        assert!(matches!(err, UpdatesError::ApiStatus { status: 503, .. }));
+        assert_eq!(cache_store.load_count(), 1);
+        assert!(cache_store.cache().entry(UpdateChannel::Stable).is_none());
     }
 
     #[test]

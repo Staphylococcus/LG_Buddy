@@ -233,7 +233,7 @@ def settings_contract(args: argparse.Namespace):
     names = {name(item) for item in accessibles}
     if not {"Screen", "Sleep & Wake", "Updates", "Desktop integration", "Idle blanking",
             "Idle timeout", "Restore policy", "TV sleep & wake", "Automatic update checks",
-            "Update channel"} <= names:
+            "Update channel", "Check for updates", "Installed version"} <= names:
         return None
     if args.expected_settings_timeout:
         timeout_entry = next(
