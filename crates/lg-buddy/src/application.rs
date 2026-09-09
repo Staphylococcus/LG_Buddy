@@ -154,6 +154,18 @@ impl Application {
         Some(self.settings_transition(transition))
     }
 
+    pub fn complete_update_check(
+        &mut self,
+        operation: crate::settings_view::UpdateCheckOperation,
+        result: Result<
+            crate::presentation::update_check::UpdateCheckReport,
+            crate::settings_view::UpdateCheckError,
+        >,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.complete_update_check(operation, result)?;
+        Some(self.settings_transition(transition))
+    }
+
     fn settings_transition(&mut self, transition: SettingsTransition) -> ApplicationTransition {
         let tvs = self.tvs.set_controls_available(
             !self.overview.has_pending_write() && !self.settings.is_mutating(),

@@ -1,4 +1,5 @@
 use crate::presentation::brightness::UserFacingError;
+use crate::presentation::update_check::UpdateCheckPresentation;
 use crate::settings::{EffectiveSetting, SettingSource, SettingType, SettingValue, SettingsStore};
 use crate::settings_view::{BehaviorSetting, SettingsIntent};
 
@@ -8,6 +9,7 @@ pub struct SettingsPresentation {
     status: SettingsStatus,
     groups: Vec<SettingsGroup>,
     retry_action: Option<SettingsAction>,
+    update_check: UpdateCheckPresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +110,7 @@ impl SettingsPresentation {
             },
             groups: Vec::new(),
             retry_action: None,
+            update_check: UpdateCheckPresentation::default(),
         }
     }
 
@@ -116,6 +119,7 @@ impl SettingsPresentation {
             status: SettingsStatus::Ready,
             groups,
             retry_action: None,
+            update_check: UpdateCheckPresentation::default(),
         }
     }
 
@@ -124,6 +128,7 @@ impl SettingsPresentation {
             status: SettingsStatus::Failed(error),
             groups,
             retry_action: Some(SettingsAction::new("Retry", true, SettingsIntent::Retry)),
+            update_check: UpdateCheckPresentation::default(),
         }
     }
 
@@ -154,6 +159,14 @@ impl SettingsPresentation {
 
     pub fn retry_action(&self) -> Option<&SettingsAction> {
         self.retry_action.as_ref()
+    }
+
+    pub fn update_check(&self) -> &UpdateCheckPresentation {
+        &self.update_check
+    }
+
+    pub(crate) fn update_check_mut(&mut self) -> &mut UpdateCheckPresentation {
+        &mut self.update_check
     }
 
     /// Keep dependent settings intact while only presenting controls that apply.
