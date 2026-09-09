@@ -12,9 +12,9 @@ INSTALL_SCRIPT="$REPOSITORY_ROOT/install.sh"
     exit 1
 }
 
-if ! unshare -Ur true >/dev/null 2>&1; then
-    echo "Skipping graphical installer smoke: unprivileged user namespaces are unavailable."
-    exit 0
+if ! command -v unshare >/dev/null 2>&1 || ! unshare -Ur true >/dev/null 2>&1; then
+    echo "Graphical installer smoke requires unprivileged user namespaces."
+    exit 1
 fi
 
 WORK_DIR="$(mktemp -d)"
@@ -97,13 +97,9 @@ case "${LG_BUDDY_GRAPHICAL_AUTH_MODE:?}" in
         exec unshare -Ur "$@"
         ;;
     accepted126)
-        # Replace only the helper namespace's first fixed PATH directory so
-        # the real install command can return 126 after copying one file.
-        unshare -Ur -m sh -c '
-            mount --bind "$1" /run/current-system/sw/bin
-            shift
-            exec "$@"
-        ' sh "${LG_BUDDY_GRAPHICAL_AUTH_STUB_DIR:?}" "$@"
+        # BASH_ENV injects the failure after the real install utility copies
+        # the first file without masking the helper's utility search paths.
+        exec unshare -Ur env BASH_ENV="${LG_BUDDY_GRAPHICAL_AUTH_BASH_ENV:?}" "$@"
         ;;
     *)
         exit 2
@@ -117,15 +113,12 @@ REAL_INSTALL="$(command -v install)"
     echo "Could not locate the host install utility for the isolated command stub."
     exit 1
 }
-cat >"$STUB_DIR/install" <<'EOF'
-#!/bin/sh
-set -eu
-"${LG_BUDDY_GRAPHICAL_AUTH_REAL_INSTALL:?}" "$@"
-if [ "${LG_BUDDY_GRAPHICAL_AUTH_MODE:-}" = accepted126 ]; then
-    exit 126
-fi
+cat >"$STUB_DIR/bash-env" <<'EOF'
+install() {
+    "${LG_BUDDY_GRAPHICAL_AUTH_REAL_INSTALL:?}" "$@"
+    return 126
+}
 EOF
-chmod 755 "$STUB_DIR/install"
 
 prepare_fixture() {
     local root="$1"
@@ -167,7 +160,7 @@ run_upgrade() {
     LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1 \
     LG_BUDDY_SKIP_PIP_INSTALL=1 \
     LG_BUDDY_GUI_RUNTIME_PROBE="$STUB_DIR/gui-runtime-probe" \
-    LG_BUDDY_GRAPHICAL_AUTH_STUB_DIR="$STUB_DIR" \
+    LG_BUDDY_GRAPHICAL_AUTH_BASH_ENV="$STUB_DIR/bash-env" \
     LG_BUDDY_GRAPHICAL_AUTH_REAL_INSTALL="$REAL_INSTALL" \
     LG_BUDDY_GRAPHICAL_AUTH_MODE="$mode" \
         bash "$BUNDLE/install.sh" --upgrade </dev/null >"$output" 2>&1

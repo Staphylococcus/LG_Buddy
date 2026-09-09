@@ -100,6 +100,17 @@ jobs:
       - name: Create release bundle
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist
 
+      - name: Enable graphical authorization smoke namespaces
+        # Ubuntu 24.04 may restrict unprivileged user namespaces through
+        # AppArmor. Relax only that disposable runner setting for the
+        # isolated graphical-authorization fixture; the final probe keeps
+        # this lane mandatory if the namespace contract is still unavailable.
+        run: |
+          if ! unshare -Ur true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur true
+
       - name: Smoke test release bundle
         run: |
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 ./scripts/test-release-bundle.sh \

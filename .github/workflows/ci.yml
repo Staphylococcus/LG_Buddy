@@ -55,7 +55,7 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-gui-dependencies.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py
 
       - name: Validate release promotion contract
@@ -108,6 +108,17 @@ jobs:
         run: |
           umask 0002
           ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
+
+      - name: Enable graphical authorization smoke namespaces
+        # Ubuntu 24.04 may restrict unprivileged user namespaces through
+        # AppArmor. Relax only that disposable runner setting for the
+        # isolated graphical-authorization fixture; the final probe keeps
+        # this lane mandatory if the namespace contract is still unavailable.
+        run: |
+          if ! unshare -Ur true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur true
 
       - name: Smoke test release bundle
         run: |
