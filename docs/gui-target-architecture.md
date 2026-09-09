@@ -211,6 +211,13 @@ into a remote activation. Normal launches still reuse the existing window.
 A failed process replacement leaves the current window open with **Retry
 restart**, which does not repeat installation.
 
+The application retains bounded failure details for the current session,
+including across retries and Settings refreshes. A collapsed native expander
+exposes them on demand; normal error messages stay concise. Credential-bearing
+lines, URLs, and control characters are removed before retention. These details
+remain available through the application presentation for the future broader
+diagnostics readout, independently of the launcher's handling of stderr.
+
 There is no separate GUI surface for a resolved screen backend, service health,
 or runtime state. Normal successful setting changes
 are silent. Feedback appears

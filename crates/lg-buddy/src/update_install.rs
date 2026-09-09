@@ -279,11 +279,11 @@ impl UpdateInstallError {
             Self::InstallerFailedWithOutput {
                 mutation_started, ..
             } if *mutation_started => {
-                "The update installer failed after installation changes began. The installation may be partial; correct the reported problem before retrying."
+                "The update installer failed after installation changes began. The installation may be partial. Open Failure details and address the cause before retrying."
                     .to_string()
             }
             Self::InstallerFailedWithOutput { .. } => {
-                "The update installer could not complete before changing installed files. Check the reported installer problem and retry."
+                "The update installer stopped before changing installed files. Open Failure details and address the cause before retrying."
                     .to_string()
             }
             Self::InstalledIdentity(_) | Self::InstalledIdentityMismatch { .. } => {
@@ -934,8 +934,8 @@ struct BoundedCommandOutput {
 impl BoundedCommandOutput {
     fn diagnostic(&self) -> String {
         bounded_combined_text(
-            &self.stdout,
             &self.stderr,
+            &self.stdout,
             self.stdout_truncated || self.stderr_truncated,
         )
     }
@@ -1454,6 +1454,16 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn installer_diagnostics_prioritize_stderr_over_progress_output() {
+        let output = installer_fixture(
+            "printf '%70000s' progress; printf 'install: No space left on device\\n' >&2; exit 1",
+        );
+        let diagnostic = output.diagnostic();
+        assert!(diagnostic.starts_with("install: No space left on device"));
+        assert!(diagnostic.ends_with("[output truncated]"));
     }
 
     #[test]

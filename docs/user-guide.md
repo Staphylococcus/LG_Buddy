@@ -193,7 +193,10 @@ You can cancel while the update is being prepared or downloaded. Once
 installation starts, keep the application open until it finishes; cancelling
 the authorization prompt leaves the installation unchanged. A failure after
 installation changes begin is reported as potentially incomplete. Follow the
-reported recovery guidance before retrying. If you change release channels,
+reported recovery guidance before retrying. Expand **Failure details** to inspect
+and select the retained error information without a terminal. The most recent
+failure remains available as **Last update failure** during retries in this
+application session. If you change release channels,
 check again before installing an offer from the new channel.
 
 This flow requires a compatible mutable release-bundle installation. Use the

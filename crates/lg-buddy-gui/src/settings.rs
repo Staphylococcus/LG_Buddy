@@ -154,6 +154,8 @@ struct UpdateCheckView {
     install_cancel_intent: Rc<RefCell<Option<SettingsIntent>>>,
     install_spinner: gtk::Spinner,
     install_error: adw::ActionRow,
+    install_details: adw::ExpanderRow,
+    install_details_text: gtk::Label,
 }
 
 impl UpdateCheckView {
@@ -258,6 +260,23 @@ impl UpdateCheckView {
         install_error.set_accessible_role(gtk::AccessibleRole::Alert);
         install_error.set_visible(false);
 
+        let install_details = adw::ExpanderRow::builder()
+            .title("Failure details")
+            .use_markup(false)
+            .visible(false)
+            .build();
+        let install_details_text = gtk::Label::builder()
+            .selectable(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .build();
+        install_details.add_row(&install_details_text);
+
         Self {
             installed,
             check,
@@ -274,6 +293,8 @@ impl UpdateCheckView {
             install_cancel_intent,
             install_spinner,
             install_error,
+            install_details,
+            install_details_text,
         }
     }
 
@@ -282,6 +303,7 @@ impl UpdateCheckView {
         group.add(&self.result);
         group.add(&self.install);
         group.add(&self.install_error);
+        group.add(&self.install_details);
         group.add(&self.error);
         group.add(&self.warning);
     }
@@ -393,6 +415,20 @@ impl UpdateCheckView {
             self.install_error.set_visible(true);
         } else {
             self.install_error.set_visible(false);
+        }
+
+        if let Some(details) = presentation.failure_details() {
+            if self.install_details_text.text().as_str() != details {
+                self.install_details.set_expanded(false);
+                self.install_details_text.set_text(details);
+            }
+            self.install_details
+                .set_title(presentation.failure_details_title());
+            self.install_details.set_visible(true);
+        } else {
+            self.install_details.set_expanded(false);
+            self.install_details.set_visible(false);
+            self.install_details_text.set_text("");
         }
     }
 }
@@ -779,7 +815,8 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .iter()
         .map(|row| row.row.clone())
         .collect();
-    assert!(!widgets.iter().any(|widget| widget.is::<adw::ExpanderRow>()));
+    assert!(!rows.iter().any(|row| row.is::<adw::ExpanderRow>()));
+    assert!(!view.update_check.install_details.is_visible());
     assert_eq!(view.groups.borrow().len(), 3);
     assert_eq!(rows.len(), 7);
     assert!(widgets
@@ -1168,8 +1205,10 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
     use lg_buddy::settings::{ConfigEnvReader, SettingsStore};
     use lg_buddy::settings_view::{SettingsApplication, SettingsIntent, UpdateCheckError};
-    use lg_buddy::update_flow::{UpdateInstallFailure, UpdateInstallOutcome};
-    use lg_buddy::update_install::{InstalledUpdate, PreparedUpdateInstall, UpdateInstallStage};
+    use lg_buddy::update_flow::UpdateInstallOutcome;
+    use lg_buddy::update_install::{
+        InstalledUpdate, PreparedUpdateInstall, UpdateInstallError, UpdateInstallStage,
+    };
     use lg_buddy::updates::UpdateChannel;
     use lg_buddy::version::VersionInfo;
 
@@ -1218,6 +1257,7 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     assert!(!view.update_check.warning.is_visible());
     assert!(!view.update_check.install.is_visible());
     assert!(!view.update_check.install_error.is_visible());
+    assert!(!view.update_check.install_details.is_visible());
 
     let check = view.update_check.check.clone();
     assert_eq!(check.accessible_role(), gtk::AccessibleRole::Button);
@@ -1356,7 +1396,15 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     let install_operation = preparing.update_install_operation().unwrap().clone();
     view.render(preparing.presentation());
     let failed_install = model
-        .complete_update_install(&install_operation, Err(UpdateInstallFailure::stopped()))
+        .complete_update_install(
+            &install_operation,
+            Err(UpdateInstallError::InstallerFailedWithOutput {
+                code: Some(1),
+                output: "install: No space left on device\naccess_token=private-value".into(),
+                mutation_started: true,
+            }
+            .into()),
+        )
         .unwrap();
     view.render(failed_install.presentation());
     assert!(view.update_check.install.is_visible());
@@ -1364,6 +1412,29 @@ fn update_check_renderer_scenarios(application: &adw::Application) {
     assert_eq!(
         view.update_check.install_error.accessible_role(),
         gtk::AccessibleRole::Alert
+    );
+    assert!(view.update_check.install_details.is_visible());
+    assert!(!view.update_check.install_details.is_expanded());
+    assert!(view.update_check.install_details_text.is_selectable());
+    assert!(view
+        .update_check
+        .install_details_text
+        .text()
+        .contains("No space left on device"));
+    assert!(!view
+        .update_check
+        .install_details_text
+        .text()
+        .contains("private-value"));
+    view.update_check.install_details.set_expanded(true);
+    view.render(failed_install.presentation());
+    assert!(
+        view.update_check.install_details.is_expanded(),
+        "refresh must not collapse requested details"
+    );
+    assert!(
+        view.update_check.install_details_text.grab_focus(),
+        "details must be keyboard accessible for selection and copying"
     );
     assert!(view.update_check.install_action.is_visible());
     assert_eq!(

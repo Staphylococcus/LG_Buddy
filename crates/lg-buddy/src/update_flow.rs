@@ -80,7 +80,7 @@ impl UpdateInstallFailure {
 
     pub fn stopped() -> Self {
         Self {
-            presentation: UserFacingError::new("Update stopped", "The update did not finish. If installation had begun, the installation may be incomplete. Check the LG Buddy logs before trying again."),
+            presentation: UserFacingError::new("Update stopped", "The update did not finish. If installation had begun, the installation may be incomplete. Open Failure details before trying again."),
             diagnostic: "update installation worker stopped without a result".into(),
             cancelled: false,
         }
@@ -230,6 +230,14 @@ impl UpdateInstallApplication {
         operation
     }
 
+    fn clear_presentation(&mut self) {
+        let failure_details = self.presentation.failure_details.take();
+        self.presentation = UpdateInstallPresentation {
+            failure_details,
+            ..Default::default()
+        };
+    }
+
     pub(crate) fn handle(
         &mut self,
         intent: SettingsIntent,
@@ -284,7 +292,7 @@ impl UpdateInstallApplication {
                 } else {
                     self.pending = None;
                     self.prepared = None;
-                    self.presentation = UpdateInstallPresentation::default();
+                    self.clear_presentation();
                 }
                 Some(None)
             }
@@ -362,7 +370,7 @@ impl UpdateInstallApplication {
                 if matches!(operation.task, UpdateInstallTask::Relaunch(_)) => {}
             Ok(_) => return self.failed(UpdateInstallFailure::worker_stopped(operation)),
             Err(error) if error.cancelled => {
-                self.presentation = UpdateInstallPresentation::default();
+                self.clear_presentation();
             }
             Err(error) => return self.failed(error),
         }
@@ -382,6 +390,7 @@ impl UpdateInstallApplication {
             .into(),
         );
         self.presentation.description.clear();
+        self.presentation.failure_details = Some(retained_failure_details(&error.diagnostic));
         self.presentation.error = Some(error.presentation);
         if self.installed.is_some() {
             self.presentation.action = Some(SettingsAction::new(
@@ -392,6 +401,62 @@ impl UpdateInstallApplication {
         }
         Some((None, Some(error.diagnostic)))
     }
+}
+
+/// Retain only bounded plain text from updater diagnostics. The installer does
+/// not read TV credentials; also omit credential-bearing lines and URLs from
+/// subprocess/network errors so an on-demand view need not expose them.
+fn retained_failure_details(diagnostic: &str) -> String {
+    const LIMIT: usize = 64 * 1024;
+    let mut result = String::new();
+    for line in diagnostic.lines() {
+        let line: String = line
+            .chars()
+            .filter(|character| {
+                (!character.is_control() || *character == '\t')
+                    && !matches!(*character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            })
+            .collect();
+        let lower = line.to_ascii_lowercase();
+        let secret = [
+            "password",
+            "passwd",
+            "token",
+            "client-key",
+            "client_key",
+            "secret",
+            "authorization:",
+            "bearer ",
+        ]
+        .iter()
+        .any(|key| lower.contains(key));
+        let line = if secret {
+            "[Credential-bearing output omitted]".to_string()
+        } else {
+            line.split_inclusive(char::is_whitespace)
+                .map(|part| {
+                    if part.contains("://") {
+                        format!("[URL omitted]{}", &part[part.trim_end().len()..])
+                    } else {
+                        part.to_string()
+                    }
+                })
+                .collect()
+        };
+        let remaining = LIMIT.saturating_sub(result.len());
+        if line.len() + 1 > remaining {
+            let mut end = remaining;
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            result.push_str(&line[..end]);
+            result.push_str("\n[Details truncated]");
+            break;
+        }
+        result.push_str(&line);
+        result.push('\n');
+    }
+    result.trim().to_string()
 }
 
 fn cancel_action() -> SettingsAction {
@@ -615,6 +680,77 @@ mod tests {
         assert!(app
             .handle_intent(SettingsIntent::ConfirmUpdateInstall)
             .is_none());
+    }
+
+    #[test]
+    fn failure_details_survive_refresh_retry_and_cancellation_without_terminal_output() {
+        let mut app = offered();
+        let operation = prepare(&mut app);
+        let failed = app
+            .complete_update_install(
+                &operation,
+                Err(UpdateInstallError::InstallerFailedWithOutput {
+                    code: Some(1),
+                    output: "install: cannot create regular file: No space left on device\naccess_token=private-value".into(),
+                    mutation_started: true,
+                }.into()),
+            )
+            .unwrap();
+        let details = failed
+            .presentation()
+            .update_install()
+            .failure_details()
+            .unwrap()
+            .to_string();
+        assert!(details.contains("No space left on device"));
+        assert!(details.contains("exit status 1"));
+        assert!(!details.contains("private-value"));
+        assert!(!failed
+            .presentation()
+            .update_install()
+            .error()
+            .unwrap()
+            .detail()
+            .contains("No space left"));
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let groups = app.presentation().groups().to_vec();
+        app.complete_read(refresh.read_operation().unwrap(), Ok(groups))
+            .unwrap();
+        assert_eq!(
+            app.presentation().update_install().failure_details(),
+            Some(details.as_str())
+        );
+        prepare(&mut app);
+        assert!(app.presentation().update_install().error().is_none());
+        assert_eq!(
+            app.presentation().update_install().failure_details_title(),
+            "Last update failure"
+        );
+        app.handle_intent(SettingsIntent::CancelUpdateInstall)
+            .unwrap();
+        assert_eq!(
+            app.presentation().update_install().failure_details(),
+            Some(details.as_str())
+        );
+    }
+
+    #[test]
+    fn retained_failure_details_remove_credentials_urls_controls_and_bound_unicode_text() {
+        let details = super::retained_failure_details(
+            "install: No space left on device\npassword=hunter2\nAuthorization: Bearer abc\nclient-key=key123\nfetch failed https://user:pass@example.test/asset?signed=value\nordinary\0text\u{202e}",
+        );
+        for secret in ["hunter2", "abc", "key123", "user:pass", "signed=value"] {
+            assert!(!details.contains(secret), "leaked {secret}");
+        }
+        assert!(details.contains("No space left on device"));
+        assert!(details.contains("fetch failed [URL omitted]"));
+        assert!(details.contains("ordinarytext"));
+        assert!(!details.contains('\0'));
+        assert!(!details.contains('\u{202e}'));
+        let large = super::retained_failure_details(&"☃".repeat(30_000));
+        assert!(large.len() <= 64 * 1024 + "\n[Details truncated]".len());
+        assert!(large.ends_with("[Details truncated]"));
     }
 
     #[test]

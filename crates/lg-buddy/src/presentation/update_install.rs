@@ -10,6 +10,7 @@ pub struct UpdateInstallPresentation {
     pub(crate) cancel_action: Option<SettingsAction>,
     pub(crate) busy: bool,
     pub(crate) error: Option<UserFacingError>,
+    pub(crate) failure_details: Option<String>,
 }
 
 impl UpdateInstallPresentation {
@@ -35,5 +36,19 @@ impl UpdateInstallPresentation {
 
     pub fn error(&self) -> Option<&UserFacingError> {
         self.error.as_ref()
+    }
+
+    /// Most recent failure in this application session, retained across retries.
+    /// Render on demand; the normal workflow uses the concise error above.
+    pub fn failure_details(&self) -> Option<&str> {
+        self.failure_details.as_deref()
+    }
+
+    pub fn failure_details_title(&self) -> &'static str {
+        if self.error.is_some() {
+            "Failure details"
+        } else {
+            "Last update failure"
+        }
     }
 }
