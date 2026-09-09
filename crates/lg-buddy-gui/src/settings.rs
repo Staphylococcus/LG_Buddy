@@ -156,6 +156,7 @@ struct UpdaterView {
     cancel_intent: Rc<RefCell<Option<SettingsIntent>>>,
     release: gtk::LinkButton,
     presented: Cell<bool>,
+    close_pending: Rc<Cell<bool>>,
     pulse: RefCell<Option<gtk::glib::SourceId>>,
     notice: RefCell<Option<adw::Toast>>,
 }
@@ -249,6 +250,33 @@ impl UpdaterView {
                 }
             }
         });
+        let close_pending = Rc::new(Cell::new(false));
+        toolbar.connect_map({
+            let close_pending = Rc::clone(&close_pending);
+            let dialog = dialog.downgrade();
+            let action = action.downgrade();
+            move |_| {
+                if !close_pending.get() {
+                    return;
+                }
+                // libadwaita 1.5 ignores force_close before its first opening
+                // frame. Finish that close after the content has mapped and
+                // the opening callback has returned.
+                let close_pending = Rc::clone(&close_pending);
+                let dialog = dialog.clone();
+                let action = action.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    if close_pending.replace(false) {
+                        if let Some(dialog) = dialog.upgrade() {
+                            dialog.force_close();
+                        }
+                        if let Some(action) = action.upgrade() {
+                            action.grab_focus();
+                        }
+                    }
+                });
+            }
+        });
         Self {
             row,
             action,
@@ -264,6 +292,7 @@ impl UpdaterView {
             cancel_intent,
             release,
             presented: Cell::new(false),
+            close_pending,
             pulse: RefCell::new(None),
             notice: RefCell::new(None),
         }
@@ -305,11 +334,16 @@ impl UpdaterView {
         }
         if !active {
             if self.presented.replace(false) {
-                self.dialog.force_close();
-                self.action.grab_focus();
+                if self.dialog.child().is_some_and(|child| child.is_mapped()) {
+                    self.dialog.force_close();
+                    self.action.grab_focus();
+                } else {
+                    self.close_pending.set(true);
+                }
             }
             return;
         }
+        self.close_pending.set(false);
         let title = install.title().unwrap_or("Updating LG Buddy…");
         self.title.set_text(title);
         self.description.set_text(install.description());
@@ -1311,6 +1345,38 @@ fn updater_renderer_scenarios(application: &adw::Application) {
         intents.borrow_mut().pop(),
         Some(SettingsIntent::PrepareUpdateInstall)
     );
+    let preparation = model
+        .handle_intent(SettingsIntent::PrepareUpdateInstall)
+        .unwrap();
+    view.render(preparation.presentation());
+    // Complete before pumping GTK: on libadwaita 1.5 the dialog's opening
+    // frame has not run yet, but the finished workflow must still dismiss it.
+    let current = model
+        .complete_update_install(
+            preparation.update_install_operation().unwrap(),
+            Ok(UpdateInstallOutcome::UpToDate),
+        )
+        .unwrap();
+    view.render(current.presentation());
+    view.show_update_notice(current.update_notice().unwrap(), &overlay);
+    pump_until(|| window.visible_dialog().is_none() && view.updater.dialog.parent().is_none());
+    assert!(action.has_focus());
+    assert_eq!(action.label().as_deref(), Some("Check for updates"));
+
+    let checking = model
+        .handle_intent(SettingsIntent::CheckForUpdates)
+        .unwrap();
+    model
+        .complete_update_check(
+            checking.update_check_operation().unwrap(),
+            Ok(UpdateCheckReport {
+                installed_version: "1.6.0".into(),
+                channel: UpdateChannel::Stable,
+                update_available: true,
+                warning: None,
+            }),
+        )
+        .unwrap();
     let preparation = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();

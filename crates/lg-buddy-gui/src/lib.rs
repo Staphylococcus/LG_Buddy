@@ -1135,6 +1135,7 @@ pub(crate) mod controller_test_support {
         application
     }
 
+    #[track_caller]
     pub(crate) fn pump_until(mut ready: impl FnMut() -> bool) {
         let context = glib::MainContext::default();
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -1826,7 +1827,10 @@ pub(crate) mod controller_test_support {
             .choose_page(super::ApplicationPage::Settings);
         controller.present();
         let native = controller.window.window();
-        pump_until(|| button(native.upcast_ref(), "Check for updates").is_some());
+        pump_until(|| {
+            button(native.upcast_ref(), "Check for updates")
+                .is_some_and(|button| button.is_mapped())
+        });
         button(native.upcast_ref(), "Check for updates")
             .unwrap()
             .emit_clicked();
