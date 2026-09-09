@@ -96,6 +96,9 @@ impl Application {
         &mut self,
         intent: OverviewIntent,
     ) -> Option<ApplicationTransition> {
+        if intent == OverviewIntent::Cancel && !self.settings.can_close() {
+            return None;
+        }
         if self.tvs.is_managing() && intent != OverviewIntent::Cancel {
             return None;
         }
@@ -163,6 +166,27 @@ impl Application {
         >,
     ) -> Option<ApplicationTransition> {
         let transition = self.settings.complete_update_check(operation, result)?;
+        Some(self.settings_transition(transition))
+    }
+
+    pub fn update_install_progress(
+        &mut self,
+        operation: &crate::update_flow::UpdateInstallOperation,
+        stage: crate::update_install::UpdateInstallStage,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.update_install_progress(operation, stage)?;
+        Some(self.settings_transition(transition))
+    }
+
+    pub fn complete_update_install(
+        &mut self,
+        operation: &crate::update_flow::UpdateInstallOperation,
+        result: Result<
+            crate::update_flow::UpdateInstallOutcome,
+            crate::update_flow::UpdateInstallFailure,
+        >,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.settings.complete_update_install(operation, result)?;
         Some(self.settings_transition(transition))
     }
 

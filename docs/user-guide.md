@@ -183,6 +183,23 @@ it checked, including while you change channels or retry. A cache warning can
 appear alongside a successful result; it does not mean the release check failed.
 Checking does not install anything or change your update preferences.
 
+For a supported release-bundle installation, choose **Install update…**, review
+its version and channel, then choose **Install and restart**. Approve the desktop
+authorization prompt to replace the installed files. Pairing and settings are
+preserved. After verifying both installed executables, LG Buddy restarts into
+the updated application. If restarting fails, use **Retry restart**.
+
+You can cancel while the update is being prepared or downloaded. Once
+installation starts, keep the application open until it finishes; cancelling
+the authorization prompt leaves the installation unchanged. A failure after
+installation changes begin is reported as potentially incomplete. Follow the
+reported recovery guidance before retrying. If you change release channels,
+check again before installing an offer from the new channel.
+
+This flow requires a compatible mutable release-bundle installation. Use the
+package manager for externally managed installations. Graphical authorization
+requires `pkexec` and a desktop authorization agent.
+
 The terminal equivalent is:
 
 ```bash

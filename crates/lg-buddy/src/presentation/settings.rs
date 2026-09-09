@@ -1,5 +1,6 @@
 use crate::presentation::brightness::UserFacingError;
 use crate::presentation::update_check::UpdateCheckPresentation;
+use crate::presentation::update_install::UpdateInstallPresentation;
 use crate::settings::{EffectiveSetting, SettingSource, SettingType, SettingValue, SettingsStore};
 use crate::settings_view::{BehaviorSetting, SettingsIntent};
 
@@ -10,6 +11,7 @@ pub struct SettingsPresentation {
     groups: Vec<SettingsGroup>,
     retry_action: Option<SettingsAction>,
     update_check: UpdateCheckPresentation,
+    update_install: UpdateInstallPresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +113,7 @@ impl SettingsPresentation {
             groups: Vec::new(),
             retry_action: None,
             update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -120,6 +123,7 @@ impl SettingsPresentation {
             groups,
             retry_action: None,
             update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -129,6 +133,7 @@ impl SettingsPresentation {
             groups,
             retry_action: Some(SettingsAction::new("Retry", true, SettingsIntent::Retry)),
             update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -167,6 +172,14 @@ impl SettingsPresentation {
 
     pub(crate) fn update_check_mut(&mut self) -> &mut UpdateCheckPresentation {
         &mut self.update_check
+    }
+
+    pub fn update_install(&self) -> &UpdateInstallPresentation {
+        &self.update_install
+    }
+
+    pub(crate) fn update_install_mut(&mut self) -> &mut UpdateInstallPresentation {
+        &mut self.update_install
     }
 
     /// Keep dependent settings intact while only presenting controls that apply.

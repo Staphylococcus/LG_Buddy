@@ -1275,14 +1275,19 @@ pub fn check_for_updates() -> Result<UpdateCheckOutcome, UpdatesError> {
     )
 }
 
-pub(crate) fn discover_install_candidate(
-    current: VersionInfo,
-) -> Result<ReleaseInfo, UpdatesError> {
-    let client = UreqGitHubReleasesClient::default();
-    let settings = EnvUpdateSettings::from_env()?;
-    discover_install_candidate_with(current, &client, &settings)
+pub(crate) fn saved_update_channel() -> Result<UpdateChannel, UpdatesError> {
+    EnvUpdateSettings::from_env()?.channel()
 }
 
+pub(crate) fn discover_install_candidate_for_channel(
+    current: VersionInfo,
+    channel: UpdateChannel,
+) -> Result<ReleaseInfo, UpdatesError> {
+    let client = UreqGitHubReleasesClient::default();
+    check_updates(channel, current, &client).map(|result| result.latest)
+}
+
+#[cfg(test)]
 fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
     current: VersionInfo,
     client: &C,

@@ -4,6 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ORIGINAL_SCRIPT_DIR="$SCRIPT_DIR"
 INSTALL_ROOT="${LG_BUDDY_INSTALL_ROOT:-}"
 INSTALL_ROOT="${INSTALL_ROOT%/}"
 SUDO_CMD="${LG_BUDDY_SUDO_CMD:-sudo}"
@@ -24,9 +25,17 @@ APP_ICON="$DEFAULT_APP_ICON"
 RUNTIME_BINARY_OVERRIDDEN=0
 GUI_BINARY_OVERRIDDEN=0
 UPGRADE_MODE=0
+SYSTEM_UPGRADE_MODE=0
 MUTATION_STARTED=0
 UPGRADE_COMPLETED=0
 GUI_BINARY_STAGED_TMP=""
+SYSTEM_UPGRADE_INSTALL_ROOT=""
+SYSTEM_UPGRADE_CANDIDATE_ROOT=""
+SYSTEM_UPGRADE_CONFIG_OVERRIDE=""
+SYSTEM_UPGRADE_NM_HOOK=""
+SYSTEM_UPGRADE_REPAIR_PYTHON="0"
+SYSTEM_UPGRADE_SKIP_PIP="0"
+SYSTEM_UPGRADE_SKIP_SYSTEMD="0"
 
 usage() {
     cat <<EOF
@@ -64,6 +73,21 @@ while [ "$#" -gt 0 ]; do
             UPGRADE_MODE=1
             shift
             ;;
+        --system-upgrade)
+            [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] || usage
+            SYSTEM_UPGRADE_MODE=1
+            UPGRADE_MODE=1
+            shift
+            [ "$#" -eq 7 ] || usage
+            SYSTEM_UPGRADE_INSTALL_ROOT="$1"
+            SYSTEM_UPGRADE_CANDIDATE_ROOT="$2"
+            SYSTEM_UPGRADE_CONFIG_OVERRIDE="$3"
+            SYSTEM_UPGRADE_NM_HOOK="$4"
+            SYSTEM_UPGRADE_REPAIR_PYTHON="$5"
+            SYSTEM_UPGRADE_SKIP_PIP="$6"
+            SYSTEM_UPGRADE_SKIP_SYSTEMD="$7"
+            shift 7
+            ;;
         -h|--help)
             usage
             ;;
@@ -78,7 +102,7 @@ if [ "$UPGRADE_MODE" -eq 1 ] && { [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ] || [ "$
     exit 1
 fi
 
-if [ -n "$INSTALL_ROOT" ]; then
+if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ -n "$INSTALL_ROOT" ]; then
     case "$INSTALL_ROOT" in
         /*) ;;
         *)
@@ -88,17 +112,17 @@ if [ -n "$INSTALL_ROOT" ]; then
     esac
 fi
 
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ "$(id -u)" -eq 0 ]; then
     echo "Error: Do not run this script with sudo. It will prompt for sudo when needed."
     exit 1
 fi
 
-if [ "$UPGRADE_MODE" -eq 1 ]; then
+if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ "$UPGRADE_MODE" -eq 1 ]; then
     echo "Starting LG Buddy Upgrade"
-else
+elif [ "$SYSTEM_UPGRADE_MODE" -eq 0 ]; then
     echo "Starting LG Buddy Installation"
 fi
-if [ -n "$INSTALL_ROOT" ]; then
+if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ -n "$INSTALL_ROOT" ]; then
     echo "Install root override: $INSTALL_ROOT"
 fi
 
@@ -110,6 +134,7 @@ SCREEN_IDLE_BLANK="enabled"
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
 NM_HOOK_TMP=""
+SYSTEM_UPGRADE_OUTPUT_TMP=""
 PM=""
 INSTALL_CMD=()
 
@@ -126,53 +151,70 @@ prefix_path() {
 run_privileged() {
     if [ "$SUDO_CMD" = "none" ]; then
         "$@"
+    elif [ "$SUDO_CMD" = "pkexec" ]; then
+        pkexec --disable-internal-agent "$@"
     else
         "$SUDO_CMD" "$@"
     fi
 }
 
-SYSTEM_BIN_DIR="$(prefix_path "/usr/bin")"
-RUNTIME_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy"
-GUI_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy-gui"
-VENV_DIR="${SYSTEM_BIN_DIR}/LG_Buddy_PIP"
-SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
-CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
-COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
-SYSTEM_SLEEP_HOOK_PATH="$(prefix_path "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook")"
-SYSTEMD_SYSTEM_DIR="$(prefix_path "/etc/systemd/system")"
-SYSTEMD_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service"
-SYSTEMD_LIFECYCLE_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_lifecycle.service"
-SYSTEMD_WAKE_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service"
-SYSTEMD_SLEEP_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service"
-SYSTEMD_SERVICE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service.d"
-SYSTEMD_LIFECYCLE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_lifecycle.service.d"
-SYSTEMD_WAKE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service.d"
-SYSTEMD_SLEEP_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service.d"
-TMPFILES_CONF_DIR="$(prefix_path "/etc/tmpfiles.d")"
-TMPFILES_CONF_PATH="${TMPFILES_CONF_DIR}/lg_buddy.conf"
-NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
-NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
-NM_LIFECYCLE_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_lifecycle"
-APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
-DESKTOP_ENTRY_NAME="io.github.staphylococcus.LGBuddy.desktop"
-DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/${DESKTOP_ENTRY_NAME}"
-LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
-DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/${DESKTOP_ENTRY_NAME}"
-if [ ! -f "$DESKTOP_ENTRY_SOURCE" ]; then
-    # Release archives retain this internal name for compatibility with
-    # updaters shipped before the application-ID filename was adopted.
-    DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/LG_Buddy_Brightness.desktop"
-fi
-APP_ICON_DIR="$(prefix_path "/usr/share/icons/hicolor/scalable/apps")"
-APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
-USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
-LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
-USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
-USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
-USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
-USER_UPDATE_CHECK_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service"
-USER_UPDATE_CHECK_TIMER_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.timer"
-USER_UPDATE_CHECK_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service.d"
+prefix_install_root_path() {
+    local install_root="$1"
+    local path="$2"
+
+    if [ -n "$install_root" ]; then
+        printf '%s%s\n' "${install_root%/}" "$path"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+initialize_install_paths() {
+    SYSTEM_BIN_DIR="$(prefix_path "/usr/bin")"
+    RUNTIME_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy"
+    GUI_INSTALL_PATH="${SYSTEM_BIN_DIR}/lg-buddy-gui"
+    VENV_DIR="${SYSTEM_BIN_DIR}/LG_Buddy_PIP"
+    SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
+    CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
+    COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
+    SYSTEM_SLEEP_HOOK_PATH="$(prefix_path "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook")"
+    SYSTEMD_SYSTEM_DIR="$(prefix_path "/etc/systemd/system")"
+    SYSTEMD_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service"
+    SYSTEMD_LIFECYCLE_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_lifecycle.service"
+    SYSTEMD_WAKE_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service"
+    SYSTEMD_SLEEP_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service"
+    SYSTEMD_SERVICE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service.d"
+    SYSTEMD_LIFECYCLE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_lifecycle.service.d"
+    SYSTEMD_WAKE_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_wake.service.d"
+    SYSTEMD_SLEEP_OVERRIDE_DIR="${SYSTEMD_SYSTEM_DIR}/LG_Buddy_sleep.service.d"
+    TMPFILES_CONF_DIR="$(prefix_path "/etc/tmpfiles.d")"
+    TMPFILES_CONF_PATH="${TMPFILES_CONF_DIR}/lg_buddy.conf"
+    NM_PRE_DOWN_DIR="$(prefix_path "/etc/NetworkManager/dispatcher.d/pre-down.d")"
+    NM_SLEEP_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_sleep"
+    NM_LIFECYCLE_HOOK_PATH="${NM_PRE_DOWN_DIR}/LG_Buddy_lifecycle"
+    APPLICATIONS_DIR="$(prefix_path "/usr/share/applications")"
+    DESKTOP_ENTRY_NAME="io.github.staphylococcus.LGBuddy.desktop"
+    DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/${DESKTOP_ENTRY_NAME}"
+    LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
+    DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/${DESKTOP_ENTRY_NAME}"
+    if [ ! -f "$DESKTOP_ENTRY_SOURCE" ]; then
+        # Release archives retain this internal name for compatibility with
+        # updaters shipped before the application-ID filename was adopted.
+        DESKTOP_ENTRY_SOURCE="${SCRIPT_DIR}/LG_Buddy_Brightness.desktop"
+    fi
+    APP_ICON_DIR="$(prefix_path "/usr/share/icons/hicolor/scalable/apps")"
+    APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
+    USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
+    LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
+    USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+    USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
+    USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
+    USER_UPDATE_CHECK_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service"
+    USER_UPDATE_CHECK_TIMER_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.timer"
+    USER_UPDATE_CHECK_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service.d"
+}
+
+initialize_install_paths
 
 check_dep() {
     local label="$1"
@@ -352,6 +394,173 @@ cleanup_legacy_sleep_wake_handlers() {
     run_privileged rmdir "$SYSTEMD_SLEEP_OVERRIDE_DIR" 2>/dev/null || true
     run_privileged rm -f "$NM_SLEEP_HOOK_PATH"
     run_privileged rm -f "$SYSTEM_SLEEP_HOOK_PATH"
+}
+
+SYSTEM_UPGRADE_HELPER_MODE=0
+SYSTEM_UPGRADE_MUTATION_EMITTED=0
+
+system_upgrade_message() {
+    if [ "$SYSTEM_UPGRADE_HELPER_MODE" -eq 1 ]; then
+        echo "$*" >&2
+    else
+        echo "$*"
+    fi
+}
+
+system_upgrade_status() {
+    printf 'LG_BUDDY_INSTALL_STATUS=%s\n' "$1"
+}
+
+run_system_mutation_command() {
+    if [ "$SYSTEM_UPGRADE_HELPER_MODE" -eq 1 ]; then
+        if [ "$SYSTEM_UPGRADE_MUTATION_EMITTED" -eq 0 ]; then
+            system_upgrade_status mutation_started
+            SYSTEM_UPGRADE_MUTATION_EMITTED=1
+        fi
+        "$@" >&2
+    else
+        run_privileged "$@"
+    fi
+}
+
+perform_privileged_runtime_installation() {
+    if [ "$UPGRADE_MODE" -eq 0 ] || [ "$REPAIR_PYTHON_ENVIRONMENT" -eq 1 ]; then
+        MUTATION_STARTED=1
+        system_upgrade_message "Creating Python virtual environment at $VENV_DIR..."
+        # Recreate the helper venv so OS Python minor-version upgrades do not leave
+        # bscpylgtv installed under an interpreter-specific site-packages directory
+        # that the new `/usr/bin/python3` no longer reads.
+        run_system_mutation_command python3 -m venv --clear "$VENV_DIR"
+        system_upgrade_message "Done."
+
+        if [ "$SKIP_PIP_INSTALL" = "1" ]; then
+            system_upgrade_message "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
+        else
+            system_upgrade_message "Installing bscpylgtv into the virtual environment..."
+            run_system_mutation_command "$VENV_DIR/bin/pip" install bscpylgtv
+            system_upgrade_message "Done."
+        fi
+    fi
+
+    MUTATION_STARTED=1
+    system_upgrade_message "Installing Rust runtime and support files..."
+    run_system_mutation_command install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
+    run_system_mutation_command install -m 755 "$GUI_BINARY" "$GUI_INSTALL_PATH"
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Off"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Monitor"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_sleep_pre"
+        run_system_mutation_command rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Brightness"
+        run_system_mutation_command rm -f "$COMMON_HELPER_PATH"
+        run_system_mutation_command rm -f "$CONFIG_POINTER_PATH"
+        run_system_mutation_command rmdir "$SYSTEM_LIB_DIR" 2>/dev/null || true
+    fi
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        run_system_mutation_command install -d "$SYSTEM_LIB_DIR"
+        run_system_mutation_command install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
+    fi
+    system_upgrade_message "Installing LG Buddy desktop entry..."
+    run_system_mutation_command install -d "$APPLICATIONS_DIR"
+    run_system_mutation_command install -m 644 "$DESKTOP_ENTRY_SOURCE" "$DESKTOP_ENTRY_PATH"
+    run_system_mutation_command rm -f "$LEGACY_DESKTOP_ENTRY_PATH"
+    run_system_mutation_command install -d "$APP_ICON_DIR"
+    run_system_mutation_command install -m 644 "$APP_ICON" "$APP_ICON_PATH"
+    system_upgrade_message "Done."
+
+}
+
+perform_privileged_services_installation() {
+    system_upgrade_message "Copying and enabling systemd services..."
+    run_system_mutation_command install -d "$SYSTEMD_SYSTEM_DIR"
+    run_system_mutation_command install -d "$TMPFILES_CONF_DIR"
+    run_system_mutation_command install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy.service" "$SYSTEMD_SERVICE_PATH"
+    run_system_mutation_command install -m 644 "$SCRIPT_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONF_PATH"
+    run_system_mutation_command install -d "$SYSTEMD_SERVICE_OVERRIDE_DIR"
+    run_system_mutation_command install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_SERVICE_OVERRIDE_DIR}/config.conf"
+
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        cleanup_legacy_sleep_wake_handlers
+    fi
+
+    run_system_mutation_command install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
+    run_system_mutation_command install -d "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR"
+    run_system_mutation_command install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
+    run_system_mutation_command install -d "$NM_PRE_DOWN_DIR"
+    run_system_mutation_command install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
+
+    if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+        system_upgrade_message "Skipping systemd tmpfiles and enable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+    else
+        run_system_mutation_command systemd-tmpfiles --create "$TMPFILES_CONF_PATH"
+        run_system_mutation_command systemctl daemon-reload
+        run_system_mutation_command systemctl enable LG_Buddy.service
+        run_system_mutation_command systemctl enable LG_Buddy_lifecycle.service
+        run_system_mutation_command systemctl restart LG_Buddy_lifecycle.service
+    fi
+    system_upgrade_message "Done."
+}
+
+perform_privileged_installation() {
+    perform_privileged_runtime_installation
+    perform_privileged_services_installation
+}
+
+run_system_upgrade_helper() {
+    [ "$(id -u)" -eq 0 ] || exit 126
+    [ "$#" -eq 7 ] || exit 2
+
+    INSTALL_ROOT="$1"
+    SCRIPT_DIR="$2"
+    SYSTEM_CONFIG_OVERRIDE_TMP="$3"
+    NM_HOOK_TMP="$4"
+    REPAIR_PYTHON_ENVIRONMENT="$5"
+    SKIP_PIP_INSTALL="$6"
+    SKIP_SYSTEMD_ACTIONS="$7"
+
+    case "$INSTALL_ROOT" in
+        ""|/*) ;;
+        *) exit 2 ;;
+    esac
+    [ "$SCRIPT_DIR" = "$ORIGINAL_SCRIPT_DIR" ] || exit 2
+    [ -d "$SCRIPT_DIR" ] || exit 2
+    case "$SCRIPT_DIR:$SYSTEM_CONFIG_OVERRIDE_TMP:$NM_HOOK_TMP" in
+        /*:/*:/*) ;;
+        *) exit 2 ;;
+    esac
+    case "$REPAIR_PYTHON_ENVIRONMENT:$SKIP_PIP_INSTALL:$SKIP_SYSTEMD_ACTIONS" in
+        0:0:0|0:0:1|0:1:0|0:1:1|1:0:0|1:0:1|1:1:0|1:1:1) ;;
+        *) exit 2 ;;
+    esac
+
+    PATH=/run/current-system/sw/bin:/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    SYSTEM_UPGRADE_HELPER_MODE=1
+    UPGRADE_MODE=1
+    RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
+    GUI_BINARY="$SCRIPT_DIR/docs/lg-buddy-gui-$GUI_TARGET"
+    APP_ICON="$SCRIPT_DIR/docs/$APP_ICON_NAME"
+    DESKTOP_ENTRY_SOURCE="$SCRIPT_DIR/$DESKTOP_ENTRY_NAME"
+    if [ ! -f "$DESKTOP_ENTRY_SOURCE" ]; then
+        DESKTOP_ENTRY_SOURCE="$SCRIPT_DIR/LG_Buddy_Brightness.desktop"
+    fi
+    for source in \
+        "$RUNTIME_BINARY" "$GUI_BINARY" "$APP_ICON" "$DESKTOP_ENTRY_SOURCE" \
+        "$SYSTEM_CONFIG_OVERRIDE_TMP" "$NM_HOOK_TMP"; do
+        [ -f "$source" ] || exit 2
+        [ ! -L "$source" ] || exit 2
+        [ -r "$source" ] || exit 2
+    done
+    [ -x "$RUNTIME_BINARY" ] || exit 2
+    [ -x "$GUI_BINARY" ] || exit 2
+    initialize_install_paths
+    SYSTEM_UPGRADE_MUTATION_EMITTED=0
+
+    system_upgrade_status authorized
+    perform_privileged_installation
+    system_upgrade_status root_complete
 }
 
 resolve_runtime_binary() {
@@ -564,6 +773,10 @@ cleanup() {
         rm -f "$NM_HOOK_TMP"
     fi
 
+    if [ -n "$SYSTEM_UPGRADE_OUTPUT_TMP" ]; then
+        rm -f "$SYSTEM_UPGRADE_OUTPUT_TMP"
+    fi
+
     if [ -n "$GUI_BINARY_STAGED_TMP" ]; then
         rm -f "$GUI_BINARY_STAGED_TMP"
     fi
@@ -576,6 +789,18 @@ cleanup() {
     trap - EXIT
     exit "$status"
 }
+
+if [ "$SYSTEM_UPGRADE_MODE" -eq 1 ]; then
+    run_system_upgrade_helper \
+        "$SYSTEM_UPGRADE_INSTALL_ROOT" \
+        "$SYSTEM_UPGRADE_CANDIDATE_ROOT" \
+        "$SYSTEM_UPGRADE_CONFIG_OVERRIDE" \
+        "$SYSTEM_UPGRADE_NM_HOOK" \
+        "$SYSTEM_UPGRADE_REPAIR_PYTHON" \
+        "$SYSTEM_UPGRADE_SKIP_PIP" \
+        "$SYSTEM_UPGRADE_SKIP_SYSTEMD"
+    exit $?
+fi
 
 trap cleanup EXIT
 
@@ -705,52 +930,51 @@ fi
 
 prepare_installation_files
 
-# 4. CREATE VIRTUAL ENVIRONMENT
-if [ "$UPGRADE_MODE" -eq 0 ] || [ "$REPAIR_PYTHON_ENVIRONMENT" -eq 1 ]; then
-    MUTATION_STARTED=1
-    echo "Creating Python virtual environment at $VENV_DIR..."
-    # Recreate the helper venv so OS Python minor-version upgrades do not leave
-    # bscpylgtv installed under an interpreter-specific site-packages directory
-    # that the new `/usr/bin/python3` no longer reads.
-    run_privileged python3 -m venv --clear "$VENV_DIR"
-    echo "Done."
+if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
+    echo "Requesting graphical authorization for system installation changes..."
+    SYSTEM_UPGRADE_OUTPUT_TMP="$(mktemp)"
+    HELPER_STATUS=0
+    set +e
+    run_privileged "$BASH" "$SCRIPT_DIR/install.sh" --system-upgrade \
+        "$INSTALL_ROOT" \
+        "$SCRIPT_DIR" \
+        "$SYSTEM_CONFIG_OVERRIDE_TMP" \
+        "$NM_HOOK_TMP" \
+        "$REPAIR_PYTHON_ENVIRONMENT" \
+        "$SKIP_PIP_INSTALL" \
+        "$SKIP_SYSTEMD_ACTIONS" | tee "$SYSTEM_UPGRADE_OUTPUT_TMP"
+    HELPER_STATUS="${PIPESTATUS[0]}"
+    set -e
 
-    if [ "$SKIP_PIP_INSTALL" = "1" ]; then
-        echo "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
-    else
-        echo "Installing bscpylgtv into the virtual environment..."
-        run_privileged "$VENV_DIR/bin/pip" install bscpylgtv
-        echo "Done."
+    if [ "$HELPER_STATUS" -ne 0 ]; then
+        if grep -F -x -q 'LG_BUDDY_INSTALL_STATUS=mutation_started' "$SYSTEM_UPGRADE_OUTPUT_TMP"; then
+            MUTATION_STARTED=1
+        elif [ "$HELPER_STATUS" -eq 126 ]; then
+            echo "Graphical authorization was cancelled; no installation changes were made." >&2
+        elif [ "$HELPER_STATUS" -eq 127 ]; then
+            echo "Graphical authorization failed or no authentication agent was available; no installation changes were made." >&2
+        else
+            echo "The authorized system installation helper failed before installation changes began." >&2
+        fi
+        exit "$HELPER_STATUS"
     fi
+
+    if grep -F -x -q 'LG_BUDDY_INSTALL_STATUS=mutation_started' "$SYSTEM_UPGRADE_OUTPUT_TMP"; then
+        MUTATION_STARTED=1
+    fi
+    if ! grep -F -x -q 'LG_BUDDY_INSTALL_STATUS=root_complete' "$SYSTEM_UPGRADE_OUTPUT_TMP"; then
+        echo "The authorized system installation helper did not report completion." >&2
+        exit 1
+    fi
+    MUTATION_STARTED=1
 fi
 
-# 6. INSTALL RUST RUNTIME AND SUPPORT FILES
-MUTATION_STARTED=1
-echo "Installing Rust runtime and support files..."
-run_privileged install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
-run_privileged install -m 755 "$GUI_BINARY" "$GUI_INSTALL_PATH"
-if [ "$UPGRADE_MODE" -eq 0 ]; then
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Startup"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Shutdown"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_On"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Off"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Screen_Monitor"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_sleep_pre"
-    run_privileged rm -f "${SYSTEM_BIN_DIR}/LG_Buddy_Brightness"
-    run_privileged rm -f "$COMMON_HELPER_PATH"
-    run_privileged rm -f "$CONFIG_POINTER_PATH"
-    run_privileged rmdir "$SYSTEM_LIB_DIR" 2>/dev/null || true
+# 4. CREATE VIRTUAL ENVIRONMENT
+if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
+    perform_privileged_runtime_installation
 fi
-if [ "$UPGRADE_MODE" -eq 0 ]; then
-    run_privileged install -d "$SYSTEM_LIB_DIR"
-    run_privileged install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
-fi
-echo "Installing LG Buddy desktop entry..."
-run_privileged install -d "$APPLICATIONS_DIR"
-run_privileged install -m 644 "$DESKTOP_ENTRY_SOURCE" "$DESKTOP_ENTRY_PATH"
-run_privileged rm -f "$LEGACY_DESKTOP_ENTRY_PATH"
-run_privileged install -d "$APP_ICON_DIR"
-run_privileged install -m 644 "$APP_ICON" "$APP_ICON_PATH"
+
+# The desktop file on the user's desktop belongs to the installing user.
 if [ "$UPGRADE_MODE" -eq 0 ]; then
     cp "$DESKTOP_ENTRY_SOURCE" "$USER_DESKTOP_ENTRY_PATH" 2>/dev/null || true
     rm -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
@@ -760,35 +984,9 @@ elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."
 
-# 7. SETUP SYSTEMD SERVICES
-echo "Copying and enabling systemd services..."
-run_privileged install -d "$SYSTEMD_SYSTEM_DIR"
-run_privileged install -d "$TMPFILES_CONF_DIR"
-run_privileged install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy.service" "$SYSTEMD_SERVICE_PATH"
-run_privileged install -m 644 "$SCRIPT_DIR/systemd/lg_buddy.conf" "$TMPFILES_CONF_PATH"
-run_privileged install -d "$SYSTEMD_SERVICE_OVERRIDE_DIR"
-run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_SERVICE_OVERRIDE_DIR}/config.conf"
-
-if [ "$UPGRADE_MODE" -eq 0 ]; then
-    cleanup_legacy_sleep_wake_handlers
+if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
+    perform_privileged_services_installation
 fi
-
-run_privileged install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_lifecycle.service" "$SYSTEMD_LIFECYCLE_SERVICE_PATH"
-run_privileged install -d "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR"
-run_privileged install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${SYSTEMD_LIFECYCLE_OVERRIDE_DIR}/config.conf"
-run_privileged install -d "$NM_PRE_DOWN_DIR"
-run_privileged install -m 755 "$NM_HOOK_TMP" "$NM_LIFECYCLE_HOOK_PATH"
-
-if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
-    echo "Skipping systemd tmpfiles and enable actions because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
-else
-    run_privileged systemd-tmpfiles --create "$TMPFILES_CONF_PATH"
-    run_privileged systemctl daemon-reload
-    run_privileged systemctl enable LG_Buddy.service
-    run_privileged systemctl enable LG_Buddy_lifecycle.service
-    run_privileged systemctl restart LG_Buddy_lifecycle.service
-fi
-echo "Done."
 
 # 8. INSTALL USER SERVICES
 echo "Installing background update check user timer..."
@@ -862,6 +1060,9 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     UPGRADE_COMPLETED=1
     echo "Upgrade complete!"
     echo "$INSTALLED_VERSION_OUTPUT"
+    if [ "$SUDO_CMD" = "pkexec" ]; then
+        system_upgrade_status complete
+    fi
 else
     echo "Installation complete!"
     echo "The user-session service has been installed."

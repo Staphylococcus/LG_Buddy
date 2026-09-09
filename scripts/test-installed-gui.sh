@@ -71,7 +71,7 @@ grep -F -x -q 'Terminal=false' "$DESKTOP_ENTRY" || fail "Desktop entry would ope
 cmp -s "$REPOSITORY_ROOT/data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" "$APP_ICON" || fail "Installed application icon differs from the source asset."
 
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
-bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_RUNTIME"
+bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_RUNTIME" "$INSTALLED_GUI"
 bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_RUNTIME" "$CONFIG_FILE"
 
 mkdir -p "$(dirname "$NATIVE_TOKEN")"

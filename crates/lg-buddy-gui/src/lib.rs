@@ -35,6 +35,10 @@ use lg_buddy::tvs::{
     EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
     TvsReadOperation, TvsTransition,
 };
+use lg_buddy::update_flow::{
+    EnvironmentUpdateInstallBackend, UpdateInstallBackend, UpdateInstallFailure,
+    UpdateInstallOperation, UpdateInstallOutcome, UpdateInstallTask,
+};
 
 pub const APPLICATION_ID: &str = "io.github.staphylococcus.LGBuddy";
 pub const APPLICATION_NAME: &str = "LG Buddy";
@@ -52,6 +56,8 @@ pub enum GuiCommand {
     Overview,
     Brightness,
     Version,
+    /// Internal entry point used only by the post-install process handoff.
+    Relaunch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +84,7 @@ where
 {
     let mut args = args.into_iter();
     let command = match args.next() {
+        Some(command) if command.as_ref() == "--gapplication-replace" => GuiCommand::Relaunch,
         Some(command) if command.as_ref() == "brightness" => GuiCommand::Brightness,
         Some(command) if matches!(command.as_ref(), "--version" | "-V") => GuiCommand::Version,
         Some(command) => return Err(GuiParseError::UnknownCommand(command.as_ref().to_string())),
@@ -96,7 +103,8 @@ pub fn help(program: &str) -> String {
 
 pub fn run(command: GuiCommand) -> glib::ExitCode {
     match command {
-        GuiCommand::Overview | GuiCommand::Brightness => run_application(command),
+        GuiCommand::Overview | GuiCommand::Brightness => run_application(command, false),
+        GuiCommand::Relaunch => run_application(GuiCommand::Overview, true),
         GuiCommand::Version => {
             print!("{}", lg_buddy::version::version_text());
             glib::ExitCode::SUCCESS
@@ -104,11 +112,16 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
     }
 }
 
-fn run_application(command: GuiCommand) -> glib::ExitCode {
+fn run_application(command: GuiCommand, replacing: bool) -> glib::ExitCode {
     glib::set_application_name(APPLICATION_NAME);
+    let mut flags = gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE
+        | gtk::gio::ApplicationFlags::ALLOW_REPLACEMENT;
+    if replacing {
+        flags |= gtk::gio::ApplicationFlags::REPLACE;
+    }
     let application = adw::Application::builder()
         .application_id(APPLICATION_ID)
-        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .flags(flags)
         .build();
     let controller = Rc::new(RefCell::new(None::<Rc<ApplicationController>>));
     install_application_actions(&application, Rc::clone(&controller));
@@ -119,8 +132,9 @@ fn run_application(command: GuiCommand) -> glib::ExitCode {
         Arc::new(EnvironmentTvsBackend),
         Arc::new(EnvironmentSettingsBackend),
     );
-    let arguments: &[&str] = match command {
-        GuiCommand::Brightness => &["lg-buddy-gui", "brightness"],
+    let arguments: &[&str] = match (command, replacing) {
+        (_, true) => &["lg-buddy-gui", "--gapplication-replace"],
+        (GuiCommand::Brightness, false) => &["lg-buddy-gui", "brightness"],
         _ => &["lg-buddy-gui"],
     };
     application.run_with_args(arguments)
@@ -166,6 +180,7 @@ struct ApplicationController {
     tvs_backend: Arc<dyn TvsBackend>,
     pairing_backend: Arc<dyn PairingBackend>,
     settings_backend: Arc<dyn SettingsBackend>,
+    update_install_backend: Arc<dyn UpdateInstallBackend>,
     navigation: RefCell<Navigation>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
@@ -193,6 +208,24 @@ impl ApplicationController {
         tvs_backend: Arc<dyn TvsBackend>,
         pairing_backend: Arc<dyn PairingBackend>,
         settings_backend: Arc<dyn SettingsBackend>,
+    ) -> (Rc<Self>, ApplicationTransition) {
+        Self::with_update_backend(
+            gtk_application,
+            backend,
+            tvs_backend,
+            pairing_backend,
+            settings_backend,
+            Arc::new(EnvironmentUpdateInstallBackend),
+        )
+    }
+
+    fn with_update_backend(
+        gtk_application: &adw::Application,
+        backend: Arc<dyn OverviewBackend>,
+        tvs_backend: Arc<dyn TvsBackend>,
+        pairing_backend: Arc<dyn PairingBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
+        update_install_backend: Arc<dyn UpdateInstallBackend>,
     ) -> (Rc<Self>, ApplicationTransition) {
         let (application, opening) = Application::open();
         let controller = Rc::new_cyclic(|controller| {
@@ -232,6 +265,7 @@ impl ApplicationController {
                 tvs_backend,
                 pairing_backend,
                 settings_backend,
+                update_install_backend,
                 navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
@@ -334,6 +368,71 @@ impl ApplicationController {
         if let Some(operation) = transition.update_check_operation() {
             Self::start_update_check(controller, operation);
         }
+        if let Some(operation) = transition.update_install_operation() {
+            Self::start_update_install(controller, operation.clone());
+        }
+    }
+
+    fn start_update_install(controller: &Rc<Self>, operation: UpdateInstallOperation) {
+        if let UpdateInstallTask::Relaunch(installed) = operation.task() {
+            let result = controller.update_install_backend.relaunch(installed);
+            let relaunched = result.is_ok();
+            let transition = controller.application.borrow_mut().complete_update_install(
+                &operation,
+                result.map(|_| UpdateInstallOutcome::Relaunched),
+            );
+            if let Some(transition) = transition {
+                Self::apply_transition(controller, transition);
+            }
+            if relaunched {
+                controller.gtk_application.quit();
+            }
+            return;
+        }
+        enum Update {
+            Progress(lg_buddy::update_install::UpdateInstallStage),
+            Done(Box<Result<UpdateInstallOutcome, UpdateInstallFailure>>),
+        }
+        let backend = Arc::clone(&controller.update_install_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::channel();
+        // A cancelled download must settle and release its bundle lock; once
+        // installation starts the application remains open until completion.
+        let application_hold = controller.gtk_application.hold();
+        thread::spawn(move || {
+            let result = backend.run(&worker_operation, &mut |stage| {
+                let _ = sender.send(Update::Progress(stage));
+            });
+            let _ = sender.send(Update::Done(Box::new(result)));
+        });
+        let controller = Rc::clone(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || loop {
+            let update = match receiver.try_recv() {
+                Ok(update) => update,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Update::Done(Box::new(Err(
+                    UpdateInstallFailure::worker_stopped(&operation),
+                ))),
+            };
+            let done = matches!(update, Update::Done(_));
+            let transition = match update {
+                Update::Progress(stage) => controller
+                    .application
+                    .borrow_mut()
+                    .update_install_progress(&operation, stage),
+                Update::Done(result) => controller
+                    .application
+                    .borrow_mut()
+                    .complete_update_install(&operation, *result),
+            };
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            if done {
+                let _ = &application_hold;
+                return glib::ControlFlow::Break;
+            }
+        });
     }
 
     fn start_update_check(controller: &Rc<Self>, operation: UpdateCheckOperation) {
@@ -776,6 +875,16 @@ mod tests {
         assert_eq!(parse_args(["--version"]), Ok(GuiCommand::Version));
         assert_eq!(parse_args(["-V"]), Ok(GuiCommand::Version));
         assert_eq!(
+            parse_args(["--gapplication-replace"]),
+            Ok(GuiCommand::Relaunch)
+        );
+        assert_eq!(
+            parse_args(["--gapplication-replace", "brightness"]),
+            Err(GuiParseError::UnexpectedArguments(vec![
+                "brightness".to_string()
+            ]))
+        );
+        assert_eq!(
             parse_args(std::iter::empty::<&str>()),
             Ok(GuiCommand::Overview)
         );
@@ -1102,6 +1211,7 @@ pub(crate) mod controller_test_support {
         run_settings_scenario();
         run_settings_write_scenario();
         run_manual_update_check_scenario();
+        run_update_install_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -1546,6 +1656,244 @@ pub(crate) mod controller_test_support {
         controller.shutdown();
         controller.window.close();
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn run_update_install_scenario() {
+        use lg_buddy::presentation::update_check::{AvailableUpdate, UpdateCheckReport};
+        use lg_buddy::update_flow::{
+            UpdateInstallBackend, UpdateInstallFailure, UpdateInstallOperation,
+            UpdateInstallOutcome, UpdateInstallTask,
+        };
+        use lg_buddy::update_install::{
+            InstalledUpdate, PreparedUpdateInstall, UpdateInstallError, UpdateInstallStage,
+        };
+        use lg_buddy::updates::UpdateChannel;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn prepared() -> PreparedUpdateInstall {
+            PreparedUpdateInstall::from_parts(
+                lg_buddy::version::VersionInfo::current(),
+                "1.7.0".parse().unwrap(),
+                UpdateChannel::Stable,
+                "https://github.com/Staphylococcus/LG_Buddy/releases/tag/v1.7.0",
+                "v1.7.0",
+                "x86_64-unknown-linux-musl",
+                "a".repeat(40),
+            )
+        }
+        struct Settings;
+        impl lg_buddy::settings_view::SettingsBackend for Settings {
+            fn read_settings(
+                &self,
+            ) -> Result<
+                Vec<lg_buddy::presentation::settings::SettingsGroup>,
+                lg_buddy::settings_view::SettingsReadError,
+            > {
+                let store = lg_buddy::settings::ConfigEnvReader::parse(
+                    "/tmp/unused-gui-update.env",
+                    "updates_auto_check=disabled\nupdates_channel=stable\n",
+                )
+                .into_store();
+                Ok(
+                    lg_buddy::presentation::settings::SettingsPresentation::from_store(&store)
+                        .groups()
+                        .to_vec(),
+                )
+            }
+            fn check_for_updates(
+                &self,
+            ) -> Result<UpdateCheckReport, lg_buddy::settings_view::UpdateCheckError> {
+                Ok(UpdateCheckReport {
+                    installed_version: "1.6.0".into(),
+                    channel: UpdateChannel::Stable,
+                    available_release: Some(AvailableUpdate {
+                        version: "1.7.0".into(),
+                        url: prepared().release().url().into(),
+                    }),
+                    warning: None,
+                })
+            }
+            fn write_setting(
+                &self,
+                _: lg_buddy::settings_view::SettingsMutationOperation,
+                _: &mut dyn FnMut(lg_buddy::settings::SettingsMutationStage),
+            ) -> Result<
+                lg_buddy::settings::SettingsMutationOutcome,
+                lg_buddy::settings::SettingsMutationFailure,
+            > {
+                panic!("update workflow must not change saved settings")
+            }
+        }
+        enum WorkerReply {
+            BeginInstall,
+            Done(bool),
+        }
+        struct Updater {
+            replies: Mutex<mpsc::Receiver<WorkerReply>>,
+            installs: AtomicUsize,
+            handoffs: AtomicUsize,
+        }
+        impl UpdateInstallBackend for Updater {
+            fn run(
+                &self,
+                operation: &UpdateInstallOperation,
+                progress: &mut dyn FnMut(UpdateInstallStage),
+            ) -> Result<UpdateInstallOutcome, UpdateInstallFailure> {
+                match operation.task() {
+                    UpdateInstallTask::Prepare {
+                        version, channel, ..
+                    } => {
+                        assert_eq!(version, "1.7.0");
+                        assert_eq!(*channel, UpdateChannel::Stable);
+                        Ok(UpdateInstallOutcome::Prepared(prepared()))
+                    }
+                    UpdateInstallTask::Install { cancellation, .. } => {
+                        self.installs.fetch_add(1, Ordering::SeqCst);
+                        progress(UpdateInstallStage::Acquiring);
+                        loop {
+                            match self.replies.lock().unwrap().recv().unwrap() {
+                                WorkerReply::BeginInstall => {
+                                    cancellation.claim_installer_boundary()?;
+                                    progress(UpdateInstallStage::Installing);
+                                }
+                                WorkerReply::Done(false) => {
+                                    return Err(UpdateInstallError::AuthorizationDeclined.into())
+                                }
+                                WorkerReply::Done(true) => {
+                                    progress(UpdateInstallStage::VerifyingInstalled);
+                                    return Ok(UpdateInstallOutcome::Installed(
+                                        InstalledUpdate::from_parts(
+                                            "1.7.0".parse().unwrap(),
+                                            UpdateChannel::Stable,
+                                            "v1.7.0",
+                                            "x86_64-unknown-linux-musl",
+                                            "a".repeat(40),
+                                            "/usr/bin/lg-buddy",
+                                            "/usr/bin/lg-buddy-gui",
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    UpdateInstallTask::Relaunch(_) => panic!("handoff is a main-thread effect"),
+                }
+            }
+            fn relaunch(&self, installed: &InstalledUpdate) -> Result<(), UpdateInstallFailure> {
+                assert_eq!(
+                    installed.gui_path(),
+                    std::path::Path::new("/usr/bin/lg-buddy-gui")
+                );
+                assert_eq!(installed.identity().version().to_string(), "1.7.0");
+                self.handoffs.fetch_add(1, Ordering::SeqCst);
+                Err(UpdateInstallFailure::stopped())
+            }
+        }
+        fn button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+                if button.is_visible() && button.label().as_deref() == Some(label) {
+                    return Some(button.clone());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(button) = button(&widget, label) {
+                    return Some(button);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let updater = Arc::new(Updater {
+            replies: Mutex::new(reply_rx),
+            installs: AtomicUsize::new(0),
+            handoffs: AtomicUsize::new(0),
+        });
+        let application = test_application("UpdateInstall");
+        let (controller, opening) = ApplicationController::with_update_backend(
+            &application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            Arc::new(lg_buddy::pairing::EnvironmentPairingBackend),
+            Arc::new(Settings),
+            updater.clone(),
+        );
+        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
+        controller
+            .window
+            .choose_page(super::ApplicationPage::Settings);
+        controller.present();
+        let native = controller.window.window();
+        pump_until(|| button(native.upcast_ref(), "Check for updates").is_some());
+        button(native.upcast_ref(), "Check for updates")
+            .unwrap()
+            .emit_clicked();
+        pump_until(|| button(native.upcast_ref(), "Install update…").is_some());
+        button(native.upcast_ref(), "Install update…")
+            .unwrap()
+            .emit_clicked();
+        pump_until(|| button(native.upcast_ref(), "Install and restart").is_some());
+        assert_eq!(updater.installs.load(Ordering::SeqCst), 0);
+        button(native.upcast_ref(), "Cancel")
+            .unwrap()
+            .emit_clicked();
+        assert_eq!(updater.installs.load(Ordering::SeqCst), 0);
+        for success in [false, true] {
+            let label = if success {
+                "Retry update"
+            } else {
+                "Install update…"
+            };
+            button(native.upcast_ref(), label).unwrap().emit_clicked();
+            pump_until(|| button(native.upcast_ref(), "Install and restart").is_some());
+            button(native.upcast_ref(), "Install and restart")
+                .unwrap()
+                .emit_clicked();
+            pump_until(|| updater.installs.load(Ordering::SeqCst) == if success { 2 } else { 1 });
+            ApplicationController::handle_settings_intent(
+                &controller,
+                lg_buddy::settings_view::SettingsIntent::ConfirmUpdateInstall,
+            );
+            controller.window.choose_page(super::ApplicationPage::Tvs);
+            controller
+                .window
+                .choose_page(super::ApplicationPage::Settings);
+            reply_tx.send(WorkerReply::BeginInstall).unwrap();
+            pump_until(|| widget_contains_text(native.upcast_ref(), "Installing update…"));
+            ApplicationController::handle_intent(&controller, super::OverviewIntent::Cancel);
+            assert!(
+                !controller.closed.get(),
+                "claimed installation keeps progress and errors visible"
+            );
+            assert!(button(native.upcast_ref(), "Cancel").is_none());
+            reply_tx.send(WorkerReply::Done(success)).unwrap();
+            pump_until(|| {
+                button(
+                    native.upcast_ref(),
+                    if success {
+                        "Retry restart"
+                    } else {
+                        "Retry update"
+                    },
+                )
+                .is_some()
+            });
+        }
+        assert_eq!(updater.installs.load(Ordering::SeqCst), 2);
+        assert_eq!(updater.handoffs.load(Ordering::SeqCst), 1);
+        button(native.upcast_ref(), "Retry restart")
+            .unwrap()
+            .emit_clicked();
+        assert_eq!(updater.handoffs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            updater.installs.load(Ordering::SeqCst),
+            2,
+            "restart retry cannot reinstall"
+        );
+        assert_eq!(application.windows().len(), 1);
+        controller.shutdown();
+        controller.window.close();
     }
 
     fn run_settings_write_scenario() {

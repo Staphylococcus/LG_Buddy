@@ -40,6 +40,7 @@ impl UpdateCheckReport {
 pub struct UpdateCheckPresentation {
     installed_version_label: String,
     checking: bool,
+    install_active: bool,
     result: Option<UpdateCheckReport>,
     error: Option<UserFacingError>,
 }
@@ -54,6 +55,7 @@ impl Default for UpdateCheckPresentation {
                 version.channel().as_str()
             ),
             checking: false,
+            install_active: false,
             result: None,
             error: None,
         }
@@ -78,7 +80,7 @@ impl UpdateCheckPresentation {
             } else {
                 "Check for updates"
             },
-            !self.checking,
+            !self.checking && !self.install_active,
             SettingsIntent::CheckForUpdates,
         )
     }
@@ -89,6 +91,10 @@ impl UpdateCheckPresentation {
 
     pub fn error(&self) -> Option<&UserFacingError> {
         self.error.as_ref()
+    }
+
+    pub(crate) fn set_install_active(&mut self, active: bool) {
+        self.install_active = active;
     }
 
     pub(crate) fn start(&mut self) {

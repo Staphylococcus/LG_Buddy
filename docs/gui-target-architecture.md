@@ -5,8 +5,9 @@ development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
 > The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
-> About. The development tree also provides manual update checks in Settings.
-> First-run completion, update installation, and on-demand diagnostics remain
+> About. The development tree also provides manual update checks and
+> user-confirmed release-bundle installation in Settings.
+> First-run completion and on-demand diagnostics remain
 > tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Boundary
@@ -191,12 +192,31 @@ refreshes and edits. GTK runs the declared operation off the UI thread and rende
 its result, retry action, and native release link. A check neither installs an
 update nor changes preferences or sends a desktop notification.
 
+An available update offers **Install update…**. `update_flow.rs` owns preparing
+an offer, explicit confirmation, cancellation, progress, failures, and handoff;
+`update_install.rs` shares discovery, identity, acquisition, compatibility, and
+installation orchestration with the CLI. The confirmed release stays pinned,
+and a changed offer or saved channel requires another check and confirmation.
+GTK only renders actions and forwards worker results. Settings writes and TV
+profile changes are unavailable while an installation workflow is active.
+
+The installer runs as the regular user. Its graphical upgrade mode requests
+one `pkexec` authorization for the existing system-file and system-service
+operations. User service/configuration work remains unprivileged. Cancellation
+uses an atomic boundary before invoking the installer; after that, the window
+stays open for the result. Verified success replaces the current GUI process
+with the installed GUI. The incumbent allows standard GApplication replacement,
+and the successor requests it so bus-name teardown cannot turn the new process
+into a remote activation. Normal launches still reuse the existing window.
+A failed process replacement leaves the current window open with **Retry
+restart**, which does not repeat installation.
+
 There is no separate GUI surface for a resolved screen backend, service health,
-runtime state, or update installation progress. Normal successful setting changes
+or runtime state. Normal successful setting changes
 are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
 an apply warning keeps the saved value and can offer **Retry apply**. The
-broader diagnostics and update installation UI is deferred as described at the top
+broader diagnostics UI is deferred as described at the top
 of this document.
 
 The main menu's **About LG Buddy** action is implemented by the native

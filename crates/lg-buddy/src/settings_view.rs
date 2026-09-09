@@ -15,6 +15,10 @@ use crate::settings::{
     SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
     SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
 };
+use crate::update_flow::{
+    UpdateInstallApplication, UpdateInstallFailure, UpdateInstallOperation, UpdateInstallOutcome,
+};
+use crate::update_install::UpdateInstallStage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BehaviorSetting {
@@ -59,6 +63,10 @@ pub enum SettingsIntent {
     Retry,
     Refresh,
     CheckForUpdates,
+    PrepareUpdateInstall,
+    ConfirmUpdateInstall,
+    CancelUpdateInstall,
+    RelaunchUpdatedApplication,
     SetEnabled {
         setting: BehaviorSetting,
         enabled: bool,
@@ -172,6 +180,7 @@ pub struct SettingsTransition {
     read_operation: Option<SettingsReadOperation>,
     mutation_operation: Option<SettingsMutationOperation>,
     update_check_operation: Option<UpdateCheckOperation>,
+    update_install_operation: Option<UpdateInstallOperation>,
     diagnostic: Option<String>,
 }
 
@@ -190,6 +199,10 @@ impl SettingsTransition {
 
     pub fn update_check_operation(&self) -> Option<UpdateCheckOperation> {
         self.update_check_operation
+    }
+
+    pub fn update_install_operation(&self) -> Option<&UpdateInstallOperation> {
+        self.update_install_operation.as_ref()
     }
 
     pub fn diagnostic(&self) -> Option<&str> {
@@ -338,6 +351,7 @@ pub struct SettingsApplication {
     queued_mutations: VecDeque<PendingMutation>,
     reconcile_mutation: Option<PendingMutation>,
     pending_update_check: Option<UpdateCheckOperation>,
+    update_install: UpdateInstallApplication,
 }
 
 impl SettingsApplication {
@@ -355,12 +369,14 @@ impl SettingsApplication {
                 queued_mutations: VecDeque::new(),
                 reconcile_mutation: None,
                 pending_update_check: None,
+                update_install: UpdateInstallApplication::default(),
             },
             SettingsTransition {
                 presentation,
                 read_operation: Some(operation),
                 mutation_operation: None,
                 update_check_operation: None,
+                update_install_operation: None,
                 diagnostic: None,
             },
         )
@@ -370,9 +386,24 @@ impl SettingsApplication {
         if self.closed {
             return None;
         }
+        self.sync_update_install();
+        if matches!(
+            intent,
+            SettingsIntent::PrepareUpdateInstall
+                | SettingsIntent::ConfirmUpdateInstall
+                | SettingsIntent::CancelUpdateInstall
+                | SettingsIntent::RelaunchUpdatedApplication
+        ) {
+            let report = self.presentation.update_check().result().cloned();
+            let operation = self.update_install.handle(intent, report.as_ref())?;
+            let mut transition = self.transition(None, None, None);
+            transition.update_install_operation = operation;
+            return Some(transition);
+        }
         match intent {
             SettingsIntent::CheckForUpdates
                 if self.pending_update_check.is_none()
+                    && !self.update_install.active()
                     && !self.presentation.groups().is_empty() =>
             {
                 let operation = UpdateCheckOperation(self.next_operation_id);
@@ -625,7 +656,9 @@ impl SettingsApplication {
     }
 
     pub fn is_mutating(&self) -> bool {
-        self.pending_mutation.is_some() || !self.queued_mutations.is_empty()
+        self.pending_mutation.is_some()
+            || !self.queued_mutations.is_empty()
+            || self.update_install.active()
     }
 
     pub fn set_controls_available(&mut self, available: bool) -> Option<SettingsTransition> {
@@ -637,7 +670,41 @@ impl SettingsApplication {
         Some(self.transition(None, None, None))
     }
 
+    pub fn update_install_active(&self) -> bool {
+        self.update_install.active()
+    }
+
+    pub fn can_close(&self) -> bool {
+        self.update_install.can_close()
+    }
+
+    pub fn update_install_progress(
+        &mut self,
+        operation: &UpdateInstallOperation,
+        stage: UpdateInstallStage,
+    ) -> Option<SettingsTransition> {
+        if self.closed || !self.update_install.progress(operation, stage) {
+            return None;
+        }
+        Some(self.transition(None, None, None))
+    }
+
+    pub fn complete_update_install(
+        &mut self,
+        operation: &UpdateInstallOperation,
+        result: Result<UpdateInstallOutcome, UpdateInstallFailure>,
+    ) -> Option<SettingsTransition> {
+        if self.closed {
+            return None;
+        }
+        let (next, diagnostic) = self.update_install.complete(operation, result)?;
+        let mut transition = self.transition(None, None, diagnostic);
+        transition.update_install_operation = next;
+        Some(transition)
+    }
+
     pub fn shutdown(&mut self) {
+        self.update_install.can_close();
         self.closed = true;
     }
 
@@ -647,6 +714,7 @@ impl SettingsApplication {
 
     fn can_edit(&self) -> bool {
         self.controls_available
+            && !self.update_install.active()
             && self.reconcile_mutation.is_none()
             && !self.presentation.groups().is_empty()
             && !matches!(self.state, SettingsApplicationState::Failed)
@@ -657,13 +725,7 @@ impl SettingsApplication {
         self.next_operation_id += 1;
         self.state = SettingsApplicationState::Loading(operation);
         self.presentation.mark_loading();
-        SettingsTransition {
-            presentation: self.presentation.clone(),
-            read_operation: Some(operation),
-            mutation_operation: None,
-            update_check_operation: None,
-            diagnostic: None,
-        }
+        self.transition(Some(operation), None, None)
     }
 
     fn begin_mutation(
@@ -729,17 +791,55 @@ impl SettingsApplication {
         Some(self.transition(None, operation, diagnostic))
     }
 
+    fn sync_update_install(&mut self) {
+        let channel = self
+            .presentation
+            .row(BehaviorSetting::UpdatesChannel)
+            .and_then(|row| match row.editor() {
+                SettingsEditor::Choice {
+                    options,
+                    selected: Some(selected),
+                } => options
+                    .get(*selected)
+                    .and_then(|choice| match choice.value() {
+                        "stable" => Some(crate::updates::UpdateChannel::Stable),
+                        "prerelease" => Some(crate::updates::UpdateChannel::Prerelease),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+        let available = self.controls_available
+            && self.pending_mutation.is_none()
+            && self.queued_mutations.is_empty()
+            && self.reconcile_mutation.is_none()
+            && self.pending_update_check.is_none()
+            && matches!(self.state, SettingsApplicationState::Ready);
+        self.update_install.refresh_offer(
+            self.presentation.update_check().result(),
+            channel,
+            available,
+        );
+        *self.presentation.update_install_mut() = self.update_install.presentation().clone();
+        self.presentation
+            .set_controls_available(self.controls_available && !self.update_install.active());
+        self.presentation
+            .update_check_mut()
+            .set_install_active(self.update_install.active());
+    }
+
     fn transition(
-        &self,
+        &mut self,
         read_operation: Option<SettingsReadOperation>,
         mutation_operation: Option<SettingsMutationOperation>,
         diagnostic: Option<String>,
     ) -> SettingsTransition {
+        self.sync_update_install();
         SettingsTransition {
             presentation: self.presentation.clone(),
             read_operation,
             mutation_operation,
             update_check_operation: None,
+            update_install_operation: None,
             diagnostic,
         }
     }
