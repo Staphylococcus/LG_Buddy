@@ -85,7 +85,11 @@ jobs:
           python-version: "3.x"
 
       - name: Install release prerequisites
-        run: sudo apt-get update && sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -399,7 +403,11 @@ jobs:
           python-version: "3.x"
 
       - name: Install canary prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux zenity
 
       - name: Download pinned updater-capable baseline
         run: |
