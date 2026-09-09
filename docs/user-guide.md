@@ -173,15 +173,38 @@ format, and compatibility behavior.
 <a id="updates"></a>
 ## Check for and install an update
 
-In **Settings → Updates**, choose **Check for updates**. This works even when
-automatic checks are off and uses your saved release channel. The app shows
-the installed version, then an available version with a release link or a
-message that no newer release is available. If a check fails, use **Retry check**.
+In **Settings → Updates**, the update row shows the installed version and
+**Check for updates**. Checking works even when automatic checks are off and
+uses your saved release channel. The button reads **Checking…** and is disabled
+until the check finishes. If LG Buddy is current, a brief **Already up to date**
+message appears. An available release changes the same row to **Install update…**.
+Changing the saved channel requires a fresh check before installation.
 
-The last successful result stays labelled with the channel and installed version
-it checked, including while you change channels or retry. A cache warning can
-appear alongside a successful result; it does not mean the release check failed.
-Checking does not install anything or change your update preferences.
+Choose **Install update…** to open the update dialog. It retrieves the latest
+qualifying release using your saved channel preference, then shows its version,
+channel, and release link. This may be a newer release than the one available
+when you checked. If no update qualifies, the dialog closes with an **Already up
+to date** message. Choose
+**Install and restart** to authorize the system installation. Pairing and
+settings are preserved. A pulsing progress bar and short status describe the
+current work; the installer does not provide a percentage.
+
+You can cancel while preparing or downloading. Once installation starts, keep
+LG Buddy open until it finishes. Cancelling authorization leaves the
+installation unchanged. Success verifies both installed executables and
+restarts into the updated application.
+
+Check and installation errors appear as toasts with **Copy details**. This
+copies the explanation and diagnostic text for troubleshooting without a
+terminal. A failure after installation changes begin may leave a partial
+installation; follow the recovery guidance in those details before retrying.
+The installation dialog closes on failure, and **Install update…** offers
+another attempt. If installation succeeded but restarting failed, the row
+identifies the required restart and its action retries restarting only.
+
+This flow requires a compatible mutable release-bundle installation. Use the
+package manager for externally managed installations. Graphical authorization
+requires `pkexec` and a desktop authorization agent.
 
 The terminal equivalent is:
 

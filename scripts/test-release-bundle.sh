@@ -286,6 +286,11 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Keep the graphical authorization boundary covered by the canonical release
+# smoke lane. The focused test uses isolated fixtures and never invokes the
+# host's authentication agent or installation paths.
+bash "$SCRIPT_DIR/test-installer-graphical-auth.sh"
+
 EXTRACT_DIR="$WORK_DIR/extracted"
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -606,7 +611,7 @@ fi
 assert_cli_surface "$INSTALLED_BINARY"
 
 if [ -n "${DISPLAY:-}" ]; then
-    bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_BINARY"
+    bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_BINARY" "$INSTALLED_GUI"
     bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_BINARY" "$CONFIG_FILE"
 fi
 

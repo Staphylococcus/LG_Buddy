@@ -167,6 +167,10 @@ impl ApplicationWindow {
         self.settings.render(presentation);
     }
 
+    pub(crate) fn show_update_notice(&self, notice: &lg_buddy::settings_view::UpdateNotice) {
+        self.settings.show_update_notice(notice, &self.toasts);
+    }
+
     pub(crate) fn dismiss_dialog(&self) -> bool {
         if let Some(dialog) = self.window.visible_dialog() {
             dialog.close();

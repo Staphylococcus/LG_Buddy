@@ -85,7 +85,11 @@ jobs:
           python-version: "3.x"
 
       - name: Install release prerequisites
-        run: sudo apt-get update && sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -99,6 +103,17 @@ jobs:
 
       - name: Create release bundle
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist
+
+      - name: Enable graphical authorization smoke namespaces
+        # Ubuntu 24.04 may restrict unprivileged user namespaces through
+        # AppArmor. Relax only that disposable runner setting for the
+        # isolated graphical-authorization fixture; the final probe keeps
+        # this lane mandatory if the namespace contract is still unavailable.
+        run: |
+          if ! unshare -Ur true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur true
 
       - name: Smoke test release bundle
         run: |
@@ -388,7 +403,11 @@ jobs:
           python-version: "3.x"
 
       - name: Install canary prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux zenity
 
       - name: Download pinned updater-capable baseline
         run: |

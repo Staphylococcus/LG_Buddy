@@ -40,7 +40,11 @@ jobs:
           sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root -- --exact
 
       - name: Install GTK test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev python3-pyatspi xdotool xvfb zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev python3-pyatspi xdotool xvfb zenity
 
       - name: Run display-backed GTK test suite
         run: |
@@ -55,7 +59,7 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-gui-dependencies.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py
 
       - name: Validate release promotion contract
@@ -92,7 +96,11 @@ jobs:
           python-version: "3.x"
 
       - name: Install smoke-test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools python3-pyatspi strace xdotool xvfb zenity
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -108,6 +116,17 @@ jobs:
         run: |
           umask 0002
           ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
+
+      - name: Enable graphical authorization smoke namespaces
+        # Ubuntu 24.04 may restrict unprivileged user namespaces through
+        # AppArmor. Relax only that disposable runner setting for the
+        # isolated graphical-authorization fixture; the final probe keeps
+        # this lane mandatory if the namespace contract is still unavailable.
+        run: |
+          if ! unshare -Ur true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare -Ur true
 
       - name: Smoke test release bundle
         run: |

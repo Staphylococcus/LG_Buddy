@@ -5,8 +5,9 @@ development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
 > The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
-> About. The development tree also provides manual update checks in Settings.
-> First-run completion, update installation, and on-demand diagnostics remain
+> About. The development tree also provides manual update checks and
+> user-confirmed release-bundle installation in Settings.
+> First-run completion and on-demand diagnostics remain
 > tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Boundary
@@ -181,22 +182,69 @@ values while hiding them; Restore policy remains visible because it also
 governs restoration outside idle blanking. Invalid blanking values keep the
 dependent controls available for diagnosis.
 
-Settings also offers **Check for updates** in the Updates group, including the
-installed version. An explicit check uses the saved channel independently of
-automatic checks, reusing the CLI's discovery, comparison, and cache policy.
-The application owns checking, available-release, no-newer-release, failure,
-and cache-warning presentation. It rejects duplicate checks and retains the last
-successful result with the channel and version actually checked across settings
-refreshes and edits. GTK runs the declared operation off the UI thread and renders
-its result, retry action, and native release link. A check neither installs an
-update nor changes preferences or sends a desktop notification.
+Settings exposes one native update row in the Updates group.
+`SettingsPresentation::updater()` projects its title, installed version,
+and **Check for updates** or **Install update…** action. While a check runs, its
+button is disabled and labeled **Checking…**. Completed checks use the saved
+channel and report only whether an update is available. The check retains no
+release version, URL, or installation target. A channel change requires a fresh
+availability check. Checking neither installs an update nor changes preferences
+or sends a desktop notification.
+
+`SettingsTransition::update_notice()` carries one-time completion feedback:
+already-current results, check errors, cache warnings, and installation errors.
+The window presents a toast with **Copy details** for failures. Refreshing or
+rerendering Settings does not replay notices, while a repeated failed operation
+produces a new notice. Toast actions copy the bounded, redacted details captured
+for that particular completion.
+
+**Install update…** opens an `adw::Dialog` with confirmation, release link,
+current status, native progress bar, and the applicable action buttons.
+Opening the dialog expresses intent to upgrade. Preparation reads the current
+saved channel and independently selects its latest qualifying release. That
+result supplies the confirmation version and release link, even if a newer
+release appeared since the availability check. If no newer release qualifies,
+the dialog closes, the row returns to **Check for updates**, and an **Already up
+to date** toast appears. The modal resolves the release identity before
+confirmation. Confirmation authorizes acquisition and installation of that
+exact release; later release changes cannot replace it.
+
+`update_flow.rs` owns preparation, explicit confirmation, cancellation,
+progress, failures, and handoff; `update_install.rs` shares discovery, pinned
+identity, acquisition, compatibility, and installation with the CLI. GTK only
+renders these facts and forwards semantic intents. The progress bar pulses
+while work is pending; no percentage is invented. Dismissal requests application
+cancellation, which checks the actual installer boundary. Settings and TV
+profile changes stay unavailable during installation.
+
+The updater action occupies the same row as its status, using native text
+spacing. Empty warning prefixes are detached so ordinary setting labels retain
+the same left edge.
+
+The installer runs as the regular user. Its graphical upgrade mode requests
+one `pkexec` authorization for the existing system-file and system-service
+operations. User service/configuration work remains unprivileged. Cancellation
+uses an atomic boundary before invoking the installer; after that, the window
+stays open for the result. Verified success replaces the current GUI process
+with the installed GUI. The incumbent allows standard GApplication replacement,
+and the successor requests it so bus-name teardown cannot turn the new process
+into a remote activation. Normal launches still reuse the existing window.
+A failed process replacement closes the progress dialog and shows a failure
+toast. The Settings row identifies that a restart is required; its installation
+action retries process replacement without reinstalling.
+
+The application retains bounded failure details for the current session,
+including across retries and Settings refreshes. Credential-bearing lines,
+URLs, and control characters are removed before retention. The error toast
+provides the details on demand, and the application presentation retains them
+for the future diagnostics readout independently of launcher stderr handling.
 
 There is no separate GUI surface for a resolved screen backend, service health,
-runtime state, or update installation progress. Normal successful setting changes
+or runtime state. Normal successful setting changes
 are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
 an apply warning keeps the saved value and can offer **Retry apply**. The
-broader diagnostics and update installation UI is deferred as described at the top
+broader diagnostics UI is deferred as described at the top
 of this document.
 
 The main menu's **About LG Buddy** action is implemented by the native
