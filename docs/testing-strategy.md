@@ -335,12 +335,13 @@ the plain launcher; only the brightness path retains the Zenity fallback.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
 covered by their current tests. First-run application tests cover saved-profile
-navigation, pending-activation read ordering, interruption, retry, and preserving
-settings. Storage and service-boundary tests verify that activation intent is
-durable before profile publication and is cleared only after successful service
-operations. Installer fixtures verify handoff to the installed executable and
-preservation of existing configuration. Complete assembled-journey verification
-remains tracked in [#201](https://github.com/Staphylococcus/LG_Buddy/issues/201).
+navigation, default behavior activation after pairing, declined or unavailable
+behaviors remaining off, Settings retries, and preserving existing settings.
+Storage and service-boundary tests verify that pairing publication remains valid
+when a behavior activation fails. Installer fixtures verify handoff to the
+installed executable and preservation of existing configuration. Complete
+assembled-journey verification remains tracked in
+[#201](https://github.com/Staphylococcus/LG_Buddy/issues/201).
 
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity

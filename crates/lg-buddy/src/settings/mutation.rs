@@ -3,8 +3,9 @@
 use std::path::Path;
 
 use super::{
-    persist_settings_mutation, ServiceController, SettingsApplier, SettingsApplyOutcome,
-    SettingsChange, SettingsError, SettingsMutation, SettingsStore,
+    activation::activate_before_persist, persist_settings_mutation, ServiceController,
+    SettingsApplier, SettingsApplyOutcome, SettingsChange, SettingsError, SettingsMutation,
+    SettingsStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,20 +22,37 @@ pub enum SettingsMutationStage {
 pub enum SettingsMutationFailure {
     Validation(SettingsError),
     Persistence(SettingsError),
+    Activation(SettingsError),
 }
 
 impl SettingsMutationFailure {
     pub fn error(&self) -> &SettingsError {
         match self {
-            Self::Validation(error) | Self::Persistence(error) => error,
+            Self::Validation(error) | Self::Persistence(error) | Self::Activation(error) => error,
         }
     }
 
     pub fn into_error(self) -> SettingsError {
         match self {
-            Self::Validation(error) | Self::Persistence(error) => error,
+            Self::Validation(error) | Self::Persistence(error) | Self::Activation(error) => error,
         }
     }
+}
+
+/// Execute the GUI mutation path. Settings that turn on a service are
+/// activated first so a successful publication cannot advertise a behavior
+/// whose runtime service is unavailable. The CLI continues to use
+/// [`execute_settings_mutation`] and retains its persist-then-apply contract.
+pub(crate) fn execute_gui_settings_mutation<C: ServiceController>(
+    path: &Path,
+    mutation: SettingsMutation,
+    applier: &SettingsApplier<C>,
+    progress: &mut dyn FnMut(SettingsMutationStage),
+) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
+    progress(SettingsMutationStage::Validating);
+    activate_before_persist(path, mutation, applier.service_controller())
+        .map_err(SettingsMutationFailure::Activation)?;
+    execute_settings_mutation(path, mutation, applier, progress)
 }
 
 #[derive(Debug, Clone)]

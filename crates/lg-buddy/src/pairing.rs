@@ -12,6 +12,7 @@ use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::pairing_store::PairingStore;
 use crate::presentation::{brightness::UserFacingError, pairing::PairingPresentation};
 use crate::settings::ConfigPathResolver;
+use crate::settings_view::BehaviorSetting;
 use crate::tvs::{TvCredentialState, TvId, TvProfile};
 use crate::web_os::{
     WebOsClient, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent, WebOsPairingReadError,
@@ -151,12 +152,45 @@ impl PairingError {
     }
 }
 
+/// A saved TV and the requested behaviors still awaiting service activation.
+/// Pairing itself is complete even if a subsequent activation is declined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingOutcome {
+    profile: TvProfile,
+    default_behaviors: Vec<BehaviorSetting>,
+}
+
+impl PairingOutcome {
+    pub fn new(profile: TvProfile, default_behaviors: Vec<BehaviorSetting>) -> Self {
+        Self {
+            profile,
+            default_behaviors,
+        }
+    }
+
+    pub fn profile(&self) -> &TvProfile {
+        &self.profile
+    }
+    pub fn into_profile(self) -> TvProfile {
+        self.profile
+    }
+    pub fn default_behaviors(&self) -> &[BehaviorSetting] {
+        &self.default_behaviors
+    }
+}
+
+impl From<TvProfile> for PairingOutcome {
+    fn from(profile: TvProfile) -> Self {
+        Self::new(profile, Vec::new())
+    }
+}
+
 pub trait PairingBackend: Send + Sync + 'static {
     fn pair(
         &self,
         operation: &PairingOperation,
         progress: &mut dyn FnMut(PairingStage),
-    ) -> Result<TvProfile, PairingError>;
+    ) -> Result<PairingOutcome, PairingError>;
 }
 
 #[derive(Debug, Default)]
@@ -167,7 +201,7 @@ impl PairingBackend for EnvironmentPairingBackend {
         &self,
         operation: &PairingOperation,
         progress: &mut dyn FnMut(PairingStage),
-    ) -> Result<TvProfile, PairingError> {
+    ) -> Result<PairingOutcome, PairingError> {
         let path = ConfigPathResolver::resolve_from_env()
             .map_err(|_| PairingError::new(PairingFailure::Persistence))?;
         pair_and_save_webos(
@@ -184,7 +218,7 @@ fn pair_and_save_webos(
     path: &std::path::Path,
     endpoint: WebOsEndpoint,
     progress: &mut dyn FnMut(PairingStage),
-) -> Result<TvProfile, PairingError> {
+) -> Result<PairingOutcome, PairingError> {
     pair_and_save(operation, path, progress, |progress| {
         let (mut client, token) = WebOsClient::pair_in_memory(
             endpoint,
@@ -242,7 +276,7 @@ fn pair_and_save(
         &mut dyn FnMut(PairingStage),
     )
         -> Result<crate::platform_access_token::PlatformAccessToken, PairingError>,
-) -> Result<TvProfile, PairingError> {
+) -> Result<PairingOutcome, PairingError> {
     if operation.is_cancelled() {
         return Err(PairingError::new(PairingFailure::Cancelled));
     }
@@ -254,17 +288,20 @@ fn pair_and_save(
     }
     progress(PairingStage::Saving);
     let request = operation.request;
-    store
+    let default_behaviors = store
         .commit(request.address, request.mac, request.input, &token)
         .map_err(|_| persistence_error())?;
-    Ok(TvProfile::new(
-        TvId::primary(),
-        "Primary TV",
-        request.address,
-        request.mac,
-        request.input,
-        TvPlatform::LgWebOs,
-        TvCredentialState::Stored,
+    Ok(PairingOutcome::new(
+        TvProfile::new(
+            TvId::primary(),
+            "Primary TV",
+            request.address,
+            request.mac,
+            request.input,
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        ),
+        default_behaviors,
     ))
 }
 
@@ -465,7 +502,7 @@ mod tests {
         })
         .expect("pairing should verify before saving");
 
-        assert_eq!(profile.address(), operation.request().address());
+        assert_eq!(profile.profile().address(), operation.request().address());
         assert_eq!(
             stages,
             vec![
@@ -658,7 +695,9 @@ mod tests {
                         token_store.load().unwrap(),
                         Some(PlatformAccessToken::new("test-client-key").unwrap())
                     );
-                    let complete = app.complete_pairing(&operation, Ok(result)).unwrap();
+                    let complete = app
+                        .complete_pairing(&operation, Ok(result.into_profile()))
+                        .unwrap();
                     assert!(complete.profile_changed());
                     assert_eq!(stages.last(), Some(&PairingStage::Saving));
                     let retry = pair_and_save(&operation, &path, &mut |_| {}, |_| {

@@ -49,8 +49,8 @@ ready to respond.
 Official bundles contain prebuilt binaries. They require GTK 4.14,
 libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
 The release installer also needs Python 3 with `venv`/`pip` support and Zenity
-for its compatibility tools. GUI service activation requires `pkexec` and a
-desktop authorization agent. Install the prerequisites for your distribution:
+for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
+a desktop authorization agent. Install the prerequisites for your distribution:
 
 <details>
 <summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
@@ -99,10 +99,10 @@ system locations. First-class NixOS packaging is tracked in
 3. The installed app opens to **Pair a TV**. Enter the TV's IP address, MAC
    address, and HDMI input. Keep the TV on and approve its pairing request
    with the remote.
-4. Authorize service activation when prompted. LG Buddy uses the default
-   behavior settings; you can adjust them later in **Settings**. If activation
-   fails, use **Retry setup** without pairing again. You can close and reopen
-   the app to resume incomplete setup.
+4. After pairing, LG Buddy attempts its default Idle Blanking and TV Sleep &
+   Wake behaviors. It asks for authorization only when a system operation needs
+   it. If a behavior cannot be activated or authorization is declined, that
+   behavior stays off; enable it later in **Settings** to retry.
 
 For terminal-only setup, run `./configure.sh` before `./install.sh`. Installing
 with an existing TV configuration preserves its saved preferences.

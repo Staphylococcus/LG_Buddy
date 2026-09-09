@@ -85,10 +85,12 @@ The local installer accepts the GUI and runtime as separate build artifacts.
 Official release bundles ship and verify both.
 
 The fresh release-bundle installer installs the payload and launches the installed
-GUI for pairing and service activation. `configure.sh` remains an explicit
-headless setup path: run it before `install.sh`. Configured installations and
-upgrades retain their saved settings. On-demand diagnostics and complete journey
-verification remain tracked in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &
+Wake behaviors; unavailable or declined behaviors stay off and can be retried in
+Settings. `configure.sh` remains an explicit headless setup path: run it before
+`install.sh`. Configured installations and upgrades retain their saved settings.
+On-demand diagnostics and complete journey verification remain tracked in
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 Official release builds inject version identity into the binary:
 
@@ -259,7 +261,6 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/pairing_store.rs` | TV profile and native credential persistence with rollback |
 | `crates/lg-buddy/src/settings_view.rs` | Settings presentation, intents, reads, and serialized mutations |
 | `crates/lg-buddy/src/navigation.rs` | Desktop destinations and selected view |
-| `crates/lg-buddy/src/setup.rs` | Resumable post-pairing service activation and pending setup state |
 | `crates/lg-buddy/src/events.rs` | Canonical runtime event vocabulary |
 | `crates/lg-buddy/src/policy.rs` | Policy outcome, action, no-action, diagnostic, and state-transition types |
 | `crates/lg-buddy/src/presentation/` | Toolkit-neutral GUI presentation declarations owned by the application |

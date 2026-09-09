@@ -226,10 +226,12 @@ End users can extract the release archive and run:
 ```
 
 That path uses the bundled `lg-buddy` binary and does not require a Rust toolchain.
-For a fresh installation it opens the installed GUI for TV pairing and resumable
-service activation. Run it as the regular user; the installer and GUI request
-only the elevation their system operations need. For terminal-only setup, run
-`./configure.sh` first. Existing TV configurations retain their saved preferences.
+For a fresh installation it opens the installed GUI for TV pairing and attempts
+the default Idle Blanking and TV Sleep & Wake behaviors. An unavailable or
+declined behavior stays off and can be retried in Settings. Run it as the regular
+user; the installer and GUI request only the elevation their system operations
+need. For terminal-only setup, run `./configure.sh` first. Existing TV
+configurations retain their saved preferences.
 
 To update an existing compatible release-bundle installation from an already
 verified and extracted newer bundle, run as the installed user:

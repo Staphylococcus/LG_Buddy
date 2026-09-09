@@ -36,7 +36,6 @@ SYSTEM_UPGRADE_NM_HOOK=""
 SYSTEM_UPGRADE_REPAIR_PYTHON="0"
 SYSTEM_UPGRADE_SKIP_PIP="0"
 CONFIG_FILE=""
-SETUP_PENDING_PATH=""
 FRESH_SETUP_MODE=0
 SYSTEM_UPGRADE_SKIP_SYSTEMD="0"
 
@@ -130,7 +129,9 @@ if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ] && [ -n "$INSTALL_ROOT" ]; then
 fi
 
 MISSING_PKGS=()
-SCREEN_IDLE_BLANK="enabled"
+SCREEN_IDLE_BLANK="disabled"
+SYSTEM_SLEEP_WAKE_POLICY="disabled"
+UPDATE_AUTO_CHECK="enabled"
 SYSTEM_CONFIG_OVERRIDE_TMP=""
 CONFIG_POINTER_TMP=""
 NM_HOOK_TMP=""
@@ -224,7 +225,6 @@ fi
 
 if [ "$SYSTEM_UPGRADE_MODE" -eq 0 ]; then
     CONFIG_FILE="$(lg_buddy_user_config_path)"
-    SETUP_PENDING_PATH="${CONFIG_FILE}.setup-pending"
 fi
 
 config_has_saved_tv_profile() {
@@ -283,15 +283,6 @@ create_empty_config_if_absent() {
     ensure_user_file_if_absent "$CONFIG_FILE" "configuration file"
 }
 
-create_setup_pending_marker() {
-    local marker_dir=""
-
-    marker_dir="$(dirname "$SETUP_PENDING_PATH")"
-    mkdir -p "$marker_dir"
-    chmod 700 "$marker_dir"
-    ensure_user_file_if_absent "$SETUP_PENDING_PATH" "setup marker"
-}
-
 check_dep() {
     local label="$1"
     local pkg="$2"
@@ -348,13 +339,13 @@ pkexec_available() {
     [ -n "$path" ] && [ -x "$path" ]
 }
 
-require_first_run_pkexec() {
+require_sleep_wake_pkexec() {
     [ "$FRESH_SETUP_MODE" -eq 1 ] || return 0
     if pkexec_available; then
         return 0
     fi
 
-    echo "pkexec is required to activate LG Buddy's installed system services after pairing."
+    echo "pkexec is required to enable TV Sleep & Wake later in Settings."
     MISSING_PKGS=("$(pkexec_package)")
     print_manual_install_command
     return 1
@@ -601,7 +592,7 @@ perform_privileged_services_installation() {
         run_system_mutation_command systemctl enable LG_Buddy.service
         run_system_mutation_command systemctl enable LG_Buddy_lifecycle.service
         if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-            system_upgrade_message "System services enabled; lifecycle start is deferred until the first TV is paired."
+            system_upgrade_message "System services enabled; pairing will attempt TV Sleep & Wake."
         else
             run_system_mutation_command systemctl restart LG_Buddy_lifecycle.service
         fi
@@ -803,11 +794,11 @@ check_install_prerequisites() {
         check_dep "python3-venv" "python3-venv" "check_python3_venv"
         check_dep "zenity" "zenity" "command -v zenity"
         if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-            check_dep "pkexec (required for first-run activation)" "$(pkexec_package)" "pkexec_available"
+            check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
         fi
     fi
     install_missing_prerequisites
-    require_first_run_pkexec
+    require_sleep_wake_pkexec
     if ! verify_gui_runtime_prerequisites; then
         echo "The installed packages do not satisfy the GUI runtime requirements."
         print_manual_install_command
@@ -957,12 +948,9 @@ else
 
 if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
     create_empty_config_if_absent
-    create_setup_pending_marker
-    SCREEN_IDLE_BLANK="enabled"
-    SYSTEM_SLEEP_WAKE_POLICY="enabled"
-    UPDATE_AUTO_CHECK="enabled"
     echo "Prepared an empty user configuration for first-run TV pairing."
-    echo "First-run setup will use the application defaults; no behavior choices are required."
+    echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
+    echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
 else
     load_existing_configuration
 fi
@@ -1047,8 +1035,6 @@ fi
 
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
     echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
-elif [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    echo "User services installed; activation is deferred until the first TV is paired."
 else
     systemctl --user enable LG_Buddy_screen.service
     systemctl --user restart LG_Buddy_screen.service
@@ -1074,7 +1060,8 @@ else
 fi
 
 if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    echo "System sleep/wake integration installed; activation is deferred until the first TV is paired."
+    echo "System sleep/wake integration installed; pairing will attempt TV Sleep & Wake."
+    echo "If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings."
 elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
     echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
 else
@@ -1105,7 +1092,7 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     fi
 else
     if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-        require_first_run_pkexec
+        require_sleep_wake_pkexec
         echo "Installation complete!"
         echo "Opening LG Buddy to pair your first TV..."
         LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_INSTALL_PATH"

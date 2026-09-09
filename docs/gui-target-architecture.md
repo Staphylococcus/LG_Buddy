@@ -7,7 +7,8 @@ the application owning state and the GTK crate rendering it.
 > The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
 > About. The development tree also provides manual update checks and
 > user-confirmed release-bundle installation in Settings, and first-run pairing
-> with resumable service activation. On-demand diagnostics remain
+> with default behavior activation. Unavailable or declined behaviors remain off
+> and can be retried in Settings. On-demand diagnostics remain
 > tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Boundary
@@ -170,22 +171,20 @@ edit as a `PairingIntent`. Its application stages are Editing, Connecting,
 WaitingForConfirmation, Verifying, Saving, and Failed. Pairing verifies power,
 audio, and OLED brightness before publishing the profile. It saves the token
 and configuration through `pairing_store.rs`; the GUI does not own those files.
-On success the application refreshes the other views and begins service
-activation. `setup.rs` owns the typed operation and its error/retry state. The
-window shows pending or failed activation across all views; completed activation
-removes that surface. Unpairing is a native destructive alert dialog and
+On success the application refreshes the other views and attempts the default
+Idle Blanking and TV Sleep & Wake behaviors. Existing saved preferences are
+preserved. A fresh setup starts each behavior disabled until its activation
+succeeds; an unavailable or declined behavior remains off, and its Settings
+toggle retries activation. Unpairing is a native destructive alert dialog and
 likewise delegates confirmation and removal to the application.
 
-The fresh installer creates an empty configuration only when absent, records
-pending setup, and hands off to the installed foreground GUI. GUI pairing records
-`${config_path}.setup-pending` before publishing the profile, so interruption
-after saving cannot lose the activation request. Activation verifies the installed
-configuration pointer, requests graphical authorization only to start the fixed
-system units, and uses the shared user-service controller to activate the screen
-monitor and saved update-timer policy. Pairing and user files remain unprivileged.
-The marker is removed only after activation succeeds. Existing profiles without
-the marker do not trigger activation on ordinary launch. Failed activation keeps
-the valid profile and offers Retry setup; a later launch resumes it automatically.
+The fresh installer creates an empty configuration only when absent and hands
+off to the installed foreground GUI. It enables the system units while deferring
+lifecycle start until pairing, and enables the user screen monitor and update
+timer for passive notifications and scheduled checks. TV Sleep & Wake requires
+graphical authorization when pairing activates it; pairing and user files remain
+unprivileged. Existing configured installations preserve their saved policies and
+do not run fresh-install activation on ordinary launch.
 
 Settings is built from the existing registry-backed `SettingsStore`. It shows
 three groups—Screen, Sleep & Wake, and Updates—with seven behavior settings.

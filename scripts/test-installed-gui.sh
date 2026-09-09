@@ -189,7 +189,7 @@ run_fresh_gui_launch_smoke() {
 
     [ -f "$fresh_home/.config/lg-buddy/config.env" ] || fail "Fresh install did not create a user configuration."
     [ ! -s "$fresh_home/.config/lg-buddy/config.env" ] || fail "Fresh install wrote TV settings before pairing."
-    [ -f "$fresh_home/.config/lg-buddy/config.env.setup-pending" ] || fail "Fresh install did not retain the pending setup marker."
+    [ ! -e "$fresh_home/.config/lg-buddy/config.env.setup-pending" ] || fail "Fresh install created an unexpected setup marker."
 }
 
 run_fresh_gui_launch_smoke

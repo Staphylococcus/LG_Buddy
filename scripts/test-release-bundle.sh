@@ -290,7 +290,7 @@ trap cleanup EXIT
 # smoke lane. The focused test uses isolated fixtures and never invokes the
 # host's authentication agent or installation paths.
 bash "$SCRIPT_DIR/test-installer-graphical-auth.sh"
-# Exercise fresh-install handoff and resumable marker behavior with an isolated
+# Exercise fresh-install handoff and failure preservation with an isolated
 # regular-user fixture before testing the extracted bundle's full payload.
 bash "$SCRIPT_DIR/test-installer-first-run.sh"
 
@@ -1180,6 +1180,9 @@ mkdir -p "$(dirname "$STALE_VENV_MARKER")"
 touch "$STALE_VENV_MARKER"
 (
     cd "$BUNDLE_DIR"
+    # This fixture tests headless reinstall with a disabled policy. Fresh
+    # installs otherwise hand off to the GUI and wait for TV pairing.
+    bash ./configure.sh
     bash ./install.sh
 )
 

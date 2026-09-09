@@ -11,14 +11,15 @@ use crate::overview::{
     OverviewIntent, OverviewSummaryError, OverviewSummaryOperation, OverviewTransition,
     OverviewTvIdentity,
 };
-use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
+use crate::pairing::{
+    PairingError, PairingFailure, PairingOperation, PairingOutcome, PairingStage,
+};
 use crate::presentation::settings::SettingsGroup;
 use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome};
 use crate::settings_view::{
-    SettingsApplication, SettingsIntent, SettingsMutationOperation, SettingsReadError,
-    SettingsReadOperation, SettingsTransition,
+    BehaviorSetting, SettingsApplication, SettingsIntent, SettingsMutationOperation,
+    SettingsReadError, SettingsReadOperation, SettingsTransition,
 };
-use crate::setup::{SetupApplication, SetupError, SetupOperation, SetupOutcome, SetupPresentation};
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
     TvProfile, TvsApplication, TvsIntent, TvsManagementError, TvsManagementOperation,
@@ -54,8 +55,6 @@ pub struct ApplicationTransition {
     tvs: Option<TvsTransition>,
     settings: Option<SettingsTransition>,
     navigation: Navigation,
-    setup: SetupPresentation,
-    setup_operation: Option<SetupOperation>,
 }
 
 impl ApplicationTransition {
@@ -63,13 +62,6 @@ impl ApplicationTransition {
         &self.navigation
     }
 
-    pub fn setup(&self) -> &SetupPresentation {
-        &self.setup
-    }
-
-    pub fn setup_operation(&self) -> Option<&SetupOperation> {
-        self.setup_operation.as_ref()
-    }
     pub fn overview(&self) -> Option<&OverviewTransition> {
         self.overview.as_ref()
     }
@@ -88,7 +80,8 @@ pub struct Application {
     tvs: TvsApplication,
     settings: SettingsApplication,
     navigation: Navigation,
-    setup: SetupApplication,
+    pairing_defaults: Vec<BehaviorSetting>,
+    pairing_settings_read: Option<SettingsReadOperation>,
     closed: bool,
 }
 
@@ -97,14 +90,14 @@ impl Application {
         let (overview, overview_opening) = OverviewApplication::open();
         let (tvs, tvs_opening) = TvsApplication::open();
         let (settings, settings_opening) = SettingsApplication::open();
-        let (setup, setup_operation) = SetupApplication::open();
         (
             Self {
                 overview,
                 tvs,
                 settings,
                 navigation: Navigation::default(),
-                setup,
+                pairing_defaults: Vec::new(),
+                pairing_settings_read: None,
                 closed: false,
             },
             ApplicationTransition {
@@ -112,8 +105,6 @@ impl Application {
                 tvs: Some(tvs_opening),
                 settings: Some(settings_opening),
                 navigation: Navigation::default(),
-                setup: SetupPresentation::Idle,
-                setup_operation: Some(setup_operation),
             },
         )
     }
@@ -122,9 +113,6 @@ impl Application {
         &mut self,
         intent: OverviewIntent,
     ) -> Option<ApplicationTransition> {
-        if self.setup.presentation().busy() && intent != OverviewIntent::Cancel {
-            return None;
-        }
         if intent == OverviewIntent::Cancel && !self.settings.can_close() {
             return None;
         }
@@ -136,7 +124,7 @@ impl Application {
     }
 
     pub fn handle_tvs_intent(&mut self, intent: TvsIntent) -> Option<ApplicationTransition> {
-        if self.setup.presentation().busy() {
+        if self.pairing_settings_read.is_some() {
             return None;
         }
         let transition = self.tvs.handle_intent(intent)?;
@@ -147,7 +135,7 @@ impl Application {
         &mut self,
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
-        if self.setup.presentation().busy() && intent != SettingsIntent::Refresh {
+        if self.pairing_settings_read.is_some() {
             return None;
         }
         let transition = self.settings.handle_intent(intent)?;
@@ -164,8 +152,8 @@ impl Application {
         match page {
             crate::navigation::ApplicationPage::Settings => self
                 .handle_settings_intent(SettingsIntent::Refresh)
-                .or_else(|| Some(self.transition(None, None, None, None))),
-            _ => Some(self.transition(None, None, None, None)),
+                .or_else(|| Some(self.transition(None, None, None))),
+            _ => Some(self.transition(None, None, None)),
         }
     }
 
@@ -174,7 +162,29 @@ impl Application {
         operation: SettingsReadOperation,
         result: Result<Vec<SettingsGroup>, SettingsReadError>,
     ) -> Option<ApplicationTransition> {
-        let transition = self.settings.complete_read(operation, result)?;
+        let succeeded = result.is_ok();
+        let mut transition = self.settings.complete_read(operation, result)?;
+        if self.pairing_settings_read == Some(operation) {
+            self.pairing_settings_read = None;
+            if let Some(update) = self.settings.set_controls_available(true) {
+                transition.update_presentation_from(update);
+            }
+            let defaults = std::mem::take(&mut self.pairing_defaults);
+            if succeeded && !self.closed {
+                for setting in defaults {
+                    if let Some(update) = self.settings.handle_intent(SettingsIntent::SetEnabled {
+                        setting,
+                        enabled: true,
+                    }) {
+                        if transition.mutation_operation().is_none() {
+                            transition = update;
+                        } else {
+                            transition.update_presentation_from(update);
+                        }
+                    }
+                }
+            }
+        }
         Some(self.settings_transition(transition))
     }
 
@@ -229,7 +239,7 @@ impl Application {
     }
 
     fn settings_transition(&mut self, transition: SettingsTransition) -> ApplicationTransition {
-        self.transition(None, None, Some(transition), None)
+        self.transition(None, None, Some(transition))
     }
 
     pub fn complete_overview(
@@ -295,15 +305,29 @@ impl Application {
     pub fn complete_pairing(
         &mut self,
         operation: &PairingOperation,
-        result: Result<TvProfile, PairingError>,
+        result: Result<PairingOutcome, PairingError>,
     ) -> Option<ApplicationTransition> {
-        let mut transition = self.tvs.complete_pairing(operation, result)?;
-        if transition.profile_changed() {
-            self.setup.paired();
-            // Pairing is durable, but setup is not complete until activation succeeds.
+        let defaults = result
+            .as_ref()
+            .map(|outcome| outcome.default_behaviors().to_vec())
+            .unwrap_or_default();
+        let mut transition = self
+            .tvs
+            .complete_pairing(operation, result.map(PairingOutcome::into_profile))?;
+        let paired = transition.profile_changed();
+        if paired {
             transition.clear_toast();
         }
-        Some(self.tvs_transition(transition))
+        let mut update = self.tvs_transition(transition);
+        if paired {
+            self.pairing_defaults = defaults;
+            let settings = self.settings.profile_changed();
+            self.pairing_settings_read = (!self.pairing_defaults.is_empty())
+                .then(|| settings.read_operation())
+                .flatten();
+            update = self.transition(update.overview, update.tvs, Some(settings));
+        }
+        Some(update)
     }
 
     pub fn pairing_worker_stopped(
@@ -330,15 +354,12 @@ impl Application {
             self.tvs.shutdown();
             self.settings.shutdown();
         }
-        self.transition(Some(transition), None, None, None)
+        self.transition(Some(transition), None, None)
     }
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
         self.navigation
             .update_profiles(transition.presentation().status());
-        if transition.profile_changed() && transition.presentation().profiles().is_empty() {
-            self.setup.unpaired();
-        }
         let overview = if transition.management_operation().is_some() {
             self.overview.profile_change_started()
         } else if transition.profile_changed() {
@@ -346,32 +367,7 @@ impl Application {
         } else {
             None
         };
-        self.transition(overview, Some(transition), None, None)
-    }
-
-    pub fn complete_setup(
-        &mut self,
-        operation: &SetupOperation,
-        result: Result<SetupOutcome, SetupError>,
-    ) -> Option<ApplicationTransition> {
-        if self.closed || !self.setup.complete(operation, result) {
-            return None;
-        }
-        Some(self.transition(None, None, None, None))
-    }
-
-    pub fn retry_setup(&mut self) -> Option<ApplicationTransition> {
-        if self.closed
-            || self.tvs.is_managing()
-            || self.tvs.is_pairing()
-            || self.settings.is_mutating()
-            || self.overview.has_pending_write()
-        {
-            return None;
-        }
-        let has_profile = !self.tvs.presentation().profiles().is_empty();
-        let operation = self.setup.retry(has_profile)?;
-        Some(self.transition(None, None, None, Some(operation)))
+        self.transition(overview, Some(transition), None)
     }
 
     fn transition(
@@ -379,23 +375,11 @@ impl Application {
         overview: Option<OverviewTransition>,
         mut tvs: Option<TvsTransition>,
         mut settings: Option<SettingsTransition>,
-        setup_operation: Option<SetupOperation>,
     ) -> ApplicationTransition {
-        let setup_operation = setup_operation.or_else(|| {
-            if self.closed
-                || self.tvs.is_managing()
-                || self.tvs.is_pairing()
-                || self.settings.is_mutating()
-                || self.overview.has_pending_write()
-            {
-                return None;
-            }
-            self.setup
-                .start_if_needed(!self.tvs.presentation().profiles().is_empty())
-        });
-        let activating = self.setup.presentation().busy();
         if let Some(update) = self.tvs.set_controls_available(
-            !activating && !self.overview.has_pending_write() && !self.settings.is_mutating(),
+            !self.overview.has_pending_write()
+                && !self.settings.is_mutating()
+                && self.pairing_settings_read.is_none(),
         ) {
             if let Some(tvs) = &mut tvs {
                 tvs.update_presentation_from(update);
@@ -404,7 +388,9 @@ impl Application {
             }
         }
         if let Some(update) = self.settings.set_controls_available(
-            !activating && !self.tvs.is_managing() && !self.tvs.is_pairing(),
+            !self.tvs.is_managing()
+                && !self.tvs.is_pairing()
+                && self.pairing_settings_read.is_none(),
         ) {
             if let Some(settings) = &mut settings {
                 settings.update_presentation_from(update);
@@ -417,8 +403,6 @@ impl Application {
             tvs,
             settings,
             navigation: self.navigation.clone(),
-            setup: self.setup.presentation().clone(),
-            setup_operation,
         }
     }
 }
@@ -467,13 +451,12 @@ mod tests {
     fn pairing_success_refreshes_overview_and_rejects_previous_results() {
         let (mut application, opening, operation) = pairing();
         let completed = application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .unwrap();
         let tvs = completed.tvs().unwrap();
         assert_eq!(tvs.presentation().profiles(), &[profile(&operation)]);
         assert!(tvs.presentation().pairing().is_none());
         assert!(tvs.toast_message().is_none());
-        assert!(completed.setup().busy());
         let refreshed = completed
             .overview()
             .expect("pairing must refresh Overview without a renderer");
@@ -517,19 +500,11 @@ mod tests {
         assert!(app.select_page(ApplicationPage::Settings).is_none());
         assert!(app.select_page(ApplicationPage::Overview).is_none());
         let paired = app
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .unwrap();
         assert!(paired.navigation().tabs_visible());
         assert_eq!(paired.navigation().selected(), ApplicationPage::Overview);
-        assert!(paired.setup().busy());
         assert!(paired.tvs().unwrap().toast_message().is_none());
-        let activated = app
-            .complete_setup(
-                paired.setup_operation().unwrap(),
-                Ok(SetupOutcome::Activated),
-            )
-            .unwrap();
-        assert_eq!(activated.setup(), &SetupPresentation::Idle);
         app.handle_tvs_intent(TvsIntent::UnpairTv).unwrap();
         let unpair = app.handle_tvs_intent(TvsIntent::ConfirmUnpair).unwrap();
         let removed = app
@@ -549,62 +524,87 @@ mod tests {
     }
 
     #[test]
-    fn pending_activation_resumes_after_profile_and_marker_reads_in_either_order() {
-        let (_, _, pairing_operation) = pairing();
-        for profiles_first in [true, false] {
-            let (mut app, opening) = Application::open();
-            let first;
-            let second;
-            if profiles_first {
-                first = app
-                    .complete_tvs_read(
-                        opening.tvs().unwrap().read_operation().unwrap(),
-                        Ok(vec![profile(&pairing_operation)]),
-                    )
-                    .unwrap();
-                second = app
-                    .complete_setup(
-                        opening.setup_operation().unwrap(),
-                        Ok(SetupOutcome::Inspected { pending: true }),
-                    )
-                    .unwrap();
-            } else {
-                first = app
-                    .complete_setup(
-                        opening.setup_operation().unwrap(),
-                        Ok(SetupOutcome::Inspected { pending: true }),
-                    )
-                    .unwrap();
-                second = app
-                    .complete_tvs_read(
-                        opening.tvs().unwrap().read_operation().unwrap(),
-                        Ok(vec![profile(&pairing_operation)]),
-                    )
-                    .unwrap();
-            }
-            assert!(first.setup_operation().is_none());
-            assert_eq!(
-                second.setup_operation().unwrap().task(),
-                crate::setup::SetupTask::Activate
-            );
-            assert!(second.setup().busy());
-            assert!(app.retry_setup().is_none());
-            assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
-            assert!(app
-                .handle_settings_intent(SettingsIntent::CheckForUpdates)
-                .is_none());
+    fn pairing_queues_independent_activation_after_reading_saved_off_policies() {
+        use crate::presentation::settings::{SettingsEditor, SettingsPresentation};
+        use crate::settings::{ConfigEnvReader, SettingsError};
+        let groups = || {
+            SettingsPresentation::from_store(
+                &ConfigEnvReader::parse(
+                    "/unused/config.env",
+                    "screen_idle_blank=disabled\nsystem_sleep_wake_policy=disabled\n",
+                )
+                .into_store(),
+            )
+            .groups()
+            .to_vec()
+        };
+        let defaults = vec![
+            BehaviorSetting::ScreenIdleBlank,
+            BehaviorSetting::SystemSleepWakePolicy,
+        ];
+        let (mut app, opening, operation) = pairing();
+        let paired = app
+            .complete_pairing(
+                &operation,
+                Ok(PairingOutcome::new(profile(&operation), defaults.clone())),
+            )
+            .unwrap();
+        assert!(paired.navigation().tabs_visible());
+        assert!(paired.tvs().unwrap().presentation().pairing().is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
+        assert!(app
+            .complete_settings_read(
+                opening.settings().unwrap().read_operation().unwrap(),
+                Ok(groups())
+            )
+            .is_none());
+        let mut update = app
+            .complete_settings_read(
+                paired.settings().unwrap().read_operation().unwrap(),
+                Ok(groups()),
+            )
+            .unwrap();
+        for setting in defaults {
+            let activation = update
+                .settings()
+                .unwrap()
+                .mutation_operation()
+                .unwrap()
+                .clone();
+            assert_eq!(activation.setting(), setting);
+            // Failure to activate one behavior must not prevent the other attempt.
+            update = app
+                .complete_settings_mutation(
+                    &activation,
+                    Err(SettingsMutationFailure::Activation(
+                        SettingsError::ActivationCancelled,
+                    )),
+                )
+                .unwrap();
+            let row = update
+                .settings()
+                .unwrap()
+                .presentation()
+                .groups()
+                .iter()
+                .flat_map(|group| group.rows())
+                .find(|row| row.setting() == setting)
+                .unwrap();
+            assert!(matches!(
+                row.editor(),
+                SettingsEditor::Toggle { value: Some(false) }
+            ));
+            assert!(row.retry_apply_action().is_none());
+            assert!(update.navigation().tabs_visible());
         }
+        assert!(update.settings().unwrap().mutation_operation().is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
     }
 
     #[test]
-    fn configured_offline_tv_keeps_navigation_without_reactivating_existing_installation() {
+    fn configured_offline_tv_keeps_navigation() {
         let (_, _, pairing_operation) = pairing();
         let (mut app, opening) = Application::open();
-        app.complete_setup(
-            opening.setup_operation().unwrap(),
-            Ok(SetupOutcome::Inspected { pending: false }),
-        )
-        .unwrap();
         let loaded = app
             .complete_tvs_read(
                 opening.tvs().unwrap().read_operation().unwrap(),
@@ -616,7 +616,6 @@ mod tests {
             loaded.navigation().selected(),
             crate::navigation::ApplicationPage::Overview
         );
-        assert!(loaded.setup_operation().is_none());
         let offline = app
             .complete_tvs_model_read(
                 loaded
@@ -630,45 +629,6 @@ mod tests {
             .unwrap();
         assert!(offline.navigation().tabs_visible());
         assert_eq!(offline.tvs().unwrap().presentation().profiles().len(), 1);
-        assert!(offline.setup_operation().is_none());
-        assert_eq!(offline.setup(), &SetupPresentation::Idle);
-    }
-
-    #[test]
-    fn activation_failure_retries_without_pairing_and_rejects_stale_or_closed_completions() {
-        let (mut app, opening, operation) = pairing();
-        let paired = app
-            .complete_pairing(&operation, Ok(profile(&operation)))
-            .unwrap();
-        let activation = *paired.setup_operation().unwrap();
-        // A late initial marker read cannot erase the new pairing's activation intent.
-        assert!(app
-            .complete_setup(
-                opening.setup_operation().unwrap(),
-                Ok(SetupOutcome::Inspected { pending: false })
-            )
-            .is_none());
-        let failed = app
-            .complete_setup(&activation, Err(SetupError::stopped()))
-            .unwrap();
-        assert!(failed.setup().retry_available());
-        assert_eq!(
-            failed.tvs().unwrap().presentation().profiles(),
-            &[profile(&operation)]
-        );
-        let retry = app.retry_setup().unwrap();
-        assert!(retry.tvs().unwrap().pairing_operation().is_none());
-        assert_ne!(retry.setup_operation().unwrap(), &activation);
-        assert!(app
-            .complete_setup(&activation, Ok(SetupOutcome::Activated))
-            .is_none());
-        app.shutdown();
-        assert!(app
-            .complete_setup(
-                retry.setup_operation().unwrap(),
-                Ok(SetupOutcome::Activated)
-            )
-            .is_none());
     }
 
     #[test]
@@ -726,7 +686,7 @@ mod tests {
         assert!(cancelled.tvs().unwrap().presentation().pairing().is_none());
         assert!(operation.is_cancelled());
         assert!(application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .is_none());
         assert!(application.pairing_worker_stopped(&operation).is_none());
 
@@ -744,7 +704,7 @@ mod tests {
             .pairing_progress(&operation, PairingStage::Verifying)
             .is_none());
         assert!(application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .is_none());
         assert!(application.handle_tvs_intent(TvsIntent::PairTv).is_none());
     }

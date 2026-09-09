@@ -322,10 +322,6 @@ impl OverviewView {
         self.initial_brightness_focus.set(false);
     }
 
-    pub(crate) fn set_setup_busy(&self, busy: bool) {
-        self.body.set_sensitive(!busy);
-    }
-
     pub(crate) fn focus_brightness(&self) {
         self.initial_brightness_focus.set(true);
         if self.brightness.scale.is_visible()
@@ -742,24 +738,6 @@ mod tests {
         render(&view, disconnected.handle_intent(retry).unwrap());
         assert!(!view.brightness.retry.button.is_visible());
         assert!(view.volume.retry.button.is_visible());
-        let previous_sensitivity = (
-            view.brightness.scale.is_sensitive(),
-            view.volume.scale.is_sensitive(),
-            view.mute.is_sensitive(),
-        );
-        view.set_setup_busy(true);
-        assert!(!view.brightness.scale.is_sensitive());
-        assert!(!view.volume.scale.is_sensitive());
-        assert!(!view.mute.is_sensitive());
-        view.set_setup_busy(false);
-        assert_eq!(
-            (
-                view.brightness.scale.is_sensitive(),
-                view.volume.scale.is_sensitive(),
-                view.mute.is_sensitive(),
-            ),
-            previous_sensitivity,
-        );
         view.window.close();
         late_brightness_respects_focus(&application);
         crate::tvs::run_renderer_scenarios(&application);

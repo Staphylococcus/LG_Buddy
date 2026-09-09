@@ -223,11 +223,8 @@ unset LG_BUDDY_CONFIG LG_BUDDY_HANDOFF_STATUS
 run_install fresh
 [ "$RUN_STATUS" -eq 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
 CONFIG_FILE="$RUN_HOME/.config/lg-buddy/config.env"
-MARKER="$CONFIG_FILE.setup-pending"
 [ -f "$CONFIG_FILE" ] && [ ! -s "$CONFIG_FILE" ]
 [ "$(stat -c '%a' "$CONFIG_FILE")" = 600 ]
-[ -f "$MARKER" ] && [ ! -s "$MARKER" ]
-[ "$(stat -c '%a' "$MARKER")" = 600 ]
 [ -f "$RUN_HANDOFF" ]
 grep -F -q ":$CONFIG_FILE" "$RUN_HANDOFF"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy" ]
@@ -235,24 +232,34 @@ grep -F -q ":$CONFIG_FILE" "$RUN_HANDOFF"
 [ -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
 grep -F -q 'Prepared an empty user configuration for first-run TV pairing.' "$RUN_OUTPUT"
 grep -F -q 'Opening LG Buddy to pair your first TV...' "$RUN_OUTPUT"
-grep -F -q 'System sleep/wake integration installed; activation is deferred until the first TV is paired.' "$RUN_OUTPUT"
+grep -F -q 'Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors.' "$RUN_OUTPUT"
+grep -F -q 'If a behavior is declined or unavailable, it stays off until retried in Settings.' "$RUN_OUTPUT"
+grep -F -q 'System sleep/wake integration installed; pairing will attempt TV Sleep & Wake.' "$RUN_OUTPUT"
+grep -F -q 'If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings.' "$RUN_OUTPUT"
+grep -F -q 'LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config.' "$RUN_OUTPUT"
+grep -F -q 'LG_Buddy_update_check.timer enabled and started.' "$RUN_OUTPUT"
 ! grep -F -q 'System sleep/wake TV control enabled via' "$RUN_OUTPUT"
 ! grep -F -q 'Running configuration script' "$RUN_OUTPUT"
+grep -F -q 'enable LG_Buddy.service' "$RUN_SYSTEMCTL_LOG"
+grep -F -q 'enable LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
 ! grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q -- '--user enable' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q -- '--user restart' "$RUN_SYSTEMCTL_LOG"
+! grep -F -q 'start LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
+grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
+grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
+grep -F -q -- '--user enable LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
+grep -F -q -- '--user start LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
 
 export LG_BUDDY_HANDOFF_STATUS=77
 run_install failed-handoff
 [ "$RUN_STATUS" -eq 77 ] || { cat "$RUN_OUTPUT"; exit 1; }
-[ -f "$RUN_HOME/.config/lg-buddy/config.env.setup-pending" ]
+[ ! -e "$RUN_HOME/.config/lg-buddy/config.env.setup-pending" ]
 [ ! -s "$RUN_HOME/.config/lg-buddy/config.env" ]
 unset LG_BUDDY_HANDOFF_STATUS
 
 export LG_BUDDY_TEST_WITHOUT_PKEXEC=1
 run_install missing-pkexec
 [ "$RUN_STATUS" -ne 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
-grep -F -q '[MISSING] pkexec (required for first-run activation)' "$RUN_OUTPUT"
+grep -F -q '[MISSING] pkexec (required for TV Sleep & Wake)' "$RUN_OUTPUT"
 [ -z "$(find "$RUN_ROOT" -mindepth 1 -print -quit)" ]
 [ ! -e "$RUN_HOME/.config" ]
 unset LG_BUDDY_TEST_WITHOUT_PKEXEC
@@ -268,17 +275,6 @@ grep -F -q 'configuration file is a symbolic link' "$RUN_OUTPUT"
 [ -L "$SYMLINK_CONFIG_HOME/.config/lg-buddy/config.env" ]
 [ ! -s "$SYMLINK_CONFIG_TARGET" ]
 
-SYMLINK_MARKER_HOME="$WORK_DIR/marker-symlink/home"
-SYMLINK_MARKER_TARGET="$WORK_DIR/marker-symlink-target"
-mkdir -p "$SYMLINK_MARKER_HOME/Desktop" "$SYMLINK_MARKER_HOME/.config/lg-buddy"
-printf '%s\n' retained >"$SYMLINK_MARKER_TARGET"
-ln -s "$SYMLINK_MARKER_TARGET" "$SYMLINK_MARKER_HOME/.config/lg-buddy/config.env.setup-pending"
-run_install marker-symlink
-[ "$RUN_STATUS" -ne 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
-grep -F -q 'setup marker is a symbolic link' "$RUN_OUTPUT"
-[ -L "$SYMLINK_MARKER_HOME/.config/lg-buddy/config.env.setup-pending" ]
-grep -F -x -q retained "$SYMLINK_MARKER_TARGET"
-
 UNREADABLE_HOME="$WORK_DIR/unreadable-config/home"
 mkdir -p "$UNREADABLE_HOME/Desktop" "$UNREADABLE_HOME/.config/lg-buddy"
 printf '%s\n' retained >"$UNREADABLE_HOME/.config/lg-buddy/config.env"
@@ -287,7 +283,6 @@ run_install unreadable-config
 [ "$RUN_STATUS" -ne 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
 grep -F -q 'configuration file is not readable' "$RUN_OUTPUT"
 [ "$(stat -c '%a' "$UNREADABLE_HOME/.config/lg-buddy/config.env")" = 0 ]
-[ ! -e "$UNREADABLE_HOME/.config/lg-buddy/config.env.setup-pending" ]
 
 if unshare -Ur true >/dev/null 2>&1 ||
     { command -v sudo >/dev/null 2>&1 && sudo -n -u root true >/dev/null 2>&1; }; then
@@ -333,11 +328,10 @@ cp "$WORK_DIR/configured/home/.config/lg-buddy/config.env" "$WORK_DIR/configured
 run_install configured
 [ "$RUN_STATUS" -eq 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
 cmp -s "$WORK_DIR/configured.expected" "$RUN_HOME/.config/lg-buddy/config.env"
-[ ! -e "$RUN_HOME/.config/lg-buddy/config.env.setup-pending" ]
 ! grep -F -q 'Opening LG Buddy to pair your first TV...' "$RUN_OUTPUT"
 grep -F -q 'Preserving existing TV profile and policy settings.' "$RUN_OUTPUT"
 grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
 
-echo "First-run installer smoke passed: fresh handoff, failure marker retention, configured preservation."
+echo "First-run installer smoke passed: fresh handoff, failure preservation, configured preservation."

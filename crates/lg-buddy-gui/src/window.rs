@@ -22,10 +22,6 @@ pub(crate) struct ApplicationWindow {
     switcher_bar: adw::ViewSwitcherBar,
     #[cfg(test)]
     menu_button: gtk::MenuButton,
-    setup_banner: gtk::Revealer,
-    setup_row: adw::ActionRow,
-    setup_spinner: gtk::Spinner,
-    setup_retry: gtk::Button,
     suppress_navigation: Rc<Cell<bool>>,
     allow_close: Rc<Cell<bool>>,
     close_requested: Rc<Cell<bool>>,
@@ -36,7 +32,6 @@ impl ApplicationWindow {
         application: &adw::Application,
         on_overview: crate::overview::IntentHandler,
         on_tvs: Rc<dyn Fn(TvsIntent)>,
-        on_setup_retry: Rc<dyn Fn()>,
         on_settings: Rc<dyn Fn(SettingsIntent)>,
         on_navigation: Rc<dyn Fn(ApplicationPage)>,
     ) -> Self {
@@ -111,35 +106,9 @@ impl ApplicationWindow {
         menu_button.update_property(&[gtk::accessible::Property::Label("Main Menu")]);
         header.pack_end(&menu_button);
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
-        let setup_spinner = gtk::Spinner::new();
-        setup_spinner.set_valign(gtk::Align::Center);
-        setup_spinner.set_visible(false);
-        let setup_retry = gtk::Button::with_label("Retry setup");
-        setup_retry.set_valign(gtk::Align::Center);
-        setup_retry.add_css_class("suggested-action");
-        setup_retry.set_visible(false);
-        setup_retry.set_sensitive(false);
-        setup_retry.connect_clicked({
-            let on_setup_retry = Rc::clone(&on_setup_retry);
-            move |_| on_setup_retry()
-        });
-        let setup_row = adw::ActionRow::builder()
-            .title("")
-            .subtitle("")
-            .activatable(false)
-            .selectable(false)
-            .build();
-        setup_row.add_prefix(&setup_spinner);
-        setup_row.add_suffix(&setup_retry);
-        setup_row.set_accessible_role(gtk::AccessibleRole::Status);
-        let setup_banner = gtk::Revealer::builder()
-            .child(&setup_row)
-            .reveal_child(false)
-            .build();
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&stack));
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(&setup_banner);
         content.append(&toasts);
         content.set_vexpand(true);
         toasts.set_vexpand(true);
@@ -191,10 +160,6 @@ impl ApplicationWindow {
             switcher_bar,
             #[cfg(test)]
             menu_button,
-            setup_banner,
-            setup_row,
-            setup_spinner,
-            setup_retry,
             suppress_navigation,
             allow_close,
             close_requested,
@@ -208,27 +173,6 @@ impl ApplicationWindow {
     pub(crate) fn render_tvs(&self, presentation: &TvsPresentation) {
         self.tvs.render(&self.window, presentation);
         self.pairing.render(&self.window, presentation.pairing());
-    }
-
-    pub(crate) fn render_setup(&self, presentation: &lg_buddy::setup::SetupPresentation) {
-        self.overview.set_setup_busy(presentation.busy());
-        let error = presentation.error();
-        let visible = presentation.busy() || error.is_some();
-        self.setup_banner.set_reveal_child(visible);
-        self.setup_spinner.set_visible(presentation.busy());
-        self.setup_spinner.set_spinning(presentation.busy());
-        self.setup_retry.set_visible(presentation.retry_available());
-        self.setup_retry
-            .set_sensitive(presentation.retry_available());
-        self.setup_row
-            .set_title(presentation.title().unwrap_or_default());
-        self.setup_row
-            .set_subtitle(error.map(|error| error.detail()).unwrap_or_default());
-        if error.is_some() {
-            self.setup_row.add_css_class("error");
-        } else {
-            self.setup_row.remove_css_class("error");
-        }
     }
 
     pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
@@ -313,16 +257,6 @@ impl ApplicationWindow {
     #[cfg(test)]
     pub(crate) fn main_menu_visible(&self) -> bool {
         self.menu_button.is_visible() && self.menu_button.is_sensitive()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn setup_banner_visible(&self) -> bool {
-        self.setup_banner.reveals_child()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn click_setup_retry(&self) {
-        self.setup_retry.emit_clicked();
     }
 }
 
