@@ -50,6 +50,7 @@ pub(crate) struct GnomeSource {
     trusted_screen_saver_signals: TrustedScreenSaverSignals,
     trusted_session_manager_signals: Option<TrustedSessionManagerSignals>,
     initial_idle_blanking_allowed: Option<bool>,
+    activity_watch: Option<GnomeActivityWatch>,
 }
 
 #[derive(Debug)]
@@ -95,6 +96,9 @@ impl GnomeSource {
         }
 
         subscribe_to_gnome_signals(&mut bus, honor_idle_inhibitors)?;
+        let activity_watch = honor_idle_inhibitors
+            .then(|| GnomeActivityWatch::connect(&mut bus))
+            .transpose()?;
         let owner = resolve_screen_saver_owner(&mut bus).map_err(|err| {
             GnomeSourceError::Failed(format!("failed to resolve GNOME ScreenSaver owner: {err}"))
         })?;
@@ -123,6 +127,7 @@ impl GnomeSource {
             trusted_screen_saver_signals: TrustedScreenSaverSignals::new(Some(owner)),
             trusted_session_manager_signals,
             initial_idle_blanking_allowed,
+            activity_watch,
         })
     }
 
@@ -144,6 +149,7 @@ impl GnomeSource {
             &mut self.bus,
             &mut self.trusted_screen_saver_signals,
             self.trusted_session_manager_signals.as_mut(),
+            self.activity_watch.as_mut(),
             &mut publish,
         )
     }
@@ -258,6 +264,15 @@ fn subscribe_to_gnome_signals(
     if honor_idle_inhibitors {
         bus.add_signal_match(BusSignalMatch {
             sender: None,
+            path: Some(GNOME_IDLE_MONITOR_PATH),
+            interface: Some(GNOME_IDLE_MONITOR_INTERFACE),
+            member: Some("WatchFired"),
+        })
+        .map_err(|err| {
+            GnomeSourceError::Failed(format!("failed to subscribe to Mutter activity: {err}"))
+        })?;
+        bus.add_signal_match(BusSignalMatch {
+            sender: None,
             path: Some(GNOME_SESSION_MANAGER_PATH),
             interface: Some(GNOME_SESSION_MANAGER_INTERFACE),
             member: None,
@@ -362,10 +377,60 @@ fn gnome_session_manager_available_from_session_bus(bus: &mut impl SessionBusCli
         .unwrap_or(false)
 }
 
+/// Mutter resets GetIdletime when inhibition ends, without firing user-active
+/// watches. Use those watches to distinguish input from the counter reset.
+struct GnomeActivityWatch {
+    owner: String,
+    id: u32,
+}
+
+impl GnomeActivityWatch {
+    fn connect(bus: &mut impl SessionBusClient) -> Result<Self, GnomeSourceError> {
+        let owner = get_name_owner(bus, GNOME_IDLE_MONITOR_NAME).map_err(|err| {
+            GnomeSourceError::Failed(format!("failed to resolve Mutter IdleMonitor owner: {err}"))
+        })?;
+        let mut watch = Self { owner, id: 0 };
+        watch.arm(bus)?;
+        Ok(watch)
+    }
+
+    fn arm(&mut self, bus: &mut impl SessionBusClient) -> Result<(), GnomeSourceError> {
+        self.id = bus
+            .call_method(BusMethodCall::new(
+                &self.owner,
+                GNOME_IDLE_MONITOR_PATH,
+                GNOME_IDLE_MONITOR_INTERFACE,
+                "AddUserActiveWatch",
+            ))
+            .and_then(|reply| reply.single_u32())
+            .map_err(|err| {
+                GnomeSourceError::Failed(format!("failed to watch Mutter user activity: {err}"))
+            })?;
+        Ok(())
+    }
+
+    fn fired(&self, signal: &BusSignal) -> bool {
+        signal.sender.as_deref() == Some(self.owner.as_str())
+            && signal.path == GNOME_IDLE_MONITOR_PATH
+            && signal.interface == GNOME_IDLE_MONITOR_INTERFACE
+            && signal.member == "WatchFired"
+            && signal.body == [BusValue::U32(self.id)]
+    }
+
+    fn owner_changed(&self, signal: &BusSignal) -> bool {
+        signal.sender.as_deref() == Some(DBUS_SERVICE_NAME)
+            && parse_name_owner_changed_signal(signal).is_some_and(|change| {
+                change.name == GNOME_IDLE_MONITOR_NAME
+                    && change.new_owner.as_deref() != Some(self.owner.as_str())
+            })
+    }
+}
+
 fn run_gnome_monitor_process<F>(
     bus: &mut impl SessionBusClient,
     trusted_screen_saver_signals: &mut TrustedScreenSaverSignals,
     mut trusted_session_manager_signals: Option<&mut TrustedSessionManagerSignals>,
+    mut activity_watch: Option<&mut GnomeActivityWatch>,
     publish: &mut F,
 ) -> Result<(), GnomeSourceError>
 where
@@ -381,7 +446,7 @@ where
         }
 
         let now = Instant::now();
-        if now >= next_idle_poll {
+        if activity_watch.is_none() && now >= next_idle_poll {
             if !poll_idle_monitor_once(bus, publish) {
                 return Ok(());
             }
@@ -389,9 +454,13 @@ where
         }
 
         let now = Instant::now();
-        let mut process_timeout = next_idle_poll
-            .saturating_duration_since(now)
-            .min(GNOME_BUS_PROCESS_INTERVAL);
+        let mut process_timeout = if activity_watch.is_some() {
+            GNOME_BUS_PROCESS_INTERVAL
+        } else {
+            next_idle_poll
+                .saturating_duration_since(now)
+                .min(GNOME_BUS_PROCESS_INTERVAL)
+        };
         if let Some(timeout) = test_timeout {
             process_timeout = process_timeout.min(timeout.saturating_sub(started.elapsed()));
         }
@@ -402,6 +471,26 @@ where
         else {
             continue;
         };
+
+        if let Some(watch) = activity_watch.as_deref_mut() {
+            if watch.owner_changed(&signal) {
+                return Err(GnomeSourceError::Failed(
+                    "Mutter IdleMonitor owner changed while watching user activity".to_string(),
+                ));
+            }
+            if watch.fired(&signal) {
+                if !publish(SessionObservation::Inactivity {
+                    observation: InactivityObservation::DesktopActivityObserved,
+                    source: EventSource::DesktopSession,
+                    observed_at: Instant::now(),
+                }) {
+                    return Ok(());
+                }
+                // User-active watches are one-shot. Keep listening even while
+                // inhibition is active, so real input can always restore.
+                watch.arm(bus)?;
+            }
+        }
 
         if let Some(trusted_session_manager_signals) =
             trusted_session_manager_signals.as_deref_mut()
@@ -415,6 +504,13 @@ where
                 }
                 Some(SessionManagerSignal::OwnerChanged(Some(_)))
                 | Some(SessionManagerSignal::InhibitorChanged) => {
+                    // The runner's timer is independent of this blocking call.
+                    // Suspend it before querying, without inventing an inhibitor.
+                    if !publish(SessionObservation::IdleBlankingPermissionPending {
+                        source: EventSource::DesktopSession,
+                    }) {
+                        return Ok(());
+                    }
                     let allowed = current_idle_blanking_allowed(bus).map_err(|err| {
                         GnomeSourceError::Failed(format!(
                             "failed to read GNOME idle inhibitor state after a SessionManager change: {err}"
@@ -484,8 +580,8 @@ mod tests {
         gnome_service_status_from_session_bus, map_screen_saver_signal, map_session_manager_signal,
         monitor_test_timeout, poll_idle_monitor_once, resolve_screen_saver_owner,
         run_gnome_monitor_process, screen_saver_owner_changed, session_manager_owner_changed,
-        subscribe_to_gnome_signals, GnomeServiceStatus, GnomeSourceError, SessionManagerSignal,
-        TrustedScreenSaverSignals, TrustedSessionManagerSignals,
+        subscribe_to_gnome_signals, GnomeActivityWatch, GnomeServiceStatus, GnomeSourceError,
+        SessionManagerSignal, TrustedScreenSaverSignals, TrustedSessionManagerSignals,
         GNOME_MONITOR_TEST_TIMEOUT_SECS_ENV,
     };
     use crate::events::EventSource;
@@ -496,7 +592,10 @@ mod tests {
         SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
     };
     use std::collections::VecDeque;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    };
     use std::time::{Duration, Instant};
 
     #[derive(Debug, Default)]
@@ -507,8 +606,11 @@ mod tests {
         idletime_ms: Option<u64>,
         screen_saver_owner: Option<String>,
         session_manager_owner: Option<String>,
+        idle_monitor_owner: Option<String>,
+        watch_ids: VecDeque<u32>,
         inhibited: Option<bool>,
         inhibited_plan: VecDeque<bool>,
+        permission_pending: Option<Arc<AtomicBool>>,
         method_calls: Vec<(String, String, String, String)>,
         method_bodies: Vec<Vec<BusValue>>,
         signal_matches: Vec<[Option<String>; 4]>,
@@ -554,6 +656,7 @@ mod tests {
                 let owner = match name.as_str() {
                     super::GNOME_SCREEN_SAVER_NAME => self.screen_saver_owner.as_deref(),
                     super::GNOME_SESSION_MANAGER_NAME => self.session_manager_owner.as_deref(),
+                    super::GNOME_IDLE_MONITOR_NAME => self.idle_monitor_owner.as_deref(),
                     _ => None,
                 };
                 return owner
@@ -565,6 +668,27 @@ mod tests {
                     .ok_or_else(|| {
                         SessionBusError::Transport("no queued GNOME owner reply".to_string())
                     });
+            }
+
+            if call.path == super::GNOME_IDLE_MONITOR_PATH
+                && call.interface == super::GNOME_IDLE_MONITOR_INTERFACE
+                && call.member == "AddUserActiveWatch"
+                && Some(call.destination) == self.idle_monitor_owner.as_deref()
+            {
+                assert!(call.body.is_empty());
+                return self
+                    .watch_ids
+                    .pop_front()
+                    .map(|id| BusReply::new(vec![BusValue::U32(id)]))
+                    .ok_or_else(|| SessionBusError::Transport("no queued watch id".to_string()));
+            }
+            if call.member == "IsInhibited" {
+                if let Some(pending) = &self.permission_pending {
+                    assert!(
+                        pending.load(Ordering::SeqCst),
+                        "permission must be suspended before querying"
+                    );
+                }
             }
 
             match (
@@ -828,7 +952,7 @@ mod tests {
         let mut bus = FakeSessionBus::default();
         subscribe_to_gnome_signals(&mut bus, true).expect("subscribe GNOME signals");
 
-        assert_eq!(bus.signal_matches.len(), 3);
+        assert_eq!(bus.signal_matches.len(), 4);
         assert!(bus.signal_matches.iter().any(|[_, path, interface, _]| {
             path.as_deref() == Some(super::GNOME_SESSION_MANAGER_PATH)
                 && interface.as_deref() == Some(super::GNOME_SESSION_MANAGER_INTERFACE)
@@ -837,6 +961,7 @@ mod tests {
 
     #[test]
     fn inhibitor_transition_publishes_permission_without_activity_or_restore() {
+        let pending = Arc::new(AtomicBool::new(false));
         let signal = BusSignal::new(
             super::GNOME_SESSION_MANAGER_PATH,
             super::GNOME_SESSION_MANAGER_INTERFACE,
@@ -847,6 +972,7 @@ mod tests {
             "/org/gnome/SessionManager/Inhibitor1".to_string(),
         )]);
         let mut bus = FakeSessionBus {
+            permission_pending: Some(Arc::clone(&pending)),
             inhibited_plan: [true].into_iter().collect(),
             process_results: [
                 Ok(Some(signal)),
@@ -865,7 +991,11 @@ mod tests {
                 &mut bus,
                 &mut screen_saver,
                 Some(&mut session_manager),
+                None,
                 &mut |observation| {
+                    if matches!(observation, SessionObservation::IdleBlankingPermissionPending { .. }) {
+                        pending.store(true, Ordering::SeqCst);
+                    }
                     observations.push(observation);
                     true
                 },
@@ -874,11 +1004,16 @@ mod tests {
         ));
         assert!(matches!(
             observations.as_slice(),
-            [SessionObservation::IdleBlankingPermission {
-                allowed: false,
-                source: EventSource::DesktopSession,
-                ..
-            }]
+            [
+                SessionObservation::IdleBlankingPermissionPending {
+                    source: EventSource::DesktopSession
+                },
+                SessionObservation::IdleBlankingPermission {
+                    allowed: false,
+                    source: EventSource::DesktopSession,
+                    ..
+                }
+            ]
         ));
     }
 
@@ -938,6 +1073,137 @@ mod tests {
                 "GetIdletime".to_string(),
             )]
         );
+    }
+
+    fn watch_fired(id: u32) -> BusSignal {
+        BusSignal::new(
+            super::GNOME_IDLE_MONITOR_PATH,
+            super::GNOME_IDLE_MONITOR_INTERFACE,
+            "WatchFired",
+        )
+        .with_sender(":1.42")
+        .with_body(vec![BusValue::U32(id)])
+    }
+
+    #[test]
+    fn activity_watch_requires_current_owner_id_and_signal_shape() {
+        let watch = GnomeActivityWatch {
+            owner: ":1.42".to_string(),
+            id: 7,
+        };
+        assert!(watch.fired(&watch_fired(7)));
+        assert!(!watch.fired(&watch_fired(8)));
+        assert!(!watch.fired(&watch_fired(7).with_sender(":1.99")));
+        assert!(!watch.fired(&watch_fired(7).with_body(vec![BusValue::U64(7)])));
+        let mut wrong_path = watch_fired(7);
+        wrong_path.path = "/untrusted".to_string();
+        assert!(!watch.fired(&wrong_path));
+    }
+
+    #[test]
+    fn activity_watch_rearms_after_input_without_polling_the_resettable_counter() {
+        let mut bus = FakeSessionBus {
+            idle_monitor_owner: Some(":1.42".to_string()),
+            watch_ids: [7, 8, 9].into_iter().collect(),
+            idletime_ms: Some(0),
+            process_results: [
+                Ok(Some(watch_fired(7).with_sender(":1.99"))),
+                Ok(Some(watch_fired(7))),
+                Ok(Some(watch_fired(7))), // One-shot watch has already expired.
+                Ok(Some(watch_fired(8))),
+                Err(SessionBusError::Transport("stop test loop".to_string())),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeSessionBus::default()
+        };
+        let mut watch = GnomeActivityWatch::connect(&mut bus).expect("register activity watch");
+        let mut screen_saver = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let mut observations = Vec::new();
+        assert!(run_gnome_monitor_process(
+            &mut bus,
+            &mut screen_saver,
+            None,
+            Some(&mut watch),
+            &mut |observation| {
+                observations.push(observation);
+                true
+            },
+        )
+        .is_err());
+        assert_eq!(observations.len(), 2);
+        assert!(observations.iter().all(|observation| matches!(
+            observation,
+            SessionObservation::Inactivity {
+                observation: InactivityObservation::DesktopActivityObserved,
+                source: EventSource::DesktopSession,
+                ..
+            }
+        )));
+        assert_eq!(watch.id, 9);
+        assert!(!bus
+            .method_calls
+            .iter()
+            .any(|(_, _, _, member)| member == "GetIdletime"));
+    }
+
+    #[test]
+    fn activity_watch_owner_loss_is_an_error_instead_of_silent_input_loss() {
+        let change = BusSignal::new(DBUS_OBJECT_PATH, DBUS_INTERFACE, "NameOwnerChanged")
+            .with_sender(DBUS_SERVICE_NAME)
+            .with_body(vec![
+                BusValue::String(super::GNOME_IDLE_MONITOR_NAME.to_string()),
+                BusValue::String(":1.42".to_string()),
+                BusValue::String(String::new()),
+            ]);
+        let mut watch = GnomeActivityWatch {
+            owner: ":1.42".to_string(),
+            id: 7,
+        };
+        assert!(!watch.owner_changed(&change.clone().with_sender(":1.99")));
+        let mut bus = FakeSessionBus {
+            process_results: [Ok(Some(change))].into_iter().collect(),
+            ..FakeSessionBus::default()
+        };
+        let mut screen_saver = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let result = run_gnome_monitor_process(
+            &mut bus,
+            &mut screen_saver,
+            None,
+            Some(&mut watch),
+            &mut |_| panic!("owner loss is not activity"),
+        );
+        assert!(
+            matches!(result, Err(GnomeSourceError::Failed(message)) if message.contains("owner changed"))
+        );
+    }
+
+    #[test]
+    fn activity_watch_rearm_failure_is_an_error_instead_of_polling_for_input() {
+        let mut bus = FakeSessionBus {
+            process_results: [Ok(Some(watch_fired(7)))].into_iter().collect(),
+            ..FakeSessionBus::default()
+        };
+        let mut watch = GnomeActivityWatch {
+            owner: ":1.42".to_string(),
+            id: 7,
+        };
+        let mut screen_saver = TrustedScreenSaverSignals::new(Some(":1.42".to_string()));
+        let mut observations = Vec::new();
+        let result = run_gnome_monitor_process(
+            &mut bus,
+            &mut screen_saver,
+            None,
+            Some(&mut watch),
+            &mut |observation| {
+                observations.push(observation);
+                true
+            },
+        );
+        assert!(
+            matches!(result, Err(GnomeSourceError::Failed(message)) if message.contains("failed to watch"))
+        );
+        assert_eq!(observations.len(), 1);
     }
 
     #[test]

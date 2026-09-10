@@ -71,10 +71,11 @@ These are the semantic events the runtime should reason about.
 
 ## Runtime Contract
 
-Native sources publish `SessionObservation` values. Each observation carries a
-canonical session event, inactivity fact, or idle-blanking permission, an `EventSource`, and the time it
-was observed. Source modules do not decide whether to blank or restore the
-screen.
+Native sources publish `SessionObservation` values: canonical session events,
+inactivity facts, or idle-blanking permission updates, with an `EventSource` and
+observation time. A pending permission refresh suspends automatic blanking
+without changing the last confirmed permission or renewing the deadline.
+Source modules do not decide whether to blank or restore the screen.
 
 GNOME and native Wayland feed activity facts to the shared runner, which owns
 their configured inactivity deadline. `swayidle` owns its initial timeout but
@@ -112,7 +113,8 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (true,)` | Idle observation that cannot bypass LG Buddy's timeout | Implemented |
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
-| Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` | `UserActivity` | Implemented |
+| Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` (honoring disabled) | `UserActivity` | Implemented |
+| Mutter `WatchFired` for the current `AddUserActiveWatch` (honoring enabled) | `UserActivity` | Implemented |
 | `org.gnome.SessionManager.IsInhibited(8)` | Idle-blanking permission when honoring is enabled | Implemented |
 
 Notes:
@@ -121,6 +123,10 @@ Notes:
 - Enabling inhibitor honoring additionally requires `org.gnome.SessionManager`.
   The source reads its current aggregate idle-inhibition state at startup and
   after trusted `InhibitorAdded`, `InhibitorRemoved`, or owner-change signals.
+  Automatic blanking pauses while each refresh is pending; an unchanged result
+  preserves the existing deadline. User input comes from Mutter's one-shot
+  user-active watches, rearmed after each signal. Unlike `GetIdletime`, these
+  do not treat the idle-counter reset on inhibitor release as activity.
   Other inhibition flags do not block blanking. Losing the service or failing
   to read its state ends the source with a diagnostic error rather than assuming
   blanking is allowed. With the setting disabled, this extra dependency is not
@@ -128,8 +134,8 @@ Notes:
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
-- Mutter idletime is used only to detect recent desktop activity. Its absolute
-  value does not trigger blanking.
+- With honoring disabled, Mutter idletime is used only to detect recent desktop
+  activity. Its absolute value does not trigger blanking.
 - ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
   wake signals reset the same LG Buddy deadline and remain restore observations
   evaluated by screen policy.

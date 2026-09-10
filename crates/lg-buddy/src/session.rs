@@ -53,4 +53,7 @@ pub(crate) enum SessionObservation {
         source: EventSource,
         observed_at: Instant,
     },
+    /// Suspend automatic blanking while the source refreshes permission.
+    /// This is not an inhibitor transition and must not renew the deadline.
+    IdleBlankingPermissionPending { source: EventSource },
 }

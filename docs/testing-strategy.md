@@ -250,8 +250,10 @@ Secondary concern:
 Examples:
 
 - GNOME signal mapping
-- GNOME monitor setup, sender ownership, and idletime polling over the
-  session-bus seam
+- GNOME monitor setup, sender ownership, idletime polling, and one-shot
+  user-active watches over the session-bus seam
+- delayed inhibitor replies crossing the blanking deadline, and inhibitor
+  release resetting Mutter's idle counter without reporting user input
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline

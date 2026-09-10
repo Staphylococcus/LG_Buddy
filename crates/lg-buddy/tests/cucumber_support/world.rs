@@ -572,6 +572,11 @@ exit 1\n",
             .schedule_idle_inhibitor_count(std::time::Duration::from_secs_f64(after_secs), count);
     }
 
+    pub fn delay_next_gnome_inhibited_query(&mut self, delay_secs: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .delay_next_inhibited_query(std::time::Duration::from_secs_f64(delay_secs));
+    }
+
     pub fn gnome_monitor_emit_idle(&mut self) {
         self.ensure_mock_session_bus_idle_monitor()
             .emit_screen_saver_idle();
@@ -599,6 +604,11 @@ exit 1\n",
             idle_monitor.set_idle_monitor_idletime(last);
         }
         idle_monitor.set_idle_monitor_idletime_plan(values);
+    }
+
+    pub fn gnome_real_input_occurs_after_secs(&mut self, seconds: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .schedule_user_activity(std::time::Duration::from_secs_f64(seconds));
     }
 
     pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {

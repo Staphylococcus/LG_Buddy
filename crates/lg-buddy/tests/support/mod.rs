@@ -1,6 +1,7 @@
 use dbus::arg::{PropMap, Variant as DbusVariant};
 use dbus::blocking::Connection as DbusConnection;
 use dbus::channel::{MatchingReceiver, Sender as DbusSender};
+use dbus::strings::BusName as DbusBusName;
 use dbus::Message as DbusMessage;
 use dbus::Path as DbusPath;
 use dbus_crossroads::{Crossroads, MethodErr};
@@ -365,8 +366,14 @@ struct MockSessionBusIdleMonitorState {
     idle_inhibitor_count: u32,
     inhibitor_plan: VecDeque<(Duration, u32)>,
     inhibitor_started_at: Option<Instant>,
+    next_inhibitor_query_delay: Option<Duration>,
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
+    idletime_reset_at: Option<Instant>,
+    next_user_active_watch_id: u32,
+    user_active_watches: VecDeque<(String, u32)>,
+    user_activity_plan: VecDeque<Duration>,
+    user_activity_started_at: Option<Instant>,
     screen_saver_signals: VecDeque<MockScreenSaverSignal>,
     client_ready: bool,
 }
@@ -384,6 +391,7 @@ impl MockSessionBusIdleMonitor {
         let (address, daemon_pid) = start_private_session_bus();
         let state = Arc::new(Mutex::new(MockSessionBusIdleMonitorState {
             default_idletime: 1500,
+            next_user_active_watch_id: 1,
             ..MockSessionBusIdleMonitorState::default()
         }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -456,6 +464,10 @@ impl MockSessionBusIdleMonitor {
         self.patch_state(|state| state.inhibitor_plan.push_back((after, count)));
     }
 
+    pub fn delay_next_inhibited_query(&self, delay: Duration) {
+        self.patch_state(|state| state.next_inhibitor_query_delay = Some(delay));
+    }
+
     pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
         self.patch_state(|state| {
             state.idletime_plan = values.iter().copied().collect();
@@ -466,6 +478,10 @@ impl MockSessionBusIdleMonitor {
         self.patch_state(|state| {
             state.idletime_plan.push_back(value);
         });
+    }
+
+    pub fn schedule_user_activity(&self, after: Duration) {
+        self.patch_state(|state| state.user_activity_plan.push_back(after));
     }
 
     pub fn emit_screen_saver_idle(&self) {
@@ -693,26 +709,63 @@ fn spawn_mock_idle_monitor_service(
                     ("flags",),
                     ("inhibited",),
                     move |_, _, (flags,): (u32,)| {
-                        let mut state = inhibitor_state
-                            .lock()
-                            .expect("mock session manager state lock");
-                        state.inhibitor_started_at.get_or_insert_with(Instant::now);
-                        Ok((flags & 8 != 0 && state.idle_inhibitor_count > 0,))
+                        let (inhibited, delay) = {
+                            let mut state = inhibitor_state
+                                .lock()
+                                .expect("mock session manager state lock");
+                            state.inhibitor_started_at.get_or_insert_with(Instant::now);
+                            let inhibited = flags & 8 != 0 && state.idle_inhibitor_count > 0;
+                            let delay = if inhibited {
+                                state.next_inhibitor_query_delay.take()
+                            } else {
+                                None
+                            };
+                            (inhibited, delay)
+                        };
+                        if let Some(delay) = delay {
+                            thread::sleep(delay);
+                        }
+                        Ok((inhibited,))
                     },
                 );
             });
         let iface = crossroads.register("org.gnome.Mutter.IdleMonitor", move |builder| {
-            let state = Arc::clone(&idle_monitor_state);
+            let idletime_state = Arc::clone(&idle_monitor_state);
             builder.method("GetIdletime", (), ("idletime",), move |_, _, ()| {
-                let mut state = state
+                let mut state = idletime_state
                     .lock()
                     .expect("mock session-bus idle monitor state lock");
                 state.client_ready = true;
-                let value = state
-                    .idletime_plan
-                    .pop_front()
-                    .unwrap_or(state.default_idletime);
+                let value = state.idletime_plan.pop_front().unwrap_or_else(|| {
+                    state
+                        .idletime_reset_at
+                        .map(|reset_at| reset_at.elapsed().as_millis() as u64)
+                        .unwrap_or(state.default_idletime)
+                });
                 Ok((value,))
+            });
+
+            let watch_state = Arc::clone(&idle_monitor_state);
+            builder.method("AddUserActiveWatch", (), ("id",), move |ctx, _, ()| {
+                let mut state = watch_state
+                    .lock()
+                    .expect("mock session-bus idle monitor state lock");
+                let caller = ctx
+                    .message()
+                    .sender()
+                    .expect("mock AddUserActiveWatch caller unique name")
+                    .to_string();
+                state.client_ready = true;
+                state
+                    .user_activity_started_at
+                    .get_or_insert_with(Instant::now);
+                let id = state.next_user_active_watch_id;
+                state.next_user_active_watch_id = state
+                    .next_user_active_watch_id
+                    .checked_add(1)
+                    .expect("mock user-active watch id exhausted");
+                state.user_active_watches.push_back((caller, id));
+                Ok((id,))
             });
         });
         let notifications_iface =
@@ -781,6 +834,7 @@ fn spawn_mock_idle_monitor_service(
             let _ = connection.process(Duration::from_millis(50));
             sync_mock_bus_names(&connection, &state, &mut owned_names);
             emit_scheduled_mock_inhibitor_changes(&connection, &state);
+            emit_scheduled_mock_user_activity(&connection, &state);
             emit_queued_mock_screen_saver_signal(&connection, &state);
         }
     })
@@ -1069,6 +1123,12 @@ fn emit_scheduled_mock_inhibitor_changes(
             .expect("scheduled inhibitor change");
         let previous = state.idle_inhibitor_count;
         state.idle_inhibitor_count = count;
+        if previous > 0 && count == 0 {
+            // Mutter resets its monotonic idle counter when the final idle
+            // inhibitor is released. This is not user activity and does not
+            // fire a user-active watch.
+            state.idletime_reset_at = Some(Instant::now());
+        }
         let member = if count > previous {
             "InhibitorAdded"
         } else {
@@ -1087,6 +1147,45 @@ fn emit_scheduled_mock_inhibitor_changes(
             );
             let _ = connection.send(message);
         }
+    }
+}
+
+fn emit_scheduled_mock_user_activity(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+) {
+    let watches = {
+        let mut state = state
+            .lock()
+            .expect("mock session-bus idle monitor state lock");
+        let Some(started_at) = state.user_activity_started_at else {
+            return;
+        };
+        let Some(after) = state.user_activity_plan.front().copied() else {
+            return;
+        };
+        if started_at.elapsed() < after {
+            return;
+        }
+
+        // Mutter user-active watches are one-shot. Input resets the idle
+        // counter, is consumed even if no watch is armed, and drains every
+        // watch armed for that input.
+        state.user_activity_plan.pop_front();
+        state.idletime_reset_at = Some(Instant::now());
+        state.user_active_watches.drain(..).collect::<Vec<_>>()
+    };
+
+    for (caller, watch_id) in watches {
+        let mut message = DbusMessage::new_signal(
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "org.gnome.Mutter.IdleMonitor",
+            "WatchFired",
+        )
+        .expect("create mock Mutter WatchFired signal")
+        .append1(watch_id);
+        message.set_destination(Some(DbusBusName::from(caller)));
+        let _ = connection.send(message);
     }
 }
 

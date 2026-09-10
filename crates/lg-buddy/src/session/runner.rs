@@ -917,6 +917,11 @@ where
         };
 
         match message {
+            RunnerMessage::IdleBlankingPermissionPending { source } => {
+                if honor_idle_inhibitors && source == EventSource::DesktopSession {
+                    inactivity.defer_idle_blanking();
+                }
+            }
             RunnerMessage::IdleBlankingPermission {
                 allowed,
                 source,
@@ -1225,6 +1230,9 @@ fn send_source_observation(
     observation: SessionObservation,
 ) -> bool {
     let message = match observation {
+        SessionObservation::IdleBlankingPermissionPending { source } => {
+            RunnerMessage::IdleBlankingPermissionPending { source }
+        }
         SessionObservation::IdleBlankingPermission {
             allowed,
             source,
@@ -1434,6 +1442,9 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 }
 
 enum RunnerMessage {
+    IdleBlankingPermissionPending {
+        source: EventSource,
+    },
     IdleBlankingPermission {
         allowed: bool,
         source: EventSource,

@@ -948,7 +948,8 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 - the GNOME session-bus connection and subscriptions
 - ScreenSaver sender ownership validation and signal mapping
-- Mutter idletime polling and normalized activity observations
+- Mutter user-active watches when honoring inhibitors, legacy idletime polling
+  otherwise, and normalized activity observations
 
 `sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle

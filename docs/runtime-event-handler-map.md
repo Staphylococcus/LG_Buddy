@@ -126,7 +126,7 @@ Current shared-runtime inputs:
 | `org.gnome.ScreenSaver.ActiveChanged(true)` | Non-authoritative idle observation | GNOME source -> shared runner; does not change the LG Buddy deadline |
 | `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
-| Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
+| Recent Mutter `GetIdletime` activity (honoring disabled) or a trusted user-active `WatchFired` (honoring enabled) | `DesktopActivityObserved` | `InactivityEngine` |
 | Linux gamepad activity | `UserActivityObserved` from `AuxiliaryInput` | Shared session runtime -> `InactivityEngine` |
 | Initial or changed logind `LockedHint=true` | `SessionEvent::Lock` from `LinuxLogind` | Shared session runtime -> `InactivityEngine` |
 | Changed logind `LockedHint=false` after lock | `SessionEvent::Unlock` from `LinuxLogind` | Clear the observed lock state without requesting screen restore |
