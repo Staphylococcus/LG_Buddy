@@ -17,6 +17,7 @@ Compiling and testing the GTK frontend additionally requires:
 - `glib-compile-resources` (provided by the GLib development tools)
 - a graphical session or virtual display for renderer tests
 - `xdotool` for native pointer tests and the executable launch smoke test
+- `pgrep` (`procps` on Debian, `procps-ng` on Fedora/Arch) for installed GUI process checks
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 
@@ -206,6 +207,25 @@ refusal, installed identity, mocked GUI read/apply/failure/cancel behavior,
 lifecycle topology, and uninstall cleanup without mutating the host installation.
 The supported Fedora and Arch lanes repeat the dependency flow with their native
 package-manager mappings.
+
+For the complete installed GUI journey, build the local TV fixture and pass it
+to the existing smoke:
+
+```bash
+cargo build --locked -p lg-buddy --example gui_journey_tv
+dbus-run-session -- xvfb-run -a bash scripts/test-installed-gui.sh \
+  target/debug/lg-buddy target/debug/lg-buddy-gui \
+  target/debug/examples/gui_journey_tv
+```
+
+The CI bundle lane additionally builds a `0.0.0` debug runtime and GUI with
+`--features gui-test-fixtures` and passes the newer canonical candidate archive
+as the fourth argument. This enables deterministic manual checks and real
+installation/handoff within the same smoke. The HTTP fixture is loopback-only,
+and this feature cannot be used in a release build. Run as a regular user with
+unprivileged user namespaces available; the test never targets the host's
+installation or live services. `LG_BUDDY_KEEP_GUI_SMOKE=1` retains failure
+evidence in the printed temporary directory.
 
 Run the cross-version smoke with explicit previous and candidate archives:
 

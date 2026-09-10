@@ -676,7 +676,10 @@ impl UreqGitHubSource {
         &self,
         url: &str,
     ) -> Result<T, BundleAcquisitionError> {
-        let response = match github_request(&self.api_agent, url, GITHUB_JSON_ACCEPT).call() {
+        let request = github_request(&self.api_agent, url, GITHUB_JSON_ACCEPT);
+        #[cfg(feature = "gui-test-fixtures")]
+        let request = crate::gui_test_fixtures::request(request);
+        let response = match request.call() {
             Ok(response) => response,
             Err(ureq::Error::Status(status, response)) => {
                 let body = read_response_text(response, url, MAX_API_ERROR_BYTES)?;
@@ -719,10 +722,11 @@ impl UreqGitHubSource {
         );
         let budget = remaining_request_budget(deadline)?;
         let agent = github_agent(budget.connect, budget.request);
-        match github_request(&agent, &url, GITHUB_ASSET_ACCEPT)
-            .set("Accept-Encoding", "identity")
-            .call()
-        {
+        let request =
+            github_request(&agent, &url, GITHUB_ASSET_ACCEPT).set("Accept-Encoding", "identity");
+        #[cfg(feature = "gui-test-fixtures")]
+        let request = crate::gui_test_fixtures::request(request);
+        match request.call() {
             Ok(response) if response.status() == 200 => Ok((response, url)),
             Ok(response) if response.status() == 302 => {
                 self.follow_asset_redirect(&url, response, deadline)
@@ -763,16 +767,17 @@ impl UreqGitHubSource {
         let safe_redirected_url = redact_url(&redirected_url);
         let budget = remaining_request_budget(deadline)?;
         let agent = github_agent(budget.connect, budget.request);
-        match agent
+        let request = agent
             .get(&redirected_url)
             .set("Accept", GITHUB_ASSET_ACCEPT)
             .set("Accept-Encoding", "identity")
             .set(
                 "User-Agent",
                 concat!("lg-buddy/", env!("CARGO_PKG_VERSION")),
-            )
-            .call()
-        {
+            );
+        #[cfg(feature = "gui-test-fixtures")]
+        let request = crate::gui_test_fixtures::request(request);
+        match request.call() {
             Ok(response) if response.status() == 200 => Ok((response, safe_redirected_url)),
             Ok(response) => Err(BundleAcquisitionError::HttpStatus {
                 url: safe_redirected_url,

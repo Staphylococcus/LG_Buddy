@@ -25,7 +25,10 @@ pub(crate) struct DiagnosticsView {
 }
 
 impl DiagnosticsView {
-    pub(crate) fn new(on_intent: Rc<dyn Fn(DiagnosticsIntent)>) -> Self {
+    pub(crate) fn new(
+        on_intent: Rc<dyn Fn(DiagnosticsIntent)>,
+        return_focus: &gtk::Widget,
+    ) -> Self {
         let presented = Rc::new(Cell::new(false));
         let suppress_close = Rc::new(Cell::new(false));
 
@@ -149,10 +152,16 @@ impl DiagnosticsView {
             let on_intent = Rc::clone(&on_intent);
             let presented = Rc::clone(&presented);
             let suppress_close = Rc::clone(&suppress_close);
+            let return_focus = return_focus.downgrade();
             move |_| {
                 presented.set(false);
                 if !suppress_close.replace(false) {
                     on_intent(DiagnosticsIntent::Close);
+                }
+                // The menu item that opened the dialog no longer exists, and
+                // a native file chooser can also clear the parent's focus.
+                if let Some(return_focus) = return_focus.upgrade() {
+                    return_focus.grab_focus();
                 }
             }
         });
@@ -267,15 +276,20 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     }
 
     let intents = Rc::new(RefCell::new(Vec::new()));
-    let view = DiagnosticsView::new(Rc::new({
-        let intents = Rc::clone(&intents);
-        move |intent| intents.borrow_mut().push(intent)
-    }));
+    let origin = gtk::Button::with_label("Open diagnostics");
+    let view = DiagnosticsView::new(
+        Rc::new({
+            let intents = Rc::clone(&intents);
+            move |intent| intents.borrow_mut().push(intent)
+        }),
+        origin.upcast_ref(),
+    );
     let wide_window = adw::ApplicationWindow::builder()
         .application(application)
         .default_width(800)
         .default_height(600)
         .build();
+    wide_window.set_content(Some(&origin));
     wide_window.present();
 
     assert!(view.report().is_focusable());
@@ -352,6 +366,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     // Native dismissal emits Close. Feeding that intent back through the
     // application and rendering its transition must not emit a second Close.
     intents.borrow_mut().clear();
+    gtk::prelude::GtkWindowExt::set_focus(&wide_window, None::<&gtk::Widget>);
     view.dialog.close();
     pump_until(|| intents.borrow().contains(&DiagnosticsIntent::Close));
     assert_eq!(*intents.borrow(), vec![DiagnosticsIntent::Close]);
@@ -362,6 +377,11 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     view.render(&wide_window, closed.presentation());
     pump_until(|| !view.presented.get() && !view.suppress_close.get());
     assert!(intents.borrow().is_empty());
+    assert_eq!(
+        gtk::prelude::GtkWindowExt::focus(&wide_window).as_ref(),
+        Some(origin.upcast_ref()),
+        "closing diagnostics restores keyboard focus after a native chooser",
+    );
     wide_window.close();
 
     let narrow_window = adw::ApplicationWindow::builder()
