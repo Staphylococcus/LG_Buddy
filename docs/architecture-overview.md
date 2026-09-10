@@ -1097,15 +1097,15 @@ What is still not implemented:
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes
 
-The no-argument launcher opens the installed application but does not replace
-the shell setup surface. v1.6 exposes TV connection/capability status and
-actionable control, pairing, and settings errors. A resolved screen backend
-display is not a GUI requirement; the existing CLI diagnostics remain available.
-
-The complete GUI first-run, service, and update journey, including runtime/service
-state and update state, belongs to v1.7.0 under
-[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The contents of
-runtime/service state remain to be defined. The current architecture is a
-Rust-owned runtime and application with a thin GTK renderer and shell setup
-surface. See [Frontend architecture](gui-target-architecture.md) for the current
-view and renderer boundaries.
+The no-argument launcher opens the installed application, while the shell layer
+remains the explicit setup, installation, and uninstallation surface for
+headless use. v1.7.0 extends the GUI with the complete first-run, service
+activation, update, and troubleshooting journey under
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The
+application owns typed runtime/service and update state, including on-demand
+diagnostics; the GUI renders those states without inferring policy. A resolved
+screen backend display is not a GUI requirement, and the existing CLI paths
+remain available. The current architecture is a Rust-owned runtime and
+application with a thin GTK renderer and shell setup surface. See
+[Frontend architecture](gui-target-architecture.md) for the current view and
+renderer boundaries.
