@@ -2205,11 +2205,16 @@ pub(crate) mod controller_test_support {
                     .is_none()
             });
             pump_until(|| button(native.upcast_ref(), "Copy details").is_some());
-            assert!(button(native.upcast_ref(), "Install update…").is_some());
+            let expected_retry = if success {
+                "Retry restart"
+            } else {
+                "Install update…"
+            };
+            assert!(button(native.upcast_ref(), expected_retry).is_some());
         }
         assert_eq!(updater.installs.load(Ordering::SeqCst), 2);
         assert_eq!(updater.handoffs.load(Ordering::SeqCst), 1);
-        button(native.upcast_ref(), "Install update…")
+        button(native.upcast_ref(), "Retry restart")
             .unwrap()
             .emit_clicked();
         assert_eq!(updater.handoffs.load(Ordering::SeqCst), 2);

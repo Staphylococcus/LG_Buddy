@@ -284,6 +284,9 @@ impl UpdateInstallApplication {
                 Some(Some(operation))
             }
             SettingsIntent::CancelUpdateInstall if self.active() && !self.cancelling => {
+                let preparing = self.pending.as_ref().is_some_and(|operation| {
+                    matches!(operation.task, UpdateInstallTask::Prepare { .. })
+                });
                 if let Some(cancellation) =
                     self.pending
                         .as_ref()
@@ -297,9 +300,15 @@ impl UpdateInstallApplication {
                         return None;
                     }
                     self.cancelling = true;
-                    self.presentation.title = Some("Cancelling update…".into());
-                    self.presentation.description = "Waiting for the current preparation step to finish. No installation will start.".into();
-                    self.presentation.cancel_action = None;
+                    if preparing {
+                        // Close the modal immediately while the worker drains;
+                        // the pending operation still blocks a new update.
+                        self.clear_presentation();
+                    } else {
+                        self.presentation.title = Some("Cancelling update…".into());
+                        self.presentation.description = "Waiting for the current preparation step to finish. No installation will start.".into();
+                        self.presentation.cancel_action = None;
+                    }
                 } else {
                     self.pending = None;
                     self.prepared = None;
