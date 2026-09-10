@@ -1,3 +1,4 @@
+mod diagnostics;
 mod overview;
 mod pairing;
 mod settings;
@@ -17,6 +18,11 @@ use lg_buddy::application::{Application, ApplicationTransition, OverviewCompleti
 use lg_buddy::audio::{AudioWriteError, AudioWriteFailure};
 use lg_buddy::brightness::{
     BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
+};
+use lg_buddy::diagnostics_view::{
+    DiagnosticsBackend, DiagnosticsError, DiagnosticsIntent, DiagnosticsReadOperation,
+    DiagnosticsSaveOperation, DiagnosticsSaveRequest, DiagnosticsTransition,
+    EnvironmentDiagnosticsBackend,
 };
 use lg_buddy::navigation::ApplicationPage;
 use lg_buddy::overview::{
@@ -181,6 +187,7 @@ struct ApplicationController {
     pairing_backend: Arc<dyn PairingBackend>,
     settings_backend: Arc<dyn SettingsBackend>,
     update_install_backend: Arc<dyn UpdateInstallBackend>,
+    diagnostics_backend: Arc<dyn DiagnosticsBackend>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
 }
@@ -226,6 +233,26 @@ impl ApplicationController {
         settings_backend: Arc<dyn SettingsBackend>,
         update_install_backend: Arc<dyn UpdateInstallBackend>,
     ) -> (Rc<Self>, ApplicationTransition) {
+        Self::with_all_backends(
+            gtk_application,
+            backend,
+            tvs_backend,
+            pairing_backend,
+            settings_backend,
+            update_install_backend,
+            Arc::new(EnvironmentDiagnosticsBackend),
+        )
+    }
+
+    fn with_all_backends(
+        gtk_application: &adw::Application,
+        backend: Arc<dyn OverviewBackend>,
+        tvs_backend: Arc<dyn TvsBackend>,
+        pairing_backend: Arc<dyn PairingBackend>,
+        settings_backend: Arc<dyn SettingsBackend>,
+        update_install_backend: Arc<dyn UpdateInstallBackend>,
+        diagnostics_backend: Arc<dyn DiagnosticsBackend>,
+    ) -> (Rc<Self>, ApplicationTransition) {
         let (application, opening) = Application::open();
         let controller = Rc::new_cyclic(|controller| {
             let on_intent: overview::IntentHandler = Rc::new({
@@ -260,11 +287,20 @@ impl ApplicationController {
                     }
                 }
             });
+            let on_diagnostics = Rc::new({
+                let controller = controller.clone();
+                move |intent| {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::handle_diagnostics_intent(&controller, intent);
+                    }
+                }
+            });
             Self {
                 tvs_backend,
                 pairing_backend,
                 settings_backend,
                 update_install_backend,
+                diagnostics_backend,
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
                 window: window::ApplicationWindow::new(
@@ -273,6 +309,7 @@ impl ApplicationController {
                     on_tvs,
                     on_settings,
                     on_navigation,
+                    on_diagnostics,
                 ),
                 backend,
                 closed: Cell::new(false),
@@ -313,6 +350,138 @@ impl ApplicationController {
         if let Some(overview) = transition.overview() {
             Self::render_overview_transition(controller, overview);
         }
+        if let Some(diagnostics) = transition.diagnostics() {
+            Self::render_diagnostics_transition(controller, diagnostics);
+        }
+    }
+
+    fn handle_diagnostics_intent(controller: &Rc<Self>, intent: DiagnosticsIntent) {
+        let transition = controller
+            .application
+            .borrow_mut()
+            .handle_diagnostics_intent(intent);
+        if let Some(transition) = transition {
+            Self::apply_transition(controller, transition);
+        }
+    }
+
+    fn render_diagnostics_transition(controller: &Rc<Self>, transition: &DiagnosticsTransition) {
+        if controller.closed.get() {
+            return;
+        }
+        controller
+            .window
+            .render_diagnostics(transition.presentation());
+        if let Some(text) = transition.clipboard_text() {
+            controller.window.window().clipboard().set_text(text);
+        }
+        if let Some(message) = transition.toast() {
+            controller.window.show_toast(message);
+        }
+        if let Some(operation) = transition.read_operation() {
+            Self::start_diagnostics_read(controller, operation.clone());
+        }
+        if let Some(request) = transition.save_request() {
+            Self::choose_diagnostics_destination(controller, request);
+        }
+        if let Some(operation) = transition.save_operation() {
+            Self::start_diagnostics_save(controller, operation.clone());
+        }
+    }
+
+    fn start_diagnostics_read(controller: &Rc<Self>, operation: DiagnosticsReadOperation) {
+        let backend = Arc::clone(&controller.diagnostics_backend);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(backend.collect());
+        });
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let Some(controller) = controller.upgrade().filter(|value| !value.closed.get()) else {
+                return glib::ControlFlow::Break;
+            };
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(DiagnosticsError::collection_stopped())
+                }
+            };
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_diagnostics_read(&operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn choose_diagnostics_destination(controller: &Rc<Self>, request: DiagnosticsSaveRequest) {
+        let dialog = gtk::FileDialog::builder()
+            .title("Save Diagnostic Report")
+            .initial_name("lg-buddy-diagnostics.txt")
+            .modal(true)
+            .build();
+        let weak_controller = Rc::downgrade(controller);
+        dialog.save(
+            Some(&controller.window.window()),
+            None::<&gtk::gio::Cancellable>,
+            move |result| {
+                let Some(controller) = weak_controller.upgrade() else {
+                    return;
+                };
+                let intent = match result {
+                    Ok(file) => match file.path() {
+                        Some(path) => DiagnosticsIntent::SaveDestination {
+                            request,
+                            path: Some(path),
+                        },
+                        None => DiagnosticsIntent::SaveSelectionFailed(request),
+                    },
+                    Err(error)
+                        if error.matches(gtk::DialogError::Dismissed)
+                            || error.matches(gtk::DialogError::Cancelled) =>
+                    {
+                        DiagnosticsIntent::SaveDestination {
+                            request,
+                            path: None,
+                        }
+                    }
+                    Err(_) => DiagnosticsIntent::SaveSelectionFailed(request),
+                };
+                Self::handle_diagnostics_intent(&controller, intent);
+            },
+        );
+    }
+
+    fn start_diagnostics_save(controller: &Rc<Self>, operation: DiagnosticsSaveOperation) {
+        let backend = Arc::clone(&controller.diagnostics_backend);
+        let worker_operation = operation.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        // An accepted export finishes even if its dialog or window closes.
+        let application_hold = controller.gtk_application.hold();
+        thread::spawn(move || {
+            let _ = sender.send(backend.save(&worker_operation));
+        });
+        let controller = Rc::clone(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => Err(DiagnosticsError::save_failed()),
+            };
+            let transition = controller
+                .application
+                .borrow_mut()
+                .complete_diagnostics_save(&operation, result);
+            if let Some(transition) = transition {
+                Self::apply_transition(&controller, transition);
+            }
+            let _ = &application_hold;
+            glib::ControlFlow::Break
+        });
     }
 
     fn render_overview_transition(controller: &Rc<Self>, transition: &OverviewTransition) {
@@ -1205,6 +1374,15 @@ pub(crate) mod controller_test_support {
                 return true;
             }
         }
+        if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+            let buffer = view.buffer();
+            if buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .contains(expected)
+            {
+                return true;
+            }
+        }
         let mut child = widget.first_child();
         while let Some(current) = child {
             if widget_contains_text(&current, expected) {
@@ -1248,6 +1426,7 @@ pub(crate) mod controller_test_support {
         run_settings_write_scenario();
         run_manual_update_check_scenario();
         run_update_install_scenario();
+        run_diagnostics_scenario();
 
         let (backend, controls) = BlockingBackend::new();
         let application = test_application("Blocking");
@@ -1500,6 +1679,105 @@ pub(crate) mod controller_test_support {
         pump_until(|| widget_contains_text(native.upcast_ref(), "120"));
         controller.shutdown();
         controller.window.close();
+    }
+
+    fn run_diagnostics_scenario() {
+        use lg_buddy::diagnostics::{DiagnosticSection, DiagnosticsReport};
+        use lg_buddy::diagnostics_view::{DiagnosticsBackend, DiagnosticsError, DiagnosticsIntent};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Collector {
+            calls: AtomicUsize,
+            replies: Mutex<mpsc::Receiver<DiagnosticsReport>>,
+        }
+        impl DiagnosticsBackend for Collector {
+            fn collect(&self) -> Result<DiagnosticsReport, DiagnosticsError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.replies.lock().unwrap().recv().unwrap())
+            }
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let backend = Arc::new(Collector {
+            calls: AtomicUsize::new(0),
+            replies: Mutex::new(reply_rx),
+        });
+        let application = test_application("Diagnostics");
+        let (controller, opening) = ApplicationController::with_all_backends(
+            &application,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            Arc::new(lg_buddy::pairing::EnvironmentPairingBackend),
+            Arc::new(DefaultSettingsBackend),
+            Arc::new(lg_buddy::update_flow::EnvironmentUpdateInstallBackend),
+            backend.clone(),
+        );
+        assert!(opening.diagnostics().is_none());
+        assert!(!opening.navigation().tabs_visible());
+        controller.present();
+        pump_for(Duration::from_millis(30));
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        let native = controller.window.window();
+        native.activate_action("win.diagnostics", None).unwrap();
+        pump_until(|| backend.calls.load(Ordering::SeqCst) == 1);
+        assert!(widget_contains_text(
+            native.upcast_ref(),
+            "Collecting diagnostics"
+        ));
+        ApplicationController::handle_diagnostics_intent(&controller, DiagnosticsIntent::Refresh);
+        pump_for(Duration::from_millis(30));
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+
+        let report = DiagnosticsReport::new(
+            1_000,
+            vec![
+                DiagnosticSection::new("Application", "Fixture diagnostics"),
+                DiagnosticSection::new("TV observation", "No TV configured"),
+                DiagnosticSection::new("Services", "Inspection unavailable"),
+            ],
+        );
+        reply_tx.send(report.clone()).unwrap();
+        pump_until(|| widget_contains_text(native.upcast_ref(), "Fixture diagnostics"));
+        ApplicationController::handle_diagnostics_intent(&controller, DiagnosticsIntent::Copy);
+        let copied = glib::MainContext::default()
+            .block_on(native.clipboard().read_text_future())
+            .unwrap();
+        assert_eq!(copied.as_deref(), Some(report.text()));
+
+        // Supply the native chooser's completion directly so this scenario
+        // exercises the real export worker without interacting with a portal.
+        let request = controller
+            .application
+            .borrow_mut()
+            .handle_diagnostics_intent(DiagnosticsIntent::Save)
+            .unwrap()
+            .diagnostics()
+            .unwrap()
+            .save_request()
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "lg-buddy-diagnostics-controller-{}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        ApplicationController::handle_diagnostics_intent(
+            &controller,
+            DiagnosticsIntent::SaveDestination {
+                request,
+                path: Some(path.clone()),
+            },
+        );
+        pump_until(|| std::fs::read_to_string(&path).ok().as_deref() == Some(report.text()));
+        pump_for(Duration::from_millis(30));
+        std::fs::remove_file(path).unwrap();
+
+        ApplicationController::handle_diagnostics_intent(&controller, DiagnosticsIntent::Refresh);
+        pump_until(|| backend.calls.load(Ordering::SeqCst) == 2);
+        ApplicationController::handle_diagnostics_intent(&controller, DiagnosticsIntent::Close);
+        reply_tx.send(report).unwrap();
+        pump_for(Duration::from_millis(30));
+        controller.shutdown();
+        native.close();
     }
 
     fn run_manual_update_check_scenario() {

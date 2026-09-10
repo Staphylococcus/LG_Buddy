@@ -7,6 +7,8 @@ pub mod backend;
 pub mod brightness;
 pub mod commands;
 pub mod config;
+pub mod diagnostics;
+pub mod diagnostics_view;
 pub mod events;
 pub mod lifecycle;
 pub mod navigation;

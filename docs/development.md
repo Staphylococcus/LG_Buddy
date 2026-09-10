@@ -89,7 +89,8 @@ GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &
 Wake behaviors; unavailable or declined behaviors stay off and can be retried in
 Settings. `configure.sh` remains an explicit headless setup path: run it before
 `install.sh`. Configured installations and upgrades retain their saved settings.
-On-demand diagnostics and complete journey verification remain tracked in
+The application menu offers on-demand diagnostics with Refresh, Copy, and Save.
+Complete journey verification remains tracked in
 [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 Official release builds inject version identity into the binary:

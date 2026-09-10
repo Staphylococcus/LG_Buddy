@@ -8,8 +8,8 @@ the application owning state and the GTK crate rendering it.
 > About. The development tree also provides manual update checks and
 > user-confirmed release-bundle installation in Settings, and first-run pairing
 > with default behavior activation. Unavailable or declined behaviors remain off
-> and can be retried in Settings. On-demand diagnostics remain
-> tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+> and can be retried in Settings. The app menu provides on-demand diagnostics
+> with report viewing, refresh, copying, and saving.
 
 ## Boundary
 
@@ -18,7 +18,7 @@ flowchart LR
     LAUNCH["lg-buddy launcher"] --> GUI["lg-buddy-gui"]
 
     subgraph APP["lg-buddy application"]
-        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication"]
+        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication\nDiagnosticsApplication"]
         PRESENT["presentation/*\ntyped state and actions"]
         MODEL --> PRESENT
     end
@@ -257,15 +257,36 @@ The application retains bounded failure details for the current session,
 including across retries and Settings refreshes. Credential-bearing lines,
 URLs, and control characters are removed before retention. The error toast
 provides the details on demand, and the application presentation retains them
-for the future diagnostics readout independently of launcher stderr handling.
+for the diagnostics readout independently of launcher stderr handling.
 
-There is no separate GUI surface for a resolved screen backend, service health,
-or runtime state. Normal successful setting changes
+Resolved screen backend, service health, and runtime observations belong in
+Diagnostics. Normal successful setting changes
 are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
-an apply warning keeps the saved value and can offer **Retry apply**. The
-broader diagnostics UI is deferred as described at the top
-of this document.
+an apply warning keeps the saved value and can offer **Retry apply**.
+
+## Diagnostics
+
+The app menu's **Diagnostics** action is available before pairing, including
+when navigation tabs are hidden. It opens a native dialog and starts a read-only
+snapshot. **Refresh** collects again; **Copy** and **Save…** export exactly the
+bounded, sanitized report shown in the dialog. A failed refresh retains the
+previous report and collection time. File chooser cancellation is silent, and
+save failures leave the report available to copy or save elsewhere.
+
+`diagnostics.rs` collects build identity, typed effective settings, desktop
+capabilities, separate systemd state fields, TV observations, and bounded recent
+failure findings. Unavailable observations remain explicit partial results.
+Capability probes are not treated as proof of what a running service uses; TV
+connectivity is not proof of automation. Raw configuration values, credentials,
+protocol frames, and journal messages are excluded from the report.
+
+`diagnostics_view.rs` owns collection, export snapshots, and stale-completion
+handling. `Application` adds retained user-facing failures from the current GUI
+session. The GTK controller runs workers, writes the clipboard, and selects a
+save destination; the dialog renders report and action state. Closing it
+invalidates pending UI completions, while an accepted file export can finish.
+There is no automatic collection or generic repair action.
 
 The main menu's **About LG Buddy** action is implemented by the native
 `adw::AboutDialog`. It supplies the application name and icon, version, links,

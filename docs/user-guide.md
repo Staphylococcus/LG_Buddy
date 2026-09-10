@@ -255,8 +255,17 @@ information, and open the project issue form. The terminal equivalent is:
 lg-buddy --version
 ```
 
-When reporting a problem, include the version, what you expected, what happened,
-and the relevant command output. These checks usually identify the next step:
+Open **Diagnostics** from the app menu to collect a troubleshooting report,
+even before a TV is paired. Use **Refresh** for a new snapshot, **Copy** for the
+clipboard, or **Save…** for a text file. The report includes settings, desktop
+capabilities, service states, and available failure findings. A failed inspection
+leaves the other results available. Collection does not change settings, start
+services, or pair a TV.
+
+The report excludes credentials and raw logs, but includes local TV addresses
+and configuration details. Review it before sharing. When reporting a problem,
+include what you expected, what happened, and the report. These additional
+checks can help identify the next step:
 
 | Problem | Check |
 | --- | --- |
