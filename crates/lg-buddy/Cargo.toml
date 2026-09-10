@@ -1,8 +1,12 @@
 [package]
 name = "lg-buddy"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 publish = false
+
+[features]
+# Only for the installed GUI smoke; forbidden in release builds.
+gui-test-fixtures = []
 
 [dependencies]
 dbus = { version = "0.9.11", features = ["vendored"] }

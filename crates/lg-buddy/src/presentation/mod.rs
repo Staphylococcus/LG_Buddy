@@ -3,3 +3,6 @@ pub mod overview;
 pub mod pairing;
 pub mod settings;
 pub mod tvs;
+pub mod update_check;
+pub mod update_install;
+pub mod updater;

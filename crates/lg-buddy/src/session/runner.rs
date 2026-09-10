@@ -14,10 +14,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::backend::{
-    configured_backend_from_env_or_config, resolve_backend_with_probe, BackendDetectionError,
-    BackendResolution, BackendSelectionError, SystemBackendProbe, SWAYIDLE_DEPRECATION_NOTICE,
+    configured_backend_from_env_or_config, honor_idle_inhibitors_from_config,
+    resolve_backend_with_probe, BackendDetectionError, BackendResolution, BackendSelectionError,
+    SystemBackendProbe, SWAYIDLE_DEPRECATION_NOTICE,
 };
-use crate::commands::{run_sleep_pre_for_event, run_system_resume};
 use crate::config::{
     load_config, normalize_idle_timeout_secs, parse_config_entries, parse_idle_timeout_secs,
     resolve_config_path_from_env, ConfigPathError, ScreenBackend, ScreenIdleBlankPolicy,
@@ -82,34 +82,32 @@ pub trait SessionActionExecutor {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuntimeActionExecutor;
+pub use super::actions::RuntimeActionExecutor;
 
 impl SessionActionExecutor for RuntimeActionExecutor {
     fn screen_off(&mut self, event: RuntimeEvent) -> Result<ScreenOffResult, RunError> {
         let mut output = Vec::new();
-        let result =
-            crate::screen::run_screen_off_from_env_for_event_with_result(&mut output, event)?;
+        let blank_succeeded = self.run_screen_off(&mut output, event)?;
         Ok(ScreenOffResult {
             output: String::from_utf8_lossy(&output).into_owned(),
-            blank_succeeded: result.blank_succeeded,
+            blank_succeeded,
         })
     }
 
     fn timed_power_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| crate::screen::run_timed_power_off_from_env_for_event(writer, event))
+        run_action(|writer| self.run_timed_power_off(writer, event))
     }
 
     fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| crate::screen::run_screen_on_from_env_for_event(writer, event))
+        run_action(|writer| self.run_screen_on(writer, event))
     }
 
     fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| run_sleep_pre_for_event(writer, event))
+        run_action(|writer| self.run_sleep_pre(writer, event))
     }
 
     fn after_resume(&mut self, _event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(run_system_resume)
+        run_action(|writer| self.run_system_resume(writer))
     }
 
     fn after_resume_streaming<W: Write>(
@@ -117,7 +115,7 @@ impl SessionActionExecutor for RuntimeActionExecutor {
         writer: &mut W,
         _event: RuntimeEvent,
     ) -> Result<(), RunError> {
-        run_system_resume(writer)
+        self.run_system_resume(writer)
     }
 }
 
@@ -361,7 +359,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 }
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    run_monitor_with_executor(writer, RuntimeActionExecutor).map_err(|err| match err {
+    run_monitor_with_executor(writer, RuntimeActionExecutor::default()).map_err(|err| match err {
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
         other => RunError::Policy(other.to_string()),
@@ -370,13 +368,12 @@ pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_lifecycle_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor, &config_path).map_err(
-        |err| match err {
+    run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor::default(), &config_path)
+        .map_err(|err| match err {
             SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
             SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
             other => RunError::Policy(other.to_string()),
-        },
-    )
+        })
 }
 
 fn run_lifecycle_monitor_with_executor<W: Write, E: SessionActionExecutor>(
@@ -565,7 +562,8 @@ fn prepare_monitor_backend(
     probe: &mut SystemBackendProbe,
     configured: ScreenBackend,
 ) -> Result<(BackendResolution, Option<wayland_client::Connection>), BackendDetectionError> {
-    let resolution = resolve_backend_with_probe(probe, configured)?;
+    let resolution =
+        resolve_backend_with_probe(probe, configured, honor_idle_inhibitors_from_config())?;
     let connection = probe.take_wayland_connection();
     Ok((resolution, connection))
 }
@@ -758,7 +756,8 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
 ) -> Result<(), SessionRunnerError> {
-    let source = GnomeSource::connect().map_err(map_gnome_source_error)?;
+    let honor_idle_inhibitors = honor_idle_inhibitors_from_config();
+    let source = GnomeSource::connect(honor_idle_inhibitors).map_err(map_gnome_source_error)?;
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
@@ -766,6 +765,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
         writer,
         dispatcher,
         ScreenBackend::Gnome,
+        honor_idle_inhibitors,
         move |sender, latest_observation| {
             spawn_gnome_monitor_thread(source, sender, latest_observation)
         },
@@ -778,13 +778,20 @@ fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
     connection: wayland_client::Connection,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
+    let honor_idle_inhibitors = honor_idle_inhibitors_from_config();
 
     run_native_session_monitor(
         writer,
         dispatcher,
         ScreenBackend::Wayland,
+        honor_idle_inhibitors,
         move |sender, latest_observation| {
-            spawn_wayland_monitor_thread(connection, sender, latest_observation)
+            spawn_wayland_monitor_thread(
+                connection,
+                honor_idle_inhibitors,
+                sender,
+                latest_observation,
+            )
         },
     )
 }
@@ -793,6 +800,7 @@ fn run_native_session_monitor<W, E, S>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
 ) -> Result<(), SessionRunnerError>
 where
@@ -804,6 +812,7 @@ where
         writer,
         dispatcher,
         backend,
+        honor_idle_inhibitors,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
@@ -813,6 +822,7 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -827,6 +837,7 @@ where
         dispatcher,
         backend,
         InitialBlankTrigger::Deadline,
+        honor_idle_inhibitors,
         spawn_monitor,
         spawn_lock_monitor,
     )
@@ -843,6 +854,7 @@ fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     initial_blank_trigger: InitialBlankTrigger,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -871,6 +883,12 @@ where
         InactivityEngine::new_with_power_off_after(blank_after, power_off_after, started_at)
     };
 
+    // No automatic blanking until an enabled native source has established
+    // permission, including when inhibition predates monitor startup.
+    if honor_idle_inhibitors {
+        inactivity.set_idle_blanking_allowed(false, started_at);
+    }
+
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
     let monitor_handle = spawn_monitor(sender.clone(), Arc::clone(&latest_inactivity));
@@ -895,6 +913,20 @@ where
         };
 
         match message {
+            RunnerMessage::IdleBlankingPermissionPending { source } => {
+                if honor_idle_inhibitors && source == EventSource::DesktopSession {
+                    inactivity.defer_idle_blanking();
+                }
+            }
+            RunnerMessage::IdleBlankingPermission {
+                allowed,
+                source,
+                observed_at,
+            } => {
+                if honor_idle_inhibitors && source == EventSource::DesktopSession {
+                    inactivity.set_idle_blanking_allowed(allowed, observed_at);
+                }
+            }
             RunnerMessage::InactivityObservationReady => {
                 if let Some(observation) = latest_inactivity.take() {
                     handle_inactivity_observation(
@@ -1027,6 +1059,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         dispatcher,
         ScreenBackend::Swayidle,
         InitialBlankTrigger::Provider,
+        false,
         move |sender, _latest_observation| {
             thread::spawn(move || {
                 let event_sender = sender.clone();
@@ -1133,11 +1166,12 @@ fn spawn_gnome_monitor_thread(
 
 fn spawn_wayland_monitor_thread(
     connection: wayland_client::Connection,
+    honor_idle_inhibitors: bool,
     sender: mpsc::Sender<RunnerMessage>,
     latest_observation: Arc<LatestInactivityObservation>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let result = run_wayland_session_source(connection, {
+        let result = run_wayland_session_source(connection, honor_idle_inhibitors, {
             let sender = sender.clone();
             move |observation| {
                 publish_desktop_observation(&sender, &latest_observation, observation)
@@ -1192,6 +1226,18 @@ fn send_source_observation(
     observation: SessionObservation,
 ) -> bool {
     let message = match observation {
+        SessionObservation::IdleBlankingPermissionPending { source } => {
+            RunnerMessage::IdleBlankingPermissionPending { source }
+        }
+        SessionObservation::IdleBlankingPermission {
+            allowed,
+            source,
+            observed_at,
+        } => RunnerMessage::IdleBlankingPermission {
+            allowed,
+            source,
+            observed_at,
+        },
         SessionObservation::Event {
             event,
             source,
@@ -1392,6 +1438,14 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 }
 
 enum RunnerMessage {
+    IdleBlankingPermissionPending {
+        source: EventSource,
+    },
+    IdleBlankingPermission {
+        allowed: bool,
+        source: EventSource,
+        observed_at: Instant,
+    },
     SessionEvent {
         event: SessionEvent,
         source: EventSource,
@@ -1772,13 +1826,12 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::sync::{mpsc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::session::test_env_lock()
     }
 
     #[derive(Debug, Default)]
@@ -2787,6 +2840,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     let result = activity_receiver
@@ -2839,6 +2893,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Wayland,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
@@ -2884,6 +2939,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     let locked_at = Instant::now();

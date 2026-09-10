@@ -1,8 +1,11 @@
 [package]
 name = "lg-buddy-gui"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 publish = false
+
+[features]
+gui-test-fixtures = ["lg-buddy/gui-test-fixtures"]
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.9.2", features = ["gtk_v4_10", "v1_5"] }

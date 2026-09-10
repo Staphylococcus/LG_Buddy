@@ -3,20 +3,20 @@ use std::io::{self, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::config::{
-    load_config, resolve_config_path_from_env, Config, HdmiInput, MacAddress, ScreenRestorePolicy,
-};
-use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
+use crate::config::{Config, HdmiInput, MacAddress, ScreenRestorePolicy};
+#[cfg(test)]
+use crate::events::RuntimeEventKind;
+use crate::events::{EventSource, RuntimeEvent};
 use crate::policy::{
     ActionKind, DecisionReason, DecisionReasonCode, Diagnostic, PolicyOutcome, StateMarker,
     StateTransition, TransitionReason, TransitionReasonCode,
 };
 #[cfg(test)]
 use crate::runtime_phase::NoopRuntimePhaseProvider;
-use crate::runtime_phase::{LogindRuntimePhaseProvider, RuntimePhaseProvider, RuntimePhaseRead};
+use crate::runtime_phase::{RuntimePhaseProvider, RuntimePhaseRead};
 use crate::state::{ScreenOwnershipMarker, StateScope};
-use crate::tv::{build_tv_client, CurrentInput, TvClient, TvClientBuildOptions, TvDevice, TvError};
-use crate::wol::{UdpWakeOnLanSender, WakeOnLanSender};
+use crate::tv::{CurrentInput, TvClient, TvDevice, TvError};
+use crate::wol::WakeOnLanSender;
 use crate::RunError;
 
 const SCREEN_ON_INITIAL_WAKE_DELAY: Duration = Duration::from_secs(6);
@@ -45,7 +45,7 @@ pub(crate) struct SystemMarkerLifecycleStatusProvider {
 }
 
 impl SystemMarkerLifecycleStatusProvider {
-    fn from_env() -> Result<Self, crate::state::StateDirError> {
+    pub(crate) fn from_env() -> Result<Self, crate::state::StateDirError> {
         Ok(Self {
             marker: ScreenOwnershipMarker::from_env(StateScope::System)?,
         })
@@ -227,146 +227,6 @@ impl ScreenRestoreTrace {
     }
 }
 
-pub(crate) fn run_screen_off_from_env<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    run_screen_off_from_env_for_event(
-        writer,
-        RuntimeEvent::new(EventSource::CliApi, RuntimeEventKind::ScreenBlankRequested),
-    )
-}
-
-pub(crate) fn run_screen_off_from_env_for_event<W: Write>(
-    writer: &mut W,
-    event: RuntimeEvent,
-) -> Result<(), RunError> {
-    run_screen_off_from_env_for_event_with_result(writer, event).map(|_| ())
-}
-
-#[derive(Debug)]
-pub(crate) struct ScreenOffActionResult {
-    pub(crate) blank_succeeded: bool,
-}
-
-pub(crate) fn run_screen_off_from_env_for_event_with_result<W: Write>(
-    writer: &mut W,
-    event: RuntimeEvent,
-) -> Result<ScreenOffActionResult, RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker =
-        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(
-        &config_path,
-        config.tv_ip,
-        config.tv_platform,
-        TvClientBuildOptions::production(),
-    )?;
-    let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
-    let lifecycle_status =
-        SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
-
-    run_screen_off_with_result_for_event(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        event,
-        &mut phase_provider,
-        &lifecycle_status,
-    )
-    .map(|result| ScreenOffActionResult {
-        blank_succeeded: result.blank_succeeded,
-    })
-}
-
-pub(crate) fn run_timed_power_off_from_env_for_event<W: Write>(
-    writer: &mut W,
-    event: RuntimeEvent,
-) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker =
-        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    if !config.screen_idle_blank.is_enabled() {
-        writeln!(
-            writer,
-            "LG Buddy Timed Power Off: Screen idle blanking is disabled; skipping power-off."
-        )?;
-        return Ok(());
-    }
-    if !marker.exists() {
-        writeln!(
-            writer,
-            "LG Buddy Timed Power Off: Screen ownership marker is absent; skipping power-off."
-        )?;
-        return Ok(());
-    }
-    let tv_client = build_tv_client(
-        &config_path,
-        config.tv_ip,
-        config.tv_platform,
-        TvClientBuildOptions::production(),
-    )?;
-    let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
-    let lifecycle_status =
-        SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
-
-    run_timed_power_off_with_event(
-        writer,
-        &config,
-        &marker,
-        &tv_client,
-        event,
-        &mut phase_provider,
-        &lifecycle_status,
-    )
-    .map(|_| ())
-}
-
-pub(crate) fn run_screen_on_from_env<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    run_screen_on_from_env_for_event(
-        writer,
-        RuntimeEvent::new(
-            EventSource::CliApi,
-            RuntimeEventKind::ScreenRestoreRequested,
-        ),
-    )
-}
-
-pub(crate) fn run_screen_on_from_env_for_event<W: Write>(
-    writer: &mut W,
-    event: RuntimeEvent,
-) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker =
-        ScreenOwnershipMarker::from_env(StateScope::Session).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(
-        &config_path,
-        config.tv_ip,
-        config.tv_platform,
-        TvClientBuildOptions::production(),
-    )?;
-    let wol_sender = UdpWakeOnLanSender::default();
-    let sleeper = ThreadSleeper;
-    let mut phase_provider = LogindRuntimePhaseProvider::from_system_bus();
-    let lifecycle_status =
-        SystemMarkerLifecycleStatusProvider::from_env().map_err(RunError::StateDir)?;
-
-    run_screen_on_with_event(
-        writer,
-        &config,
-        &marker,
-        ScreenOnDeps {
-            tv_client: &tv_client,
-            wol_sender: &wol_sender,
-            sleeper: &sleeper,
-            phase_provider: &mut phase_provider,
-            lifecycle_status: &lifecycle_status,
-        },
-        event,
-    )
-}
-
 #[cfg(test)]
 pub(crate) fn run_screen_off_with<W: Write>(
     writer: &mut W,
@@ -461,13 +321,13 @@ pub(crate) fn run_screen_off_with_outcome_for_event<
     .map(|result| result.outcome)
 }
 
-struct ScreenOffExecutionResult {
+pub(crate) struct ScreenOffExecutionResult {
     #[cfg(test)]
     outcome: PolicyOutcome,
-    blank_succeeded: bool,
+    pub(crate) blank_succeeded: bool,
 }
 
-fn run_screen_off_with_result_for_event<
+pub(crate) fn run_screen_off_with_result_for_event<
     W: Write,
     C: TvClient,
     P: RuntimePhaseProvider,
@@ -2280,6 +2140,7 @@ mod tests {
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
+            screen_honor_idle_inhibitors: crate::config::ScreenHonorIdleInhibitorsPolicy::Disabled,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,
         }
     }

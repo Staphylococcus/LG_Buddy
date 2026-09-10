@@ -49,7 +49,8 @@ ready to respond.
 Official bundles contain prebuilt binaries. They require GTK 4.14,
 libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
 The release installer also needs Python 3 with `venv`/`pip` support and Zenity
-for its compatibility tools. Install the prerequisites for your distribution:
+for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
+a desktop authorization agent. Install the prerequisites for your distribution:
 
 <details>
 <summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
@@ -57,19 +58,19 @@ for its compatibility tools. Install the prerequisites for your distribution:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0
+sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0 pkexec
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita
+sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita polkit
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita
+sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita polkit
 ```
 
 </details>
@@ -79,7 +80,7 @@ these distributions, with your confirmation. Older desktops that need the
 deprecated `swayidle` integration must install `swayidle` separately.
 
 The shell installer supports conventional Linux installations with writable
-system locations. First-class NixOS packaging is tracked in
+system locations. Official NixOS support is planned for 3.0.0; see
 [issue #24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
 
 ## Install
@@ -95,12 +96,22 @@ system locations. First-class NixOS packaging is tracked in
 
    The installer requests elevated access when needed.
 
-3. Follow the setup prompts for your TV's IP address, MAC address, HDMI input,
-   and desktop behavior. Keep the TV on and approve its pairing request with
-   the remote.
-4. Open **LG Buddy** from your app launcher. Automatic power and screen
-   behavior runs in the background after setup; the window is there when you
-   want to adjust something.
+3. The installed app opens to **Pair a TV**. Until a TV is saved, **TVs** is
+   the only page and the other tabs are hidden. Enter the TV's IP address, MAC
+   address, and HDMI input. Keep the TV on and approve its pairing request
+   with the remote.
+4. After pairing, LG Buddy attempts its default Idle Blanking and TV Sleep &
+   Wake behaviors. There is no separate confirmation for each service; LG Buddy
+   asks for desktop authorization only when a system operation needs it. The TV
+   remains saved if authorization is declined or activation is unavailable, and
+   the affected behavior stays off. Enable it later in **Settings** to retry.
+
+After installation, use **TVs** to change the HDMI input and **Settings** to
+change blanking, sleep and wake, desktop integration, or update preferences.
+Installing with an existing TV configuration preserves its saved preferences.
+
+For a headless setup, run `./configure.sh` before `./install.sh`; the user guide
+keeps the command-line alternatives for scripts and machines without the GUI.
 
 <a id="quick-start"></a>
 
@@ -116,22 +127,24 @@ system locations. First-class NixOS packaging is tracked in
 - [Use terminal commands](docs/user-guide.md#common-commands) for shortcuts,
   scripts, or a desktop without the GUI.
 
-To rerun setup or change installed service wiring, run `./configure.sh` from
-the extracted release archive.
+For installed GUI reconfiguration, use **TVs** and **Settings**. The headless
+`configure.sh` path is for setup before installation; command-line alternatives
+are listed in the [user guide](docs/user-guide.md#common-commands).
 
-## Update
+## Update from the installed app
 
 Read what changed in the [release notes on GitHub](https://github.com/Staphylococcus/LG_Buddy/releases).
 
-To install the next release while keeping your settings and pairing, run as
-your regular user:
+To check manually, open **Settings → Updates** and choose **Check for updates**.
+The row disables and reads **Checking…** while it works, shows an up-to-date
+toast when no release qualifies, and changes to **Install update…** when one is
+available. The install dialog resolves the newest qualifying release for the
+saved channel, shows its version and channel, and displays indeterminate
+progress while it downloads, verifies, installs, and restarts. Your settings and
+TV pairing are preserved.
 
-```bash
-lg-buddy updates install
-```
-
-Review the offered version and confirm to proceed. For preview releases,
-automatic check preferences, or older installations, see
+For preview releases, automatic check preferences, older installations, or a
+headless update path, see
 [Update LG Buddy](docs/user-guide.md#updates).
 
 <a id="documentation"></a>

@@ -3,12 +3,14 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <installed-lg-buddy> <config-file>"
+    echo "Usage: $0 <installed-lg-buddy> <config-file> [tv-fixture] [update-archive]"
     exit 1
 }
 
 RUNTIME_BINARY="${1:-}"
 CONFIG_FILE="${2:-}"
+TV_FIXTURE="${3:-${LG_BUDDY_GUI_TV_FIXTURE:-}}"
+UPDATE_ARCHIVE="${4:-${LG_BUDDY_GUI_UPDATE_ARCHIVE:-}}"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="$(mktemp -d)"
@@ -20,6 +22,8 @@ WINDOW_ID=""
 ACCESSIBILITY_BUS_PID=""
 ACCESSIBILITY_REGISTRY_PID=""
 ACCESSIBILITY_PYTHON=""
+TV_FIXTURE_PID=""
+GITHUB_FIXTURE_PID=""
 
 fail() {
     echo "$1" >&2
@@ -35,6 +39,12 @@ cleanup() {
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
     fi
+    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID"; do
+        if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
+            kill "$fixture_pid" 2>/dev/null || true
+            wait "$fixture_pid" 2>/dev/null || true
+        fi
+    done
     if [ -n "$ACCESSIBILITY_REGISTRY_PID" ] && kill -0 "$ACCESSIBILITY_REGISTRY_PID" 2>/dev/null; then
         kill "$ACCESSIBILITY_REGISTRY_PID"
         wait "$ACCESSIBILITY_REGISTRY_PID" 2>/dev/null || true
@@ -43,7 +53,11 @@ cleanup() {
         kill "$ACCESSIBILITY_BUS_PID"
         wait "$ACCESSIBILITY_BUS_PID" 2>/dev/null || true
     fi
-    rm -rf "$WORK_DIR"
+    if [ "${LG_BUDDY_KEEP_GUI_SMOKE:-0}" = 1 ]; then
+        echo "GUI smoke evidence: $WORK_DIR" >&2
+    else
+        rm -rf "$WORK_DIR"
+    fi
 }
 trap cleanup EXIT
 
@@ -105,7 +119,10 @@ start_gui() {
     GUI_PID=$!
     for ((attempt = 0; attempt < 300; attempt++)); do
         WINDOW_ID="$(xdotool search --onlyvisible --name "^${WINDOW_TITLE}$" 2>/dev/null | head -n1 || true)"
-        [ -z "$WINDOW_ID" ] || return 0
+        if [ -n "$WINDOW_ID" ]; then
+            xdotool windowfocus --sync "$WINDOW_ID"
+            return 0
+        fi
         kill -0 "$GUI_PID" 2>/dev/null || fail "GUI exited before presenting its window."
         sleep 0.1
     done
@@ -219,6 +236,13 @@ observe_gui_state() {
     "$ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-release-gui-accessibility.py" \
         --timeout 30 "$@"
 }
+
+if [ "${LG_BUDDY_GUI_JOURNEY_ONLY:-0}" = 1 ]; then
+    start_accessibility_bus
+    source "$SCRIPT_DIR/test-release-gui-journey.sh"
+    run_installed_gui_journey
+    exit 0
+fi
 
 # A plain installed launch opens Overview. An explicit brightness activation
 # from TVs returns to the same window and focuses the slider after the read.
@@ -351,7 +375,6 @@ cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
 cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
 start_gui enabled "" "" normal
-observe_gui_state --select-page TVs
 observe_gui_state --expected-tvs-state empty
 observe_gui_state --activate-control "Pair a TV"
 observe_gui_state --expected-tvs-state pairing
@@ -459,6 +482,11 @@ if path.exists():
     state = json.loads(path.read_text(encoding="utf-8"))
     assert not any(call.get("command") == "set_settings" for call in state.get("calls", [])), state
 PY
+
+if [ -n "$TV_FIXTURE" ]; then
+    source "$SCRIPT_DIR/test-release-gui-journey.sh"
+    run_installed_gui_journey
+fi
 
 if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
     command -v xwd >/dev/null || fail "xwd is required for theme verification."

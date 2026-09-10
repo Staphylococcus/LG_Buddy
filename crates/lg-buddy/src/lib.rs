@@ -1,5 +1,10 @@
 mod dev;
 
+#[cfg(all(feature = "gui-test-fixtures", not(debug_assertions)))]
+compile_error!("gui-test-fixtures must never be enabled in a release build");
+#[cfg(feature = "gui-test-fixtures")]
+mod gui_test_fixtures;
+
 pub mod application;
 pub mod audio;
 pub mod auth;
@@ -7,6 +12,8 @@ pub mod backend;
 pub mod brightness;
 pub mod commands;
 pub mod config;
+pub mod diagnostics;
+pub mod diagnostics_view;
 pub mod events;
 pub mod lifecycle;
 pub mod navigation;
@@ -29,6 +36,7 @@ pub mod sources;
 pub mod state;
 pub mod tv;
 pub mod tvs;
+pub mod update_flow;
 pub mod update_install;
 pub mod updates;
 pub mod upgrade_preflight;
@@ -88,6 +96,7 @@ pub enum Command {
     UpgradePreflight {
         candidate_root: PathBuf,
         repair_python: bool,
+        json: bool,
     },
 }
 
@@ -761,10 +770,13 @@ where
                     .as_ref(),
             );
             let mut repair_python = false;
+            let mut json = false;
             let mut unexpected = Vec::new();
             for argument in args {
                 if argument.as_ref() == "--repair-python" && !repair_python {
                     repair_python = true;
+                } else if argument.as_ref() == "--json" && !json {
+                    json = true;
                 } else {
                     unexpected.push(argument.as_ref().to_string());
                 }
@@ -772,6 +784,7 @@ where
             let command = Command::UpgradePreflight {
                 candidate_root,
                 repair_python,
+                json,
             };
             if !unexpected.is_empty() {
                 return Err(ParseError::UnexpectedArguments {
@@ -845,11 +858,22 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::UpgradePreflight {
             candidate_root,
             repair_python,
+            json,
         } => {
             let report =
                 crate::upgrade_preflight::candidate_host_preflight(&candidate_root, repair_python);
+            if json {
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&report.advice())
+                        .expect("preflight advice contains only serializable strings")
+                )?;
+            }
             if report.compatible() {
-                write!(writer, "{report}")?;
+                if !json {
+                    write!(writer, "{report}")?;
+                }
                 Ok(())
             } else {
                 Err(RunError::UpgradePreflight(report))
@@ -1680,6 +1704,7 @@ mod tests {
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
                 repair_python: false,
+                json: false,
             }))
         );
         assert_eq!(
@@ -1691,6 +1716,7 @@ mod tests {
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
                 repair_python: true,
+                json: false,
             }))
         );
     }
@@ -1981,6 +2007,27 @@ mod tests {
     }
 
     #[test]
+    fn candidate_preflight_accepts_structured_advice_with_repair_checks() {
+        assert_eq!(
+            parse_args([
+                "upgrade-preflight",
+                "/tmp/candidate",
+                "--json",
+                "--repair-python"
+            ]),
+            Ok(ParseOutcome::Command(Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/candidate"),
+                repair_python: true,
+                json: true
+            }))
+        );
+        assert!(matches!(
+            parse_args(["upgrade-preflight", "/tmp/candidate", "--json", "--json"]),
+            Err(ParseError::UnexpectedArguments { .. })
+        ));
+    }
+
+    #[test]
     fn invalid_upgrade_preflight_command_is_rejected() {
         assert_eq!(
             parse_args(["upgrade-preflight"]),
@@ -1992,6 +2039,7 @@ mod tests {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
                     repair_python: false,
+                    json: false,
                 },
                 arguments: vec!["extra".to_string()],
             })
@@ -2007,6 +2055,7 @@ mod tests {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
                     repair_python: true,
+                    json: false,
                 },
                 arguments: vec!["--repair-python".to_string()],
             })

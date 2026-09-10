@@ -172,6 +172,14 @@ The checker assigns each target an installer-operation policy so replacement,
 directory mutation, recursive repair, exact drop-in, and candidate-input
 requirements cannot silently lose their operation-specific safeguards.
 
+The installed GUI uses the same compatibility checks with its own installed
+executable path; a source checkout or externally managed GUI cannot substitute
+for the mutable release-bundle installation. GUI updates keep confirmation and
+network work unprivileged, then use one graphical authorization for a bounded
+system-installation helper. User configuration and user service operations
+remain in the invoking user's process. CLI updates retain terminal confirmation
+and their existing sudo behavior.
+
 The extracted candidate exposes this second pass through the hidden
 `upgrade-preflight` installer entrypoint. `install.sh --upgrade` invokes it
 before sudo or installation writes, loads the existing config pointer and
@@ -218,6 +226,12 @@ End users can extract the release archive and run:
 ```
 
 That path uses the bundled `lg-buddy` binary and does not require a Rust toolchain.
+For a fresh installation it opens the installed GUI for TV pairing and attempts
+the default Idle Blanking and TV Sleep & Wake behaviors. An unavailable or
+declined behavior stays off and can be retried in Settings. Run it as the regular
+user; the installer and GUI request only the elevation their system operations
+need. For terminal-only setup, run `./configure.sh` first. Existing TV
+configurations retain their saved preferences.
 
 To update an existing compatible release-bundle installation from an already
 verified and extracted newer bundle, run as the installed user:

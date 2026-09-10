@@ -620,7 +620,7 @@ fn session_dispatcher_skips_screen_action_while_logind_reports_sleep_pending() {
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
 
     let mut output = Vec::new();
-    let mut dispatcher = SessionEventDispatcher::new(RuntimeActionExecutor);
+    let mut dispatcher = SessionEventDispatcher::new(RuntimeActionExecutor::default());
     dispatcher
         .dispatch_event(&mut output, SessionEvent::Idle)
         .expect("session idle dispatch should succeed");
@@ -663,7 +663,7 @@ fn session_dispatcher_skips_screen_restore_while_system_resume_restore_is_pendin
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
 
     let mut output = Vec::new();
-    let mut dispatcher = SessionEventDispatcher::new(RuntimeActionExecutor);
+    let mut dispatcher = SessionEventDispatcher::new(RuntimeActionExecutor::default());
     dispatcher
         .dispatch_event(&mut output, SessionEvent::Active)
         .expect("session active dispatch should succeed");

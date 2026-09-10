@@ -1177,6 +1177,7 @@ mod tests {
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
+            screen_honor_idle_inhibitors: crate::config::ScreenHonorIdleInhibitorsPolicy::Disabled,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,
         }
     }

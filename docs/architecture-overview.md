@@ -131,7 +131,8 @@ flowchart LR
 
     subgraph Rust["Rust Runtime"]
         MAIN["main.rs / lib.rs<br/>CLI + command dispatch"]
-        COMMANDS["commands.rs<br/>CLI/API dependency assembly"]
+        COMMANDS["commands.rs<br/>CLI/API entrypoints"]
+        ACTIONS["session::actions<br/>action dependencies + TV client owner"]
         EVENTS["events.rs<br/>canonical runtime events"]
         POLICY["policy.rs<br/>action / no-action / state trail"]
         NOTIFICATIONS["notifications.rs<br/>native desktop notifications"]
@@ -218,7 +219,11 @@ flowchart LR
     COMMANDS --> NMGATE
     COMMANDS --> NOTIFICATIONS
     COMMANDS --> SESSIONNOTIFY
-    COMMANDS --> SCREEN
+    COMMANDS -->|"screen / sleep"| ACTIONS
+    RUNNER -->|"retains"| ACTIONS
+    ACTIONS -->|"screen events"| SCREEN
+    ACTIONS -->|"sleep / resume"| LIFECYCLE
+    ACTIONS --> TV
     COMMANDS --> LIFECYCLE
     SCREEN --> POLICY
     LIFECYCLE --> POLICY
@@ -237,8 +242,6 @@ flowchart LR
     RUNNER --> SESSIONNOTIFY
     SESSIONMODEL --> RUNNER
 
-    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity / Lock / TimedPowerOff"| SCREEN
-    RUNNER -->|"AfterResume"| LIFECYCLE
     COMMANDS --> CONFIG
     COMMANDS --> STATE
     BRIGHTNESS --> CONFIG
@@ -264,7 +267,8 @@ The current split is:
   - shared error types
 - `commands.rs`
   - CLI/API command entrypoints
-  - config, state, and dependency loading for command execution
+  - delegates screen and sleep actions to a short-lived runtime action owner
+  - config, state, and dependency loading for other command execution
   - command output handoff
 - `application.rs`
   - toolkit-neutral coordination between Overview, TVs, and Settings
@@ -386,6 +390,11 @@ The current split is:
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
   - starts source workers and multiplexes their normalized observations
+- `session/actions.rs`
+  - shared dependency assembly for screen and sleep actions
+  - retains the native TV client across compatible events in each monitor
+  - reloads configuration and replaces clients when their target or operation
+    policy changes
 - `sources/linux/logind.rs`
   - Linux system lifecycle and current-session lock-state adapter
   - maps `org.freedesktop.login1` resume signals into canonical lifecycle
@@ -484,8 +493,10 @@ public-surface migration:
 
 `lib.rs` parses the command line into a typed command enum and dispatches into
 the runtime command handlers in `commands.rs` and `session/runner.rs`.
-`commands.rs` then delegates screen and lifecycle decisions to their domain
-modules and delegates platform ingestion to `sources/`. The on-demand
+Screen and sleep actions share dependency assembly in `session/actions.rs`:
+monitors retain one action owner, while one-shot commands create a fresh owner.
+The owner delegates decisions to the screen and lifecycle domain modules;
+platform ingestion belongs to `sources/`. The on-demand
 `updates check` command reads the saved `updates.channel` policy and consumes
 the GitHub Releases API without entering the screen, lifecycle, or scheduling
 paths. `updates install` adds the user-confirmed upgrade orchestration: initial
@@ -852,6 +863,22 @@ effectful operation. The legacy adapter performs its equivalent power-state
 readback through `bscpylgtvcommand`; neither implementation exposes webOS power
 states to policy code.
 
+Each monitor's `RuntimeActionExecutor` retains this adapter across compatible
+events. Client construction and connection remain lazy: starting a monitor
+does not contact the TV. The owner reloads configuration for every action and
+replaces its client when the profile path, TV address, MAC, platform, or client
+options change. Unrelated settings changes preserve the connection. Client
+options keep foreground pairing and timeouts separate from unattended suspend
+and resume operations. Legacy clients are rebuilt per action, and one-shot
+commands drop their owner on completion. A consumed or invalidated native
+session reconnects on demand; there is no background connection maintenance.
+
+If an input query invalidates a reused session, the adapter retries that read
+once on a fresh connection before returning a failure to policy. This prevents
+a socket closed between events from triggering the screen-off fallback without
+checking the TV's current input. Fresh-session failures return normally, and
+effectful operations are never replayed by this recovery path.
+
 Native picture settings have two known service-invocation paths. A direct SSAP
 write sends `ssap://settings/setSystemSettings` on the websocket. The Luna path
 uses that same websocket to create and close a temporary notification alert;
@@ -948,7 +975,8 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 - the GNOME session-bus connection and subscriptions
 - ScreenSaver sender ownership validation and signal mapping
-- Mutter idletime polling and normalized activity observations
+- Mutter user-active watches when honoring inhibitors, legacy idletime polling
+  otherwise, and normalized activity observations
 
 `sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
@@ -1069,15 +1097,15 @@ What is still not implemented:
 - an immutable-distribution install layout that avoids conventional `/usr`
   writes
 
-The no-argument launcher opens the installed application but does not replace
-the shell setup surface. v1.6 exposes TV connection/capability status and
-actionable control, pairing, and settings errors. A resolved screen backend
-display is not a GUI requirement; the existing CLI diagnostics remain available.
-
-The complete GUI first-run, service, and update journey, including runtime/service
-state and update state, belongs to v1.7.0 under
-[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The contents of
-runtime/service state remain to be defined. The current architecture is a
-Rust-owned runtime and application with a thin GTK renderer and shell setup
-surface. See [Frontend architecture](gui-target-architecture.md) for the current
-view and renderer boundaries.
+The no-argument launcher opens the installed application, while the shell layer
+remains the explicit setup, installation, and uninstallation surface for
+headless use. v1.7.0 extends the GUI with the complete first-run, service
+activation, update, and troubleshooting journey under
+[issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129). The
+application owns typed runtime/service and update state, including on-demand
+diagnostics; the GUI renders those states without inferring policy. A resolved
+screen backend display is not a GUI requirement, and the existing CLI paths
+remain available. The current architecture is a Rust-owned runtime and
+application with a thin GTK renderer and shell setup surface. See
+[Frontend architecture](gui-target-architecture.md) for the current view and
+renderer boundaries.

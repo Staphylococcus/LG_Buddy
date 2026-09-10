@@ -478,7 +478,34 @@ pub struct CompatibilityReport {
     failures: Vec<CompatibilityFailure>,
 }
 
+/// Safe advice for the GUI; paths and raw host observations stay in diagnostics.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CompatibilityAdvice {
+    pub compatible: bool,
+    pub failures: Vec<CompatibilityAdviceItem>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CompatibilityAdviceItem {
+    pub check: String,
+    pub remedy: String,
+}
+
 impl CompatibilityReport {
+    pub(crate) fn advice(&self) -> CompatibilityAdvice {
+        CompatibilityAdvice {
+            compatible: self.compatible(),
+            failures: self
+                .failures
+                .iter()
+                .map(|failure| CompatibilityAdviceItem {
+                    check: failure.check.into(),
+                    remedy: failure.remedy.clone(),
+                })
+                .collect(),
+        }
+    }
+
     pub fn compatible(&self) -> bool {
         self.failures.is_empty()
     }
@@ -544,6 +571,19 @@ pub fn current_host_preflight() -> CompatibilityReport {
     evaluate_initial_preflight(&OsFilesystemFacts, &facts)
 }
 
+/// Evaluate the installed host from the graphical executable's process.
+///
+/// The GUI and CLI share the same installation layout and trust checks. The
+/// only process-specific differences are the executable that must be running
+/// and the fact that the GUI binary is required for a GUI-led upgrade.
+pub fn current_gui_host_preflight() -> CompatibilityReport {
+    let facts = match observe_current_process() {
+        Ok(facts) => facts,
+        Err(report) => return report,
+    };
+    evaluate_gui_initial_preflight(&OsFilesystemFacts, &facts)
+}
+
 pub fn candidate_host_preflight(candidate_root: &Path, repair_python: bool) -> CompatibilityReport {
     let facts = match observe_current_process() {
         Ok(facts) => facts,
@@ -604,13 +644,46 @@ pub fn evaluate_initial_preflight(
     filesystem: &impl FilesystemFacts,
     facts: &HostPreflightFacts,
 ) -> CompatibilityReport {
-    evaluate_installed_state(
+    evaluate_initial_preflight_for_process(
         filesystem,
         facts,
         &facts.layout.installed_executable(),
-        "running-executable",
         "run the release-bundle installation at /usr/bin/lg-buddy, or use the host's native package manager",
         false,
+    )
+}
+
+/// Evaluate the installed host for a GUI-led upgrade using the same checks as
+/// [`evaluate_initial_preflight`]. The installed GUI binary is mandatory so a
+/// successful handoff always has a verified target.
+pub fn evaluate_gui_initial_preflight(
+    filesystem: &impl FilesystemFacts,
+    facts: &HostPreflightFacts,
+) -> CompatibilityReport {
+    evaluate_initial_preflight_for_process(
+        filesystem,
+        facts,
+        &facts.layout.system_path("/usr/bin/lg-buddy-gui"),
+        "run the installed graphical executable at /usr/bin/lg-buddy-gui, or use the host's native package manager",
+        true,
+    )
+}
+
+fn evaluate_initial_preflight_for_process(
+    filesystem: &impl FilesystemFacts,
+    facts: &HostPreflightFacts,
+    expected_running_executable: &Path,
+    executable_remedy: &'static str,
+    require_gui: bool,
+) -> CompatibilityReport {
+    evaluate_installed_state(
+        filesystem,
+        facts,
+        expected_running_executable,
+        "running-executable",
+        executable_remedy,
+        false,
+        require_gui,
     )
 }
 
@@ -621,6 +694,7 @@ fn evaluate_installed_state(
     executable_check: &'static str,
     executable_remedy: &'static str,
     repair_python: bool,
+    require_gui: bool,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
     let system_trust = TrustedRoot::strict(&facts.layout.system_root, facts.system_owner_uid);
@@ -679,13 +753,24 @@ fn evaluate_installed_state(
         "installed-layout",
     );
     for requirement in OPTIONAL_SYSTEM_PATH_REQUIREMENTS {
-        checker.check_optional_requirement(
-            &facts.layout.system_path(requirement.path),
-            facts.system_owner_uid,
-            Some(system_trust),
-            requirement.policy,
-            "installed-layout",
-        );
+        let path = facts.layout.system_path(requirement.path);
+        if require_gui && requirement.path == "/usr/bin/lg-buddy-gui" {
+            checker.check_requirement(
+                &path,
+                facts.system_owner_uid,
+                Some(system_trust),
+                requirement.policy,
+                "installed-layout",
+            );
+        } else {
+            checker.check_optional_requirement(
+                &path,
+                facts.system_owner_uid,
+                Some(system_trust),
+                requirement.policy,
+                "installed-layout",
+            );
+        }
     }
     if repair_python {
         for requirement in PYTHON_REPAIR_PATH_REQUIREMENTS {
@@ -803,6 +888,7 @@ pub fn evaluate_candidate_host_preflight(
         "candidate-executable",
         "run the preflight with the verified candidate binary from this bundle",
         repair_python,
+        false,
     );
     report.extend(evaluate_candidate_preflight(
         filesystem,
@@ -1567,6 +1653,28 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn graphical_preflight_advice_excludes_paths_and_raw_observations() {
+        let mut report = CompatibilityReport::default();
+        report.refuse(
+            "installed-layout",
+            Some(PathBuf::from("/private/user-config")),
+            "raw observation that may contain private data",
+            "Restore the installed runtime before retrying.",
+        );
+        let json = serde_json::to_string(&report.advice()).unwrap();
+        assert!(!json.contains("/private"));
+        assert!(!json.contains("raw observation"));
+        let advice: CompatibilityAdvice = serde_json::from_str(&json).unwrap();
+        assert!(!advice.compatible);
+        assert_eq!(advice.failures.len(), 1);
+        assert_eq!(advice.failures[0].check, "installed-layout");
+        assert_eq!(
+            advice.failures[0].remedy,
+            "Restore the installed runtime before retrying."
+        );
+    }
+
+    #[test]
     fn supported_release_bundle_layout_passes_initial_and_candidate_preflights() {
         let fixture = InstalledFixture::new("supported");
         let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
@@ -1616,6 +1724,34 @@ mod tests {
             "installed-layout",
             &icons,
             "found Symlink",
+        );
+    }
+
+    #[test]
+    fn gui_initial_preflight_requires_the_running_gui_and_installed_gui_binary() {
+        let mut fixture = InstalledFixture::new("required-installed-gui");
+        let gui = fixture.facts.layout.system_path("/usr/bin/lg-buddy-gui");
+        fixture.facts.running_executable = gui.clone();
+
+        let missing = evaluate_gui_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &missing,
+            "installed-layout",
+            &gui,
+            "required path is missing",
+        );
+
+        write_file(&gui, true);
+        let installed = evaluate_gui_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(installed.compatible(), "{}", installed.render());
+
+        fixture.facts.running_executable = fixture.facts.layout.installed_executable();
+        let cli_process = evaluate_gui_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &cli_process,
+            "running-executable",
+            &fixture.facts.layout.installed_executable(),
+            "not the expected runtime",
         );
     }
 

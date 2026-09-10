@@ -12,6 +12,8 @@ use crate::config::{parse_config_entries, HdmiInput, MacAddress};
 use crate::platform_access_token::{
     PlatformAccessToken, PlatformAccessTokenStore, PlatformAccessTokenStoreError,
 };
+use crate::settings::{ConfigEnvEditor, ConfigEnvReader, SettingValue};
+use crate::settings_view::BehaviorSetting;
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -130,7 +132,7 @@ impl PairingStore {
         mac: MacAddress,
         input: HdmiInput,
         token: &PlatformAccessToken,
-    ) -> Result<(), PairingStoreError> {
+    ) -> Result<Vec<BehaviorSetting>, PairingStoreError> {
         if current_euid() == 0 {
             return Err(PairingStoreError::RunningAsRoot);
         }
@@ -167,17 +169,23 @@ impl PairingStore {
             }
 
             let original = self.snapshot.as_deref().unwrap_or_default();
-            let contents = render_first_primary_config(original, address, mac, input);
+            let original =
+                std::str::from_utf8(original).map_err(|source| PairingStoreError::ConfigRead {
+                    path: self.config_path.clone(),
+                    source: io::Error::new(io::ErrorKind::InvalidData, source),
+                })?;
+            let (contents, requested) = render_first_primary_config(original, address, mac, input);
             atomic_write_config(
                 &self.config_path,
                 &contents,
                 &self.owner,
                 self.snapshot.is_some(),
-            )
+            )?;
+            Ok(requested)
         })();
 
         match result {
-            Ok(()) => Ok(()),
+            Ok(requested) => Ok(requested),
             Err(error) => match self.restore_token() {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(PairingStoreError::Rollback {
@@ -821,12 +829,30 @@ fn remove_empty_dir(path: &Path) -> Result<(), PairingStoreError> {
 }
 
 fn render_first_primary_config(
-    original: &[u8],
+    original: &str,
     address: Ipv4Addr,
     mac: MacAddress,
     input: HdmiInput,
-) -> Vec<u8> {
-    let mut contents = original.to_vec();
+) -> (Vec<u8>, Vec<BehaviorSetting>) {
+    let store = ConfigEnvReader::parse("config.env", original).into_store();
+    let mut editor = ConfigEnvEditor::parse("config.env", original);
+    let mut requested = Vec::new();
+    for setting in [
+        BehaviorSetting::ScreenIdleBlank,
+        BehaviorSetting::SystemSleepWakePolicy,
+    ] {
+        let effective = store
+            .effective_by_name(setting.key_name())
+            .expect("known behavior");
+        if effective.value() == Some(SettingValue::Enum("enabled")) {
+            requested.push(setting);
+            editor.set(effective.storage_key(), SettingValue::Enum("disabled"));
+        }
+    }
+    // Publish requested policies off with the TV until their services are
+    // available. Saved enabled choices need activation too, for example after
+    // reinstalling with retained settings. Explicit off choices stay off.
+    let mut contents = editor.render().into_bytes();
     if !contents.is_empty() && !contents.ends_with(b"\n") {
         contents.push(b'\n');
     }
@@ -834,7 +860,7 @@ fn render_first_primary_config(
     contents.extend_from_slice(format!("tvs_primary_mac={mac}\n").as_bytes());
     contents.extend_from_slice(format!("tvs_primary_input={}\n", input.as_str()).as_bytes());
     contents.extend_from_slice(b"tvs_primary_platform=lg_webos\n");
-    contents
+    (contents, requested)
 }
 
 fn atomic_write_config(
@@ -1343,7 +1369,7 @@ mod tests {
         let dir = TestDir::new("success");
         fs::write(dir.config(), "# keep\nscreen_backend=gnome\n").unwrap();
         let store = PairingStore::prepare(&dir.config()).unwrap();
-        store
+        let defaults = store
             .commit(
                 "192.0.2.42".parse().unwrap(),
                 mac(),
@@ -1353,6 +1379,15 @@ mod tests {
             .unwrap();
 
         let config = fs::read_to_string(dir.config()).unwrap();
+        assert_eq!(
+            defaults,
+            [
+                BehaviorSetting::ScreenIdleBlank,
+                BehaviorSetting::SystemSleepWakePolicy
+            ]
+        );
+        assert!(config.contains("screen_idle_blank=disabled\n"));
+        assert!(config.contains("system_sleep_wake_policy=disabled\n"));
         assert!(config.starts_with("# keep\nscreen_backend=gnome\n"));
         assert!(config.contains("tvs_primary_ip=192.0.2.42\n"));
         assert!(config.contains("tvs_primary_mac=aa:bb:cc:dd:ee:ff\n"));
@@ -1366,6 +1401,46 @@ mod tests {
             .config()
             .with_file_name(".config.env.pairing.lock")
             .exists());
+    }
+
+    #[test]
+    fn pairing_requests_saved_enabled_behaviors_and_preserves_off_choices() {
+        for (idle, sleep) in [
+            ("disabled", "disabled"),
+            ("enabled", "disabled"),
+            ("disabled", "enabled"),
+            ("enabled", "enabled"),
+        ] {
+            let dir = TestDir::new("behavior-preferences");
+            fs::write(dir.config(), format!("# retained after unpairing\nscreen_idle_blank={idle}\nsystem_sleep_wake_policy={sleep}\nscreen_idle_timeout=42\n")).unwrap();
+            let requested = PairingStore::prepare(&dir.config())
+                .unwrap()
+                .commit(
+                    "192.0.2.42".parse().unwrap(),
+                    mac(),
+                    HdmiInput::Hdmi1,
+                    &token("secret"),
+                )
+                .unwrap();
+            let expected: Vec<_> = [
+                (BehaviorSetting::ScreenIdleBlank, idle),
+                (BehaviorSetting::SystemSleepWakePolicy, sleep),
+            ]
+            .into_iter()
+            .filter_map(|(setting, value)| (value == "enabled").then_some(setting))
+            .collect();
+            assert_eq!(requested, expected);
+            let saved = ConfigEnvReader::load(dir.config()).unwrap().into_store();
+            assert_eq!(
+                saved.raw_storage_value("screen_idle_blank"),
+                Some("disabled")
+            );
+            assert_eq!(
+                saved.raw_storage_value("system_sleep_wake_policy"),
+                Some("disabled")
+            );
+            assert_eq!(saved.raw_storage_value("screen_idle_timeout"), Some("42"));
+        }
     }
 
     #[test]

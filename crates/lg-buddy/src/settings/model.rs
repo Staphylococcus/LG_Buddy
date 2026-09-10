@@ -623,6 +623,10 @@ pub enum SettingsError {
     Apply {
         message: String,
     },
+    Activation {
+        message: String,
+    },
+    ActivationCancelled,
     PlatformPreflight {
         key: String,
         message: String,
@@ -672,6 +676,8 @@ impl fmt::Display for SettingsError {
                 )
             }
             Self::Apply { message } => write!(f, "{message}"),
+            Self::Activation { message } => write!(f, "{message}"),
+            Self::ActivationCancelled => write!(f, "authorization was cancelled"),
             Self::PlatformPreflight { key, message } => write!(
                 f,
                 "could not enable platform setting `{key}` because native preflight failed: {message}"
@@ -716,6 +722,8 @@ impl std::error::Error for SettingsError {
             Self::ReadConfig { .. }
             | Self::WriteConfig { .. }
             | Self::Apply { .. }
+            | Self::Activation { .. }
+            | Self::ActivationCancelled
             | Self::PlatformPreflight { .. }
             | Self::ApplyAfterPersist { .. }
             | Self::WriteOutput(_)

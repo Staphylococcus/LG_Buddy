@@ -6,20 +6,18 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::process::Output;
-use std::time::Duration;
 
 use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
 use crate::brightness::{
     notify_brightness_success_with, read_current_brightness_with, write_brightness_with,
 };
 use crate::config::{load_config, resolve_config_path_from_env, Config};
-use crate::events::RuntimeEvent;
+use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
 use crate::lifecycle::ThreadSleeper;
 use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
 use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
-use crate::state::{
-    ScreenOwnershipMarker, StateScope, SystemSleepAttemptState, SystemSleepCycleState,
-};
+use crate::session::actions::{RuntimeActionExecutor, SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT};
+use crate::state::{ScreenOwnershipMarker, StateScope, SystemSleepAttemptState};
 use crate::tv::{
     build_tv_client, AudioStatus, OledBrightness, TvClient, TvClientBuildOptions, TvDevice,
     VolumeLevel,
@@ -27,7 +25,6 @@ use crate::tv::{
 use crate::wol::UdpWakeOnLanSender;
 use crate::{BrightnessCommand, MuteCommand, RunError, StartupMode, VolumeCommand};
 
-const SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const GUI_ENV: &str = "LG_BUDDY_GUI";
 const GUI_EXECUTABLE: &str = "lg-buddy-gui";
 
@@ -378,7 +375,12 @@ fn strip_lg_buddy_prefix(value: &str) -> &str {
 }
 
 pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    crate::screen::run_screen_off_from_env(writer)
+    RuntimeActionExecutor::default()
+        .run_screen_off(
+            writer,
+            RuntimeEvent::new(EventSource::CliApi, RuntimeEventKind::ScreenBlankRequested),
+        )
+        .map(|_| ())
 }
 
 pub fn run_sleep_pre<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -393,30 +395,7 @@ pub fn run_sleep_pre_for_event<W: Write>(
     writer: &mut W,
     event: RuntimeEvent,
 ) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let cycle_state =
-        SystemSleepCycleState::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(
-        &config_path,
-        config.tv_ip,
-        config.tv_platform,
-        TvClientBuildOptions::production()
-            .stored_token_only()
-            .with_command_timeout(SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT),
-    )?;
-    let sleeper = ThreadSleeper;
-
-    lifecycle::handle_system_suspend_with(
-        writer,
-        &config,
-        &marker,
-        &cycle_state,
-        &tv_client,
-        &sleeper,
-        event,
-    )
+    RuntimeActionExecutor::default().run_sleep_pre(writer, event)
 }
 
 pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -567,74 +546,7 @@ pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), Ru
 }
 
 pub fn run_system_resume<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
-    let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let attempt_state =
-        SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
-    let tv_client = build_tv_client(
-        &config_path,
-        config.tv_ip,
-        config.tv_platform,
-        TvClientBuildOptions::production().stored_token_only(),
-    )?;
-    let wol_sender = UdpWakeOnLanSender::default();
-    let sleeper = ThreadSleeper;
-    let network_waiter = NmOnlineNetworkWaiter::default();
-
-    let result = (|| -> Result<(), RunError> {
-        match tv_client.can_authenticate_unattended() {
-            Ok(true) => lifecycle::restore_after_system_sleep_with(
-                writer,
-                &config,
-                &marker,
-                &tv_client,
-                &wol_sender,
-                &sleeper,
-                &network_waiter,
-            ),
-            Ok(false) => {
-                marker.clear()?;
-                writeln!(
-                    writer,
-                    "LG Buddy System Resume: No stored native TV credential; skipping unattended TV control."
-                )?;
-                Ok(())
-            }
-            Err(err) => {
-                marker.clear()?;
-                Err(err.into())
-            }
-        }
-    })();
-
-    let mut cleanup_error = None;
-
-    if let Err(err) = attempt_state.clear() {
-        writeln!(
-            writer,
-            "LG Buddy System Resume: could not clear system sleep attempt marker after resume. {err}"
-        )?;
-        cleanup_error = Some(err);
-    }
-
-    if let Err(err) = attempt_state.clear_outcome() {
-        writeln!(
-            writer,
-            "LG Buddy System Resume: could not clear system sleep cycle state after resume. {err}"
-        )?;
-        if cleanup_error.is_none() {
-            cleanup_error = Some(err);
-        }
-    }
-
-    if result.is_ok() {
-        if let Some(err) = cleanup_error {
-            return Err(RunError::Io(err));
-        }
-    }
-
-    result
+    RuntimeActionExecutor::default().run_system_resume(writer)
 }
 
 fn fail_open_nm_pre_down_after_system_bus_error<W: Write, E: std::fmt::Display>(
@@ -678,7 +590,13 @@ pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
 }
 
 pub fn run_screen_on<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    crate::screen::run_screen_on_from_env(writer)
+    RuntimeActionExecutor::default().run_screen_on(
+        writer,
+        RuntimeEvent::new(
+            EventSource::CliApi,
+            RuntimeEventKind::ScreenRestoreRequested,
+        ),
+    )
 }
 
 fn run_brightness_command_with<W: Write, C: TvClient>(
@@ -2248,6 +2166,7 @@ mod tests {
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
             screen_restore_policy,
+            screen_honor_idle_inhibitors: crate::config::ScreenHonorIdleInhibitorsPolicy::Disabled,
             system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,
         }
     }

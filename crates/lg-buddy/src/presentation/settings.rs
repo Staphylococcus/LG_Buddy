@@ -1,4 +1,7 @@
 use crate::presentation::brightness::UserFacingError;
+use crate::presentation::update_check::UpdateCheckPresentation;
+use crate::presentation::update_install::UpdateInstallPresentation;
+use crate::presentation::updater::UpdaterPresentation;
 use crate::settings::{EffectiveSetting, SettingSource, SettingType, SettingValue, SettingsStore};
 use crate::settings_view::{BehaviorSetting, SettingsIntent};
 
@@ -8,6 +11,8 @@ pub struct SettingsPresentation {
     status: SettingsStatus,
     groups: Vec<SettingsGroup>,
     retry_action: Option<SettingsAction>,
+    update_check: UpdateCheckPresentation,
+    update_install: UpdateInstallPresentation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +113,8 @@ impl SettingsPresentation {
             },
             groups: Vec::new(),
             retry_action: None,
+            update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -116,6 +123,8 @@ impl SettingsPresentation {
             status: SettingsStatus::Ready,
             groups,
             retry_action: None,
+            update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -124,6 +133,8 @@ impl SettingsPresentation {
             status: SettingsStatus::Failed(error),
             groups,
             retry_action: Some(SettingsAction::new("Retry", true, SettingsIntent::Retry)),
+            update_check: UpdateCheckPresentation::default(),
+            update_install: UpdateInstallPresentation::default(),
         }
     }
 
@@ -154,6 +165,61 @@ impl SettingsPresentation {
 
     pub fn retry_action(&self) -> Option<&SettingsAction> {
         self.retry_action.as_ref()
+    }
+
+    pub fn update_check(&self) -> &UpdateCheckPresentation {
+        &self.update_check
+    }
+
+    pub(crate) fn update_check_mut(&mut self) -> &mut UpdateCheckPresentation {
+        &mut self.update_check
+    }
+
+    pub fn update_install(&self) -> &UpdateInstallPresentation {
+        &self.update_install
+    }
+
+    /// Project the compact update row and its current semantic action.
+    pub fn updater(&self) -> UpdaterPresentation {
+        UpdaterPresentation::from_settings(self)
+    }
+
+    pub(crate) fn update_install_mut(&mut self) -> &mut UpdateInstallPresentation {
+        &mut self.update_install
+    }
+
+    /// Keep dependent settings intact while only presenting controls that apply.
+    /// Missing or invalid blanking values retain the controls for diagnosis.
+    pub fn row_visible(&self, setting: BehaviorSetting) -> bool {
+        if !matches!(
+            setting,
+            BehaviorSetting::ScreenBackend
+                | BehaviorSetting::ScreenHonorIdleInhibitors
+                | BehaviorSetting::ScreenIdleTimeout
+        ) {
+            return true;
+        }
+
+        if matches!(
+            self.row(BehaviorSetting::ScreenIdleBlank)
+                .map(SettingsRow::editor),
+            Some(SettingsEditor::Toggle { value: Some(false) })
+        ) {
+            return false;
+        }
+
+        if setting != BehaviorSetting::ScreenHonorIdleInhibitors {
+            return true;
+        }
+
+        let backend_is_swayidle = self
+            .row(BehaviorSetting::ScreenBackend)
+            .and_then(|row| {
+                let selected = row.editor().selected_choice()?;
+                row.editor().choices()?.get(selected)
+            })
+            .is_some_and(|choice| choice.value() == "swayidle");
+        !backend_is_swayidle
     }
 
     pub(crate) fn row(&self, setting: BehaviorSetting) -> Option<&SettingsRow> {
@@ -446,8 +512,9 @@ pub(crate) fn groups_from_store(store: &SettingsStore) -> Vec<SettingsGroup> {
             "Screen",
             "Choose when LG Buddy blanks and restores your TV screen.",
             vec![
-                row_from_effective(setting("screen.backend")),
                 row_from_effective(setting("screen.idle_blank")),
+                row_from_effective(setting("screen.honor_idle_inhibitors")),
+                row_from_effective(setting("screen.backend")),
                 row_from_effective(setting("screen.idle_timeout")),
                 row_from_effective(setting("screen.restore_policy")),
             ],
@@ -528,6 +595,7 @@ fn editor_for(
 ) -> SettingsEditor {
     match setting {
         BehaviorSetting::ScreenIdleBlank
+        | BehaviorSetting::ScreenHonorIdleInhibitors
         | BehaviorSetting::SystemSleepWakePolicy
         | BehaviorSetting::UpdatesAutoCheck => SettingsEditor::Toggle {
             value: effective.value().and_then(|value| match value {
@@ -576,6 +644,7 @@ fn setting_title(key: &str) -> &'static str {
     match key {
         "screen.backend" => "Desktop integration",
         "screen.idle_blank" => "Idle blanking",
+        "screen.honor_idle_inhibitors" => "Allow apps to prevent idle blanking",
         "screen.idle_timeout" => "Idle timeout",
         "screen.restore_policy" => "Restore policy",
         "system.sleep_wake_policy" => "TV sleep & wake",

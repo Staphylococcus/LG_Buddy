@@ -4,11 +4,12 @@ This document describes the current first-party Linux frontend in the
 development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
-> The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
-> About. The broader GUI
-> first-run, runtime/service, and update state surface is deferred to
-> `v1.7.0` and [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129);
-> its runtime and service contents are still TBD.
+> The `v1.7.0` frontend covers Overview, TVs, Settings, first-TV pairing,
+> About, manual update checks, user-confirmed release-bundle installation in
+> Settings, and first-run pairing with default behavior activation. Unavailable
+> or declined behaviors remain off and can be retried in Settings. The app menu
+> provides on-demand diagnostics with report viewing, refresh, copying, and
+> saving.
 
 ## Boundary
 
@@ -17,7 +18,7 @@ flowchart LR
     LAUNCH["lg-buddy launcher"] --> GUI["lg-buddy-gui"]
 
     subgraph APP["lg-buddy application"]
-        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication"]
+        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication\nDiagnosticsApplication"]
         PRESENT["presentation/*\ntyped state and actions"]
         MODEL --> PRESENT
     end
@@ -140,7 +141,14 @@ application owns the selected page; GTK reports page changes to the
 controller, which selects the page in `Application` and renders the resulting
 state.
 
-Overview is the normal root. It shows the primary TV summary and connection
+The coordinator initially shows the TVs loading view while reading local profiles.
+No saved TV means TVs-only mode, with both desktop and narrow navigation hidden.
+The app menu remains available. Pairing reveals normal navigation; unpairing
+returns to TVs-only mode without changing unrelated settings. An offline saved
+TV keeps normal navigation. A failed configuration read keeps Settings reachable
+and shows a read error rather than an empty pairing prompt.
+
+With a saved TV, Overview is the normal root. It shows the primary TV summary and connection
 state, OLED pixel brightness, TV volume, and mute. It has no separate Apply or
 Cancel workflow: moving a slider emits `SetBrightness` or `SetVolume`, and
 changing the sound button emits `SetMuted`. Writes remain asynchronous and
@@ -163,9 +171,21 @@ edit as a `PairingIntent`. Its application stages are Editing, Connecting,
 WaitingForConfirmation, Verifying, Saving, and Failed. Pairing verifies power,
 audio, and OLED brightness before publishing the profile. It saves the token
 and configuration through `pairing_store.rs`; the GUI does not own those files.
-On success the application publishes a `TV paired successfully` toast and
-refreshes the other views. Unpairing is a native destructive alert dialog and
-likewise delegates confirmation and removal to the application.
+On success the application refreshes the other views and activates each requested
+Idle Blanking and TV Sleep & Wake behavior, including saved enabled preferences
+when pairing again. Explicit off choices remain off. Requested behaviors are
+saved disabled until activation succeeds; an unavailable or declined behavior
+remains off, and its Settings toggle retries activation. Unpairing is a native
+destructive alert dialog and likewise delegates confirmation and removal to the
+application.
+
+The fresh installer creates an empty configuration only when absent and hands
+off to the installed foreground GUI. It enables the system units while deferring
+lifecycle start until pairing, and enables the user screen monitor and update
+timer for passive notifications and scheduled checks. TV Sleep & Wake requires
+graphical authorization when pairing activates it; pairing and user files remain
+unprivileged. Existing configured installations preserve their saved policies and
+do not run fresh-install activation on ordinary launch.
 
 Settings is built from the existing registry-backed `SettingsStore`. It shows
 three groups—Screen, Sleep & Wake, and Updates—with seven behavior settings.
@@ -176,13 +196,100 @@ changes are validated, persisted, and applied automatically; writes are
 serialized in application state, with accepted edits queued in order. There is
 no Save or Cancel button.
 
-Settings displays configured values only; there is no separate GUI surface for
-a resolved screen backend, service health, runtime state, update availability,
-or update progress. Normal successful changes are silent. Feedback appears
+The application presentation hides Desktop integration and Idle timeout when
+Idle blanking is explicitly disabled. GTK retains the native rows and their
+values while hiding them; Restore policy remains visible because it also
+governs restoration outside idle blanking. Invalid blanking values keep the
+dependent controls available for diagnosis.
+
+Settings exposes one native update row in the Updates group.
+`SettingsPresentation::updater()` projects its title, installed version,
+and **Check for updates** or **Install update…** action. While a check runs, its
+button is disabled and labeled **Checking…**. Completed checks use the saved
+channel and report only whether an update is available. The check retains no
+release version, URL, or installation target. A channel change requires a fresh
+availability check. Checking neither installs an update nor changes preferences
+or sends a desktop notification.
+
+`SettingsTransition::update_notice()` carries one-time completion feedback:
+already-current results, check errors, cache warnings, and installation errors.
+The window presents a toast with **Copy details** for failures. Refreshing or
+rerendering Settings does not replay notices, while a repeated failed operation
+produces a new notice. Toast actions copy the bounded, redacted details captured
+for that particular completion.
+
+**Install update…** opens an `adw::Dialog` with confirmation, release link,
+current status, native progress bar, and the applicable action buttons.
+Opening the dialog expresses intent to upgrade. Preparation reads the current
+saved channel and independently selects its latest qualifying release. That
+result supplies the confirmation version and release link, even if a newer
+release appeared since the availability check. If no newer release qualifies,
+the dialog closes, the row returns to **Check for updates**, and an **Already up
+to date** toast appears. The modal resolves the release identity before
+confirmation. Confirmation authorizes acquisition and installation of that
+exact release; later release changes cannot replace it.
+
+`update_flow.rs` owns preparation, explicit confirmation, cancellation,
+progress, failures, and handoff; `update_install.rs` shares discovery, pinned
+identity, acquisition, compatibility, and installation with the CLI. GTK only
+renders these facts and forwards semantic intents. The progress bar pulses
+while work is pending; no percentage is invented. Dismissal requests application
+cancellation, which checks the actual installer boundary. Settings and TV
+profile changes stay unavailable during installation.
+
+The updater action occupies the same row as its status, using native text
+spacing. Empty warning prefixes are detached so ordinary setting labels retain
+the same left edge.
+
+The installer runs as the regular user. Its graphical upgrade mode requests
+one `pkexec` authorization for the existing system-file and system-service
+operations. User service/configuration work remains unprivileged. Cancellation
+uses an atomic boundary before invoking the installer; after that, the window
+stays open for the result. Verified success replaces the current GUI process
+with the installed GUI. The incumbent allows standard GApplication replacement,
+and the successor requests it so bus-name teardown cannot turn the new process
+into a remote activation. Normal launches still reuse the existing window.
+A failed process replacement closes the progress dialog and shows a failure
+toast. The Settings row identifies that a restart is required; its installation
+action retries process replacement without reinstalling.
+
+The application retains bounded failure details for the current session,
+including across retries and Settings refreshes. Credential-bearing lines,
+URLs, and control characters are removed before retention. The error toast
+provides the details on demand, and the application presentation retains them
+for the diagnostics readout independently of launcher stderr handling.
+
+Resolved screen backend, service health, and runtime observations belong in
+Diagnostics. Normal successful setting changes
+are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
-an apply warning keeps the saved value and can offer **Retry apply**. The
-broader runtime/service and update state UI is deferred as described at the top
-of this document.
+an apply warning keeps the saved value and can offer **Retry apply**.
+
+## Diagnostics
+
+The app menu's **Diagnostics** action is available before pairing, including
+when navigation tabs are hidden. It opens a native dialog and starts a read-only
+snapshot. **Refresh** collects again; **Copy** and **Save…** export exactly the
+bounded, sanitized report shown in the dialog. A failed refresh retains the
+previous report and collection time. File chooser cancellation is silent, and
+save failures leave the report available to copy or save elsewhere.
+
+`diagnostics.rs` collects build identity, typed effective settings, desktop
+capabilities, separate systemd state fields, TV observations, and bounded recent
+failure findings. Unavailable observations remain explicit partial results.
+Capability probes are not treated as proof of what a running service uses; TV
+connectivity is not proof of automation. Raw configuration values, credentials,
+protocol frames, and journal messages are excluded from the report.
+Native TV model reads require stored credentials. Compatibility profiles expose
+local credential metadata only, because that backend cannot guarantee a model
+read without initiating pairing.
+
+`diagnostics_view.rs` owns collection, export snapshots, and stale-completion
+handling. `Application` adds retained user-facing failures from the current GUI
+session. The GTK controller runs workers, writes the clipboard, and selects a
+save destination; the dialog renders report and action state. Closing it
+invalidates pending UI completions, while an accepted file export can finish.
+There is no automatic collection or generic repair action.
 
 The main menu's **About LG Buddy** action is implemented by the native
 `adw::AboutDialog`. It supplies the application name and icon, version, links,

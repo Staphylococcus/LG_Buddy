@@ -107,10 +107,13 @@ Mock the API surface we consume, not the whole system behind it.
 Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
-- GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
+- GNOME monitor/runtime tests should use the private session-bus harness for
+  ScreenSaver signals, Mutter idletime, and SessionManager idle-inhibition
+  snapshots and signals
 - native Wayland provider tests should model registry discovery, protocol-version
-  rejection, every advertised seat, resumed-only activity, and fatal provider
-  loss without requiring a compositor
+  rejection, every advertised seat, input-notification resumed activity, separate
+  inhibitor-aware permission notifications, and fatal provider loss without
+  requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
 
@@ -212,6 +215,12 @@ The native webOS client tests use one stateful server for complete webOS frames,
 device state, and protocol-fault scenarios. Characterization tests keep its TV
 behavior aligned with observed hardware evidence.
 
+`session/actions/tests.rs` uses this same server through the production client
+builder to verify runtime ownership across events: lazy connection, authenticated
+session reuse, later reconnection after closure, and replacement after profile
+or operation-policy changes. These tests use isolated loopback addresses on
+the standard webOS TLS port and share the session tests' environment lock.
+
 Cucumber adds the process-level product boundary. It runs the real `lg-buddy`
 binary against the same stateful server over TLS on the standard webOS port.
 The scenarios exercise the production unsigned registration manifest and
@@ -247,11 +256,15 @@ Secondary concern:
 Examples:
 
 - GNOME signal mapping
-- GNOME monitor setup, sender ownership, and idletime polling over the
-  session-bus seam
+- GNOME monitor setup, sender ownership, idletime polling, and one-shot
+  user-active watches over the session-bus seam
+- delayed inhibitor replies crossing the blanking deadline, and inhibitor
+  release resetting Mutter's idle counter without reporting user input
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
+- opt-in idle inhibition at startup, overlapping inhibitors, a fresh timeout
+  after the last release, and release never acting as restore activity
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
   restore trigger, while observation-time tests cover pre-lock, post-lock grace,
@@ -271,6 +284,9 @@ cases report a precise fallback reason, and `auto` retains the
 GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
 keep the static x86_64 musl build and release-bundle smoke test green, including
 preservation and deprecation reporting for an existing `swayidle` config.
+For inhibitor changes, start real video playback before the monitor: disabled
+must still blank, enabled must remain visible past the timeout, and stopping
+playback must leave the screen visible for a fresh full timeout before blanking.
 
 ### Gamepad activity
 
@@ -328,14 +344,45 @@ environment, replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
 The installed GUI smoke also verifies the desktop entry's no-argument
-`lg-buddy` launch opens normal Overview, while `lg-buddy brightness` selects the
+`lg-buddy` launch opens the existing pairing prompt without navigation for an
+unconfigured installation, and normal Overview for a saved TV. `lg-buddy brightness` selects the
 brightness control even when another view is already open. A missing GUI fails
 the plain launcher; only the brightness path retains the Zenity fallback.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
-covered by their current tests. The complete GUI first-run, service, and update
-journey is outside this slice and remains tracked in
-[#129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
+covered by their current tests. First-run application tests cover saved-profile
+navigation, default behavior activation after pairing, declined or unavailable
+behaviors remaining off, Settings retries, and preserving existing settings.
+Storage and service-boundary tests verify that pairing publication remains valid
+when a behavior activation fails. Installer fixtures verify handoff to the
+installed executable and preservation of existing configuration.
+
+With the `gui_journey_tv` example supplied, the same installed smoke drives
+native webOS pairing against the existing local TLS TV fixture. It covers
+rejection, cancellation, interrupted setup, successful default activation,
+declined activation followed by Settings retry, re-pairing with retained
+preferences, and relaunch with an offline saved TV. Diagnostics is opened
+before and after pairing and while offline; its visible report, clipboard,
+and saved file must agree and exclude credentials when an observation fails.
+
+The update variant supplies a candidate from `build-release-bundle.sh` and
+debug binaries built with `gui-test-fixtures`. Only their HTTP transport is
+redirected to local GitHub-shaped responses. Saved-channel selection, fresh
+release resolution, archive and identity verification, compatibility checks,
+the shipped installer, and executable handoff use the normal application path.
+The test checks manual results with automatic checks disabled, cancelled
+confirmation, corrupt downloads, declined authorization, and successful
+replacement and relaunch with unchanged settings and credentials. The feature
+is forbidden in release builds; published artifacts use the default features.
+
+Diagnostics tests cover on-demand collection before pairing, partial reports,
+service-state distinctions, bounded subprocess reads, and credential exclusion.
+Application tests cover retained safe failures, refresh/close races, exact
+copy/save snapshots, chooser cancellation, and failed exports. Native GTK
+scenarios exercise the menu, collection responsiveness, report selection,
+keyboard focus, adaptive layout, clipboard contents, and file export through
+the worker boundary. Tests inject probes and reports without changing live
+services or querying a real TV.
 
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity
@@ -349,6 +396,15 @@ keyboard-only behavior, external AT-SPI role/name/value checks, visibly distinct
 light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
 renderer suite separately asserts the same GTK semantics directly at the widget
 boundary.
+
+These are controlled installed tests: systemd observations and authorization
+decisions are fixtures, and elevated installer operations run in an isolated
+user namespace and installation root. The supported-distro lanes verify the
+actual payload, desktop dependencies, authorization command boundary, and
+handoff on those distributions. They do not prove a real desktop PolicyKit
+dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
+those still require supported-host verification. NixOS development runs are
+not evidence of official NixOS support.
 
 The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
 GUI runtime dependency handling. They prove that an unconfirmed install does not

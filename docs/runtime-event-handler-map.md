@@ -30,6 +30,12 @@ resets or cancels the applicable deadline; each expiry is edge-triggered.
 
 GNOME, native Wayland, and `swayidle` feed the shared session path.
 
+Screen and sleep actions pass through `session::actions` for configuration and
+dependency assembly before reaching their policy handlers. Each monitor retains
+one `RuntimeActionExecutor`, which lazily owns and reuses a native TV client for
+compatible events. One-shot commands use a fresh instance of the same owner.
+The handler map below omits this common assembly step.
+
 ## Current Top-Level Handlers
 
 | External event source | Runtime entrypoint | Primary handler | Current action |
@@ -126,7 +132,7 @@ Current shared-runtime inputs:
 | `org.gnome.ScreenSaver.ActiveChanged(true)` | Non-authoritative idle observation | GNOME source -> shared runner; does not change the LG Buddy deadline |
 | `org.gnome.ScreenSaver.ActiveChanged(false)` | `ProviderActive` | `InactivityEngine` |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | `InactivityEngine` |
-| Recent activity reported by `org.gnome.Mutter.IdleMonitor.GetIdletime` | `DesktopActivityObserved` | `InactivityEngine` |
+| Recent Mutter `GetIdletime` activity (honoring disabled) or a trusted user-active `WatchFired` (honoring enabled) | `DesktopActivityObserved` | `InactivityEngine` |
 | Linux gamepad activity | `UserActivityObserved` from `AuxiliaryInput` | Shared session runtime -> `InactivityEngine` |
 | Initial or changed logind `LockedHint=true` | `SessionEvent::Lock` from `LinuxLogind` | Shared session runtime -> `InactivityEngine` |
 | Changed logind `LockedHint=false` after lock | `SessionEvent::Unlock` from `LinuxLogind` | Clear the observed lock state without requesting screen restore |

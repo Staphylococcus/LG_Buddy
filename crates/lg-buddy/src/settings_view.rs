@@ -9,16 +9,23 @@ use crate::presentation::settings::{
     SettingsEditStatus, SettingsEditor, SettingsFeedback, SettingsFeedbackSeverity, SettingsGroup,
     SettingsPresentation, SettingsRow,
 };
+use crate::presentation::update_check::UpdateCheckReport;
 use crate::settings::{
-    execute_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
+    execute_gui_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
     SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
     SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
 };
+use crate::update_flow::{
+    UpdateInstallApplication, UpdateInstallFailure, UpdateInstallOperation, UpdateInstallOutcome,
+    UpdateInstallTask,
+};
+use crate::update_install::UpdateInstallStage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BehaviorSetting {
     ScreenBackend,
     ScreenIdleBlank,
+    ScreenHonorIdleInhibitors,
     ScreenIdleTimeout,
     ScreenRestorePolicy,
     SystemSleepWakePolicy,
@@ -31,6 +38,7 @@ impl BehaviorSetting {
         match self {
             Self::ScreenBackend => "screen.backend",
             Self::ScreenIdleBlank => "screen.idle_blank",
+            Self::ScreenHonorIdleInhibitors => "screen.honor_idle_inhibitors",
             Self::ScreenIdleTimeout => "screen.idle_timeout",
             Self::ScreenRestorePolicy => "screen.restore_policy",
             Self::SystemSleepWakePolicy => "system.sleep_wake_policy",
@@ -43,6 +51,7 @@ impl BehaviorSetting {
         Some(match key {
             "screen.backend" => Self::ScreenBackend,
             "screen.idle_blank" => Self::ScreenIdleBlank,
+            "screen.honor_idle_inhibitors" => Self::ScreenHonorIdleInhibitors,
             "screen.idle_timeout" => Self::ScreenIdleTimeout,
             "screen.restore_policy" => Self::ScreenRestorePolicy,
             "system.sleep_wake_policy" => Self::SystemSleepWakePolicy,
@@ -57,6 +66,11 @@ impl BehaviorSetting {
 pub enum SettingsIntent {
     Retry,
     Refresh,
+    CheckForUpdates,
+    PrepareUpdateInstall,
+    ConfirmUpdateInstall,
+    CancelUpdateInstall,
+    RelaunchUpdatedApplication,
     SetEnabled {
         setting: BehaviorSetting,
         enabled: bool,
@@ -113,6 +127,75 @@ impl SettingsMutationOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsReadOperation(u64);
 
+/// Opaque identity for a manual check, independent of settings reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateCheckOperation(u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheckError {
+    presentation: UserFacingError,
+    diagnostic: String,
+}
+
+impl UpdateCheckError {
+    pub fn stopped() -> Self {
+        Self {
+            presentation: UserFacingError::new(
+                "Update check stopped",
+                "The check did not finish. Try again.",
+            ),
+            diagnostic: "the update check worker stopped before returning a result".into(),
+        }
+    }
+}
+
+impl From<crate::updates::UpdatesError> for UpdateCheckError {
+    fn from(error: crate::updates::UpdatesError) -> Self {
+        use crate::updates::UpdatesError;
+        let detail = match &error {
+            UpdatesError::Settings(_) | UpdatesError::SettingsInvariant(_) => {
+                "Check the saved Update channel in Settings, then try again."
+            }
+            UpdatesError::Http { .. } => "Check your internet connection, then try again.",
+            UpdatesError::ApiStatus { status: 403 | 429, .. } => {
+                "The release service refused the request. Try again later."
+            }
+            UpdatesError::InvalidLocalVersion { .. } => {
+                "The installed version could not be compared. Install a supported LG Buddy release."
+            }
+            _ => "Release information could not be retrieved. Try again; if this continues, check the LG Buddy logs.",
+        };
+        Self {
+            presentation: UserFacingError::new("Could not check for updates", detail),
+            diagnostic: error.to_string(),
+        }
+    }
+}
+
+/// A one-shot update result for a toolkit renderer to show as a toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateNotice {
+    title: String,
+    details: Option<String>,
+}
+
+impl UpdateNotice {
+    fn new(title: impl Into<String>, details: Option<String>) -> Self {
+        Self {
+            title: title.into(),
+            details,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn details(&self) -> Option<&str> {
+        self.details.as_deref()
+    }
+}
+
 impl SettingsReadOperation {
     pub(crate) fn new(id: u64) -> Self {
         Self(id)
@@ -124,10 +207,16 @@ pub struct SettingsTransition {
     presentation: SettingsPresentation,
     read_operation: Option<SettingsReadOperation>,
     mutation_operation: Option<SettingsMutationOperation>,
+    update_check_operation: Option<UpdateCheckOperation>,
+    update_install_operation: Option<UpdateInstallOperation>,
+    update_notice: Option<UpdateNotice>,
     diagnostic: Option<String>,
 }
 
 impl SettingsTransition {
+    pub(crate) fn update_presentation_from(&mut self, other: Self) {
+        self.presentation = other.presentation;
+    }
     pub fn presentation(&self) -> &SettingsPresentation {
         &self.presentation
     }
@@ -138,6 +227,18 @@ impl SettingsTransition {
 
     pub fn mutation_operation(&self) -> Option<&SettingsMutationOperation> {
         self.mutation_operation.as_ref()
+    }
+
+    pub fn update_check_operation(&self) -> Option<UpdateCheckOperation> {
+        self.update_check_operation
+    }
+
+    pub fn update_install_operation(&self) -> Option<&UpdateInstallOperation> {
+        self.update_install_operation.as_ref()
+    }
+
+    pub fn update_notice(&self) -> Option<&UpdateNotice> {
+        self.update_notice.as_ref()
     }
 
     pub fn diagnostic(&self) -> Option<&str> {
@@ -198,6 +299,8 @@ impl Error for SettingsReadError {}
 pub trait SettingsBackend: Send + Sync + 'static {
     fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError>;
 
+    fn check_for_updates(&self) -> Result<UpdateCheckReport, UpdateCheckError>;
+
     fn write_setting(
         &self,
         operation: SettingsMutationOperation,
@@ -209,6 +312,19 @@ pub trait SettingsBackend: Send + Sync + 'static {
 pub struct EnvironmentSettingsBackend;
 
 impl SettingsBackend for EnvironmentSettingsBackend {
+    fn check_for_updates(&self) -> Result<UpdateCheckReport, UpdateCheckError> {
+        let outcome = crate::updates::check_for_updates()?;
+        let result = outcome.result();
+        Ok(UpdateCheckReport {
+            installed_version: result.current_version().to_string(),
+            channel: result.check_channel(),
+            update_available: result.update_available(),
+            warning: (!outcome.warnings().is_empty()).then(|| {
+                "The release check succeeded, but its cache could not be read or saved. A later check may need to download the release information again.".into()
+            }),
+        })
+    }
+
     fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
         let store = SettingsStore::load_from_env()
             .map_err(|error| SettingsReadError::unreadable(error.to_string()))?;
@@ -229,13 +345,13 @@ impl SettingsBackend for EnvironmentSettingsBackend {
                 progress(SettingsMutationStage::Validating);
                 let mutation = SettingsMutation::set(&store, operation.key_name(), value)
                     .map_err(SettingsMutationFailure::Validation)?;
-                execute_settings_mutation(&path, mutation, &applier, progress)
+                execute_gui_settings_mutation(&path, mutation, &applier, progress)
             }
             SettingsMutationRequest::Reset => {
                 progress(SettingsMutationStage::Validating);
                 let mutation = SettingsMutation::unset(&store, operation.key_name())
                     .map_err(SettingsMutationFailure::Validation)?;
-                execute_settings_mutation(&path, mutation, &applier, progress)
+                execute_gui_settings_mutation(&path, mutation, &applier, progress)
             }
             SettingsMutationRequest::RetryApply => {
                 retry_settings_apply(&store, operation.key_name(), &applier, progress)
@@ -267,6 +383,8 @@ pub struct SettingsApplication {
     pending_mutation: Option<PendingMutation>,
     queued_mutations: VecDeque<PendingMutation>,
     reconcile_mutation: Option<PendingMutation>,
+    pending_update_check: Option<UpdateCheckOperation>,
+    update_install: UpdateInstallApplication,
 }
 
 impl SettingsApplication {
@@ -283,21 +401,59 @@ impl SettingsApplication {
                 pending_mutation: None,
                 queued_mutations: VecDeque::new(),
                 reconcile_mutation: None,
+                pending_update_check: None,
+                update_install: UpdateInstallApplication::default(),
             },
             SettingsTransition {
                 presentation,
                 read_operation: Some(operation),
                 mutation_operation: None,
+                update_check_operation: None,
+                update_install_operation: None,
+                update_notice: None,
                 diagnostic: None,
             },
         )
+    }
+
+    /// Re-read settings after pairing has published a profile. This also
+    /// supersedes the initial read when it is still in flight, so onboarding
+    /// always queues requested behaviors against the newly published configuration.
+    pub fn profile_changed(&mut self) -> SettingsTransition {
+        self.begin_read()
     }
 
     pub fn handle_intent(&mut self, intent: SettingsIntent) -> Option<SettingsTransition> {
         if self.closed {
             return None;
         }
+        self.sync_update_install();
+        if matches!(
+            intent,
+            SettingsIntent::PrepareUpdateInstall
+                | SettingsIntent::ConfirmUpdateInstall
+                | SettingsIntent::CancelUpdateInstall
+                | SettingsIntent::RelaunchUpdatedApplication
+        ) {
+            let operation = self.update_install.handle(intent)?;
+            let mut transition = self.transition(None, None, None);
+            transition.update_install_operation = operation;
+            return Some(transition);
+        }
         match intent {
+            SettingsIntent::CheckForUpdates
+                if self.pending_update_check.is_none()
+                    && !self.update_install.active()
+                    && !self.presentation.groups().is_empty() =>
+            {
+                let operation = UpdateCheckOperation(self.next_operation_id);
+                self.next_operation_id += 1;
+                self.pending_update_check = Some(operation);
+                self.presentation.update_check_mut().start();
+                let mut transition = self.transition(None, None, None);
+                transition.update_check_operation = Some(operation);
+                Some(transition)
+            }
             SettingsIntent::Retry if matches!(self.state, SettingsApplicationState::Failed) => {
                 Some(self.begin_read())
             }
@@ -411,7 +567,9 @@ impl SettingsApplication {
                 )
             }
         };
+        let update_check = self.presentation.update_check().clone();
         self.presentation = presentation;
+        *self.presentation.update_check_mut() = update_check;
         if matches!(self.state, SettingsApplicationState::Ready) {
             self.finish_mutation(None, diagnostic)
         } else {
@@ -466,29 +624,73 @@ impl SettingsApplication {
                 self.finish_mutation(Some(operation.setting()), diagnostic)
             }
             Err(failure) => {
+                let activation_failure = match &failure {
+                    SettingsMutationFailure::Activation(error) => Some(error),
+                    SettingsMutationFailure::Validation(_)
+                    | SettingsMutationFailure::Persistence(_) => None,
+                };
+                let activation_cancelled = activation_failure
+                    .is_some_and(|error| matches!(error, SettingsError::ActivationCancelled));
                 let status = match &failure {
                     SettingsMutationFailure::Validation(_) => SettingsEditStatus::ValidationFailed,
                     SettingsMutationFailure::Persistence(_) => {
                         SettingsEditStatus::PersistenceFailed
                     }
+                    SettingsMutationFailure::Activation(_) => SettingsEditStatus::ApplyFailed,
                 };
                 let preserve_retry_apply = pending.previous_row.retry_apply_action().is_some();
                 self.presentation.replace_row(pending.previous_row);
                 self.presentation
                     .set_controls_available(self.controls_available);
-                self.presentation.set_row_state(
-                    operation.setting(),
-                    status,
-                    Some(SettingsFeedback::new(
-                        SettingsFeedbackSeverity::Error,
-                        mutation_failure_message(&failure),
-                    )),
-                    preserve_retry_apply,
-                );
+                if activation_cancelled {
+                    // Authorization cancellation is an ordinary onboarding
+                    // choice. Restore the old off row without inventing a
+                    // retryable apply error.
+                    self.presentation.set_row_state(
+                        operation.setting(),
+                        SettingsEditStatus::Unchanged,
+                        None,
+                        false,
+                    );
+                } else {
+                    self.presentation.set_row_state(
+                        operation.setting(),
+                        status,
+                        Some(SettingsFeedback::new(
+                            SettingsFeedbackSeverity::Error,
+                            mutation_failure_message(&failure),
+                        )),
+                        if activation_failure.is_some() {
+                            false
+                        } else {
+                            preserve_retry_apply
+                        },
+                    );
+                }
                 self.state = SettingsApplicationState::Ready;
-                self.finish_mutation(Some(operation.setting()), Some(failure.error().to_string()))
+                let diagnostic = (!activation_cancelled).then(|| failure.error().to_string());
+                self.finish_mutation(Some(operation.setting()), diagnostic)
             }
         }
+    }
+
+    pub fn complete_update_check(
+        &mut self,
+        operation: UpdateCheckOperation,
+        result: Result<UpdateCheckReport, UpdateCheckError>,
+    ) -> Option<SettingsTransition> {
+        if self.closed || self.pending_update_check != Some(operation) {
+            return None;
+        }
+        self.pending_update_check = None;
+        let update_notice = update_check_notice(&result);
+        let diagnostic = result.as_ref().err().map(|error| error.diagnostic.clone());
+        self.presentation
+            .update_check_mut()
+            .complete(result.map_err(|error| error.presentation));
+        let mut transition = self.transition(None, None, diagnostic);
+        transition.update_notice = update_notice;
+        Some(transition)
     }
 
     pub fn mutation_worker_stopped(
@@ -522,7 +724,9 @@ impl SettingsApplication {
     }
 
     pub fn is_mutating(&self) -> bool {
-        self.pending_mutation.is_some() || !self.queued_mutations.is_empty()
+        self.pending_mutation.is_some()
+            || !self.queued_mutations.is_empty()
+            || self.update_install.active()
     }
 
     pub fn set_controls_available(&mut self, available: bool) -> Option<SettingsTransition> {
@@ -534,7 +738,60 @@ impl SettingsApplication {
         Some(self.transition(None, None, None))
     }
 
+    pub fn update_install_active(&self) -> bool {
+        self.update_install.active()
+    }
+
+    pub fn can_close(&self) -> bool {
+        self.update_install.can_close()
+    }
+
+    pub fn update_install_progress(
+        &mut self,
+        operation: &UpdateInstallOperation,
+        stage: UpdateInstallStage,
+    ) -> Option<SettingsTransition> {
+        if self.closed || !self.update_install.progress(operation, stage) {
+            return None;
+        }
+        Some(self.transition(None, None, None))
+    }
+
+    pub fn complete_update_install(
+        &mut self,
+        operation: &UpdateInstallOperation,
+        result: Result<UpdateInstallOutcome, UpdateInstallFailure>,
+    ) -> Option<SettingsTransition> {
+        if self.closed {
+            return None;
+        }
+        let up_to_date = matches!(result, Ok(UpdateInstallOutcome::UpToDate))
+            && matches!(operation.task(), UpdateInstallTask::Prepare { .. });
+        let (next, diagnostic) = self.update_install.complete(operation, result)?;
+        let notice = if up_to_date {
+            self.presentation.update_check_mut().clear_result();
+            Some(UpdateNotice::new("Already up to date", None))
+        } else {
+            self.update_install.presentation().error().map(|error| {
+                let title = if matches!(operation.task(), UpdateInstallTask::Relaunch(_)) {
+                    "Restart required"
+                } else {
+                    error.summary()
+                };
+                UpdateNotice::new(
+                    title,
+                    notice_details(error, diagnostic.as_deref().unwrap_or("")),
+                )
+            })
+        };
+        let mut transition = self.transition(None, None, diagnostic);
+        transition.update_install_operation = next;
+        transition.update_notice = notice;
+        Some(transition)
+    }
+
     pub fn shutdown(&mut self) {
+        self.update_install.can_close();
         self.closed = true;
     }
 
@@ -544,6 +801,7 @@ impl SettingsApplication {
 
     fn can_edit(&self) -> bool {
         self.controls_available
+            && !self.update_install.active()
             && self.reconcile_mutation.is_none()
             && !self.presentation.groups().is_empty()
             && !matches!(self.state, SettingsApplicationState::Failed)
@@ -554,12 +812,7 @@ impl SettingsApplication {
         self.next_operation_id += 1;
         self.state = SettingsApplicationState::Loading(operation);
         self.presentation.mark_loading();
-        SettingsTransition {
-            presentation: self.presentation.clone(),
-            read_operation: Some(operation),
-            mutation_operation: None,
-            diagnostic: None,
-        }
+        self.transition(Some(operation), None, None)
     }
 
     fn begin_mutation(
@@ -569,7 +822,9 @@ impl SettingsApplication {
     ) -> Option<SettingsTransition> {
         let previous_row = self.presentation.row(setting)?.clone();
         if matches!(self.state, SettingsApplicationState::Loading(_)) {
+            let update_check = self.presentation.update_check().clone();
             self.presentation = SettingsPresentation::ready(self.presentation.groups().to_vec());
+            *self.presentation.update_check_mut() = update_check;
         }
         let operation = SettingsMutationOperation::new(self.next_operation_id, setting, request);
         self.next_operation_id += 1;
@@ -623,18 +878,96 @@ impl SettingsApplication {
         Some(self.transition(None, operation, diagnostic))
     }
 
+    fn sync_update_install(&mut self) {
+        let channel = self
+            .presentation
+            .row(BehaviorSetting::UpdatesChannel)
+            .and_then(|row| match row.editor() {
+                SettingsEditor::Choice {
+                    options,
+                    selected: Some(selected),
+                } => options
+                    .get(*selected)
+                    .and_then(|choice| match choice.value() {
+                        "stable" => Some(crate::updates::UpdateChannel::Stable),
+                        "prerelease" => Some(crate::updates::UpdateChannel::Prerelease),
+                        _ => None,
+                    }),
+                _ => None,
+            });
+        let available = self.controls_available
+            && self.pending_mutation.is_none()
+            && self.queued_mutations.is_empty()
+            && self.reconcile_mutation.is_none()
+            && self.pending_update_check.is_none()
+            && matches!(self.state, SettingsApplicationState::Ready);
+        self.update_install.refresh_availability(
+            self.presentation.update_check().result(),
+            channel,
+            available,
+        );
+        *self.presentation.update_install_mut() = self.update_install.presentation().clone();
+        self.presentation
+            .set_controls_available(self.controls_available && !self.update_install.active());
+        self.presentation
+            .update_check_mut()
+            .set_install_active(self.update_install.active());
+    }
+
     fn transition(
-        &self,
+        &mut self,
         read_operation: Option<SettingsReadOperation>,
         mutation_operation: Option<SettingsMutationOperation>,
         diagnostic: Option<String>,
     ) -> SettingsTransition {
+        self.sync_update_install();
         SettingsTransition {
             presentation: self.presentation.clone(),
             read_operation,
             mutation_operation,
+            update_check_operation: None,
+            update_install_operation: None,
+            update_notice: None,
             diagnostic,
         }
+    }
+}
+
+fn update_check_notice(
+    result: &Result<UpdateCheckReport, UpdateCheckError>,
+) -> Option<UpdateNotice> {
+    match result {
+        Ok(report) => {
+            if !report.update_available {
+                Some(UpdateNotice::new(
+                    "Already up to date",
+                    report.warning.as_deref().and_then(sanitized_notice_detail),
+                ))
+            } else {
+                report.warning.as_deref().map(|warning| {
+                    UpdateNotice::new("Update check warning", sanitized_notice_detail(warning))
+                })
+            }
+        }
+        Err(error) => Some(UpdateNotice::new(
+            error.presentation.summary(),
+            notice_details(&error.presentation, &error.diagnostic),
+        )),
+    }
+}
+
+fn sanitized_notice_detail(detail: &str) -> Option<String> {
+    let detail = crate::update_flow::retained_failure_details(detail);
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn notice_details(error: &UserFacingError, diagnostic: &str) -> Option<String> {
+    let diagnostic = crate::update_flow::retained_failure_details(diagnostic);
+    match (error.detail().is_empty(), diagnostic.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(error.detail().to_string()),
+        (true, false) => Some(diagnostic),
+        (false, false) => Some(format!("{}\n\n{}", error.detail(), diagnostic)),
     }
 }
 
@@ -649,6 +982,12 @@ fn mutation_failure_message(failure: &SettingsMutationFailure) -> String {
         SettingsMutationFailure::Persistence(_) => {
             "LG Buddy could not save this setting. Your previous value was kept.".to_string()
         }
+        SettingsMutationFailure::Activation(error) => match error {
+            SettingsError::ActivationCancelled => {
+                "Authorization was cancelled. The setting remains disabled.".to_string()
+            }
+            _ => "The service could not be activated, so the setting remains disabled.".to_string(),
+        },
     }
 }
 
@@ -713,7 +1052,9 @@ mod tests {
     use crate::presentation::settings::{
         SettingsEditStatus, SettingsFeedback, SettingsFeedbackSeverity, SettingsRow, SettingsStatus,
     };
-    use crate::settings::{ConfigEnvReader, SettingValue, SettingsStore, SETTINGS_REGISTRY};
+    use crate::settings::{
+        execute_settings_mutation, ConfigEnvReader, SettingValue, SettingsStore, SETTINGS_REGISTRY,
+    };
 
     fn groups(contents: &str) -> Vec<SettingsGroup> {
         let store = ConfigEnvReader::parse("/tmp/config.env", contents).into_store();
@@ -750,7 +1091,7 @@ mod tests {
     fn default_settings_are_ready_and_grouped() {
         let groups = groups("");
         assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].rows().len(), 4);
+        assert_eq!(groups[0].rows().len(), 5);
         assert_eq!(groups[1].rows().len(), 1);
         assert_eq!(groups[2].rows().len(), 2);
 
@@ -759,6 +1100,203 @@ mod tests {
         assert_eq!(backend.source_label(), "Default");
         assert_eq!(backend.default_label(), "Automatic");
         assert!(backend.problem().is_none());
+
+        let inhibitors = row(&groups, "Screen", "Allow apps to prevent idle blanking");
+        assert_eq!(
+            inhibitors.description(),
+            "Honor keep-awake requests from video players, presentations, and other apps."
+        );
+        assert_eq!(inhibitors.editor().as_toggle(), Some(Some(false)));
+    }
+
+    #[test]
+    fn idle_controls_are_hidden_only_for_explicitly_disabled_blanking() {
+        for (config, visible) in [
+            ("", true),
+            ("screen_idle_blank=enabled\n", true),
+            ("screen_idle_blank=disabled\n", false),
+            ("screen_idle_blank=invalid\n", true),
+        ] {
+            let presentation = SettingsPresentation::ready(groups(config));
+            for setting in [
+                BehaviorSetting::ScreenBackend,
+                BehaviorSetting::ScreenHonorIdleInhibitors,
+                BehaviorSetting::ScreenIdleTimeout,
+            ] {
+                assert_eq!(presentation.row_visible(setting), visible, "{config}");
+            }
+            assert!(presentation.row_visible(BehaviorSetting::ScreenIdleBlank));
+            assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
+        }
+    }
+
+    #[test]
+    fn idle_inhibitor_preference_is_hidden_for_explicit_swayidle() {
+        let presentation = SettingsPresentation::ready(groups(
+            "screen_idle_blank=enabled\nscreen_backend=swayidle\n",
+        ));
+        assert!(presentation.row_visible(BehaviorSetting::ScreenBackend));
+        assert!(presentation.row_visible(BehaviorSetting::ScreenIdleTimeout));
+        assert!(!presentation.row_visible(BehaviorSetting::ScreenHonorIdleInhibitors));
+    }
+
+    fn update_report(channel: crate::updates::UpdateChannel) -> UpdateCheckReport {
+        UpdateCheckReport {
+            installed_version: "1.6.0".into(),
+            channel,
+            update_available: true,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn manual_check_is_independent_of_auto_checks_edits_and_refreshes() {
+        use crate::updates::UpdateChannel;
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(
+            opening.read_operation().unwrap(),
+            Ok(groups(
+                "updates_auto_check=disabled\nupdates_channel=stable\n",
+            )),
+        )
+        .unwrap();
+        let checking = app.handle_intent(SettingsIntent::CheckForUpdates).unwrap();
+        let operation = checking.update_check_operation().unwrap();
+        assert!(checking.presentation().update_check().checking());
+        assert!(!checking
+            .presentation()
+            .update_check()
+            .check_action()
+            .enabled());
+        assert!(checking.mutation_operation().is_none());
+        assert!(!app.is_mutating());
+        assert!(app.handle_intent(SettingsIntent::CheckForUpdates).is_none());
+
+        // A refresh can observe a newer saved channel while discovery is in flight.
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        app.complete_read(
+            refresh.read_operation().unwrap(),
+            Ok(groups(
+                "updates_auto_check=disabled\nupdates_channel=prerelease\n",
+            )),
+        )
+        .unwrap();
+        assert!(app.presentation().update_check().checking());
+        let completed = app
+            .complete_update_check(operation, Ok(update_report(UpdateChannel::Stable)))
+            .unwrap();
+        let result = completed.presentation().update_check().result().unwrap();
+        assert_eq!(result.channel, UpdateChannel::Stable);
+        assert!(result.update_available);
+        assert_eq!(
+            completed
+                .presentation()
+                .row(BehaviorSetting::UpdatesChannel)
+                .unwrap()
+                .value_label(),
+            "Prerelease"
+        );
+        assert_eq!(
+            completed
+                .presentation()
+                .row(BehaviorSetting::UpdatesAutoCheck)
+                .unwrap()
+                .value_label(),
+            "Disabled"
+        );
+
+        let previous = completed.presentation().update_check().clone();
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        let edit = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::UpdatesChannel,
+                value: "stable".into(),
+            })
+            .unwrap();
+        assert_eq!(edit.presentation().update_check(), &previous);
+        assert!(app
+            .complete_read(refresh.read_operation().unwrap(), Ok(groups("")))
+            .is_none());
+        assert!(app
+            .complete_update_check(operation, Ok(update_report(UpdateChannel::Prerelease)))
+            .is_none());
+    }
+
+    #[test]
+    fn retry_retains_last_channel_result_and_ignores_stale_or_closed_checks() {
+        use crate::updates::UpdateChannel;
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(opening.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        let first = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        app.complete_update_check(first, Ok(update_report(UpdateChannel::Stable)))
+            .unwrap();
+        let second = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        assert!(app.presentation().update_check().result().is_some());
+        assert!(app
+            .complete_update_check(first, Err(UpdateCheckError::stopped()))
+            .is_none());
+        let failed = app
+            .complete_update_check(second, Err(UpdateCheckError::stopped()))
+            .unwrap();
+        assert!(failed.presentation().update_check().error().is_some());
+        assert!(failed
+            .presentation()
+            .update_check()
+            .check_action()
+            .enabled());
+        assert_eq!(
+            failed
+                .presentation()
+                .update_check()
+                .result()
+                .unwrap()
+                .channel,
+            UpdateChannel::Stable
+        );
+
+        let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
+        app.complete_read(
+            refresh.read_operation().unwrap(),
+            Err(SettingsReadError::unreadable("test")),
+        )
+        .unwrap();
+        let retry = app.handle_intent(SettingsIntent::Retry).unwrap();
+        app.complete_read(retry.read_operation().unwrap(), Ok(groups("")))
+            .unwrap();
+        assert!(app.presentation().update_check().error().is_some());
+        let third = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        let mut current = update_report(UpdateChannel::Prerelease);
+        current.update_available = false;
+        current.warning = Some("Cache could not be saved.".into());
+        let done = app
+            .complete_update_check(third, Ok(current.clone()))
+            .unwrap();
+        assert_eq!(done.presentation().update_check().result(), Some(&current));
+        assert!(done.presentation().update_check().error().is_none());
+        assert!(!current.update_available);
+        let last = app
+            .handle_intent(SettingsIntent::CheckForUpdates)
+            .unwrap()
+            .update_check_operation()
+            .unwrap();
+        app.shutdown();
+        assert!(app
+            .complete_update_check(last, Err(UpdateCheckError::stopped()))
+            .is_none());
+        assert!(app.handle_intent(SettingsIntent::CheckForUpdates).is_none());
     }
 
     #[test]
@@ -819,16 +1357,22 @@ screen_backend=wayland\n",
         );
         let expected = [
             (
-                "screen.backend",
-                "Desktop integration",
-                "Automatic",
-                "Automatic, GNOME, Wayland, swayidle (deprecated)",
-            ),
-            (
                 "screen.idle_blank",
                 "Idle blanking",
                 "Enabled",
                 "Enabled, Disabled",
+            ),
+            (
+                "screen.honor_idle_inhibitors",
+                "Allow apps to prevent idle blanking",
+                "Disabled",
+                "Enabled, Disabled",
+            ),
+            (
+                "screen.backend",
+                "Desktop integration",
+                "Automatic",
+                "Automatic, GNOME, Wayland, swayidle (deprecated)",
             ),
             (
                 "screen.idle_timeout",
@@ -1347,6 +1891,9 @@ screen_backend=wayland\n",
             })
             .unwrap();
         let operation = transition.mutation_operation().unwrap().clone();
+        assert!(transition
+            .presentation()
+            .row_visible(BehaviorSetting::ScreenIdleTimeout));
         let transition = app
             .complete_mutation(
                 &operation,
@@ -1360,6 +1907,9 @@ screen_backend=wayland\n",
             .row(BehaviorSetting::ScreenIdleBlank)
             .unwrap();
         assert_eq!(row.edit_status(), SettingsEditStatus::PersistenceFailed);
+        assert!(transition
+            .presentation()
+            .row_visible(BehaviorSetting::ScreenIdleTimeout));
         assert!(row.retry_apply_action().is_some());
         let refresh = app.handle_intent(SettingsIntent::Refresh).unwrap();
         let refreshed = app

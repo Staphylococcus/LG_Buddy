@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use lg_buddy::diagnostics_view::{DiagnosticsIntent, DiagnosticsPresentation};
 use lg_buddy::navigation::ApplicationPage;
 use lg_buddy::overview::OverviewIntent;
 use lg_buddy::presentation::overview::OverviewPresentation;
@@ -15,9 +16,14 @@ pub(crate) struct ApplicationWindow {
     overview: crate::overview::OverviewView,
     tvs: crate::tvs::TvsView,
     settings: crate::settings::SettingsView,
+    diagnostics: crate::diagnostics::DiagnosticsView,
     pairing: crate::pairing::PairingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
+    switcher: adw::ViewSwitcher,
+    switcher_bar: adw::ViewSwitcherBar,
+    #[cfg(test)]
+    menu_button: gtk::MenuButton,
     suppress_navigation: Rc<Cell<bool>>,
     allow_close: Rc<Cell<bool>>,
     close_requested: Rc<Cell<bool>>,
@@ -30,6 +36,7 @@ impl ApplicationWindow {
         on_tvs: Rc<dyn Fn(TvsIntent)>,
         on_settings: Rc<dyn Fn(SettingsIntent)>,
         on_navigation: Rc<dyn Fn(ApplicationPage)>,
+        on_diagnostics: Rc<dyn Fn(DiagnosticsIntent)>,
     ) -> Self {
         let window = adw::ApplicationWindow::builder()
             .application(application)
@@ -53,6 +60,12 @@ impl ApplicationWindow {
             }
         });
         window.add_action(&about);
+        let diagnostics_action = gtk::gio::SimpleAction::new("diagnostics", None);
+        diagnostics_action.connect_activate({
+            let on_diagnostics = Rc::clone(&on_diagnostics);
+            move |_, _| on_diagnostics(DiagnosticsIntent::Open)
+        });
+        window.add_action(&diagnostics_action);
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
         let pairing = crate::pairing::PairingView::new(on_tvs);
@@ -92,6 +105,7 @@ impl ApplicationWindow {
             .build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
         let menu = gtk::gio::Menu::new();
+        menu.append(Some("Diagnostics"), Some("win.diagnostics"));
         menu.append(Some("About LG Buddy"), Some("win.about"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -100,11 +114,17 @@ impl ApplicationWindow {
             .menu_model(&menu)
             .build();
         menu_button.update_property(&[gtk::accessible::Property::Label("Main Menu")]);
+        let diagnostics =
+            crate::diagnostics::DiagnosticsView::new(on_diagnostics, menu_button.upcast_ref());
         header.pack_end(&menu_button);
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&stack));
-        let toolbar = adw::ToolbarView::builder().content(&toasts).build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&toasts);
+        content.set_vexpand(true);
+        toasts.set_vexpand(true);
+        let toolbar = adw::ToolbarView::builder().content(&content).build();
         toolbar.add_top_bar(&header);
         toolbar.add_bottom_bar(&switcher_bar);
         window.set_content(Some(&toolbar));
@@ -145,9 +165,14 @@ impl ApplicationWindow {
             overview,
             tvs,
             settings,
+            diagnostics,
             pairing,
             toasts,
             stack,
+            switcher,
+            switcher_bar,
+            #[cfg(test)]
+            menu_button,
             suppress_navigation,
             allow_close,
             close_requested,
@@ -167,6 +192,14 @@ impl ApplicationWindow {
         self.settings.render(presentation);
     }
 
+    pub(crate) fn render_diagnostics(&self, presentation: &DiagnosticsPresentation) {
+        self.diagnostics.render(&self.window, presentation);
+    }
+
+    pub(crate) fn show_update_notice(&self, notice: &lg_buddy::settings_view::UpdateNotice) {
+        self.settings.show_update_notice(notice, &self.toasts);
+    }
+
     pub(crate) fn dismiss_dialog(&self) -> bool {
         if let Some(dialog) = self.window.visible_dialog() {
             dialog.close();
@@ -183,12 +216,22 @@ impl ApplicationWindow {
     }
 
     pub(crate) fn navigate(&self, page: ApplicationPage) {
+        if self.stack.visible_child_name().as_deref() == Some(page_name(page)) {
+            return;
+        }
         if page != ApplicationPage::Overview {
             self.overview.leave();
         }
         self.suppress_navigation.set(true);
         self.stack.set_visible_child_name(page_name(page));
         self.suppress_navigation.set(false);
+    }
+
+    /// Render application-owned navigation availability. The app menu remains
+    /// in the header while both desktop and narrow-window tab controls hide.
+    pub(crate) fn set_navigation_visible(&self, visible: bool) {
+        self.switcher.set_visible(visible);
+        self.switcher_bar.set_visible(visible);
     }
 
     pub(crate) fn present(&self) {
@@ -204,18 +247,35 @@ impl ApplicationWindow {
     pub(crate) fn close(&self) {
         self.allow_close.set(true);
         if !self.close_requested.get() {
-            self.window.close();
+            // Application policy has already approved closing. AdwWindow's
+            // close() can dismiss only its visible dialog and leave the window
+            // alive after the application model has shut down.
+            self.window.destroy();
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn window(&self) -> gtk::Window {
         self.window.clone().upcast()
     }
 
     #[cfg(test)]
-    pub(crate) fn choose_page(&self, page: ApplicationPage) {
-        self.stack.set_visible_child_name(page_name(page));
+    pub(crate) fn visible_page(&self) -> ApplicationPage {
+        match self.stack.visible_child_name().as_deref() {
+            Some("overview") => ApplicationPage::Overview,
+            Some("tvs") => ApplicationPage::Tvs,
+            Some("settings") => ApplicationPage::Settings,
+            _ => panic!("application window has no visible page"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn navigation_visible(&self) -> bool {
+        self.switcher.is_visible() && self.switcher_bar.is_visible()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn main_menu_visible(&self) -> bool {
+        self.menu_button.is_visible() && self.menu_button.is_sensitive()
     }
 }
 

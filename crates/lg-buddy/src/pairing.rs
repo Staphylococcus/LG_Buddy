@@ -12,6 +12,7 @@ use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::pairing_store::PairingStore;
 use crate::presentation::{brightness::UserFacingError, pairing::PairingPresentation};
 use crate::settings::ConfigPathResolver;
+use crate::settings_view::BehaviorSetting;
 use crate::tvs::{TvCredentialState, TvId, TvProfile};
 use crate::web_os::{
     WebOsClient, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent, WebOsPairingReadError,
@@ -151,12 +152,45 @@ impl PairingError {
     }
 }
 
+/// A saved TV and the requested behaviors still awaiting service activation.
+/// Pairing itself is complete even if a subsequent activation is declined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingOutcome {
+    profile: TvProfile,
+    requested_behaviors: Vec<BehaviorSetting>,
+}
+
+impl PairingOutcome {
+    pub fn new(profile: TvProfile, requested_behaviors: Vec<BehaviorSetting>) -> Self {
+        Self {
+            profile,
+            requested_behaviors,
+        }
+    }
+
+    pub fn profile(&self) -> &TvProfile {
+        &self.profile
+    }
+    pub fn into_profile(self) -> TvProfile {
+        self.profile
+    }
+    pub fn requested_behaviors(&self) -> &[BehaviorSetting] {
+        &self.requested_behaviors
+    }
+}
+
+impl From<TvProfile> for PairingOutcome {
+    fn from(profile: TvProfile) -> Self {
+        Self::new(profile, Vec::new())
+    }
+}
+
 pub trait PairingBackend: Send + Sync + 'static {
     fn pair(
         &self,
         operation: &PairingOperation,
         progress: &mut dyn FnMut(PairingStage),
-    ) -> Result<TvProfile, PairingError>;
+    ) -> Result<PairingOutcome, PairingError>;
 }
 
 #[derive(Debug, Default)]
@@ -167,7 +201,7 @@ impl PairingBackend for EnvironmentPairingBackend {
         &self,
         operation: &PairingOperation,
         progress: &mut dyn FnMut(PairingStage),
-    ) -> Result<TvProfile, PairingError> {
+    ) -> Result<PairingOutcome, PairingError> {
         let path = ConfigPathResolver::resolve_from_env()
             .map_err(|_| PairingError::new(PairingFailure::Persistence))?;
         pair_and_save_webos(
@@ -184,7 +218,7 @@ fn pair_and_save_webos(
     path: &std::path::Path,
     endpoint: WebOsEndpoint,
     progress: &mut dyn FnMut(PairingStage),
-) -> Result<TvProfile, PairingError> {
+) -> Result<PairingOutcome, PairingError> {
     pair_and_save(operation, path, progress, |progress| {
         let (mut client, token) = WebOsClient::pair_in_memory(
             endpoint,
@@ -242,7 +276,7 @@ fn pair_and_save(
         &mut dyn FnMut(PairingStage),
     )
         -> Result<crate::platform_access_token::PlatformAccessToken, PairingError>,
-) -> Result<TvProfile, PairingError> {
+) -> Result<PairingOutcome, PairingError> {
     if operation.is_cancelled() {
         return Err(PairingError::new(PairingFailure::Cancelled));
     }
@@ -254,17 +288,20 @@ fn pair_and_save(
     }
     progress(PairingStage::Saving);
     let request = operation.request;
-    store
+    let requested_behaviors = store
         .commit(request.address, request.mac, request.input, &token)
         .map_err(|_| persistence_error())?;
-    Ok(TvProfile::new(
-        TvId::primary(),
-        "Primary TV",
-        request.address,
-        request.mac,
-        request.input,
-        TvPlatform::LgWebOs,
-        TvCredentialState::Stored,
+    Ok(PairingOutcome::new(
+        TvProfile::new(
+            TvId::primary(),
+            "Primary TV",
+            request.address,
+            request.mac,
+            request.input,
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        ),
+        requested_behaviors,
     ))
 }
 
@@ -434,6 +471,131 @@ mod tests {
     }
 
     #[test]
+    fn pairing_again_reactivates_saved_sleep_preference_and_keeps_it_off_on_failure() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        use crate::application::Application;
+        use crate::platform_access_token::PlatformAccessToken;
+        use crate::presentation::settings::{SettingsEditor, SettingsPresentation};
+        use crate::settings::{
+            execute_settings_mutation, ConfigEnvReader, SettingsApplier, SettingsError,
+            SettingsMutation, SettingsMutationFailure,
+        };
+        use std::fs;
+
+        for failure in [
+            None,
+            Some(SettingsError::ActivationCancelled),
+            Some(SettingsError::Activation {
+                message: "lifecycle service could not start".into(),
+            }),
+        ] {
+            let path = pairing_test_path("retained-sleep-preference");
+            let (mut app, opening) = Application::open();
+            app.complete_tvs_read(opening.tvs().unwrap().read_operation().unwrap(), Ok(vec![]))
+                .unwrap();
+            for intent in [
+                TvsIntent::PairTv,
+                TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
+                TvsIntent::Pairing(PairingIntent::SetMac("02:11:22:33:44:55".into())),
+            ] {
+                app.handle_tvs_intent(intent).unwrap();
+            }
+            let submitted = app
+                .handle_tvs_intent(TvsIntent::Pairing(PairingIntent::Submit))
+                .unwrap();
+            let operation = submitted.tvs().unwrap().pairing_operation().unwrap();
+            let request = operation.request();
+            let profile = TvProfile::new(
+                TvId::primary(),
+                "Primary TV",
+                request.address(),
+                request.mac(),
+                request.input(),
+                TvPlatform::LgWebOs,
+                TvCredentialState::Stored,
+            );
+            // Unpairing and reinstalling can retain these preferences while
+            // the lifecycle service is no longer running.
+            let preferences = "screen_idle_blank=disabled\nsystem_sleep_wake_policy=enabled\n";
+            fs::write(&path, format!(
+                "{preferences}tvs_primary_ip={}\ntvs_primary_mac={}\ntvs_primary_input={}\ntvs_primary_platform=lg_webos\n",
+                request.address(), request.mac(), request.input().as_str(),
+            )).unwrap();
+            PairingStore::unpair_primary(&path, &profile).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), preferences);
+
+            let outcome = pair_and_save(operation, &path, &mut |_| {}, |_| {
+                Ok(PlatformAccessToken::new("test-client-key").unwrap())
+            })
+            .unwrap();
+            assert_eq!(
+                outcome.requested_behaviors(),
+                &[BehaviorSetting::SystemSleepWakePolicy]
+            );
+            let paired = app.complete_pairing(operation, Ok(outcome)).unwrap();
+            let store = ConfigEnvReader::load(&path).unwrap().into_store();
+            assert_eq!(
+                store.raw_storage_value("system_sleep_wake_policy"),
+                Some("disabled")
+            );
+            let ready = app
+                .complete_settings_read(
+                    paired.settings().unwrap().read_operation().unwrap(),
+                    Ok(SettingsPresentation::from_store(&store).groups().to_vec()),
+                )
+                .unwrap();
+            let activation = ready.settings().unwrap().mutation_operation().unwrap();
+            assert_eq!(activation.setting(), BehaviorSetting::SystemSleepWakePolicy);
+
+            let enabled = failure.is_none();
+            // Model the service-activation result at the worker boundary;
+            // a successful activation uses the shared persistence executor.
+            let result = match failure {
+                Some(error) => Err(SettingsMutationFailure::Activation(error)),
+                None => execute_settings_mutation(
+                    &path,
+                    SettingsMutation::set(&store, "system.sleep_wake_policy", "enabled").unwrap(),
+                    &SettingsApplier::from_env(),
+                    &mut |_| {},
+                ),
+            };
+            let completed = app.complete_settings_mutation(activation, result).unwrap();
+            let settings = completed.settings().unwrap();
+            assert!(settings.mutation_operation().is_none());
+            for (setting, expected) in [
+                (BehaviorSetting::ScreenIdleBlank, false),
+                (BehaviorSetting::SystemSleepWakePolicy, enabled),
+            ] {
+                let row = settings
+                    .presentation()
+                    .groups()
+                    .iter()
+                    .flat_map(|group| group.rows())
+                    .find(|row| row.setting() == setting)
+                    .unwrap();
+                assert_eq!(
+                    row.editor(),
+                    &SettingsEditor::Toggle {
+                        value: Some(expected)
+                    }
+                );
+            }
+            let saved = ConfigEnvReader::load(&path).unwrap().into_store();
+            assert_eq!(
+                saved.raw_storage_value("system_sleep_wake_policy"),
+                Some(if enabled { "enabled" } else { "disabled" })
+            );
+            assert_eq!(
+                saved.raw_storage_value("tvs_primary_ip"),
+                Some("192.0.2.10")
+            );
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
     fn environment_pairing_verifies_capabilities_before_saving() {
         if skip_pairing_tests_as_root() {
             return;
@@ -465,7 +627,7 @@ mod tests {
         })
         .expect("pairing should verify before saving");
 
-        assert_eq!(profile.address(), operation.request().address());
+        assert_eq!(profile.profile().address(), operation.request().address());
         assert_eq!(
             stages,
             vec![
@@ -658,7 +820,9 @@ mod tests {
                         token_store.load().unwrap(),
                         Some(PlatformAccessToken::new("test-client-key").unwrap())
                     );
-                    let complete = app.complete_pairing(&operation, Ok(result)).unwrap();
+                    let complete = app
+                        .complete_pairing(&operation, Ok(result.into_profile()))
+                        .unwrap();
                     assert!(complete.profile_changed());
                     assert_eq!(stages.last(), Some(&PairingStage::Saving));
                     let retry = pair_and_save(&operation, &path, &mut |_| {}, |_| {

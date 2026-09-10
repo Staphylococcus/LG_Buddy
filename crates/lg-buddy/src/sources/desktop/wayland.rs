@@ -126,7 +126,56 @@ impl RegistryFacts {
 
 struct SeatBinding {
     seat: wl_seat::WlSeat,
-    notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    input_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationKind {
+    Input(u32),
+    IdlePermission(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationMeaning {
+    InputActivity,
+    IdlePermission(bool),
+}
+
+#[derive(Debug, Default)]
+struct IdlePermissionTracker {
+    seats: HashMap<u32, bool>,
+    allowed: bool,
+}
+
+impl IdlePermissionTracker {
+    fn add_seat(&mut self, name: u32) -> Option<bool> {
+        self.seats.insert(name, false);
+        self.recompute()
+    }
+
+    fn remove_seat(&mut self, name: u32) -> Option<bool> {
+        self.seats.remove(&name)?;
+        self.recompute()
+    }
+
+    fn set_idle(&mut self, name: u32, idle: bool) -> Option<bool> {
+        let previous = self.seats.get_mut(&name)?;
+        if *previous == idle {
+            return None;
+        }
+        *previous = idle;
+        self.recompute()
+    }
+
+    fn recompute(&mut self) -> Option<bool> {
+        let allowed = !self.seats.is_empty() && self.seats.values().all(|idle| *idle);
+        if self.allowed == allowed {
+            return None;
+        }
+        self.allowed = allowed;
+        Some(allowed)
+    }
 }
 
 struct WaylandProviderState<F> {
@@ -134,27 +183,45 @@ struct WaylandProviderState<F> {
     registry_facts: RegistryFacts,
     idle_notifier: Option<(u32, ext_idle_notifier_v1::ExtIdleNotifierV1)>,
     seats: HashMap<u32, SeatBinding>,
+    idle_permission: IdlePermissionTracker,
+    honor_idle_inhibitors: bool,
     initialized: bool,
     running: bool,
     error: Option<WaylandProviderError>,
-    on_activity: F,
+    on_observation: F,
 }
 
 impl<F> WaylandProviderState<F>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
-    fn new(on_activity: F) -> Self {
+    fn new(on_observation: F, honor_idle_inhibitors: bool) -> Self {
         Self {
             registry: None,
             registry_facts: RegistryFacts::default(),
             idle_notifier: None,
             seats: HashMap::new(),
+            idle_permission: IdlePermissionTracker::default(),
+            honor_idle_inhibitors,
             initialized: false,
             running: true,
             error: None,
-            on_activity,
+            on_observation,
         }
+    }
+
+    fn publish(&mut self, observation: SessionObservation) {
+        if !(self.on_observation)(observation) {
+            self.running = false;
+        }
+    }
+
+    fn publish_idle_permission_change(&mut self, allowed: bool) {
+        self.publish(SessionObservation::IdleBlankingPermission {
+            allowed,
+            source: EventSource::DesktopSession,
+            observed_at: Instant::now(),
+        });
     }
 
     fn bind_idle_notifier(
@@ -195,9 +262,15 @@ where
             name,
             SeatBinding {
                 seat,
-                notification: None,
+                input_notification: None,
+                idle_notification: None,
             },
         );
+        if self.honor_idle_inhibitors {
+            if let Some(allowed) = self.idle_permission.add_seat(name) {
+                self.publish_idle_permission_change(allowed);
+            }
+        }
         self.attach_seat(name, queue_handle);
     }
 
@@ -215,12 +288,24 @@ where
         let Some(binding) = self.seats.get_mut(&name) else {
             return;
         };
-        if binding.notification.is_some() {
+        if binding.input_notification.is_some() {
             return;
         }
 
-        binding.notification =
-            Some(notifier.get_input_idle_notification(0, &binding.seat, queue_handle, name));
+        binding.input_notification = Some(notifier.get_input_idle_notification(
+            0,
+            &binding.seat,
+            queue_handle,
+            NotificationKind::Input(name),
+        ));
+        if self.honor_idle_inhibitors {
+            binding.idle_notification = Some(notifier.get_idle_notification(
+                0,
+                &binding.seat,
+                queue_handle,
+                NotificationKind::IdlePermission(name),
+            ));
+        }
     }
 
     fn remove_global(&mut self, name: u32) {
@@ -232,13 +317,22 @@ where
             .is_some_and(|(global_name, _)| *global_name == name);
 
         let removed_seat = if let Some(mut binding) = self.seats.remove(&name) {
-            if let Some(notification) = binding.notification.take() {
+            if let Some(notification) = binding.input_notification.take() {
+                notification.destroy();
+            }
+            if let Some(notification) = binding.idle_notification.take() {
                 notification.destroy();
             }
             true
         } else {
             false
         };
+
+        if removed_seat && self.honor_idle_inhibitors {
+            if let Some(allowed) = self.idle_permission.remove_seat(name) {
+                self.publish_idle_permission_change(allowed);
+            }
+        }
 
         if let Some(err) = global_removal_error(
             self.initialized,
@@ -275,9 +369,32 @@ fn notification_is_activity(event: &ext_idle_notification_v1::Event) -> bool {
     matches!(event, ext_idle_notification_v1::Event::Resumed)
 }
 
+fn idle_notification_permission(event: &ext_idle_notification_v1::Event) -> Option<bool> {
+    match event {
+        ext_idle_notification_v1::Event::Idled => Some(true),
+        ext_idle_notification_v1::Event::Resumed => Some(false),
+        _ => None,
+    }
+}
+
+fn notification_meaning(
+    kind: NotificationKind,
+    event: &ext_idle_notification_v1::Event,
+) -> Option<NotificationMeaning> {
+    match kind {
+        NotificationKind::Input(_) if notification_is_activity(event) => {
+            Some(NotificationMeaning::InputActivity)
+        }
+        NotificationKind::IdlePermission(_) => {
+            idle_notification_permission(event).map(NotificationMeaning::IdlePermission)
+        }
+        _ => None,
+    }
+}
+
 impl<F> Dispatch<wl_registry::WlRegistry, ()> for WaylandProviderState<F>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
     fn event(
         state: &mut Self,
@@ -334,7 +451,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandCapabilityProbeState {
 
 impl<F> Dispatch<wl_seat::WlSeat, u32> for WaylandProviderState<F>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
     fn event(
         _: &mut Self,
@@ -349,7 +466,7 @@ where
 
 impl<F> Dispatch<ext_idle_notifier_v1::ExtIdleNotifierV1, ()> for WaylandProviderState<F>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
     fn event(
         _: &mut Self,
@@ -362,20 +479,35 @@ where
     }
 }
 
-impl<F> Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, u32> for WaylandProviderState<F>
+impl<F> Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, NotificationKind>
+    for WaylandProviderState<F>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
     fn event(
         state: &mut Self,
         _: &ext_idle_notification_v1::ExtIdleNotificationV1,
         event: ext_idle_notification_v1::Event,
-        _: &u32,
+        kind: &NotificationKind,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if notification_is_activity(&event) && !(state.on_activity)(Instant::now()) {
-            state.running = false;
+        match notification_meaning(*kind, &event) {
+            Some(NotificationMeaning::InputActivity) => {
+                state.publish(SessionObservation::Inactivity {
+                    observation: InactivityObservation::DesktopActivityObserved,
+                    source: EventSource::DesktopSession,
+                    observed_at: Instant::now(),
+                });
+            }
+            Some(NotificationMeaning::IdlePermission(allowed)) => {
+                if let NotificationKind::IdlePermission(name) = *kind {
+                    if let Some(allowed) = state.idle_permission.set_idle(name, allowed) {
+                        state.publish_idle_permission_change(allowed);
+                    }
+                }
+            }
+            None => {}
         }
     }
 }
@@ -388,15 +520,16 @@ type InitializedWaylandProvider<F> = (
 
 fn initialize_provider<F>(
     connection: Connection,
-    on_activity: F,
+    honor_idle_inhibitors: bool,
+    on_observation: F,
 ) -> Result<InitializedWaylandProvider<F>, WaylandProviderError>
 where
-    F: FnMut(Instant) -> bool + 'static,
+    F: FnMut(SessionObservation) -> bool + 'static,
 {
     let display = connection.display();
     let mut event_queue = connection.new_event_queue();
     let queue_handle = event_queue.handle();
-    let mut state = WaylandProviderState::new(on_activity);
+    let mut state = WaylandProviderState::new(on_observation, honor_idle_inhibitors);
     state.registry = Some(display.get_registry(&queue_handle, ()));
 
     event_queue
@@ -436,19 +569,16 @@ pub(crate) fn probe_wayland_capabilities_on(
 
 pub(crate) fn run_session_source<F>(
     connection: Connection,
+    honor_idle_inhibitors: bool,
     mut publish: F,
 ) -> Result<(), WaylandProviderError>
 where
     F: FnMut(SessionObservation) -> bool + 'static,
 {
-    let on_activity = move |observed_at| {
-        publish(SessionObservation::Inactivity {
-            observation: InactivityObservation::DesktopActivityObserved,
-            source: EventSource::DesktopSession,
-            observed_at,
-        })
-    };
-    let (mut event_queue, mut state, _) = initialize_provider(connection, on_activity)?;
+    let (mut event_queue, mut state, _) =
+        initialize_provider(connection, honor_idle_inhibitors, move |observation| {
+            publish(observation)
+        })?;
 
     while state.running {
         event_queue
@@ -465,8 +595,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ext_idle_notification_v1, global_removal_error, notification_is_activity, RegistryFacts,
-        WaylandProviderCapabilities, WaylandProviderError,
+        ext_idle_notification_v1, global_removal_error, idle_notification_permission,
+        notification_is_activity, notification_meaning, IdlePermissionTracker, NotificationKind,
+        NotificationMeaning, RegistryFacts, WaylandProviderCapabilities, WaylandProviderError,
     };
 
     const NOTIFIER: &str = "ext_idle_notifier_v1";
@@ -567,5 +698,59 @@ mod tests {
         assert!(notification_is_activity(
             &ext_idle_notification_v1::Event::Resumed
         ));
+    }
+
+    #[test]
+    fn idle_permission_stays_blocked_until_every_seat_reports_idle() {
+        let mut tracker = IdlePermissionTracker::default();
+
+        assert_eq!(tracker.add_seat(11), None);
+        assert_eq!(tracker.add_seat(12), None);
+        assert!(!tracker.allowed);
+        assert_eq!(tracker.set_idle(11, true), None);
+        assert_eq!(tracker.set_idle(12, true), Some(true));
+        assert_eq!(tracker.set_idle(12, true), None);
+        assert!(tracker.allowed);
+    }
+
+    #[test]
+    fn seat_addition_and_removal_recompute_permission_meaningfully() {
+        let mut tracker = IdlePermissionTracker::default();
+        tracker.add_seat(11);
+        tracker.set_idle(11, true);
+        assert!(tracker.allowed);
+
+        assert_eq!(tracker.add_seat(12), Some(false));
+        assert!(!tracker.allowed);
+        assert_eq!(tracker.remove_seat(12), Some(true));
+        assert!(tracker.allowed);
+        assert_eq!(tracker.remove_seat(11), Some(false));
+        assert!(!tracker.allowed);
+    }
+
+    #[test]
+    fn inhibitor_notification_resumed_changes_permission_without_becoming_activity() {
+        assert_eq!(
+            idle_notification_permission(&ext_idle_notification_v1::Event::Idled),
+            Some(true)
+        );
+        assert_eq!(
+            idle_notification_permission(&ext_idle_notification_v1::Event::Resumed),
+            Some(false)
+        );
+        assert_eq!(
+            notification_meaning(
+                NotificationKind::Input(11),
+                &ext_idle_notification_v1::Event::Resumed
+            ),
+            Some(NotificationMeaning::InputActivity)
+        );
+        assert_eq!(
+            notification_meaning(
+                NotificationKind::IdlePermission(11),
+                &ext_idle_notification_v1::Event::Resumed
+            ),
+            Some(NotificationMeaning::IdlePermission(false))
+        );
     }
 }

@@ -61,11 +61,31 @@ pub trait ServiceController {
 
     fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError>;
 
+    /// The coarse state above intentionally preserves the CLI's historical
+    /// behavior. GUI onboarding also needs to distinguish an enabled but
+    /// currently stopped unit before publishing an enabled setting.
+    fn user_service_is_active(&self, service: &str) -> Result<bool, SettingsError> {
+        Ok(matches!(
+            self.user_service_state(service)?,
+            UserServiceState::ActiveOrEnabled
+        ))
+    }
+
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError>;
 
     fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError>;
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError>;
+
+    fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
+        Ok(false)
+    }
+
+    fn start_system_lifecycle(&self) -> Result<(), SettingsError> {
+        Err(SettingsError::Apply {
+            message: "system lifecycle service activation is unavailable".to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +113,15 @@ impl SystemdUserServiceController {
     fn user_systemctl_status(&self, args: &[&str]) -> io::Result<bool> {
         ProcessCommand::new(&self.command_path)
             .arg("--user")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+    }
+
+    fn systemctl_status(&self, args: &[&str]) -> io::Result<bool> {
+        ProcessCommand::new(&self.command_path)
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -150,6 +179,12 @@ impl ServiceController for SystemdUserServiceController {
         }
     }
 
+    fn user_service_is_active(&self, service: &str) -> Result<bool, SettingsError> {
+        Ok(self
+            .user_systemctl_status(&["is-active", "--quiet", service])
+            .unwrap_or(false))
+    }
+
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["restart", service])
     }
@@ -169,6 +204,41 @@ impl ServiceController for SystemdUserServiceController {
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["disable", "--now", unit])
+    }
+
+    fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
+        Ok(self
+            .systemctl_status(&["is-active", "--quiet", "LG_Buddy_lifecycle.service"])
+            .unwrap_or(false))
+    }
+
+    fn start_system_lifecycle(&self) -> Result<(), SettingsError> {
+        let output = ProcessCommand::new("pkexec")
+            .arg("--disable-internal-agent")
+            // Keep the test/diagnostic command override out of the privileged
+            // executable selection. pkexec resolves this fixed command name
+            // through its sanitized system PATH.
+            .arg("systemctl")
+            .arg("start")
+            .arg("LG_Buddy_lifecycle.service")
+            .output()
+            .map_err(|error| SettingsError::Activation {
+                message: format!("could not request system lifecycle activation: {error}"),
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else if output.status.code() == Some(126) {
+            Err(SettingsError::ActivationCancelled)
+        } else {
+            Err(SettingsError::Activation {
+                message: format_command_failure(
+                    output.status.code(),
+                    &output.stdout,
+                    &output.stderr,
+                ),
+            })
+        }
     }
 }
 

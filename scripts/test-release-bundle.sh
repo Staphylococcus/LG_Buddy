@@ -286,6 +286,14 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Keep the graphical authorization boundary covered by the canonical release
+# smoke lane. The focused test uses isolated fixtures and never invokes the
+# host's authentication agent or installation paths.
+bash "$SCRIPT_DIR/test-installer-graphical-auth.sh"
+# Exercise fresh-install handoff and failure preservation with an isolated
+# regular-user fixture before testing the extracted bundle's full payload.
+bash "$SCRIPT_DIR/test-installer-first-run.sh"
+
 EXTRACT_DIR="$WORK_DIR/extracted"
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -497,7 +505,7 @@ mkdir -p "$FRESH_CONFIG_HOME"
     export LG_BUDDY_NATIVE_PAIRING_MARKER="$FRESH_NATIVE_PAIRING_MARKER"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
     printf '%s\n' \
-        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '1' '300' '1' 'Y' \
+        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '1' '300' '1' 'n' 'Y' \
         | bash "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
 )
 grep -F -q 'TV Platform:         lg_webos' "$FRESH_CONFIG_OUTPUT"
@@ -513,6 +521,7 @@ if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
     exit 1
 fi
 grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+grep -q '^screen_honor_idle_inhibitors=disabled$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -528,6 +537,26 @@ export LG_BUDDY_SCREEN_BACKEND="auto"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 export PIP_DISABLE_PIP_VERSION_CHECK="1"
 export PIP_NO_PYTHON_VERSION_WARNING="1"
+
+# Keep this release-installation smoke focused on payload wiring. The dedicated
+# first-run installer smoke covers the GUI handoff; a configured fixture here
+# lets the bundle continue into its existing lifecycle, upgrade, and CLI checks
+# without blocking on a foreground GUI.
+mkdir -p "$XDG_CONFIG_HOME/lg-buddy"
+cat >"$XDG_CONFIG_HOME/lg-buddy/config.env" <<'EOF'
+tvs_primary_ip=192.168.1.10
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
+tvs_primary_platform=bscpylgtv
+screen_idle_blank=enabled
+screen_honor_idle_inhibitors=disabled
+screen_backend=auto
+screen_idle_timeout=300
+screen_restore_policy=conservative
+system_sleep_wake_policy=enabled
+updates_auto_check=enabled
+updates_channel=stable
+EOF
 
 if [ "$SKIP_PIP_INSTALL" -eq 1 ]; then
     export LG_BUDDY_SKIP_PIP_INSTALL="1"
@@ -595,6 +624,7 @@ grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
+grep -q '^screen_honor_idle_inhibitors=disabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
@@ -606,7 +636,7 @@ fi
 assert_cli_surface "$INSTALLED_BINARY"
 
 if [ -n "${DISPLAY:-}" ]; then
-    bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_BINARY"
+    bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_BINARY" "$INSTALLED_GUI"
     bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_BINARY" "$CONFIG_FILE"
 fi
 
@@ -645,6 +675,7 @@ printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV creden
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 "$INSTALLED_BINARY" settings set screen.backend swayidle
+"$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.idle_timeout 90000
 grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
@@ -660,6 +691,7 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
 printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
 grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
+grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
@@ -681,6 +713,7 @@ LEGACY_CONFIGURE_OUTPUT="$WORK_DIR/legacy-configure.output"
     unset LG_BUDDY_SCREEN_BACKEND
     unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
     unset LG_BUDDY_SCREEN_RESTORE_POLICY
+    unset LG_BUDDY_SCREEN_HONOR_IDLE_INHIBITORS
     unset LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY
     export LG_BUDDY_TV_IP="192.168.1.11"
     export LG_BUDDY_TV_MAC="11:22:33:44:55:66"
@@ -696,6 +729,7 @@ grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
+grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
@@ -1153,6 +1187,9 @@ mkdir -p "$(dirname "$STALE_VENV_MARKER")"
 touch "$STALE_VENV_MARKER"
 (
     cd "$BUNDLE_DIR"
+    # This fixture tests headless reinstall with a disabled policy. Fresh
+    # installs otherwise hand off to the GUI and wait for TV pairing.
+    bash ./configure.sh
     bash ./install.sh
 )
 
