@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use lg_buddy::diagnostics_view::{DiagnosticsIntent, DiagnosticsPresentation};
 use lg_buddy::navigation::ApplicationPage;
 use lg_buddy::overview::OverviewIntent;
 use lg_buddy::presentation::overview::OverviewPresentation;
@@ -15,6 +16,7 @@ pub(crate) struct ApplicationWindow {
     overview: crate::overview::OverviewView,
     tvs: crate::tvs::TvsView,
     settings: crate::settings::SettingsView,
+    diagnostics: crate::diagnostics::DiagnosticsView,
     pairing: crate::pairing::PairingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
@@ -34,6 +36,7 @@ impl ApplicationWindow {
         on_tvs: Rc<dyn Fn(TvsIntent)>,
         on_settings: Rc<dyn Fn(SettingsIntent)>,
         on_navigation: Rc<dyn Fn(ApplicationPage)>,
+        on_diagnostics: Rc<dyn Fn(DiagnosticsIntent)>,
     ) -> Self {
         let window = adw::ApplicationWindow::builder()
             .application(application)
@@ -57,10 +60,17 @@ impl ApplicationWindow {
             }
         });
         window.add_action(&about);
+        let diagnostics_action = gtk::gio::SimpleAction::new("diagnostics", None);
+        diagnostics_action.connect_activate({
+            let on_diagnostics = Rc::clone(&on_diagnostics);
+            move |_, _| on_diagnostics(DiagnosticsIntent::Open)
+        });
+        window.add_action(&diagnostics_action);
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
         let pairing = crate::pairing::PairingView::new(on_tvs);
         let settings = crate::settings::SettingsView::new(on_settings);
+        let diagnostics = crate::diagnostics::DiagnosticsView::new(on_diagnostics);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(false);
@@ -96,6 +106,7 @@ impl ApplicationWindow {
             .build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
         let menu = gtk::gio::Menu::new();
+        menu.append(Some("Diagnostics"), Some("win.diagnostics"));
         menu.append(Some("About LG Buddy"), Some("win.about"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -153,6 +164,7 @@ impl ApplicationWindow {
             overview,
             tvs,
             settings,
+            diagnostics,
             pairing,
             toasts,
             stack,
@@ -177,6 +189,10 @@ impl ApplicationWindow {
 
     pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
         self.settings.render(presentation);
+    }
+
+    pub(crate) fn render_diagnostics(&self, presentation: &DiagnosticsPresentation) {
+        self.diagnostics.render(&self.window, presentation);
     }
 
     pub(crate) fn show_update_notice(&self, notice: &lg_buddy::settings_view::UpdateNotice) {
@@ -234,7 +250,6 @@ impl ApplicationWindow {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn window(&self) -> gtk::Window {
         self.window.clone().upcast()
     }

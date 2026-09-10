@@ -4,6 +4,11 @@
 
 use crate::audio::{AudioWriteError, AudioWriteOutcome};
 use crate::brightness::{BrightnessReadError, BrightnessWriteError, BrightnessWriteOutcome};
+use crate::diagnostics::DiagnosticsReport;
+use crate::diagnostics_view::{
+    DiagnosticsApplication, DiagnosticsError, DiagnosticsIntent, DiagnosticsReadOperation,
+    DiagnosticsSaveOperation, DiagnosticsTransition,
+};
 use crate::navigation::Navigation;
 use crate::overview::{
     AudioReadError, OverviewApplication, OverviewAudioReadOperation, OverviewAudioWriteOperation,
@@ -54,6 +59,7 @@ pub struct ApplicationTransition {
     overview: Option<OverviewTransition>,
     tvs: Option<TvsTransition>,
     settings: Option<SettingsTransition>,
+    diagnostics: Option<DiagnosticsTransition>,
     navigation: Navigation,
 }
 
@@ -73,12 +79,17 @@ impl ApplicationTransition {
     pub fn settings(&self) -> Option<&SettingsTransition> {
         self.settings.as_ref()
     }
+
+    pub fn diagnostics(&self) -> Option<&DiagnosticsTransition> {
+        self.diagnostics.as_ref()
+    }
 }
 
 pub struct Application {
     overview: OverviewApplication,
     tvs: TvsApplication,
     settings: SettingsApplication,
+    diagnostics: DiagnosticsApplication,
     navigation: Navigation,
     pairing_behaviors: Vec<BehaviorSetting>,
     pairing_settings_read: Option<SettingsReadOperation>,
@@ -95,6 +106,7 @@ impl Application {
                 overview,
                 tvs,
                 settings,
+                diagnostics: DiagnosticsApplication::default(),
                 navigation: Navigation::default(),
                 pairing_behaviors: Vec::new(),
                 pairing_settings_read: None,
@@ -104,6 +116,7 @@ impl Application {
                 overview: Some(overview_opening),
                 tvs: Some(tvs_opening),
                 settings: Some(settings_opening),
+                diagnostics: None,
                 navigation: Navigation::default(),
             },
         )
@@ -161,6 +174,55 @@ impl Application {
                 .or_else(|| Some(self.transition(None, None, None))),
             _ => Some(self.transition(None, None, None)),
         }
+    }
+
+    pub fn handle_diagnostics_intent(
+        &mut self,
+        intent: DiagnosticsIntent,
+    ) -> Option<ApplicationTransition> {
+        if self.closed {
+            return None;
+        }
+        if matches!(intent, DiagnosticsIntent::Open | DiagnosticsIntent::Refresh) {
+            if let Some(details) = self
+                .settings
+                .presentation()
+                .update_install()
+                .failure_details()
+            {
+                self.diagnostics
+                    .record_failure("Last update failure", details);
+            }
+        }
+        let transition = self.diagnostics.handle_intent(intent)?;
+        Some(self.diagnostics_transition(transition))
+    }
+
+    pub fn complete_diagnostics_read(
+        &mut self,
+        operation: &DiagnosticsReadOperation,
+        result: Result<DiagnosticsReport, DiagnosticsError>,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.diagnostics.complete_read(operation, result)?;
+        Some(self.diagnostics_transition(transition))
+    }
+
+    pub fn complete_diagnostics_save(
+        &mut self,
+        operation: &DiagnosticsSaveOperation,
+        result: Result<(), DiagnosticsError>,
+    ) -> Option<ApplicationTransition> {
+        let transition = self.diagnostics.complete_save(operation, result)?;
+        Some(self.diagnostics_transition(transition))
+    }
+
+    fn diagnostics_transition(
+        &mut self,
+        diagnostics: DiagnosticsTransition,
+    ) -> ApplicationTransition {
+        let mut transition = self.transition(None, None, None);
+        transition.diagnostics = Some(diagnostics);
+        transition
     }
 
     pub fn complete_settings_read(
@@ -245,6 +307,27 @@ impl Application {
     }
 
     fn settings_transition(&mut self, transition: SettingsTransition) -> ApplicationTransition {
+        if let crate::presentation::settings::SettingsStatus::Failed(error) =
+            transition.presentation().status()
+        {
+            self.diagnostics.record_failure("Settings", error.summary());
+        }
+        for row in transition
+            .presentation()
+            .groups()
+            .iter()
+            .flat_map(|group| group.rows())
+        {
+            if let Some(feedback) = row.feedback() {
+                self.diagnostics
+                    .record_failure(row.title(), feedback.message());
+            }
+        }
+        if transition.diagnostic().is_some() {
+            if let Some(notice) = transition.update_notice() {
+                self.diagnostics.record_failure("Updates", notice.title());
+            }
+        }
         self.transition(None, None, Some(transition))
     }
 
@@ -352,18 +435,78 @@ impl Application {
         self.overview.shutdown();
         self.tvs.shutdown();
         self.settings.shutdown();
+        self.diagnostics.shutdown();
     }
 
     fn overview_transition(&mut self, transition: OverviewTransition) -> ApplicationTransition {
+        if transition.diagnostic().is_some() {
+            if let OverviewFrontendUpdate::Present(presentation) = transition.update() {
+                use crate::presentation::brightness::BrightnessStatus;
+                use crate::presentation::overview::{AudioStatus, TvSummaryStatus};
+                for (context, error) in [
+                    (
+                        "TV connection",
+                        match presentation.summary().status() {
+                            TvSummaryStatus::Failed(error) => Some(error),
+                            _ => None,
+                        },
+                    ),
+                    (
+                        "Brightness",
+                        match presentation.brightness().status() {
+                            BrightnessStatus::Failed(error) => Some(error),
+                            _ => None,
+                        },
+                    ),
+                    (
+                        "Audio",
+                        match presentation.audio().status() {
+                            AudioStatus::Failed(error) => Some(error),
+                            _ => None,
+                        },
+                    ),
+                ] {
+                    if let Some(error) = error {
+                        self.diagnostics.record_failure(
+                            context,
+                            &format!("{} {}", error.summary(), error.detail()),
+                        );
+                    }
+                }
+            }
+        }
         if matches!(transition.update(), OverviewFrontendUpdate::Close) {
             self.closed = true;
             self.tvs.shutdown();
             self.settings.shutdown();
+            self.diagnostics.shutdown();
         }
         self.transition(Some(transition), None, None)
     }
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
+        if let crate::presentation::tvs::TvsStatus::Failed(error) =
+            transition.presentation().status()
+        {
+            self.diagnostics
+                .record_failure("TV profiles", error.summary());
+        }
+        if let Some(error) = transition
+            .presentation()
+            .pairing()
+            .and_then(|pairing| pairing.error())
+        {
+            self.diagnostics.record_failure(
+                "Pairing",
+                &format!("{} {}", error.summary(), error.detail()),
+            );
+        }
+        if let Some(error) = transition.presentation().management_error() {
+            self.diagnostics.record_failure(
+                "TV settings",
+                &format!("{} {}", error.summary(), error.detail()),
+            );
+        }
         if transition.profile_changed() && transition.presentation().profiles().is_empty() {
             self.pairing_behaviors.clear();
             self.pairing_settings_read = None;
@@ -412,6 +555,7 @@ impl Application {
             overview,
             tvs,
             settings,
+            diagnostics: None,
             navigation: self.navigation.clone(),
         }
     }
@@ -424,6 +568,68 @@ mod tests {
     use crate::overview::{OverviewOperation, OverviewSummaryFailure};
     use crate::pairing::PairingIntent;
     use crate::tvs::{TvCredentialState, TvId};
+
+    #[test]
+    fn diagnostics_is_available_before_pairing_and_does_not_change_navigation() {
+        let (mut app, opening) = Application::open();
+        assert!(opening.diagnostics().is_none());
+        let diagnostics = app
+            .handle_diagnostics_intent(DiagnosticsIntent::Open)
+            .unwrap();
+        assert_eq!(diagnostics.navigation(), opening.navigation());
+        assert!(!diagnostics.navigation().tabs_visible());
+        assert!(diagnostics.overview().is_none());
+        assert!(diagnostics.settings().is_none());
+        assert!(diagnostics.tvs().is_none());
+        let operation = diagnostics.diagnostics().unwrap().read_operation().unwrap();
+        app.shutdown();
+        assert!(app
+            .complete_diagnostics_read(operation, Ok(DiagnosticsReport::new(0, vec![])))
+            .is_none());
+        assert!(app
+            .handle_diagnostics_intent(DiagnosticsIntent::Open)
+            .is_none());
+    }
+
+    #[test]
+    fn diagnostics_retains_safe_failure_summaries_without_raw_worker_output() {
+        let (mut app, opening) = Application::open();
+        let operation = opening
+            .overview()
+            .unwrap()
+            .operations()
+            .iter()
+            .find_map(|operation| match operation {
+                OverviewOperation::ReadSummary(operation) => Some(*operation),
+                _ => None,
+            })
+            .unwrap();
+        app.complete_overview(OverviewCompletion::Summary(
+            operation,
+            Err(OverviewSummaryError::new(
+                OverviewSummaryFailure::Internal,
+                "raw private protocol payload that must stay out of the report",
+            )),
+        ))
+        .unwrap();
+        let opened = app
+            .handle_diagnostics_intent(DiagnosticsIntent::Open)
+            .unwrap();
+        let report = app
+            .complete_diagnostics_read(
+                opened.diagnostics().unwrap().read_operation().unwrap(),
+                Ok(DiagnosticsReport::new(0, vec![])),
+            )
+            .unwrap();
+        let text = report
+            .diagnostics()
+            .unwrap()
+            .presentation()
+            .report_text()
+            .unwrap();
+        assert!(text.contains("TV connection"));
+        assert!(!text.contains("raw private protocol"));
+    }
 
     fn pairing() -> (Application, ApplicationTransition, PairingOperation) {
         let (mut application, opening) = Application::open();

@@ -343,6 +343,15 @@ installed executable and preservation of existing configuration. Complete
 assembled-journey verification remains tracked in
 [#201](https://github.com/Staphylococcus/LG_Buddy/issues/201).
 
+Diagnostics tests cover on-demand collection before pairing, partial reports,
+service-state distinctions, bounded subprocess reads, and credential exclusion.
+Application tests cover retained safe failures, refresh/close races, exact
+copy/save snapshots, chooser cancellation, and failed exports. Native GTK
+scenarios exercise the menu, collection responsiveness, report selection,
+keyboard focus, adaptive layout, clipboard contents, and file export through
+the worker boundary. Tests inject probes and reports without changing live
+services or querying a real TV.
+
 The focused release-manifest suite covers deterministic serialization, schema
 and critical-field handling, duplicate and missing fields, canonical identity
 formats, archive layout, and runtime/GUI target and identity mismatches. The
