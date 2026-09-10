@@ -215,6 +215,12 @@ The native webOS client tests use one stateful server for complete webOS frames,
 device state, and protocol-fault scenarios. Characterization tests keep its TV
 behavior aligned with observed hardware evidence.
 
+`session/actions/tests.rs` uses this same server through the production client
+builder to verify runtime ownership across events: lazy connection, authenticated
+session reuse, later reconnection after closure, and replacement after profile
+or operation-policy changes. These tests use isolated loopback addresses on
+the standard webOS TLS port and share the session tests' environment lock.
+
 Cucumber adds the process-level product boundary. It runs the real `lg-buddy`
 binary against the same stateful server over TLS on the standard webOS port.
 The scenarios exercise the production unsigned registration manifest and

@@ -30,6 +30,12 @@ resets or cancels the applicable deadline; each expiry is edge-triggered.
 
 GNOME, native Wayland, and `swayidle` feed the shared session path.
 
+Screen and sleep actions pass through `session::actions` for configuration and
+dependency assembly before reaching their policy handlers. Each monitor retains
+one `RuntimeActionExecutor`, which lazily owns and reuses a native TV client for
+compatible events. One-shot commands use a fresh instance of the same owner.
+The handler map below omits this common assembly step.
+
 ## Current Top-Level Handlers
 
 | External event source | Runtime entrypoint | Primary handler | Current action |

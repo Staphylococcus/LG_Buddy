@@ -127,15 +127,16 @@ impl WebOsTestInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::web_os) struct WebOsTestTvSnapshot {
-    pub(in crate::web_os) power_state: WebOsPowerState,
-    pub(in crate::web_os) input: WebOsTestInput,
-    pub(in crate::web_os) backlight: Value,
-    pub(in crate::web_os) volume: i16,
-    pub(in crate::web_os) muted: bool,
-    pub(in crate::web_os) connection_count: u64,
-    pub(in crate::web_os) pairing_prompt_count: u64,
-    pub(in crate::web_os) registration_tokens: Vec<Option<String>>,
+pub(crate) struct WebOsTestTvSnapshot {
+    pub(crate) power_state: WebOsPowerState,
+    pub(crate) input: WebOsTestInput,
+    pub(crate) backlight: Value,
+    pub(crate) volume: i16,
+    pub(crate) muted: bool,
+    pub(crate) connection_count: u64,
+    pub(crate) pairing_prompt_count: u64,
+    pub(crate) registration_tokens: Vec<Option<String>>,
+    pub(crate) request_uris: Vec<String>,
 }
 
 struct WebOsTestTv {
@@ -565,6 +566,7 @@ struct WebOsTestRuntime {
     connection_count: u64,
     pairing_prompt_count: u64,
     registration_tokens: Vec<Option<String>>,
+    request_uris: Vec<String>,
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
     restore_session_interruption_injected: bool,
@@ -624,7 +626,7 @@ impl WebOsTestServer {
     }
 
     #[allow(dead_code)]
-    pub(in crate::web_os) fn active_tls_at(
+    pub(crate) fn active_tls_at(
         version: WebOsTestVersion,
         input: WebOsTestInput,
         address: std::net::SocketAddr,
@@ -680,6 +682,7 @@ impl WebOsTestServer {
             connection_count: 0,
             pairing_prompt_count: 0,
             registration_tokens: Vec::new(),
+            request_uris: Vec::new(),
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
             restore_session_interruption_injected: false,
@@ -743,16 +746,51 @@ impl WebOsTestServer {
         self.endpoint
     }
 
-    pub(in crate::web_os) fn access_token(&self) -> PlatformAccessToken {
+    pub(crate) fn access_token(&self) -> PlatformAccessToken {
         PlatformAccessToken::new(TEST_ACCESS_TOKEN).expect("webOS test access token")
     }
 
     #[allow(dead_code)]
-    pub(in crate::web_os) fn set_scenario(&self, scenario: WebOsTestScenario) {
+    pub(crate) fn set_scenario(&self, scenario: WebOsTestScenario) {
         self.runtime
             .lock()
             .expect("webOS test server state")
             .scenario = scenario;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_input(&self, input: WebOsTestInput) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .input = input;
+    }
+
+    /// Close an established connection between operations, leaving the TV
+    /// available for the next connection.
+    #[allow(dead_code)]
+    pub(crate) fn close_active_connection(&self) {
+        self.active_connection
+            .lock()
+            .expect("webOS test active connection")
+            .as_ref()
+            .expect("an established webOS connection")
+            .shutdown(Shutdown::Both)
+            .expect("close webOS test connection");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self
+            .active_connection
+            .lock()
+            .expect("webOS test active connection")
+            .is_some()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection did not close"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[allow(dead_code)]
@@ -782,7 +820,7 @@ impl WebOsTestServer {
         );
     }
 
-    pub(in crate::web_os) fn snapshot(&self) -> WebOsTestTvSnapshot {
+    pub(crate) fn snapshot(&self) -> WebOsTestTvSnapshot {
         let runtime = self.runtime.lock().expect("webOS test TV state");
         WebOsTestTvSnapshot {
             power_state: runtime.tv.power_state.clone(),
@@ -793,6 +831,7 @@ impl WebOsTestServer {
             connection_count: runtime.connection_count,
             pairing_prompt_count: runtime.pairing_prompt_count,
             registration_tokens: runtime.registration_tokens.clone(),
+            request_uris: runtime.request_uris.clone(),
         }
     }
 
@@ -870,6 +909,17 @@ fn serve_connection<S>(
             }
             continue;
         }
+
+        runtime
+            .lock()
+            .expect("webOS test server state")
+            .request_uris
+            .push(
+                request["uri"]
+                    .as_str()
+                    .expect("webOS test request URI")
+                    .to_string(),
+            );
 
         let scenario = runtime.lock().expect("webOS test server state").scenario;
         if scenario == WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff {

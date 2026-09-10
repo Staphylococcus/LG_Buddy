@@ -18,7 +18,6 @@ use crate::backend::{
     resolve_backend_with_probe, BackendDetectionError, BackendResolution, BackendSelectionError,
     SystemBackendProbe, SWAYIDLE_DEPRECATION_NOTICE,
 };
-use crate::commands::{run_sleep_pre_for_event, run_system_resume};
 use crate::config::{
     load_config, normalize_idle_timeout_secs, parse_config_entries, parse_idle_timeout_secs,
     resolve_config_path_from_env, ConfigPathError, ScreenBackend, ScreenIdleBlankPolicy,
@@ -83,34 +82,32 @@ pub trait SessionActionExecutor {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RuntimeActionExecutor;
+pub use super::actions::RuntimeActionExecutor;
 
 impl SessionActionExecutor for RuntimeActionExecutor {
     fn screen_off(&mut self, event: RuntimeEvent) -> Result<ScreenOffResult, RunError> {
         let mut output = Vec::new();
-        let result =
-            crate::screen::run_screen_off_from_env_for_event_with_result(&mut output, event)?;
+        let blank_succeeded = self.run_screen_off(&mut output, event)?;
         Ok(ScreenOffResult {
             output: String::from_utf8_lossy(&output).into_owned(),
-            blank_succeeded: result.blank_succeeded,
+            blank_succeeded,
         })
     }
 
     fn timed_power_off(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| crate::screen::run_timed_power_off_from_env_for_event(writer, event))
+        run_action(|writer| self.run_timed_power_off(writer, event))
     }
 
     fn screen_on(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| crate::screen::run_screen_on_from_env_for_event(writer, event))
+        run_action(|writer| self.run_screen_on(writer, event))
     }
 
     fn before_sleep(&mut self, event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(|writer| run_sleep_pre_for_event(writer, event))
+        run_action(|writer| self.run_sleep_pre(writer, event))
     }
 
     fn after_resume(&mut self, _event: RuntimeEvent) -> Result<String, RunError> {
-        run_action(run_system_resume)
+        run_action(|writer| self.run_system_resume(writer))
     }
 
     fn after_resume_streaming<W: Write>(
@@ -118,7 +115,7 @@ impl SessionActionExecutor for RuntimeActionExecutor {
         writer: &mut W,
         _event: RuntimeEvent,
     ) -> Result<(), RunError> {
-        run_system_resume(writer)
+        self.run_system_resume(writer)
     }
 }
 
@@ -362,7 +359,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 }
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    run_monitor_with_executor(writer, RuntimeActionExecutor).map_err(|err| match err {
+    run_monitor_with_executor(writer, RuntimeActionExecutor::default()).map_err(|err| match err {
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
         other => RunError::Policy(other.to_string()),
@@ -371,13 +368,12 @@ pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_lifecycle_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor, &config_path).map_err(
-        |err| match err {
+    run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor::default(), &config_path)
+        .map_err(|err| match err {
             SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
             SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
             other => RunError::Policy(other.to_string()),
-        },
-    )
+        })
 }
 
 fn run_lifecycle_monitor_with_executor<W: Write, E: SessionActionExecutor>(
@@ -1830,13 +1826,12 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::sync::{mpsc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::session::test_env_lock()
     }
 
     #[derive(Debug, Default)]
