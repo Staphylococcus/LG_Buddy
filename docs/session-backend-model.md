@@ -257,6 +257,9 @@ The code split is:
 - `crates/lg-buddy/src/session/runner.rs`
   - source selection, worker lifetime, observation multiplexing, shared
     inactivity state, and policy dispatch
+- `crates/lg-buddy/src/session/actions.rs`
+  - action dependency assembly and native TV client ownership across compatible
+    events; one-shot commands use the same assembly with a finite lifetime
 - `crates/lg-buddy/src/session/gamepad/`
   - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`

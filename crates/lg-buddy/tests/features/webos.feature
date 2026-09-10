@@ -223,7 +223,8 @@ Feature: Native webOS TV platform
     And stdout contains "Using GNOME backend."
     And the session marker is absent
     And the TV screen is visible
-    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
+    And the native TV connection count is 1
+    And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
 
   Scenario: Native GNOME inactivity powers off an owned blank screen after the grace period
@@ -244,7 +245,8 @@ Feature: Native webOS TV platform
     And stdout contains "Timed power-off deadline reached"
     And the session marker exists
     And the TV is powered off
-    And the native TV registration tokens are "webos-test-access-token,webos-test-access-token"
+    And the native TV connection count is 1
+    And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
 
   Scenario: Native power on restoration is followed by native power off

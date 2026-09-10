@@ -131,7 +131,8 @@ flowchart LR
 
     subgraph Rust["Rust Runtime"]
         MAIN["main.rs / lib.rs<br/>CLI + command dispatch"]
-        COMMANDS["commands.rs<br/>CLI/API dependency assembly"]
+        COMMANDS["commands.rs<br/>CLI/API entrypoints"]
+        ACTIONS["session::actions<br/>action dependencies + TV client owner"]
         EVENTS["events.rs<br/>canonical runtime events"]
         POLICY["policy.rs<br/>action / no-action / state trail"]
         NOTIFICATIONS["notifications.rs<br/>native desktop notifications"]
@@ -218,7 +219,11 @@ flowchart LR
     COMMANDS --> NMGATE
     COMMANDS --> NOTIFICATIONS
     COMMANDS --> SESSIONNOTIFY
-    COMMANDS --> SCREEN
+    COMMANDS -->|"screen / sleep"| ACTIONS
+    RUNNER -->|"retains"| ACTIONS
+    ACTIONS -->|"screen events"| SCREEN
+    ACTIONS -->|"sleep / resume"| LIFECYCLE
+    ACTIONS --> TV
     COMMANDS --> LIFECYCLE
     SCREEN --> POLICY
     LIFECYCLE --> POLICY
@@ -237,8 +242,6 @@ flowchart LR
     RUNNER --> SESSIONNOTIFY
     SESSIONMODEL --> RUNNER
 
-    RUNNER -->|"Idle / Active / WakeRequested /<br/>UserActivity / Lock / TimedPowerOff"| SCREEN
-    RUNNER -->|"AfterResume"| LIFECYCLE
     COMMANDS --> CONFIG
     COMMANDS --> STATE
     BRIGHTNESS --> CONFIG
@@ -264,7 +267,8 @@ The current split is:
   - shared error types
 - `commands.rs`
   - CLI/API command entrypoints
-  - config, state, and dependency loading for command execution
+  - delegates screen and sleep actions to a short-lived runtime action owner
+  - config, state, and dependency loading for other command execution
   - command output handoff
 - `application.rs`
   - toolkit-neutral coordination between Overview, TVs, and Settings
@@ -386,6 +390,11 @@ The current split is:
   - combines backend observations with the inactivity engine
   - dispatches semantic session events into screen and lifecycle policy
   - starts source workers and multiplexes their normalized observations
+- `session/actions.rs`
+  - shared dependency assembly for screen and sleep actions
+  - retains the native TV client across compatible events in each monitor
+  - reloads configuration and replaces clients when their target or operation
+    policy changes
 - `sources/linux/logind.rs`
   - Linux system lifecycle and current-session lock-state adapter
   - maps `org.freedesktop.login1` resume signals into canonical lifecycle
@@ -484,8 +493,10 @@ public-surface migration:
 
 `lib.rs` parses the command line into a typed command enum and dispatches into
 the runtime command handlers in `commands.rs` and `session/runner.rs`.
-`commands.rs` then delegates screen and lifecycle decisions to their domain
-modules and delegates platform ingestion to `sources/`. The on-demand
+Screen and sleep actions share dependency assembly in `session/actions.rs`:
+monitors retain one action owner, while one-shot commands create a fresh owner.
+The owner delegates decisions to the screen and lifecycle domain modules;
+platform ingestion belongs to `sources/`. The on-demand
 `updates check` command reads the saved `updates.channel` policy and consumes
 the GitHub Releases API without entering the screen, lifecycle, or scheduling
 paths. `updates install` adds the user-confirmed upgrade orchestration: initial
@@ -851,6 +862,17 @@ may reconnect for safe read-only verification, but it never replays the
 effectful operation. The legacy adapter performs its equivalent power-state
 readback through `bscpylgtvcommand`; neither implementation exposes webOS power
 states to policy code.
+
+Each monitor's `RuntimeActionExecutor` retains this adapter across compatible
+events. Client construction and connection remain lazy: starting a monitor
+does not contact the TV. The owner reloads configuration for every action and
+replaces its client when the profile path, TV address, MAC, platform, or client
+options change. Unrelated settings changes preserve the connection. Client
+options keep foreground pairing and timeouts separate from unattended suspend
+and resume operations. Legacy clients are rebuilt per action, and one-shot
+commands drop their owner on completion. A consumed or invalidated native
+session reconnects only when a later operation needs it; there is no background
+connection maintenance.
 
 Native picture settings have two known service-invocation paths. A direct SSAP
 write sends `ssap://settings/setSystemSettings` on the websocket. The Luna path

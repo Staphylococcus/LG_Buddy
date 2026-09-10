@@ -945,6 +945,15 @@ mod tests {
             after_write.connection_count, 2,
             "verification reconnects without replaying the effectful operation"
         );
+        assert_eq!(
+            after_write
+                .request_uris
+                .iter()
+                .filter(|uri| uri.as_str() == "ssap://tv/switchInput")
+                .count(),
+            1,
+            "the ambiguous input write must be sent exactly once"
+        );
 
         assert_eq!(
             client
