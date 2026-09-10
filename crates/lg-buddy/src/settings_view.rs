@@ -766,7 +766,7 @@ impl SettingsApplication {
             return None;
         }
         let up_to_date = matches!(result, Ok(UpdateInstallOutcome::UpToDate))
-            && matches!(operation.task(), UpdateInstallTask::Prepare);
+            && matches!(operation.task(), UpdateInstallTask::Prepare { .. });
         let (next, diagnostic) = self.update_install.complete(operation, result)?;
         let notice = if up_to_date {
             self.presentation.update_check_mut().clear_result();

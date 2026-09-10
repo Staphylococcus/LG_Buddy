@@ -157,6 +157,7 @@ struct UpdaterView {
     release: gtk::LinkButton,
     presented: Cell<bool>,
     close_pending: Rc<Cell<bool>>,
+    focus_after_close: Rc<Cell<bool>>,
     pulse: RefCell<Option<gtk::glib::SourceId>>,
     notice: RefCell<Option<adw::Toast>>,
 }
@@ -241,12 +242,25 @@ impl UpdaterView {
             // non-cancellable boundary before the next progress event arrives.
             .can_close(false)
             .build();
+        let focus_after_close = Rc::new(Cell::new(false));
         dialog.connect_close_attempt({
             let cancel_intent = Rc::clone(&cancel_intent);
             move |_| {
                 let intent = cancel_intent.borrow().clone();
                 if let Some(intent) = intent {
                     on_intent(intent);
+                }
+            }
+        });
+        dialog.connect_closed({
+            let action = action.downgrade();
+            let focus_after_close = Rc::clone(&focus_after_close);
+            move |_| {
+                if let Some(action) = action.upgrade() {
+                    if action.is_sensitive() {
+                        focus_after_close.set(false);
+                        action.grab_focus();
+                    }
                 }
             }
         });
@@ -293,6 +307,7 @@ impl UpdaterView {
             release,
             presented: Cell::new(false),
             close_pending,
+            focus_after_close,
             pulse: RefCell::new(None),
             notice: RefCell::new(None),
         }
@@ -334,12 +349,25 @@ impl UpdaterView {
         }
         if !active {
             if self.presented.replace(false) {
+                self.focus_after_close.set(true);
                 if self.dialog.child().is_some_and(|child| child.is_mapped()) {
                     self.dialog.force_close();
-                    self.action.grab_focus();
+                    let action = self.action.downgrade();
+                    gtk::glib::idle_add_local_once(move || {
+                        if let Some(action) = action.upgrade() {
+                            action.grab_focus();
+                        }
+                    });
                 } else {
                     self.close_pending.set(true);
                 }
+            }
+            if self.focus_after_close.get()
+                && self.action.is_sensitive()
+                && self.dialog.parent().is_none()
+            {
+                self.focus_after_close.set(false);
+                self.action.grab_focus();
             }
             return;
         }
@@ -1418,6 +1446,7 @@ fn updater_renderer_scenarios(application: &adw::Application) {
     let preparation = model
         .handle_intent(SettingsIntent::PrepareUpdateInstall)
         .unwrap();
+    let preparation_operation = preparation.update_install_operation().unwrap().clone();
     view.render(preparation.presentation());
     pump_until(|| {
         window.visible_dialog().as_ref() == Some(&view.updater.dialog)
@@ -1441,6 +1470,19 @@ fn updater_renderer_scenarios(application: &adw::Application) {
     view.render(model.presentation());
     pump_until(|| window.visible_dialog().is_none() && view.updater.dialog.parent().is_none());
     assert!(view.updater.pulse.borrow().is_none());
+
+    // Cancellation closes the modal immediately, but the worker remains
+    // active until its cleanup completes; focus returns when the action is
+    // available again.
+    assert!(!action.is_sensitive());
+    model
+        .complete_update_install(
+            &preparation_operation,
+            Err(UpdateInstallError::Cancelled.into()),
+        )
+        .unwrap();
+    view.render(model.presentation());
+    pump_until(|| action.is_sensitive());
     assert!(action.has_focus());
 
     let preparation = model

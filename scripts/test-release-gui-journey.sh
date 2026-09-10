@@ -124,7 +124,8 @@ dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 shift
 printf '%s\n' "$*" >> "$dir/authorizations"
 [ "$(cat "$dir/auth-mode")" != decline ] || exit 126
-if [ "${1:-}" = /usr/bin/systemctl ] && [ "${2:-}" = start ] && [ "${3:-}" = LG_Buddy_lifecycle.service ]; then
+if { [ "${1:-}" = systemctl ] || [ "${1:-}" = /usr/bin/systemctl ]; } &&
+    [ "${2:-}" = start ] && [ "${3:-}" = LG_Buddy_lifecycle.service ]; then
     shift
     exec "$LG_BUDDY_SYSTEMCTL" "$@"
 fi
