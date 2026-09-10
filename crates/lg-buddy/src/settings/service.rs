@@ -215,7 +215,10 @@ impl ServiceController for SystemdUserServiceController {
     fn start_system_lifecycle(&self) -> Result<(), SettingsError> {
         let output = ProcessCommand::new("pkexec")
             .arg("--disable-internal-agent")
-            .arg("/usr/bin/systemctl")
+            // Keep the test/diagnostic command override out of the privileged
+            // executable selection. pkexec resolves this fixed command name
+            // through its sanitized system PATH.
+            .arg("systemctl")
             .arg("start")
             .arg("LG_Buddy_lifecycle.service")
             .output()

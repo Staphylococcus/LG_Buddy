@@ -2041,7 +2041,7 @@ pub(crate) mod controller_test_support {
                 progress: &mut dyn FnMut(UpdateInstallStage),
             ) -> Result<UpdateInstallOutcome, UpdateInstallFailure> {
                 match operation.task() {
-                    UpdateInstallTask::Prepare => {
+                    UpdateInstallTask::Prepare { .. } => {
                         if self.preparations.fetch_add(1, Ordering::SeqCst) == 0 {
                             Ok(UpdateInstallOutcome::UpToDate)
                         } else {

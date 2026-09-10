@@ -678,9 +678,15 @@ impl UpdateInstallRuntime for SystemUpdateInstallRuntime {
 /// latest qualifying release at the time it opens.
 pub fn prepare_gui_update() -> Result<Option<PreparedUpdateInstall>, UpdateInstallError> {
     let cancellation = UpdateInstallCancellation::new();
+    prepare_gui_update_with_cancellation(&cancellation)
+}
+
+pub fn prepare_gui_update_with_cancellation(
+    cancellation: &UpdateInstallCancellation,
+) -> Result<Option<PreparedUpdateInstall>, UpdateInstallError> {
     let mut runtime = SystemUpdateInstallRuntime { require_gui: true };
     let current = runtime.current_version();
-    prepare_gui_update_with(&mut runtime, &cancellation, current)
+    prepare_gui_update_with(&mut runtime, cancellation, current)
 }
 
 /// Install a previously prepared and explicitly confirmed GUI update.

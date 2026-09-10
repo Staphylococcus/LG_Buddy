@@ -476,11 +476,9 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         .unwrap()
         .contains("system_sleep_wake_policy=enabled"));
     let calls = fs::read_to_string(&log).unwrap();
-    assert_eq!(
-        calls,
-        "--disable-internal-agent\n/usr/bin/systemctl\nstart\nLG_Buddy_lifecycle.service\n"
-            .repeat(3)
-    );
+    let expected_call =
+        "--disable-internal-agent\nsystemctl\nstart\nLG_Buddy_lifecycle.service\n";
+    assert_eq!(calls, expected_call.repeat(3));
 
     run_mutation(
         &mut app,

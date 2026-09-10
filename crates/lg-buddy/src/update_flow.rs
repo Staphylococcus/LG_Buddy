@@ -9,14 +9,16 @@ use crate::presentation::update_check::UpdateCheckReport;
 use crate::presentation::update_install::UpdateInstallPresentation;
 use crate::settings_view::SettingsIntent;
 use crate::update_install::{
-    install_gui_update, prepare_gui_update, InstalledUpdate, PreparedUpdateInstall,
-    UpdateInstallCancellation, UpdateInstallError, UpdateInstallStage,
+    install_gui_update, prepare_gui_update_with_cancellation, InstalledUpdate,
+    PreparedUpdateInstall, UpdateInstallCancellation, UpdateInstallError, UpdateInstallStage,
 };
 use crate::updates::UpdateChannel;
 
 #[derive(Debug, Clone)]
 pub enum UpdateInstallTask {
-    Prepare,
+    Prepare {
+        cancellation: UpdateInstallCancellation,
+    },
     Install {
         prepared: PreparedUpdateInstall,
         cancellation: UpdateInstallCancellation,
@@ -125,14 +127,16 @@ impl UpdateInstallBackend for EnvironmentUpdateInstallBackend {
         progress: &mut dyn FnMut(UpdateInstallStage),
     ) -> Result<UpdateInstallOutcome, UpdateInstallFailure> {
         match operation.task() {
-            UpdateInstallTask::Prepare => prepare_gui_update()
-                .map(|prepared| {
-                    prepared.map_or(
-                        UpdateInstallOutcome::UpToDate,
-                        UpdateInstallOutcome::Prepared,
-                    )
-                })
-                .map_err(Into::into),
+            UpdateInstallTask::Prepare { cancellation } => {
+                prepare_gui_update_with_cancellation(cancellation)
+                    .map(|prepared| {
+                        prepared.map_or(
+                            UpdateInstallOutcome::UpToDate,
+                            UpdateInstallOutcome::Prepared,
+                        )
+                    })
+                    .map_err(Into::into)
+            }
             UpdateInstallTask::Install {
                 prepared,
                 cancellation,
@@ -259,7 +263,9 @@ impl UpdateInstallApplication {
                         .as_ref()
                         .is_some_and(SettingsAction::enabled) =>
             {
-                let operation = self.start(UpdateInstallTask::Prepare);
+                let operation = self.start(UpdateInstallTask::Prepare {
+                    cancellation: UpdateInstallCancellation::default(),
+                });
                 self.presentation.title = Some("Preparing update…".into());
                 self.presentation.description =
                     "Finding the latest update for your saved channel.".into();
@@ -278,10 +284,14 @@ impl UpdateInstallApplication {
                 Some(Some(operation))
             }
             SettingsIntent::CancelUpdateInstall if self.active() && !self.cancelling => {
-                if let Some(UpdateInstallOperation {
-                    task: UpdateInstallTask::Install { cancellation, .. },
-                    ..
-                }) = &self.pending
+                if let Some(cancellation) =
+                    self.pending
+                        .as_ref()
+                        .and_then(|operation| match &operation.task {
+                            UpdateInstallTask::Prepare { cancellation }
+                            | UpdateInstallTask::Install { cancellation, .. } => Some(cancellation),
+                            UpdateInstallTask::Relaunch(_) => None,
+                        })
                 {
                     if !cancellation.cancel() {
                         return None;
@@ -336,12 +346,19 @@ impl UpdateInstallApplication {
         if self.pending.as_ref() != Some(operation) {
             return None;
         }
+        let cancelled_prepare =
+            self.cancelling && matches!(operation.task(), UpdateInstallTask::Prepare { .. });
         self.pending = None;
         self.presentation.busy = false;
         self.presentation.cancel_action = None;
+        if cancelled_prepare {
+            self.cancelling = false;
+            self.clear_presentation();
+            return Some((None, None));
+        }
         match result {
             Ok(UpdateInstallOutcome::Prepared(prepared))
-                if matches!(operation.task, UpdateInstallTask::Prepare) =>
+                if matches!(operation.task(), UpdateInstallTask::Prepare { .. }) =>
             {
                 self.presentation.title = Some(format!(
                     "Install LG Buddy {}?",
@@ -358,7 +375,7 @@ impl UpdateInstallApplication {
                 self.presentation.cancel_action = Some(cancel_action());
             }
             Ok(UpdateInstallOutcome::UpToDate)
-                if matches!(operation.task, UpdateInstallTask::Prepare) =>
+                if matches!(operation.task(), UpdateInstallTask::Prepare { .. }) =>
             {
                 self.clear_presentation();
             }
@@ -531,7 +548,10 @@ mod tests {
     fn modal_selects_a_fresh_release_and_pins_only_the_confirmed_target() {
         let mut app = offered();
         let operation = prepare(&mut app);
-        assert!(matches!(operation.task(), UpdateInstallTask::Prepare));
+        assert!(matches!(
+            operation.task(),
+            UpdateInstallTask::Prepare { .. }
+        ));
         let latest = PreparedUpdateInstall::from_parts(
             VersionInfo::current(),
             "1.7.1".parse().unwrap(),
@@ -628,6 +648,11 @@ mod tests {
             })
             .is_none());
         app.handle_intent(SettingsIntent::CancelUpdateInstall)
+            .unwrap();
+        assert!(app
+            .handle_intent(SettingsIntent::PrepareUpdateInstall)
+            .is_none());
+        app.complete_update_install(&old, Err(UpdateInstallError::Cancelled.into()))
             .unwrap();
         let current = prepare(&mut app);
         assert!(app
@@ -756,6 +781,10 @@ mod tests {
                 .unwrap()
                 .intent(),
             SettingsIntent::RelaunchUpdatedApplication
+        );
+        assert_eq!(
+            failed.presentation().updater().action().label(),
+            "Retry restart"
         );
         assert!(app
             .handle_intent(SettingsIntent::ConfirmUpdateInstall)

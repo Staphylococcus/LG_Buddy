@@ -26,11 +26,7 @@ impl UpdaterPresentation {
                 return Self {
                     title: "Restart required".into(),
                     description: "The update is installed. Restart LG Buddy to finish.".into(),
-                    action: SettingsAction::new(
-                        "Install update…",
-                        action.enabled(),
-                        action.intent(),
-                    ),
+                    action: SettingsAction::new("Retry restart", action.enabled(), action.intent()),
                 };
             }
         }
