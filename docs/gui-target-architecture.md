@@ -4,12 +4,12 @@ This document describes the current first-party Linux frontend in the
 development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
-> The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
-> About. The development tree also provides manual update checks and
-> user-confirmed release-bundle installation in Settings, and first-run pairing
-> with default behavior activation. Unavailable or declined behaviors remain off
-> and can be retried in Settings. The app menu provides on-demand diagnostics
-> with report viewing, refresh, copying, and saving.
+> The `v1.7.0` frontend covers Overview, TVs, Settings, first-TV pairing,
+> About, manual update checks, user-confirmed release-bundle installation in
+> Settings, and first-run pairing with default behavior activation. Unavailable
+> or declined behaviors remain off and can be retried in Settings. The app menu
+> provides on-demand diagnostics with report viewing, refresh, copying, and
+> saving.
 
 ## Boundary
 
