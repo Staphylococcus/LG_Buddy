@@ -70,7 +70,6 @@ impl ApplicationWindow {
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
         let pairing = crate::pairing::PairingView::new(on_tvs);
         let settings = crate::settings::SettingsView::new(on_settings);
-        let diagnostics = crate::diagnostics::DiagnosticsView::new(on_diagnostics);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
         stack.set_vhomogeneous(false);
@@ -115,6 +114,8 @@ impl ApplicationWindow {
             .menu_model(&menu)
             .build();
         menu_button.update_property(&[gtk::accessible::Property::Label("Main Menu")]);
+        let diagnostics =
+            crate::diagnostics::DiagnosticsView::new(on_diagnostics, menu_button.upcast_ref());
         header.pack_end(&menu_button);
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
         let toasts = adw::ToastOverlay::new();
@@ -246,7 +247,10 @@ impl ApplicationWindow {
     pub(crate) fn close(&self) {
         self.allow_close.set(true);
         if !self.close_requested.get() {
-            self.window.close();
+            // Application policy has already approved closing. AdwWindow's
+            // close() can dismiss only its visible dialog and leave the window
+            // alive after the application model has shut down.
+            self.window.destroy();
         }
     }
 

@@ -11,10 +11,10 @@ up LG Buddy for the first time, start with the [installation instructions](../RE
 <a id="desktop-app"></a>
 ## Open LG Buddy
 
-Open **LG Buddy** from your application launcher, or run `lg-buddy` with no
-arguments. With a saved TV, both open **Overview**. Without one, the app opens
-directly to [Pair a TV](#pair-your-first-tv), with navigation hidden until
-pairing succeeds. For a keyboard shortcut straight to
+Open **LG Buddy** from your application launcher, or run `lg-buddy`. With a saved TV, it opens
+**Overview**. After a fresh release-bundle install, the app opens directly to
+[Pair a TV](#pair-your-first-tv): **TVs** is the only page and the other tabs
+are hidden until pairing succeeds. For a keyboard shortcut straight to
 brightness, bind `lg-buddy brightness` to your preferred key combination.
 
 LG Buddy manages one TV. Screenshots use sample TV data.
@@ -51,12 +51,14 @@ In the dialog:
 Cancel is available until saving starts; once saving starts, the dialog stays
 open until the operation finishes. When verification and saving finish, the
 dialog closes and normal navigation becomes available. A fresh setup attempts
-the default Idle Blanking and TV Sleep & Wake behaviors; approve the desktop
-authorization prompt when a system operation needs it. Pairing again reactivates
-previously enabled behaviors and keeps disabled choices off. If a behavior cannot
-be activated or authorization is declined, that behavior stays off and can be
-enabled in **Settings** to retry. A failed pairing shows an error you can correct
-and submit again; a cancelled attempt does not save a TV.
+the default Idle Blanking and TV Sleep & Wake behaviors. There is no separate
+confirmation for each service; approve the desktop authorization prompt when a
+system operation needs it. Pairing again reactivates previously enabled
+behaviors and keeps disabled choices off. If authorization is declined or a
+behavior cannot be activated, the paired TV remains saved while that behavior
+stays off. Enable it in **Settings** later to retry and activate the service. A
+failed pairing shows an error you can correct and submit again; a cancelled
+attempt does not save a TV.
 
 ![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 
@@ -87,11 +89,11 @@ After unpairing, use **Pair a TV** and approve native webOS pairing again.
 Cancelling the unpair confirmation keeps the connection. Cancelling or failing
 the new pairing leaves no TV configured.
 
-For a terminal-only repair or reconfiguration, run `./configure.sh` from the
-release archive. To select native control for an existing profile and verify it
-before saving, use `lg-buddy settings set tv.platform lg_webos`. The explicit
-`bscpylgtv` value remains available as a compatibility fallback when native
-control cannot be used.
+For installed GUI reconfiguration, use **TVs** to change the HDMI input or
+unpair and pair again, and use **Settings** for screen, sleep and wake, desktop
+integration, and update preferences. The command-line setup and compatibility
+fallback remain available in [headless commands](#common-commands) when the GUI
+cannot be used.
 
 <a id="settings"></a>
 <a id="automatic-screen-blanking"></a>
@@ -147,6 +149,11 @@ guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
 <a id="common-commands"></a>
 <a id="configuration"></a>
 ## Use commands for shortcuts, scripts, or a headless setup
+
+For first-time setup without the GUI, run `./configure.sh` from the extracted
+release archive before `./install.sh`. To select native control for an existing
+profile and verify it before saving, use `lg-buddy settings set tv.platform
+lg_webos`. The explicit `bscpylgtv` value remains a compatibility fallback.
 
 These commands work without opening the GUI:
 
@@ -210,7 +217,9 @@ This flow requires a compatible mutable release-bundle installation. Use the
 package manager for externally managed installations. Graphical authorization
 requires `pkexec` and a desktop authorization agent.
 
-The terminal equivalent is:
+### Headless update commands
+
+The terminal alternatives are:
 
 ```bash
 lg-buddy updates check
@@ -265,15 +274,15 @@ services, or pair a TV.
 The report excludes credentials and raw logs, but includes local TV addresses
 and configuration details. Review it before sharing. When reporting a problem,
 include what you expected, what happened, and the report. These additional
-checks can help identify the next step:
+checks include command-line alternatives for headless use:
 
 | Problem | Check |
 | --- | --- |
 | The TV is disconnected | Check its power, network, saved address, and Wake-on-LAN setting. For rejected authorization, follow [Fix a pairing problem](#fix-pairing-problem). |
 | Idle blanking does not work | `lg-buddy settings describe screen.backend`<br>`systemctl --user status LG_Buddy_screen.service`<br>`journalctl --user -u LG_Buddy_screen.service --since today` |
-| A setting shows an error | Follow its message, then use **Retry apply** when offered. If the integration is missing or disabled, rerun `./configure.sh` from the release archive. Use `lg-buddy settings describe <KEY>` to inspect an invalid saved value. |
+| A setting shows an error | Follow its message, then use **Retry apply** when offered. If a behavior is off after a declined or unavailable activation, enable it again in **Settings** after fixing the reported service or authorization issue. |
 | System sleep/wake behavior is wrong | `systemctl status LG_Buddy_lifecycle.service`<br>`journalctl -u LG_Buddy_lifecycle.service --since today` |
-| An update cannot be installed | Keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |
+| An update cannot be installed | In the GUI, use the update toast's **Copy details** action. For a headless update, keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |
 
 For deeper behavior and integration details, see [Technical references](#technical-references).
 

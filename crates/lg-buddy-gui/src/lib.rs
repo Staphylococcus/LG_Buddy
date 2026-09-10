@@ -2747,6 +2747,10 @@ pub(crate) mod controller_test_support {
             );
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
             assert!(controller.closed.get());
+            assert!(
+                !controller.window.window().is_visible(),
+                "application quit must close the window even when pairing has a dialog open",
+            );
             let _ = std::fs::remove_file(settings_path);
         }
     }

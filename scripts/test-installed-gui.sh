@@ -7,6 +7,8 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_BINARY="${1:-$REPOSITORY_ROOT/target/debug/lg-buddy}"
 GUI_BINARY="${2:-$REPOSITORY_ROOT/target/debug/lg-buddy-gui}"
+TV_FIXTURE="${3:-${LG_BUDDY_GUI_TV_FIXTURE:-}}"
+UPDATE_ARCHIVE="${4:-${LG_BUDDY_GUI_UPDATE_ARCHIVE:-}}"
 WORK_DIR="$(mktemp -d)"
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -221,7 +223,7 @@ cmp -s "$REPOSITORY_ROOT/data/icons/hicolor/scalable/apps/io.github.staphylococc
 
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
 bash "$SCRIPT_DIR/test-gui-launch.sh" "$INSTALLED_RUNTIME" "$INSTALLED_GUI"
-bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_RUNTIME" "$CONFIG_FILE"
+bash "$SCRIPT_DIR/test-release-gui-behavior.sh" "$INSTALLED_RUNTIME" "$CONFIG_FILE" "$TV_FIXTURE" "$UPDATE_ARCHIVE"
 
 mkdir -p "$(dirname "$NATIVE_TOKEN")"
 printf '%s\n' '{"access_token":"installed-gui-smoke-token"}' >"$NATIVE_TOKEN"

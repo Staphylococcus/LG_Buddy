@@ -1,5 +1,10 @@
 mod dev;
 
+#[cfg(all(feature = "gui-test-fixtures", not(debug_assertions)))]
+compile_error!("gui-test-fixtures must never be enabled in a release build");
+#[cfg(feature = "gui-test-fixtures")]
+mod gui_test_fixtures;
+
 pub mod application;
 pub mod audio;
 pub mod auth;

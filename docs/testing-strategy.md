@@ -339,9 +339,25 @@ navigation, default behavior activation after pairing, declined or unavailable
 behaviors remaining off, Settings retries, and preserving existing settings.
 Storage and service-boundary tests verify that pairing publication remains valid
 when a behavior activation fails. Installer fixtures verify handoff to the
-installed executable and preservation of existing configuration. Complete
-assembled-journey verification remains tracked in
-[#201](https://github.com/Staphylococcus/LG_Buddy/issues/201).
+installed executable and preservation of existing configuration.
+
+With the `gui_journey_tv` example supplied, the same installed smoke drives
+native webOS pairing against the existing local TLS TV fixture. It covers
+rejection, cancellation, interrupted setup, successful default activation,
+declined activation followed by Settings retry, re-pairing with retained
+preferences, and relaunch with an offline saved TV. Diagnostics is opened
+before and after pairing and while offline; its visible report, clipboard,
+and saved file must agree and exclude credentials when an observation fails.
+
+The update variant supplies a candidate from `build-release-bundle.sh` and
+debug binaries built with `gui-test-fixtures`. Only their HTTP transport is
+redirected to local GitHub-shaped responses. Saved-channel selection, fresh
+release resolution, archive and identity verification, compatibility checks,
+the shipped installer, and executable handoff use the normal application path.
+The test checks manual results with automatic checks disabled, cancelled
+confirmation, corrupt downloads, declined authorization, and successful
+replacement and relaunch with unchanged settings and credentials. The feature
+is forbidden in release builds; published artifacts use the default features.
 
 Diagnostics tests cover on-demand collection before pairing, partial reports,
 service-state distinctions, bounded subprocess reads, and credential exclusion.
@@ -364,6 +380,15 @@ keyboard-only behavior, external AT-SPI role/name/value checks, visibly distinct
 light/dark rendering, and 1x/2x window-geometry coverage. The display-backed
 renderer suite separately asserts the same GTK semantics directly at the widget
 boundary.
+
+These are controlled installed tests: systemd observations and authorization
+decisions are fixtures, and elevated installer operations run in an isolated
+user namespace and installation root. The supported-distro lanes verify the
+actual payload, desktop dependencies, authorization command boundary, and
+handoff on those distributions. They do not prove a real desktop PolicyKit
+dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
+those still require supported-host verification. NixOS development runs are
+not evidence of official NixOS support.
 
 The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
 GUI runtime dependency handling. They prove that an unconfirmed install does not

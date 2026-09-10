@@ -995,6 +995,8 @@ impl GitHubReleasesClient for UreqGitHubReleasesClient {
             request = request.set("If-None-Match", etag);
         }
 
+        #[cfg(feature = "gui-test-fixtures")]
+        let request = crate::gui_test_fixtures::request(request);
         let result = request.call();
 
         match result {

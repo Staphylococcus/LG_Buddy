@@ -49,9 +49,13 @@ jobs:
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
+          cargo build --locked -p lg-buddy --example gui_journey_tv
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
-          dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh ./target/debug/lg-buddy ./target/debug/lg-buddy-gui
+          dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh \
+              ./target/debug/lg-buddy \
+              ./target/debug/lg-buddy-gui \
+              ./target/debug/examples/gui_journey_tv
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 
       - name: Run clippy
@@ -59,8 +63,11 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
-          python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py
+          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
+
+      - name: Validate deterministic GUI GitHub fixture
+        run: python3 scripts/test_mock_github_gui.py
 
       - name: Run first-run installer smoke
         run: bash ./scripts/test-installer-first-run.sh
@@ -120,6 +127,16 @@ jobs:
           umask 0002
           ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
 
+      - name: Build GUI journey fixtures
+        env:
+          LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
+          LG_BUDDY_RELEASE_VERSION: "0.0.0"
+        run: |
+          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures
+          cargo build --locked -p lg-buddy --example gui_journey_tv --target x86_64-unknown-linux-musl
+          mkdir -p target/gui-journey-fixtures
+          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/x86_64-unknown-linux-musl/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+
       - name: Enable graphical authorization smoke namespaces
         # Ubuntu 24.04 may restrict unprivileged user namespaces through
         # AppArmor. Relax only that disposable runner setting for the
@@ -133,7 +150,9 @@ jobs:
 
       - name: Smoke test release bundle
         run: |
-          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 ./scripts/test-release-bundle.sh \
+          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+              LG_BUDDY_GUI_TV_FIXTURE="$PWD/target/gui-journey-fixtures/gui_journey_tv" \
+              ./scripts/test-release-bundle.sh \
               --skip-pip-install \
               --work-dir "$RUNNER_TEMP/release-bundle-smoke" \
               --archive "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
@@ -142,6 +161,15 @@ jobs:
               --expected-channel prerelease \
               --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ github.sha }}"
+
+      - name: Smoke test installed GUI journey
+        run: |
+          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+              bash ./scripts/test-installed-gui.sh \
+              target/gui-journey-fixtures/lg-buddy \
+              target/gui-journey-fixtures/lg-buddy-gui \
+              target/gui-journey-fixtures/gui_journey_tv \
+              "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
 
       - name: Download pinned cross-version baseline
         run: |
@@ -190,6 +218,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload GUI journey fixtures for supported-distro checks
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-gui-journey-fixtures
+          path: target/gui-journey-fixtures/*
+          if-no-files-found: error
+          retention-days: 7
+
   bundle-supported-distros:
     needs: bundle-smoke-test
     runs-on: ubuntu-24.04
@@ -210,6 +246,7 @@ jobs:
             setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
     container:
       image: ${{ matrix.image }}
+      options: --security-opt seccomp=unconfined
 
     steps:
       - name: Install ${{ matrix.name }} prerequisites
@@ -224,6 +261,12 @@ jobs:
           name: ci-release-bundle
           path: dist
 
+      - name: Download GUI journey fixtures
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-gui-journey-fixtures
+          path: gui-journey-fixtures
+
       - name: Install and launch the packaged GUI on ${{ matrix.name }}
         shell: bash
         run: |
@@ -232,6 +275,7 @@ jobs:
           extraction="$(mktemp -d)"
           tar --no-same-owner -C "$extraction" -xzf "$archive"
           bundle="$(find "$extraction" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          chmod 755 gui-journey-fixtures/*
           chmod -R a+rX "$extraction" "$GITHUB_WORKSPACE"
           runuser -u tester -- bash ./scripts/test-release-linkage.sh \
               "$bundle/lg-buddy" \
@@ -246,6 +290,13 @@ jobs:
               bash ./scripts/test-installed-gui.sh \
               "$bundle/lg-buddy" \
               "$bundle/docs/lg-buddy-gui-x86_64-unknown-linux-gnu"
+          runuser -u tester -- dbus-run-session -- xvfb-run -a -s "-screen 0 1920x1080x24" \
+              env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals LG_BUDDY_TEST_PLATFORM_CONTRACT=1 \
+              bash ./scripts/test-installed-gui.sh \
+              "$GITHUB_WORKSPACE/gui-journey-fixtures/lg-buddy" \
+              "$GITHUB_WORKSPACE/gui-journey-fixtures/lg-buddy-gui" \
+              "$GITHUB_WORKSPACE/gui-journey-fixtures/gui_journey_tv" \
+              "$archive"
 
       - name: Upgrade the pinned baseline on ${{ matrix.name }}
         shell: bash

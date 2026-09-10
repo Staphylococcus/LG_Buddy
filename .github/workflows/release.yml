@@ -104,6 +104,16 @@ jobs:
       - name: Create release bundle
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist
 
+      - name: Build GUI journey fixtures
+        env:
+          LG_BUDDY_BUILD_COMMIT: ${{ needs.validate.outputs.head_sha }}
+          LG_BUDDY_RELEASE_VERSION: "0.0.0"
+        run: |
+          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures
+          cargo build --locked -p lg-buddy --example gui_journey_tv --target x86_64-unknown-linux-musl
+          mkdir -p target/gui-journey-fixtures
+          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/x86_64-unknown-linux-musl/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+
       - name: Enable graphical authorization smoke namespaces
         # Ubuntu 24.04 may restrict unprivileged user namespaces through
         # AppArmor. Relax only that disposable runner setting for the
@@ -117,7 +127,9 @@ jobs:
 
       - name: Smoke test release bundle
         run: |
-          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 ./scripts/test-release-bundle.sh \
+          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+              LG_BUDDY_GUI_TV_FIXTURE="$PWD/target/gui-journey-fixtures/gui_journey_tv" \
+              ./scripts/test-release-bundle.sh \
               --skip-pip-install \
               --work-dir "$RUNNER_TEMP/release-bundle-smoke" \
               --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
@@ -126,6 +138,15 @@ jobs:
               --expected-channel "${{ needs.validate.outputs.channel }}" \
               --expected-target x86_64-unknown-linux-musl \
               --expected-commit "${{ needs.validate.outputs.head_sha }}"
+
+      - name: Smoke test installed GUI journey
+        run: |
+          dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+              bash ./scripts/test-installed-gui.sh \
+              target/gui-journey-fixtures/lg-buddy \
+              target/gui-journey-fixtures/lg-buddy-gui \
+              target/gui-journey-fixtures/gui_journey_tv \
+              "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz"
 
       - name: Download pinned cross-version baseline
         run: |
