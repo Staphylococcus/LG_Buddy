@@ -130,6 +130,10 @@ def parse_args() -> argparse.Namespace:
         help="also require this text in a visible accessible name or text value",
     )
     parser.add_argument(
+        "--expected-absent-text",
+        help="also wait until this text is absent from visible accessible names and text values",
+    )
+    parser.add_argument(
         "--expected-toggle",
         action="append",
         default=[],
@@ -676,11 +680,13 @@ def contains_visible_text(accessibles: list[object], expected_text: str) -> bool
     )
 
 
-def text_contract(expected_text: str):
+def text_contract(expected_text: str | None):
     accessibles = accessible_tree()
     if not any(name(item) == WINDOW_TITLE for item in accessibles):
         return None
-    return (accessibles, None) if contains_visible_text(accessibles, expected_text) else None
+    if expected_text is not None and not contains_visible_text(accessibles, expected_text):
+        return None
+    return accessibles, None
 
 
 def expected_toggles(args: argparse.Namespace) -> list[tuple[str, bool]]:
@@ -841,13 +847,16 @@ def main() -> int:
             or args.save_diagnostics
         ):
             contract = diagnostics_contract(args.expected_diagnostics_state or "report", args.expected_text)
-        elif args.expected_text:
+        elif args.expected_text or args.expected_absent_text:
             contract = text_contract(args.expected_text)
         else:
             contract = observed_contract(args.expected_state, args.expected_slider_value)
         expected_text_ok = (
             args.expected_text is None
             or contains_visible_text(contract[0], args.expected_text)
+        ) and (
+            args.expected_absent_text is None
+            or not contains_visible_text(contract[0], args.expected_absent_text)
         ) if contract is not None else False
         if contract is not None and expected_text_ok and (
             args.expected_settings_state
@@ -883,6 +892,8 @@ def main() -> int:
             except Exception:
                 continue
         expected = f" {args.expected_settings_state or args.expected_tvs_state or args.expected_diagnostics_state or args.expected_updater_state or args.expected_state} state"
+        if args.expected_absent_text is not None:
+            expected += f" without {args.expected_absent_text!r}"
         if args.expected_slider_value is not None:
             expected += f" at slider value {args.expected_slider_value:g}"
         raise SystemExit(

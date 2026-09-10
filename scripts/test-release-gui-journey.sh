@@ -97,7 +97,8 @@ case "$action" in
         if [ "$unit" = LG_Buddy_screen.service ] && [ -e "$dir/screen-fails" ]; then
             echo 'screen service failed' >&2; exit 1
         fi
-        touch "$dir/active-$scope-$unit" ;;
+        touch "$dir/active-$scope-$unit"
+        printf '%s %s %s\n' "$scope" "$action" "$unit" >> "$dir/successful-calls" ;;
     enable)
         if [[ " $* " == *" --now "* ]]; then
             if [ "$unit" = LG_Buddy_screen.service ] && [ -e "$dir/screen-fails" ]; then
@@ -192,8 +193,15 @@ SH
     journey_setting screen.idle_timeout 720
     observe_gui_state --expected-text 'Retry apply'
     rm "$WORK_DIR/services/screen-fails"
+    # A saved value and the earlier activation do not prove this retry worked.
+    : > "$WORK_DIR/services/successful-calls"
     observe_gui_state --activate-control 'Retry apply Idle timeout'
-    observe_gui_state --expected-settings-state ready --expected-settings-timeout 720
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        grep -qx 'user restart LG_Buddy_screen.service' "$WORK_DIR/services/successful-calls" && break
+        sleep 0.1
+    done
+    grep -qx 'user restart LG_Buddy_screen.service' "$WORK_DIR/services/successful-calls" || fail "Retry apply did not successfully restart the screen service."
+    observe_gui_state --expected-settings-state ready --expected-settings-timeout 720 --expected-absent-text 'Retry apply'
     observe_gui_state --select-page TVs
     observe_gui_state --activate-control 'Unpair TV…'
     observe_gui_state --expected-tvs-state unpair
