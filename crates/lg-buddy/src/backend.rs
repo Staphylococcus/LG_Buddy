@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::config::{load_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend};
 use crate::session_bus::new_session_bus_client;
 use crate::sources::desktop::gnome::{
-    GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
-    GNOME_SHELL_NAME,
+    GNOME_IDLE_INHIBITORS_REQUIRED_REASON, GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON,
+    GNOME_SCREEN_SAVER_NAME, GNOME_SESSION_MANAGER_NAME, GNOME_SHELL_NAME,
 };
 use crate::sources::desktop::wayland::{
     connect_wayland, probe_wayland_capabilities_on, WaylandProviderCapabilities,
@@ -108,6 +108,9 @@ pub trait BackendProbe {
     fn gnome_shell_available(&self) -> bool;
     fn gnome_screen_saver_available(&self) -> bool;
     fn gnome_idle_monitor_available(&self) -> bool;
+    fn gnome_session_manager_available(&self) -> bool {
+        false
+    }
     fn wayland_capabilities(&self) -> Result<WaylandProviderCapabilities, String> {
         Err("native Wayland capability probing is unavailable".to_string())
     }
@@ -166,6 +169,15 @@ impl BackendProbe for SystemBackendProbe {
         bus.name_has_owner(GNOME_IDLE_MONITOR_NAME).unwrap_or(false)
     }
 
+    fn gnome_session_manager_available(&self) -> bool {
+        let mut bus = match new_session_bus_client() {
+            Ok(bus) => bus,
+            Err(_) => return false,
+        };
+        bus.name_has_owner(GNOME_SESSION_MANAGER_NAME)
+            .unwrap_or(false)
+    }
+
     fn wayland_capabilities(&self) -> Result<WaylandProviderCapabilities, String> {
         let connection = match self.wayland_connection.borrow().as_ref() {
             Some(connection) => connection.clone(),
@@ -222,6 +234,13 @@ pub fn configured_backend_from_sources(
     Ok(config_backend.unwrap_or(ScreenBackend::Auto))
 }
 
+pub(crate) fn honor_idle_inhibitors_from_config() -> bool {
+    resolve_config_path_from_env()
+        .ok()
+        .and_then(|path| load_config(&path).ok())
+        .is_some_and(|config| config.screen_honor_idle_inhibitors.is_enabled())
+}
+
 pub fn detect_backend_from_system(
     configured: ScreenBackend,
 ) -> Result<ScreenBackend, BackendDetectionError> {
@@ -231,34 +250,49 @@ pub fn detect_backend_from_system(
 pub fn resolve_backend_from_system(
     configured: ScreenBackend,
 ) -> Result<BackendResolution, BackendDetectionError> {
-    resolve_backend_with_probe(&SystemBackendProbe::default(), configured)
+    resolve_backend_with_probe(
+        &SystemBackendProbe::default(),
+        configured,
+        honor_idle_inhibitors_from_config(),
+    )
 }
 
 pub fn detect_backend_with_probe(
     probe: &impl BackendProbe,
     configured: ScreenBackend,
+    honor_idle_inhibitors: bool,
 ) -> Result<ScreenBackend, BackendDetectionError> {
-    resolve_backend_with_probe(probe, configured).map(|resolution| resolution.backend())
+    resolve_backend_with_probe(probe, configured, honor_idle_inhibitors)
+        .map(|resolution| resolution.backend())
 }
 
 pub fn resolve_backend_with_probe(
     probe: &impl BackendProbe,
     configured: ScreenBackend,
+    honor_idle_inhibitors: bool,
 ) -> Result<BackendResolution, BackendDetectionError> {
     match configured {
         ScreenBackend::Auto => {
             let gnome_shell_available = probe.gnome_shell_available();
-            if gnome_shell_available
-                && probe.gnome_screen_saver_available()
-                && probe.gnome_idle_monitor_available()
-            {
+            let gnome_screen_saver_available =
+                gnome_shell_available && probe.gnome_screen_saver_available();
+            let gnome_idle_monitor_available =
+                gnome_screen_saver_available && probe.gnome_idle_monitor_available();
+            let gnome_core_available = gnome_shell_available
+                && gnome_screen_saver_available
+                && gnome_idle_monitor_available;
+            let gnome_available = gnome_core_available
+                && (!honor_idle_inhibitors || probe.gnome_session_manager_available());
+            if gnome_available {
                 return Ok(BackendResolution::selected(ScreenBackend::Gnome, None));
             }
 
-            let gnome_reason = if gnome_shell_available {
+            let gnome_reason = if !gnome_shell_available {
+                "GNOME Shell is not available".to_string()
+            } else if !gnome_core_available {
                 GNOME_REQUIRED_SERVICES_REASON.to_string()
             } else {
-                "GNOME Shell is not available".to_string()
+                GNOME_IDLE_INHIBITORS_REQUIRED_REASON.to_string()
             };
 
             match probe.wayland_capabilities() {
@@ -282,15 +316,27 @@ pub fn resolve_backend_with_probe(
             }
         }
         ScreenBackend::Gnome => {
-            if probe.gnome_shell_available()
-                && probe.gnome_screen_saver_available()
-                && probe.gnome_idle_monitor_available()
-            {
+            let gnome_shell_available = probe.gnome_shell_available();
+            let gnome_screen_saver_available =
+                gnome_shell_available && probe.gnome_screen_saver_available();
+            let gnome_idle_monitor_available =
+                gnome_screen_saver_available && probe.gnome_idle_monitor_available();
+            let gnome_core_available = gnome_shell_available
+                && gnome_screen_saver_available
+                && gnome_idle_monitor_available;
+            let gnome_available = gnome_core_available
+                && (!honor_idle_inhibitors || probe.gnome_session_manager_available());
+            if gnome_available {
                 Ok(BackendResolution::selected(ScreenBackend::Gnome, None))
             } else {
+                let reason = if !gnome_core_available {
+                    GNOME_REQUIRED_SERVICES_REASON
+                } else {
+                    GNOME_IDLE_INHIBITORS_REQUIRED_REASON
+                };
                 Err(BackendDetectionError::UnavailableBackend {
                     backend: ScreenBackend::Gnome,
-                    reason: GNOME_REQUIRED_SERVICES_REASON.to_string(),
+                    reason: reason.to_string(),
                 })
             }
         }
@@ -340,6 +386,7 @@ mod tests {
         gnome_shell_available: bool,
         gnome_screen_saver_available: bool,
         gnome_idle_monitor_available: bool,
+        gnome_session_manager_available: bool,
         has_swayidle: bool,
         swayidle_fallback_reason: Option<&'static str>,
         wayland_capabilities: Result<WaylandProviderCapabilities, &'static str>,
@@ -351,6 +398,7 @@ mod tests {
                 gnome_shell_available: false,
                 gnome_screen_saver_available: false,
                 gnome_idle_monitor_available: false,
+                gnome_session_manager_available: false,
                 has_swayidle: false,
                 swayidle_fallback_reason: None,
                 wayland_capabilities: Err("no Wayland compositor is available"),
@@ -376,6 +424,10 @@ mod tests {
 
         fn gnome_idle_monitor_available(&self) -> bool {
             self.gnome_idle_monitor_available
+        }
+
+        fn gnome_session_manager_available(&self) -> bool {
+            self.gnome_session_manager_available
         }
 
         fn wayland_capabilities(&self) -> Result<WaylandProviderCapabilities, String> {
@@ -473,14 +525,78 @@ mod tests {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: true,
+            gnome_session_manager_available: false,
             has_swayidle: true,
             ..FakeProbe::default()
         };
 
-        let backend =
-            detect_backend_with_probe(&probe, ScreenBackend::Auto).expect("detect gnome backend");
+        let backend = detect_backend_with_probe(&probe, ScreenBackend::Auto, false)
+            .expect("detect gnome backend");
 
         assert_eq!(backend, ScreenBackend::Gnome);
+    }
+
+    #[test]
+    fn auto_falls_back_when_honoring_inhibitors_but_session_manager_is_missing() {
+        let probe = FakeProbe {
+            gnome_shell_available: true,
+            gnome_screen_saver_available: true,
+            gnome_idle_monitor_available: true,
+            gnome_session_manager_available: false,
+            has_swayidle: true,
+            wayland_capabilities: Ok(native_wayland_capabilities()),
+            ..FakeProbe::default()
+        };
+
+        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto, true)
+            .expect("fall back from GNOME without SessionManager");
+
+        assert_eq!(resolution.backend(), ScreenBackend::Wayland);
+        assert_eq!(
+            resolution.fallback_reason(),
+            Some(
+                "GNOME unavailable: GNOME SessionManager is required when idle inhibitor honoring is enabled"
+            )
+        );
+    }
+
+    #[test]
+    fn auto_selects_gnome_when_honoring_inhibitors_and_session_manager_is_available() {
+        let probe = FakeProbe {
+            gnome_shell_available: true,
+            gnome_screen_saver_available: true,
+            gnome_idle_monitor_available: true,
+            gnome_session_manager_available: true,
+            ..FakeProbe::default()
+        };
+
+        let backend = detect_backend_with_probe(&probe, ScreenBackend::Auto, true)
+            .expect("detect GNOME with SessionManager");
+
+        assert_eq!(backend, ScreenBackend::Gnome);
+    }
+
+    #[test]
+    fn forced_gnome_requires_session_manager_when_honoring_inhibitors() {
+        let probe = FakeProbe {
+            gnome_shell_available: true,
+            gnome_screen_saver_available: true,
+            gnome_idle_monitor_available: true,
+            gnome_session_manager_available: false,
+            ..FakeProbe::default()
+        };
+
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome, true)
+            .expect_err("honoring inhibitors requires SessionManager");
+
+        assert_eq!(
+            err,
+            BackendDetectionError::UnavailableBackend {
+                backend: ScreenBackend::Gnome,
+                reason: "GNOME SessionManager is required when idle inhibitor honoring is enabled"
+                    .to_string(),
+            }
+        );
     }
 
     #[test]
@@ -491,7 +607,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto)
+        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect("detect native Wayland backend");
 
         assert_eq!(resolution.backend(), ScreenBackend::Wayland);
@@ -512,7 +628,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto)
+        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect("fall back from incomplete GNOME to native Wayland");
 
         assert_eq!(resolution.backend(), ScreenBackend::Wayland);
@@ -532,7 +648,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let backend = detect_backend_with_probe(&probe, ScreenBackend::Auto)
+        let backend = detect_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect("detect swayidle backend");
 
         assert_eq!(backend, ScreenBackend::Swayidle);
@@ -548,7 +664,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect_err("missing backend should fail");
 
         assert_eq!(
@@ -571,7 +687,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome, false)
             .expect_err("forced gnome without a full GNOME session should fail");
 
         assert_eq!(
@@ -595,7 +711,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect_err("unsupported gnome surface should fail explicitly");
 
         assert_eq!(
@@ -620,7 +736,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect_err("unsafe automatic fallback should fail");
         assert_eq!(
             err,
@@ -632,7 +748,7 @@ mod tests {
             }
         );
 
-        let explicit = detect_backend_with_probe(&probe, ScreenBackend::Swayidle)
+        let explicit = detect_backend_with_probe(&probe, ScreenBackend::Swayidle, false)
             .expect("explicit swayidle should bypass native fallback safety");
         assert_eq!(explicit, ScreenBackend::Swayidle);
     }
@@ -647,7 +763,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto)
+        let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto, false)
             .expect("fallback to swayidle when GNOME is incomplete");
 
         assert_eq!(resolution.backend(), ScreenBackend::Swayidle);
@@ -666,7 +782,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Gnome, false)
             .expect_err("forced gnome without idle monitor should fail");
 
         assert_eq!(
@@ -690,7 +806,7 @@ mod tests {
             ..FakeProbe::default()
         };
 
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Swayidle)
+        let err = detect_backend_with_probe(&probe, ScreenBackend::Swayidle, false)
             .expect_err("forced swayidle without command should fail");
 
         assert_eq!(
@@ -709,6 +825,7 @@ mod tests {
                 "ext_idle_notifier_v1 version 1 is unsupported; version 2 or newer is required",
             )),
             ScreenBackend::Wayland,
+            false,
         )
         .expect_err("forced Wayland without protocol v2 should fail");
 
@@ -728,6 +845,7 @@ mod tests {
         let backend = detect_backend_with_probe(
             &WaylandProbe(Ok(native_wayland_capabilities())),
             ScreenBackend::Wayland,
+            false,
         )
         .expect("forced Wayland should be available");
 

@@ -59,6 +59,7 @@ const SETTING_DEFINITIONS: &[SettingDefinition] = &[
     tv::PLATFORM,
     screen::BACKEND,
     screen::IDLE_BLANK,
+    screen::HONOR_IDLE_INHIBITORS,
     screen::IDLE_TIMEOUT,
     screen::RESTORE_POLICY,
     system::SLEEP_WAKE_POLICY,
@@ -264,6 +265,7 @@ mod tests {
                 "tv.platform",
                 "screen.backend",
                 "screen.idle_blank",
+                "screen.honor_idle_inhibitors",
                 "screen.idle_timeout",
                 "screen.restore_policy",
                 "system.sleep_wake_policy",
@@ -290,6 +292,10 @@ mod tests {
                 ("tv.platform", "tvs_primary_platform"),
                 ("screen.backend", "screen_backend"),
                 ("screen.idle_blank", "screen_idle_blank"),
+                (
+                    "screen.honor_idle_inhibitors",
+                    "screen_honor_idle_inhibitors",
+                ),
                 ("screen.idle_timeout", "screen_idle_timeout"),
                 ("screen.restore_policy", "screen_restore_policy"),
                 ("system.sleep_wake_policy", "system_sleep_wake_policy"),
@@ -314,8 +320,9 @@ mod tests {
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
                 "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set,unset | apply=no-runtime-apply-required | description=Control platform for the primary configured TV.",
-                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.",
+                "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
                 "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.",
+                "screen.honor_idle_inhibitors | storage=screen_honor_idle_inhibitors | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=disabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Honor keep-awake requests from video players, presentations, and other apps.",
                 "screen.idle_timeout | storage=screen_idle_timeout | fallbacks=(none) | type=integer range=1..=86400 | default=300 | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Seconds of user inactivity before LG Buddy blanks the configured screen.",
                 "screen.restore_policy | storage=screen_restore_policy | fallbacks=(none) | type=enum values=conservative,aggressive aliases=marker_only->conservative | default=conservative | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Conservative restores the TV only after LG Buddy blanked or powered it off. Aggressive also attempts to restore it without a prior LG Buddy action.",
                 "system.sleep_wake_policy | storage=system_sleep_wake_policy | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=runtime-policy-only | description=Power off the TV before the computer sleeps and restore it after waking.",
@@ -407,6 +414,7 @@ tv.input=<missing> (missing, read-write, ops: get,describe,set)
 tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)
 screen.backend=gnome (config.env, read-write, ops: get,describe,set,unset)
 screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)
+screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)
 screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
 screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)
 system.sleep_wake_policy=disabled (config.env, read-write, ops: get,describe,set,unset)
@@ -503,7 +511,7 @@ screen.backend
   supported operations: get, describe, set, unset
   allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)
   apply: restart-user-screen-service
-  description: Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.
+  description: Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.
 
 screen.idle_blank
   storage key: screen_idle_blank
@@ -516,6 +524,18 @@ screen.idle_blank
   allowed values: enabled, disabled
   apply: restart-user-screen-service
   description: Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.
+
+screen.honor_idle_inhibitors
+  storage key: screen_honor_idle_inhibitors
+  type: enum
+  current: disabled
+  source: default
+  default: disabled
+  mutability: read-write
+  supported operations: get, describe, set, unset
+  allowed values: enabled, disabled
+  apply: restart-user-screen-service
+  description: Honor keep-awake requests from video players, presentations, and other apps.
 
 screen.idle_timeout
   storage key: screen_idle_timeout
@@ -899,6 +919,7 @@ screen_restore_policy=aggressive
                 "tv.platform",
                 "screen.backend",
                 "screen.idle_blank",
+                "screen.honor_idle_inhibitors",
                 "screen.idle_timeout",
                 "screen.restore_policy",
                 "system.sleep_wake_policy",
@@ -915,6 +936,7 @@ screen_restore_policy=aggressive
                 "bscpylgtv",
                 "gnome",
                 "enabled",
+                "disabled",
                 "300",
                 "conservative",
                 "disabled",
@@ -933,6 +955,7 @@ screen_restore_policy=aggressive
                 SettingSource::Default,
                 SettingSource::Default,
                 SettingSource::Default,
+                SettingSource::Default,
                 SettingSource::ConfigEnv,
                 SettingSource::Default,
                 SettingSource::Default,
@@ -945,6 +968,7 @@ screen_restore_policy=aggressive
         for key in [
             "screen.backend",
             "screen.idle_blank",
+            "screen.honor_idle_inhibitors",
             "screen.idle_timeout",
             "screen.restore_policy",
             "system.sleep_wake_policy",

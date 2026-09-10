@@ -107,10 +107,13 @@ Mock the API surface we consume, not the whole system behind it.
 Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
-- GNOME monitor/runtime tests should use the private session-bus harness for ScreenSaver signals and Mutter idletime
+- GNOME monitor/runtime tests should use the private session-bus harness for
+  ScreenSaver signals, Mutter idletime, and SessionManager idle-inhibition
+  snapshots and signals
 - native Wayland provider tests should model registry discovery, protocol-version
-  rejection, every advertised seat, resumed-only activity, and fatal provider
-  loss without requiring a compositor
+  rejection, every advertised seat, input-notification resumed activity, separate
+  inhibitor-aware permission notifications, and fatal provider loss without
+  requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
 
@@ -247,11 +250,15 @@ Secondary concern:
 Examples:
 
 - GNOME signal mapping
-- GNOME monitor setup, sender ownership, and idletime polling over the
-  session-bus seam
+- GNOME monitor setup, sender ownership, idletime polling, and one-shot
+  user-active watches over the session-bus seam
+- delayed inhibitor replies crossing the blanking deadline, and inhibitor
+  release resetting Mutter's idle counter without reporting user input
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
+- opt-in idle inhibition at startup, overlapping inhibitors, a fresh timeout
+  after the last release, and release never acting as restore activity
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
   restore trigger, while observation-time tests cover pre-lock, post-lock grace,
@@ -271,6 +278,9 @@ cases report a precise fallback reason, and `auto` retains the
 GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
 keep the static x86_64 musl build and release-bundle smoke test green, including
 preservation and deprecation reporting for an existing `swayidle` config.
+For inhibitor changes, start real video playback before the monitor: disabled
+must still blank, enabled must remain visible past the timeout, and stopping
+playback must leave the screen visible for a fresh full timeout before blanking.
 
 ### Gamepad activity
 

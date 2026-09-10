@@ -816,7 +816,13 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(!rows.iter().any(|row| row.is::<adw::ExpanderRow>()));
     assert!(!view.updater.presented.get());
     assert_eq!(view.groups.borrow().len(), 3);
-    assert_eq!(rows.len(), 7);
+    assert_eq!(rows.len(), 8);
+    assert!(
+        descendants(rows[1].upcast_ref())
+            .iter()
+            .any(|widget| widget.accessible_role() == gtk::AccessibleRole::Switch),
+        "idle inhibitor row contains an accessible toggle"
+    );
     assert!(widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<gtk::Label>().ok())
@@ -855,7 +861,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             .iter()
             .filter(|row| matches!(row.editor, NativeEditor::Toggle(_)))
             .count(),
-        3
+        4
     );
     assert_eq!(
         view.rows
@@ -900,7 +906,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(view.rows.borrow().iter().all(|row| row.row.is_sensitive()));
     // A new edit supersedes this refresh; its stale read must not replace the value.
     intents.borrow_mut().clear();
-    let entry = match &view.rows.borrow()[2].editor {
+    let entry = match &view.rows.borrow()[3].editor {
         NativeEditor::Number { entry, .. } => entry.clone(),
         _ => unreachable!(),
     };
@@ -929,7 +935,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .is_none());
     view.render(writing.presentation());
     assert!(view.rows.borrow().iter().all(|row| row.row.is_sensitive()));
-    assert!(!view.rows.borrow()[2].feedback.is_visible());
+    assert!(!view.rows.borrow()[3].feedback.is_visible());
     assert_eq!(
         view.groups.borrow()[0]
             .measure(gtk::Orientation::Vertical, 600)
@@ -970,7 +976,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         "failure restores the previous effective value"
     );
     assert!(entry.is_sensitive());
-    assert!(view.rows.borrow()[2].feedback.is_visible());
+    assert!(view.rows.borrow()[3].feedback.is_visible());
     assert!(intents.borrow().is_empty(), "restoration emits no write");
     match &view.rows.borrow()[0].editor {
         NativeEditor::Toggle(switch) => switch.set_active(false),
@@ -983,7 +989,18 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             enabled: false,
         })
     );
-    match &view.rows.borrow()[6].editor {
+    match &view.rows.borrow()[1].editor {
+        NativeEditor::Toggle(switch) => switch.set_active(true),
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::SetEnabled {
+            setting: BehaviorSetting::ScreenHonorIdleInhibitors,
+            enabled: true,
+        })
+    );
+    match &view.rows.borrow()[7].editor {
         NativeEditor::Choice(choice) => choice.set_selected(1),
         _ => unreachable!(),
     }
@@ -1038,6 +1055,26 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     // Keep its native widget/draft and hide its associated errors too.
     entry.grab_focus();
     intents.borrow_mut().clear();
+    let swayidle = SettingsPresentation::from_store(
+        &ConfigEnvReader::parse(
+            "/unused/config.env",
+            "screen_idle_blank=enabled\nscreen_backend=swayidle\n",
+        )
+        .into_store(),
+    );
+    view.render(&swayidle);
+    assert!(
+        !rows[1].is_visible(),
+        "native inhibitor setting is hidden for swayidle"
+    );
+    assert!(
+        rows[2].is_visible(),
+        "the selected swayidle backend remains visible"
+    );
+    assert!(
+        rows[3].is_visible(),
+        "idle timeout remains visible for swayidle"
+    );
     let disabled = SettingsPresentation::from_store(
         &ConfigEnvReader::parse(
             "/unused/config.env",
@@ -1048,11 +1085,12 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     view.render(&disabled);
     pump_until(|| !entry.is_mapped());
     assert!(rows[0].is_visible(), "Idle blanking remains available");
-    assert!(!rows[1].is_visible(), "Desktop integration is hidden");
-    assert!(!rows[2].is_visible(), "Idle timeout is hidden");
-    assert!(rows[3].is_visible(), "Restore policy remains available");
-    assert!(!view.rows.borrow()[1].problem.is_visible());
-    assert!(!view.rows.borrow()[2].feedback.is_visible());
+    assert!(!rows[1].is_visible(), "Idle inhibitor preference is hidden");
+    assert!(!rows[2].is_visible(), "Desktop integration is hidden");
+    assert!(!rows[3].is_visible(), "Idle timeout is hidden");
+    assert!(rows[4].is_visible(), "Restore policy remains available");
+    assert!(!view.rows.borrow()[2].problem.is_visible());
+    assert!(!view.rows.borrow()[3].feedback.is_visible());
     assert!(
         intents.borrow().is_empty(),
         "hiding rows must not save a draft"
@@ -1062,9 +1100,9 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
 
     view.render(failed.presentation());
     pump_until(|| entry.is_mapped());
-    assert!(rows[1].is_visible());
     assert!(rows[2].is_visible());
-    assert!(view.rows.borrow()[2].feedback.is_visible());
+    assert!(rows[3].is_visible());
+    assert!(view.rows.borrow()[3].feedback.is_visible());
     assert_eq!(entry.text(), "721", "hiding must preserve the editor draft");
     assert!(view
         .rows
@@ -1125,7 +1163,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .content(view.widget())
         .build();
     window.present();
-    let choice = match &view.rows.borrow()[1].editor {
+    let choice = match &view.rows.borrow()[2].editor {
         NativeEditor::Choice(choice) => choice.clone(),
         _ => unreachable!(),
     };
@@ -1179,7 +1217,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .unwrap()
         .success());
     pump_until(|| !intents.borrow().is_empty());
-    let expected = ready.presentation().groups()[0].rows()[1]
+    let expected = ready.presentation().groups()[0].rows()[2]
         .editor()
         .choices()
         .unwrap()

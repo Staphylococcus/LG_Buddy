@@ -17,6 +17,7 @@ use support::{ExecutableScript, TestConfigFile, TestEnv};
 
 const BEHAVIOR_CONFIG: &str = "screen_backend=auto
 screen_idle_blank=enabled
+screen_honor_idle_inhibitors=disabled
 screen_idle_timeout=300
 screen_restore_policy=conservative
 system_sleep_wake_policy=enabled
@@ -92,7 +93,7 @@ fn environment_backend_edits_all_behavior_settings_without_a_tv_and_matches_cli(
             .iter()
             .map(|group| group.rows().len())
             .sum::<usize>(),
-        7,
+        8,
         "the Settings view is independent of TV availability"
     );
 
@@ -112,6 +113,14 @@ fn environment_backend_edits_all_behavior_settings_without_a_tv_and_matches_cli(
             },
             "screen.idle_blank",
             "disabled",
+        ),
+        (
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenHonorIdleInhibitors,
+                enabled: true,
+            },
+            "screen.honor_idle_inhibitors",
+            "enabled",
         ),
         (
             SettingsIntent::Commit {

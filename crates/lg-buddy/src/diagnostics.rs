@@ -318,6 +318,10 @@ fn gnome_interface_observation() -> String {
         ("GNOME Shell", "org.gnome.Shell"),
         ("GNOME ScreenSaver", "org.gnome.ScreenSaver"),
         ("GNOME IdleMonitor", "org.gnome.Mutter.IdleMonitor"),
+        (
+            "GNOME SessionManager (required for idle inhibitor honoring)",
+            "org.gnome.SessionManager",
+        ),
     ];
     let mut body = format!("using {command}: ");
     for (index, (label, name)) in names.iter().enumerate() {

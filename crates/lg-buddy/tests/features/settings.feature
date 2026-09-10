@@ -11,6 +11,7 @@ Feature: Settings CLI
     And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.backend=auto (config.env, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
+    And stdout contains "screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "system.sleep_wake_policy=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "updates.auto_check=enabled (default, read-write, ops: get,describe,set,unset)"
@@ -131,6 +132,15 @@ Feature: Settings CLI
     Then the command succeeds
     And stdout contains "screen.idle_blank"
     And stdout contains "storage key: screen_idle_blank"
+    And stdout contains "allowed values: enabled, disabled"
+    And stdout contains "apply: restart-user-screen-service"
+
+  Scenario: settings describe shows idle inhibitor policy operations
+    Given a temporary LG Buddy config using input HDMI_2
+    When I run the command "settings describe screen.honor_idle_inhibitors"
+    Then the command succeeds
+    And stdout contains "screen.honor_idle_inhibitors"
+    And stdout contains "storage key: screen_honor_idle_inhibitors"
     And stdout contains "allowed values: enabled, disabled"
     And stdout contains "apply: restart-user-screen-service"
 

@@ -39,6 +39,7 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
+- `org.gnome.SessionManager` when testing **Allow apps to prevent idle blanking**
 
 The C toolchain is required because `cargo build` now compiles vendored
 `libdbus` as part of the dependency graph. On common Linux distributions that

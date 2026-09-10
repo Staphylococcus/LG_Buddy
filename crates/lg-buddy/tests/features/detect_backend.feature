@@ -27,6 +27,26 @@ Feature: Detect backend
     Then the command succeeds
     And stdout is "gnome"
 
+  Scenario: Automatic falls back when GNOME cannot honor keep-awake requests
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And honoring app keep-awake requests is "enabled"
+    And swayidle is installed
+    When I run the command "detect-backend"
+    Then the command succeeds
+    And stdout is "swayidle"
+
+  Scenario: Explicit GNOME reports a missing keep-awake dependency
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And honoring app keep-awake requests is "enabled"
+    And the backend override is "gnome"
+    When I run the command "detect-backend"
+    Then the command fails
+    And stderr contains "GNOME SessionManager is required"
+
   Scenario: Missing GNOME idle monitor is reported explicitly when no fallback exists
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated

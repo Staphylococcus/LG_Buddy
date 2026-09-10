@@ -122,6 +122,37 @@ pub enum ScreenIdleBlankPolicy {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenHonorIdleInhibitorsPolicy {
+    Enabled,
+    Disabled,
+}
+
+impl ScreenHonorIdleInhibitorsPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+impl FromStr for ScreenHonorIdleInhibitorsPolicy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "enabled" => Ok(Self::Enabled),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(()),
+        }
+    }
+}
+
 impl ScreenIdleBlankPolicy {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -313,6 +344,7 @@ pub struct Config {
     pub screen_idle_timeout: u64,
     pub screen_restore_policy: ScreenRestorePolicy,
     pub screen_idle_blank: ScreenIdleBlankPolicy,
+    pub screen_honor_idle_inhibitors: ScreenHonorIdleInhibitorsPolicy,
     pub system_sleep_wake_policy: SystemSleepWakePolicy,
 }
 
@@ -520,6 +552,11 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
         .and_then(|value| value.parse::<ScreenIdleBlankPolicy>().ok())
         .unwrap_or(ScreenIdleBlankPolicy::Enabled);
 
+    let screen_honor_idle_inhibitors = entries
+        .get("screen_honor_idle_inhibitors")
+        .and_then(|value| value.parse::<ScreenHonorIdleInhibitorsPolicy>().ok())
+        .unwrap_or(ScreenHonorIdleInhibitorsPolicy::Disabled);
+
     let system_sleep_wake_policy = entries
         .get("system_sleep_wake_policy")
         .and_then(|value| value.parse::<SystemSleepWakePolicy>().ok())
@@ -534,6 +571,7 @@ pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
         screen_idle_timeout,
         screen_restore_policy,
         screen_idle_blank,
+        screen_honor_idle_inhibitors,
         system_sleep_wake_policy,
     })
 }
@@ -582,9 +620,9 @@ fn sanitize_config_value(value: &str) -> String {
 mod tests {
     use super::{
         parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
-        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend, ScreenIdleBlankPolicy,
-        ScreenRestorePolicy, SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT,
-        MAX_IDLE_TIMEOUT,
+        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend,
+        ScreenHonorIdleInhibitorsPolicy, ScreenIdleBlankPolicy, ScreenRestorePolicy,
+        SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -786,6 +824,7 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
                 screen_idle_timeout: DEFAULT_IDLE_TIMEOUT,
                 screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
                 screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
+                screen_honor_idle_inhibitors: ScreenHonorIdleInhibitorsPolicy::Disabled,
                 system_sleep_wake_policy: SystemSleepWakePolicy::Enabled,
             }
         );
@@ -817,6 +856,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             ScreenRestorePolicy::Aggressive
         );
         assert_eq!(config.screen_idle_blank, ScreenIdleBlankPolicy::Disabled);
+        assert_eq!(
+            config.screen_honor_idle_inhibitors,
+            ScreenHonorIdleInhibitorsPolicy::Disabled
+        );
         assert_eq!(
             config.system_sleep_wake_policy,
             SystemSleepWakePolicy::Disabled
@@ -864,6 +907,10 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
             ScreenRestorePolicy::MarkerOnly
         );
         assert_eq!(config.screen_idle_blank, ScreenIdleBlankPolicy::Enabled);
+        assert_eq!(
+            config.screen_honor_idle_inhibitors,
+            ScreenHonorIdleInhibitorsPolicy::Disabled
+        );
         assert_eq!(
             config.system_sleep_wake_policy,
             SystemSleepWakePolicy::Enabled
@@ -966,6 +1013,45 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         assert!(!disabled.screen_idle_blank.is_enabled());
         assert_eq!(ScreenIdleBlankPolicy::Enabled.as_str(), "enabled");
         assert_eq!(ScreenIdleBlankPolicy::Disabled.as_str(), "disabled");
+    }
+
+    #[test]
+    fn parse_accepts_screen_honor_idle_inhibitors_policy_values() {
+        let enabled = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            screen_honor_idle_inhibitors=enabled
+            ",
+        )
+        .expect("parse enabled idle inhibitor policy");
+
+        let disabled = parse_config(
+            "\
+            tv_ip=192.168.1.42
+            tv_mac=aa:bb:cc:dd:ee:ff
+            input=HDMI_1
+            screen_honor_idle_inhibitors=disabled
+            ",
+        )
+        .expect("parse disabled idle inhibitor policy");
+
+        assert_eq!(
+            enabled.screen_honor_idle_inhibitors,
+            ScreenHonorIdleInhibitorsPolicy::Enabled
+        );
+        assert!(enabled.screen_honor_idle_inhibitors.is_enabled());
+        assert_eq!(
+            disabled.screen_honor_idle_inhibitors,
+            ScreenHonorIdleInhibitorsPolicy::Disabled
+        );
+        assert!(!disabled.screen_honor_idle_inhibitors.is_enabled());
+        assert_eq!(ScreenHonorIdleInhibitorsPolicy::Enabled.as_str(), "enabled");
+        assert_eq!(
+            ScreenHonorIdleInhibitorsPolicy::Disabled.as_str(),
+            "disabled"
+        );
     }
 
     #[test]

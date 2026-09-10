@@ -177,6 +177,10 @@ mod tests {
                 presentation.row_visible(BehaviorSetting::ScreenIdleTimeout),
                 enabled
             );
+            assert_eq!(
+                presentation.row_visible(BehaviorSetting::ScreenHonorIdleInhibitors),
+                enabled
+            );
             assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
             let toggle = presentation.groups()[0]
                 .rows()
@@ -196,6 +200,7 @@ mod tests {
         for (key, value, restarts, enables, disables) in [
             ("screen.backend", "gnome", 1, 0, 0),
             ("screen.idle_blank", "disabled", 1, 0, 0),
+            ("screen.honor_idle_inhibitors", "enabled", 1, 0, 0),
             ("screen.idle_timeout", "600", 1, 0, 0),
             ("screen.restore_policy", "aggressive", 1, 0, 0),
             ("system.sleep_wake_policy", "disabled", 0, 0, 0),

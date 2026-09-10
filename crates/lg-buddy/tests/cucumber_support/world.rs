@@ -93,6 +93,13 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_idle_blank={policy}"));
     }
 
+    pub fn set_honor_idle_inhibitors(&self, policy: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_honor_idle_inhibitors={policy}"));
+    }
+
     pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
         self.ensure_env()
             .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
@@ -555,6 +562,21 @@ exit 1\n",
             .set_idle_monitor_available(value);
     }
 
+    pub fn set_gnome_idle_inhibitors(&mut self, count: u32) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .set_idle_inhibitor_count(count);
+    }
+
+    pub fn schedule_gnome_idle_inhibitors(&mut self, count: u32, after_secs: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .schedule_idle_inhibitor_count(std::time::Duration::from_secs_f64(after_secs), count);
+    }
+
+    pub fn delay_next_gnome_inhibited_query(&mut self, delay_secs: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .delay_next_inhibited_query(std::time::Duration::from_secs_f64(delay_secs));
+    }
+
     pub fn gnome_monitor_emit_idle(&mut self) {
         self.ensure_mock_session_bus_idle_monitor()
             .emit_screen_saver_idle();
@@ -582,6 +604,11 @@ exit 1\n",
             idle_monitor.set_idle_monitor_idletime(last);
         }
         idle_monitor.set_idle_monitor_idletime_plan(values);
+    }
+
+    pub fn gnome_real_input_occurs_after_secs(&mut self, seconds: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .schedule_user_activity(std::time::Duration::from_secs_f64(seconds));
     }
 
     pub fn gnome_monitor_stays_open_for_secs(&mut self, seconds: f64) {

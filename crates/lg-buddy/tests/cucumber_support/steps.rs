@@ -21,6 +21,29 @@ fn screen_idle_blanking(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_idle_blank(&policy);
 }
 
+#[given(regex = r#"honoring app keep-awake requests is "(enabled|disabled)""#)]
+fn honor_idle_inhibitors(world: &mut LgBuddyWorld, policy: String) {
+    world.set_honor_idle_inhibitors(&policy);
+}
+
+#[given(regex = r#"GNOME has (\d+) idle inhibitors"#)]
+fn gnome_idle_inhibitors(world: &mut LgBuddyWorld, count: u32) {
+    world.set_gnome_idle_inhibitors(count);
+}
+
+#[given(regex = r#"GNOME changes to (\d+) idle inhibitors after ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn scheduled_gnome_idle_inhibitors(world: &mut LgBuddyWorld, count: u32, seconds: String) {
+    world.schedule_gnome_idle_inhibitors(count, seconds.parse().expect("inhibitor delay"));
+}
+
+#[given(regex = r#"GNOME delays the next inhibited query by ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn gnome_delays_next_inhibited_query(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid GNOME inhibitor query delay `{seconds}`: {err}"));
+    world.delay_next_gnome_inhibited_query(seconds);
+}
+
 #[given(regex = r#"the idle timeout is (\d+) seconds"#)]
 fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);
@@ -312,6 +335,14 @@ fn gnome_monitor_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: Strin
         .parse::<f64>()
         .unwrap_or_else(|err| panic!("invalid GNOME monitor sleep `{seconds}`: {err}"));
     world.gnome_monitor_stays_open_for_secs(seconds);
+}
+
+#[given(regex = r#"genuine desktop input occurs after ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn genuine_desktop_input_occurs_after_seconds(world: &mut LgBuddyWorld, seconds: String) {
+    let seconds = seconds
+        .parse::<f64>()
+        .unwrap_or_else(|err| panic!("invalid GNOME desktop input delay `{seconds}`: {err}"));
+    world.gnome_real_input_occurs_after_secs(seconds);
 }
 
 #[given(regex = r#"gamepad activity is observed after ([0-9]+(?:\.[0-9]+)?) seconds"#)]

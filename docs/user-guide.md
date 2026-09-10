@@ -104,6 +104,11 @@ Open **Settings** to adapt the TV to your routine:
 - To wait longer before blanking, increase **Screen → Idle timeout**. The value
   is in seconds: `600` gives you ten minutes. The default is five minutes.
 - To keep the panel on while you are away, turn off **Idle blanking**.
+- To keep the panel on during video playback or presentations, turn on
+  **Allow apps to prevent idle blanking**. It is off by default. Apps must
+  request that the desktop stay awake; when the last request ends, LG Buddy
+  starts a fresh idle timeout. A request does not restore an already blanked
+  TV or prevent blanking when you lock the session.
 - To stop the TV following PC sleep and wake, turn off
   **Sleep & Wake → TV sleep & wake**. Enable it to power the TV off before
   sleep and restore it after wake.
@@ -129,7 +134,12 @@ Leave **Desktop integration** at **Automatic** unless you need to select a
 particular compatible desktop. See the [session backend model](session-backend-model.md)
 for compatibility details, including the deprecated `swayidle` option.
 
-Turning off **Idle blanking** hides **Desktop integration** and **Idle timeout**
+This preference applies to the native GNOME and Wayland integrations. The
+deprecated `swayidle` integration always honors app inhibition, including when
+**Automatic** falls back to it. Selecting `swayidle` hides this preference.
+
+Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**,
+**Desktop integration**, and **Idle timeout**
 while keeping their saved values for when you turn it back on. **Restore policy**
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.

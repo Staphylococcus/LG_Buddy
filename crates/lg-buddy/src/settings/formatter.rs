@@ -152,6 +152,9 @@ impl SettingsFormatter {
             if let Some(notice) = screen::deprecation_notice(&configured) {
                 writeln!(writer, "  deprecation: {notice}.").map_err(output_error)?;
             }
+            if let Some(notice) = screen::swayidle_inhibitor_notice(&configured) {
+                writeln!(writer, "  compatibility: {notice}.").map_err(output_error)?;
+            }
         }
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
         writeln!(writer, "  default: {}", definition.default_value_label())
