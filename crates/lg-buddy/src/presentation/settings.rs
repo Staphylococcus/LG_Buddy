@@ -191,14 +191,35 @@ impl SettingsPresentation {
     /// Keep dependent settings intact while only presenting controls that apply.
     /// Missing or invalid blanking values retain the controls for diagnosis.
     pub fn row_visible(&self, setting: BehaviorSetting) -> bool {
-        !matches!(
+        if !matches!(
             setting,
-            BehaviorSetting::ScreenBackend | BehaviorSetting::ScreenIdleTimeout
-        ) || !matches!(
+            BehaviorSetting::ScreenBackend
+                | BehaviorSetting::ScreenHonorIdleInhibitors
+                | BehaviorSetting::ScreenIdleTimeout
+        ) {
+            return true;
+        }
+
+        if matches!(
             self.row(BehaviorSetting::ScreenIdleBlank)
                 .map(SettingsRow::editor),
             Some(SettingsEditor::Toggle { value: Some(false) })
-        )
+        ) {
+            return false;
+        }
+
+        if setting != BehaviorSetting::ScreenHonorIdleInhibitors {
+            return true;
+        }
+
+        let backend_is_swayidle = self
+            .row(BehaviorSetting::ScreenBackend)
+            .and_then(|row| {
+                let selected = row.editor().selected_choice()?;
+                row.editor().choices()?.get(selected)
+            })
+            .is_some_and(|choice| choice.value() == "swayidle");
+        !backend_is_swayidle
     }
 
     pub(crate) fn row(&self, setting: BehaviorSetting) -> Option<&SettingsRow> {
@@ -492,6 +513,7 @@ pub(crate) fn groups_from_store(store: &SettingsStore) -> Vec<SettingsGroup> {
             "Choose when LG Buddy blanks and restores your TV screen.",
             vec![
                 row_from_effective(setting("screen.idle_blank")),
+                row_from_effective(setting("screen.honor_idle_inhibitors")),
                 row_from_effective(setting("screen.backend")),
                 row_from_effective(setting("screen.idle_timeout")),
                 row_from_effective(setting("screen.restore_policy")),
@@ -573,6 +595,7 @@ fn editor_for(
 ) -> SettingsEditor {
     match setting {
         BehaviorSetting::ScreenIdleBlank
+        | BehaviorSetting::ScreenHonorIdleInhibitors
         | BehaviorSetting::SystemSleepWakePolicy
         | BehaviorSetting::UpdatesAutoCheck => SettingsEditor::Toggle {
             value: effective.value().and_then(|value| match value {
@@ -621,6 +644,7 @@ fn setting_title(key: &str) -> &'static str {
     match key {
         "screen.backend" => "Desktop integration",
         "screen.idle_blank" => "Idle blanking",
+        "screen.honor_idle_inhibitors" => "Allow apps to prevent idle blanking",
         "screen.idle_timeout" => "Idle timeout",
         "screen.restore_policy" => "Restore policy",
         "system.sleep_wake_policy" => "TV sleep & wake",

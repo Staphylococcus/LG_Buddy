@@ -64,6 +64,13 @@ validate_screen_idle_blank() {
     esac
 }
 
+validate_screen_honor_idle_inhibitors() {
+    case "$1" in
+        enabled|disabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 validate_restore_policy() {
     case "$1" in
         marker_only|conservative|aggressive) return 0 ;;
@@ -98,6 +105,7 @@ current_input="HDMI_1"
 current_tv_platform="lg_webos"
 current_screen_backend="$LG_BUDDY_DEFAULT_SCREEN_BACKEND"
 current_screen_idle_blank="$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK"
+current_screen_honor_idle_inhibitors="$LG_BUDDY_DEFAULT_SCREEN_HONOR_IDLE_INHIBITORS"
 current_screen_idle_timeout="$LG_BUDDY_DEFAULT_IDLE_TIMEOUT"
 current_screen_restore_policy="$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY"
 current_system_sleep_wake_policy="$LG_BUDDY_DEFAULT_SYSTEM_SLEEP_WAKE_POLICY"
@@ -113,6 +121,7 @@ if lg_buddy_load_config >/dev/null 2>&1; then
     current_tv_platform="$tv_platform"
     current_screen_backend="$screen_backend"
     current_screen_idle_blank="$screen_idle_blank"
+    current_screen_honor_idle_inhibitors="$screen_honor_idle_inhibitors"
     current_screen_idle_timeout="$screen_idle_timeout"
     current_screen_restore_policy="$(normalize_restore_policy "$screen_restore_policy")"
     current_system_sleep_wake_policy="$system_sleep_wake_policy"
@@ -134,6 +143,7 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     tv_platform="${LG_BUDDY_TV_PLATFORM:-$current_tv_platform}"
     screen_backend="${LG_BUDDY_SCREEN_BACKEND:-$current_screen_backend}"
     screen_idle_blank="$current_screen_idle_blank"
+    screen_honor_idle_inhibitors="${LG_BUDDY_SCREEN_HONOR_IDLE_INHIBITORS:-$current_screen_honor_idle_inhibitors}"
     screen_idle_timeout="${LG_BUDDY_SCREEN_IDLE_TIMEOUT:-$current_screen_idle_timeout}"
     screen_restore_policy="${LG_BUDDY_SCREEN_RESTORE_POLICY:-$current_screen_restore_policy}"
     system_sleep_wake_policy="${LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY:-$current_system_sleep_wake_policy}"
@@ -168,6 +178,10 @@ if [ "${LG_BUDDY_NONINTERACTIVE:-0}" = "1" ]; then
     }
     validate_screen_idle_blank "$screen_idle_blank" || {
         echo "screen_idle_blank must be one of enabled or disabled."
+        exit 1
+    }
+    validate_screen_honor_idle_inhibitors "$screen_honor_idle_inhibitors" || {
+        echo "LG_BUDDY_SCREEN_HONOR_IDLE_INHIBITORS must be one of enabled or disabled."
         exit 1
     }
     validate_restore_policy "$screen_restore_policy" || {
@@ -370,8 +384,28 @@ else
                 *) echo "  Please enter a number between 1 and 2." ;;
             esac
         done
+
+        if [ "$screen_backend" != "swayidle" ]; then
+            case "$current_screen_honor_idle_inhibitors" in
+                enabled) default_honor_idle_inhibitors_choice="Y" ;;
+                disabled) default_honor_idle_inhibitors_choice="n" ;;
+                *) default_honor_idle_inhibitors_choice="n" ;;
+            esac
+
+            while true; do
+                HONOR_IDLE_INHIBITORS_CHOICE="$(prompt_with_default "Allow apps to prevent idle blanking? (native desktop integrations only) (y/N)" "$default_honor_idle_inhibitors_choice")"
+                case "$HONOR_IDLE_INHIBITORS_CHOICE" in
+                    [Yy]*|1|true|TRUE|True|yes|YES|Yes) screen_honor_idle_inhibitors="enabled"; break ;;
+                    ""|[Nn]*|0|false|FALSE|False|no|NO|No) screen_honor_idle_inhibitors="disabled"; break ;;
+                    *) echo "  Please answer yes or no." ;;
+                esac
+            done
+        else
+            screen_honor_idle_inhibitors="$current_screen_honor_idle_inhibitors"
+        fi
     else
         screen_backend="$current_screen_backend"
+        screen_honor_idle_inhibitors="$current_screen_honor_idle_inhibitors"
         screen_idle_timeout="$current_screen_idle_timeout"
         screen_restore_policy="$current_screen_restore_policy"
     fi
@@ -388,6 +422,7 @@ echo "  TV MAC:              $tv_mac"
 echo "  PC Input:            $input"
 echo "  TV Platform:         $tv_platform"
 echo "  Screen Idle Blank:   $screen_idle_blank"
+echo "  Honor Idle Inhibitors: $screen_honor_idle_inhibitors"
 echo "  Screen Backend:      $screen_backend"
 echo "  Screen Idle Timeout: $screen_idle_timeout"
 echo "  Screen Restore:      $screen_restore_policy"
@@ -422,6 +457,7 @@ tvs_primary_mac=$tv_mac
 tvs_primary_input=$input
 tvs_primary_platform=bscpylgtv
 screen_idle_blank=$screen_idle_blank
+screen_honor_idle_inhibitors=$screen_honor_idle_inhibitors
 screen_backend=$screen_backend
 screen_idle_timeout=$screen_idle_timeout
 screen_restore_policy=$screen_restore_policy

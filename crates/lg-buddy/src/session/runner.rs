@@ -14,8 +14,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::backend::{
-    configured_backend_from_env_or_config, resolve_backend_with_probe, BackendDetectionError,
-    BackendResolution, BackendSelectionError, SystemBackendProbe, SWAYIDLE_DEPRECATION_NOTICE,
+    configured_backend_from_env_or_config, honor_idle_inhibitors_from_config,
+    resolve_backend_with_probe, BackendDetectionError, BackendResolution, BackendSelectionError,
+    SystemBackendProbe, SWAYIDLE_DEPRECATION_NOTICE,
 };
 use crate::commands::{run_sleep_pre_for_event, run_system_resume};
 use crate::config::{
@@ -565,7 +566,8 @@ fn prepare_monitor_backend(
     probe: &mut SystemBackendProbe,
     configured: ScreenBackend,
 ) -> Result<(BackendResolution, Option<wayland_client::Connection>), BackendDetectionError> {
-    let resolution = resolve_backend_with_probe(probe, configured)?;
+    let resolution =
+        resolve_backend_with_probe(probe, configured, honor_idle_inhibitors_from_config())?;
     let connection = probe.take_wayland_connection();
     Ok((resolution, connection))
 }
@@ -758,7 +760,8 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
 ) -> Result<(), SessionRunnerError> {
-    let source = GnomeSource::connect().map_err(map_gnome_source_error)?;
+    let honor_idle_inhibitors = honor_idle_inhibitors_from_config();
+    let source = GnomeSource::connect(honor_idle_inhibitors).map_err(map_gnome_source_error)?;
 
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
 
@@ -766,6 +769,7 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
         writer,
         dispatcher,
         ScreenBackend::Gnome,
+        honor_idle_inhibitors,
         move |sender, latest_observation| {
             spawn_gnome_monitor_thread(source, sender, latest_observation)
         },
@@ -778,13 +782,20 @@ fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
     connection: wayland_client::Connection,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
+    let honor_idle_inhibitors = honor_idle_inhibitors_from_config();
 
     run_native_session_monitor(
         writer,
         dispatcher,
         ScreenBackend::Wayland,
+        honor_idle_inhibitors,
         move |sender, latest_observation| {
-            spawn_wayland_monitor_thread(connection, sender, latest_observation)
+            spawn_wayland_monitor_thread(
+                connection,
+                honor_idle_inhibitors,
+                sender,
+                latest_observation,
+            )
         },
     )
 }
@@ -793,6 +804,7 @@ fn run_native_session_monitor<W, E, S>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
 ) -> Result<(), SessionRunnerError>
 where
@@ -804,6 +816,7 @@ where
         writer,
         dispatcher,
         backend,
+        honor_idle_inhibitors,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
@@ -813,6 +826,7 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -827,6 +841,7 @@ where
         dispatcher,
         backend,
         InitialBlankTrigger::Deadline,
+        honor_idle_inhibitors,
         spawn_monitor,
         spawn_lock_monitor,
     )
@@ -843,6 +858,7 @@ fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     initial_blank_trigger: InitialBlankTrigger,
+    honor_idle_inhibitors: bool,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -871,6 +887,12 @@ where
         InactivityEngine::new_with_power_off_after(blank_after, power_off_after, started_at)
     };
 
+    // No automatic blanking until an enabled native source has established
+    // permission, including when inhibition predates monitor startup.
+    if honor_idle_inhibitors {
+        inactivity.set_idle_blanking_allowed(false, started_at);
+    }
+
     let (sender, receiver) = mpsc::channel();
     let latest_inactivity = Arc::new(LatestInactivityObservation::default());
     let monitor_handle = spawn_monitor(sender.clone(), Arc::clone(&latest_inactivity));
@@ -895,6 +917,15 @@ where
         };
 
         match message {
+            RunnerMessage::IdleBlankingPermission {
+                allowed,
+                source,
+                observed_at,
+            } => {
+                if honor_idle_inhibitors && source == EventSource::DesktopSession {
+                    inactivity.set_idle_blanking_allowed(allowed, observed_at);
+                }
+            }
             RunnerMessage::InactivityObservationReady => {
                 if let Some(observation) = latest_inactivity.take() {
                     handle_inactivity_observation(
@@ -1027,6 +1058,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         dispatcher,
         ScreenBackend::Swayidle,
         InitialBlankTrigger::Provider,
+        false,
         move |sender, _latest_observation| {
             thread::spawn(move || {
                 let event_sender = sender.clone();
@@ -1133,11 +1165,12 @@ fn spawn_gnome_monitor_thread(
 
 fn spawn_wayland_monitor_thread(
     connection: wayland_client::Connection,
+    honor_idle_inhibitors: bool,
     sender: mpsc::Sender<RunnerMessage>,
     latest_observation: Arc<LatestInactivityObservation>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let result = run_wayland_session_source(connection, {
+        let result = run_wayland_session_source(connection, honor_idle_inhibitors, {
             let sender = sender.clone();
             move |observation| {
                 publish_desktop_observation(&sender, &latest_observation, observation)
@@ -1192,6 +1225,15 @@ fn send_source_observation(
     observation: SessionObservation,
 ) -> bool {
     let message = match observation {
+        SessionObservation::IdleBlankingPermission {
+            allowed,
+            source,
+            observed_at,
+        } => RunnerMessage::IdleBlankingPermission {
+            allowed,
+            source,
+            observed_at,
+        },
         SessionObservation::Event {
             event,
             source,
@@ -1392,6 +1434,11 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 }
 
 enum RunnerMessage {
+    IdleBlankingPermission {
+        allowed: bool,
+        source: EventSource,
+        observed_at: Instant,
+    },
     SessionEvent {
         event: SessionEvent,
         source: EventSource,
@@ -2787,6 +2834,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     let result = activity_receiver
@@ -2839,6 +2887,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Wayland,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
@@ -2884,6 +2933,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            false,
             |sender, _latest_inactivity| {
                 thread::spawn(move || {
                     let locked_at = Instant::now();

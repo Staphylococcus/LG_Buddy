@@ -93,6 +93,13 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_idle_blank={policy}"));
     }
 
+    pub fn set_honor_idle_inhibitors(&self, policy: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_honor_idle_inhibitors={policy}"));
+    }
+
     pub fn set_idle_timeout_secs(&mut self, seconds: u64) {
         self.ensure_env()
             .set("LG_BUDDY_IDLE_TIMEOUT", seconds.to_string());
@@ -553,6 +560,16 @@ exit 1\n",
     pub fn set_gnome_idle_monitor_available(&mut self, value: bool) {
         self.ensure_mock_session_bus_idle_monitor()
             .set_idle_monitor_available(value);
+    }
+
+    pub fn set_gnome_idle_inhibitors(&mut self, count: u32) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .set_idle_inhibitor_count(count);
+    }
+
+    pub fn schedule_gnome_idle_inhibitors(&mut self, count: u32, after_secs: f64) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .schedule_idle_inhibitor_count(std::time::Duration::from_secs_f64(after_secs), count);
     }
 
     pub fn gnome_monitor_emit_idle(&mut self) {

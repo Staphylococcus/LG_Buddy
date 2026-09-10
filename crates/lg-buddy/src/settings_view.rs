@@ -25,6 +25,7 @@ use crate::update_install::UpdateInstallStage;
 pub enum BehaviorSetting {
     ScreenBackend,
     ScreenIdleBlank,
+    ScreenHonorIdleInhibitors,
     ScreenIdleTimeout,
     ScreenRestorePolicy,
     SystemSleepWakePolicy,
@@ -37,6 +38,7 @@ impl BehaviorSetting {
         match self {
             Self::ScreenBackend => "screen.backend",
             Self::ScreenIdleBlank => "screen.idle_blank",
+            Self::ScreenHonorIdleInhibitors => "screen.honor_idle_inhibitors",
             Self::ScreenIdleTimeout => "screen.idle_timeout",
             Self::ScreenRestorePolicy => "screen.restore_policy",
             Self::SystemSleepWakePolicy => "system.sleep_wake_policy",
@@ -49,6 +51,7 @@ impl BehaviorSetting {
         Some(match key {
             "screen.backend" => Self::ScreenBackend,
             "screen.idle_blank" => Self::ScreenIdleBlank,
+            "screen.honor_idle_inhibitors" => Self::ScreenHonorIdleInhibitors,
             "screen.idle_timeout" => Self::ScreenIdleTimeout,
             "screen.restore_policy" => Self::ScreenRestorePolicy,
             "system.sleep_wake_policy" => Self::SystemSleepWakePolicy,
@@ -1088,7 +1091,7 @@ mod tests {
     fn default_settings_are_ready_and_grouped() {
         let groups = groups("");
         assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].rows().len(), 4);
+        assert_eq!(groups[0].rows().len(), 5);
         assert_eq!(groups[1].rows().len(), 1);
         assert_eq!(groups[2].rows().len(), 2);
 
@@ -1097,6 +1100,13 @@ mod tests {
         assert_eq!(backend.source_label(), "Default");
         assert_eq!(backend.default_label(), "Automatic");
         assert!(backend.problem().is_none());
+
+        let inhibitors = row(&groups, "Screen", "Allow apps to prevent idle blanking");
+        assert_eq!(
+            inhibitors.description(),
+            "Honor keep-awake requests from video players, presentations, and other apps."
+        );
+        assert_eq!(inhibitors.editor().as_toggle(), Some(Some(false)));
     }
 
     #[test]
@@ -1110,6 +1120,7 @@ mod tests {
             let presentation = SettingsPresentation::ready(groups(config));
             for setting in [
                 BehaviorSetting::ScreenBackend,
+                BehaviorSetting::ScreenHonorIdleInhibitors,
                 BehaviorSetting::ScreenIdleTimeout,
             ] {
                 assert_eq!(presentation.row_visible(setting), visible, "{config}");
@@ -1117,6 +1128,16 @@ mod tests {
             assert!(presentation.row_visible(BehaviorSetting::ScreenIdleBlank));
             assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
         }
+    }
+
+    #[test]
+    fn idle_inhibitor_preference_is_hidden_for_explicit_swayidle() {
+        let presentation = SettingsPresentation::ready(groups(
+            "screen_idle_blank=enabled\nscreen_backend=swayidle\n",
+        ));
+        assert!(presentation.row_visible(BehaviorSetting::ScreenBackend));
+        assert!(presentation.row_visible(BehaviorSetting::ScreenIdleTimeout));
+        assert!(!presentation.row_visible(BehaviorSetting::ScreenHonorIdleInhibitors));
     }
 
     fn update_report(channel: crate::updates::UpdateChannel) -> UpdateCheckReport {
@@ -1339,6 +1360,12 @@ screen_backend=wayland\n",
                 "screen.idle_blank",
                 "Idle blanking",
                 "Enabled",
+                "Enabled, Disabled",
+            ),
+            (
+                "screen.honor_idle_inhibitors",
+                "Allow apps to prevent idle blanking",
+                "Disabled",
                 "Enabled, Disabled",
             ),
             (

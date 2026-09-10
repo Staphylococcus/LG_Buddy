@@ -11,6 +11,7 @@ LG_BUDDY_POINTER_FILE="${LG_BUDDY_INSTALL_DIR}/config-path"
 LG_BUDDY_DEFAULT_TV_PLATFORM="bscpylgtv"
 LG_BUDDY_DEFAULT_SCREEN_BACKEND="auto"
 LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK="enabled"
+LG_BUDDY_DEFAULT_SCREEN_HONOR_IDLE_INHIBITORS="disabled"
 LG_BUDDY_DEFAULT_IDLE_TIMEOUT=300
 LG_BUDDY_MAX_IDLE_TIMEOUT=86400
 LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY="conservative"
@@ -231,6 +232,7 @@ lg_buddy_load_config() {
     fi
     screen_backend="$(lg_buddy_config_get_valid "screen_backend" '^(auto|gnome|wayland|swayidle)$' "$LG_BUDDY_DEFAULT_SCREEN_BACKEND" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_blank="$(lg_buddy_config_get_valid "screen_idle_blank" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_SCREEN_IDLE_BLANK" "$LG_BUDDY_CONFIG_FILE")"
+    screen_honor_idle_inhibitors="$(lg_buddy_config_get_valid "screen_honor_idle_inhibitors" '^(enabled|disabled)$' "$LG_BUDDY_DEFAULT_SCREEN_HONOR_IDLE_INHIBITORS" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_config_get_valid "screen_idle_timeout" '^[0-9]+$' "$LG_BUDDY_DEFAULT_IDLE_TIMEOUT" "$LG_BUDDY_CONFIG_FILE")"
     screen_idle_timeout="$(lg_buddy_normalize_idle_timeout "$screen_idle_timeout")"
     screen_restore_policy="$(lg_buddy_config_get_valid "screen_restore_policy" '^(marker_only|conservative|aggressive)$' "$LG_BUDDY_DEFAULT_SCREEN_RESTORE_POLICY" "$LG_BUDDY_CONFIG_FILE")"

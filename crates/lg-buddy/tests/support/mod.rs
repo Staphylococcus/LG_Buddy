@@ -16,7 +16,7 @@ use std::process::{self, Command as ProcessCommand};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 pub struct MockBscpylgtv {
@@ -361,6 +361,10 @@ struct MockSessionBusIdleMonitorState {
     screen_saver_available: bool,
     idle_monitor_available: bool,
     notifications_available: bool,
+    session_manager_available: bool,
+    idle_inhibitor_count: u32,
+    inhibitor_plan: VecDeque<(Duration, u32)>,
+    inhibitor_started_at: Option<Instant>,
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
     screen_saver_signals: VecDeque<MockScreenSaverSignal>,
@@ -438,6 +442,18 @@ impl MockSessionBusIdleMonitor {
 
     pub fn set_idle_monitor_idletime(&self, value: u64) {
         self.patch_state(|state| state.default_idletime = value);
+    }
+
+    pub fn set_idle_inhibitor_count(&self, count: u32) {
+        self.patch_state(|state| {
+            state.session_manager_available = true;
+            state.idle_inhibitor_count = count;
+        });
+        wait_for_mock_bus_name_sync();
+    }
+
+    pub fn schedule_idle_inhibitor_count(&self, after: Duration, count: u32) {
+        self.patch_state(|state| state.inhibitor_plan.push_back((after, count)));
     }
 
     pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
@@ -669,6 +685,22 @@ fn spawn_mock_idle_monitor_service(
 
         let mut crossroads = Crossroads::new();
         let idle_monitor_state = Arc::clone(&state);
+        let inhibitor_state = Arc::clone(&state);
+        let session_manager_iface =
+            crossroads.register("org.gnome.SessionManager", move |builder| {
+                builder.method(
+                    "IsInhibited",
+                    ("flags",),
+                    ("inhibited",),
+                    move |_, _, (flags,): (u32,)| {
+                        let mut state = inhibitor_state
+                            .lock()
+                            .expect("mock session manager state lock");
+                        state.inhibitor_started_at.get_or_insert_with(Instant::now);
+                        Ok((flags & 8 != 0 && state.idle_inhibitor_count > 0,))
+                    },
+                );
+            });
         let iface = crossroads.register("org.gnome.Mutter.IdleMonitor", move |builder| {
             let state = Arc::clone(&idle_monitor_state);
             builder.method("GetIdletime", (), ("idletime",), move |_, _, ()| {
@@ -726,6 +758,7 @@ fn spawn_mock_idle_monitor_service(
                 );
             });
         crossroads.insert("/org/gnome/Mutter/IdleMonitor/Core", &[iface], ());
+        crossroads.insert("/org/gnome/SessionManager", &[session_manager_iface], ());
         crossroads.insert("/org/freedesktop/Notifications", &[notifications_iface], ());
 
         let shared_crossroads = Arc::new(Mutex::new(crossroads));
@@ -747,6 +780,7 @@ fn spawn_mock_idle_monitor_service(
         while !stop.load(Ordering::SeqCst) {
             let _ = connection.process(Duration::from_millis(50));
             sync_mock_bus_names(&connection, &state, &mut owned_names);
+            emit_scheduled_mock_inhibitor_changes(&connection, &state);
             emit_queued_mock_screen_saver_signal(&connection, &state);
         }
     })
@@ -957,6 +991,7 @@ struct MockOwnedBusNames {
     screen_saver: bool,
     idle_monitor: bool,
     notifications: bool,
+    session_manager: bool,
 }
 
 fn sync_mock_bus_names(
@@ -964,7 +999,13 @@ fn sync_mock_bus_names(
     state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
     owned_names: &mut MockOwnedBusNames,
 ) {
-    let (want_shell, want_screen_saver, want_idle_monitor, want_notifications) = {
+    let (
+        want_shell,
+        want_screen_saver,
+        want_idle_monitor,
+        want_notifications,
+        want_session_manager,
+    ) = {
         let state = state
             .lock()
             .expect("mock session-bus idle monitor state lock");
@@ -973,6 +1014,7 @@ fn sync_mock_bus_names(
             state.screen_saver_available,
             state.idle_monitor_available,
             state.notifications_available,
+            state.session_manager_available,
         )
     };
 
@@ -1000,6 +1042,52 @@ fn sync_mock_bus_names(
         want_notifications,
         &mut owned_names.notifications,
     );
+    sync_mock_bus_name(
+        connection,
+        "org.gnome.SessionManager",
+        want_session_manager,
+        &mut owned_names.session_manager,
+    );
+}
+
+fn emit_scheduled_mock_inhibitor_changes(
+    connection: &DbusConnection,
+    state: &Arc<Mutex<MockSessionBusIdleMonitorState>>,
+) {
+    let mut state = state.lock().expect("mock session manager state lock");
+    let Some(started_at) = state.inhibitor_started_at else {
+        return;
+    };
+    while state
+        .inhibitor_plan
+        .front()
+        .is_some_and(|(after, _)| started_at.elapsed() >= *after)
+    {
+        let (_, count) = state
+            .inhibitor_plan
+            .pop_front()
+            .expect("scheduled inhibitor change");
+        let previous = state.idle_inhibitor_count;
+        state.idle_inhibitor_count = count;
+        let member = if count > previous {
+            "InhibitorAdded"
+        } else {
+            "InhibitorRemoved"
+        };
+        for id in count.min(previous)..count.max(previous) {
+            let message = DbusMessage::new_signal(
+                "/org/gnome/SessionManager",
+                "org.gnome.SessionManager",
+                member,
+            )
+            .expect("inhibitor signal")
+            .append1(
+                DbusPath::new(format!("/org/gnome/SessionManager/Inhibitor{id}"))
+                    .expect("inhibitor path"),
+            );
+            let _ = connection.send(message);
+        }
+    }
 }
 
 fn sync_mock_bus_name(connection: &DbusConnection, name: &str, wanted: bool, owned: &mut bool) {

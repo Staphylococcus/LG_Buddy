@@ -72,7 +72,7 @@ These are the semantic events the runtime should reason about.
 ## Runtime Contract
 
 Native sources publish `SessionObservation` values. Each observation carries a
-canonical session event or inactivity fact, an `EventSource`, and the time it
+canonical session event, inactivity fact, or idle-blanking permission, an `EventSource`, and the time it
 was observed. Source modules do not decide whether to blank or restore the
 screen.
 
@@ -81,6 +81,15 @@ their configured inactivity deadline. `swayidle` owns its initial timeout but
 publishes `Idle` and independent desktop-activity observations back to the same
 runner. All three backends therefore share blank, restore, and post-blank
 power-off policy.
+
+`screen.honor_idle_inhibitors` defaults to `disabled`. When enabled, native
+sources also publish `IdleBlankingPermission`. The runner initially withholds
+automatic blanking until the source establishes permission, including when an
+inhibitor predates startup. Restoring permission starts a fresh full timeout;
+duplicate observations do not extend it. Permission changes are never activity
+or restore requests. Real desktop and gamepad input still share the inactivity
+deadline. Explicit lock behavior and an already pending post-blank power-off
+deadline are unaffected.
 
 ## Provider Map
 
@@ -104,10 +113,18 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
 | Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` | `UserActivity` | Implemented |
+| `org.gnome.SessionManager.IsInhibited(8)` | Idle-blanking permission when honoring is enabled | Implemented |
 
 Notes:
 
 - GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
+- Enabling inhibitor honoring additionally requires `org.gnome.SessionManager`.
+  The source reads its current aggregate idle-inhibition state at startup and
+  after trusted `InhibitorAdded`, `InhibitorRemoved`, or owner-change signals.
+  Other inhibition flags do not block blanking. Losing the service or failing
+  to read its state ends the source with a diagnostic error rather than assuming
+  blanking is allowed. With the setting disabled, this extra dependency is not
+  queried or subscribed to.
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
@@ -183,8 +200,15 @@ selection requirement.
 The native `wayland` backend requires `ext_idle_notifier_v1` version 2 or newer
 and at least one advertised `wl_seat`. It monitors every seat, including
 seats that currently advertise no input capabilities, using zero-timeout idle
-notifications. `resumed` maps to desktop activity; `idled` remains
-observational, so only LG Buddy's inactivity deadline can trigger blanking.
+notifications from `get_input_idle_notification`. Its `resumed` maps to desktop
+activity; `idled` remains observational, so only LG Buddy's inactivity deadline
+can trigger blanking.
+
+When inhibitor honoring is enabled, a separate zero-timeout
+`get_idle_notification` observes permission on each seat. Blanking is allowed
+only once every seat reports idle. Its inhibitor-aware `resumed` withdraws
+permission without reporting input or restoring the TV. New seats initially
+withhold permission, and removing a seat recomputes the aggregate state.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
 of the bound notifier, or removal of the last seat is fatal to the provider and
@@ -207,6 +231,10 @@ Notes:
   and is planned for removal in 2.0.0 after the native provider remains
   field-validated across supported compositors and the 1.x migration window.
 - `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
+- Its source-owned timeout always honors compositor inhibition, independently
+  of `screen.honor_idle_inhibitors`, including when `auto` falls back to it.
+  The preference is hidden for explicit `swayidle` selections; this compatibility
+  backend does not offer the native default-off behavior.
 - `swayidle` does not provide a Mutter-style early activity surface.
 - LG Buddy owns the configured timeout value for this backend.
 - The shared runner owns lock observation, screen policy, and the post-blank

@@ -11,6 +11,7 @@ use super::{
 const SERVICE_NAME: &str = "LG_Buddy_screen.service";
 const BACKEND_VALUES: &[&str] = &["auto", "gnome", "wayland", "swayidle"];
 const IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
+const HONOR_IDLE_INHIBITORS_VALUES: &[&str] = &["enabled", "disabled"];
 const RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
 const RESTORE_POLICY_ALIASES: &[SettingAlias] = &[SettingAlias {
     from: "marker_only",
@@ -29,7 +30,7 @@ pub(super) const BACKEND: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration.",
+    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
 };
 
 pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
@@ -45,6 +46,21 @@ pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
     description: "Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.",
+};
+
+pub(super) const HONOR_IDLE_INHIBITORS: SettingDefinition = SettingDefinition {
+    key: "screen.honor_idle_inhibitors",
+    storage_key: "screen_honor_idle_inhibitors",
+    fallback_storage_keys: EMPTY_STORAGE_KEYS,
+    value_type: SettingType::Enum(EnumSettingType {
+        values: HONOR_IDLE_INHIBITORS_VALUES,
+        aliases: EMPTY_ALIASES,
+    }),
+    default_value: Some(SettingValue::Enum("disabled")),
+    mutability: SettingMutability::ReadWrite,
+    operations: READ_WRITE_OPERATIONS,
+    apply_strategy: ApplyStrategy::RestartUserScreenService,
+    description: "Honor keep-awake requests from video players, presentations, and other apps.",
 };
 
 pub(super) const IDLE_TIMEOUT: SettingDefinition = SettingDefinition {
@@ -140,6 +156,12 @@ pub(super) fn resolution_details(
 
 pub(super) fn deprecation_notice(configured: &str) -> Option<&'static str> {
     (configured == ScreenBackend::Swayidle.as_str()).then_some(SWAYIDLE_DEPRECATION_NOTICE)
+}
+
+pub(super) fn swayidle_inhibitor_notice(configured: &str) -> Option<&'static str> {
+    (configured == ScreenBackend::Swayidle.as_str()).then_some(
+        "swayidle always honors keep-awake requests; this preference applies only to native backends",
+    )
 }
 
 pub(super) fn apply_service_restart<C: ServiceController>(
@@ -289,6 +311,7 @@ mod tests {
         assert!(output.contains("  resolved backend: swayidle\n"));
         assert!(output.contains("  fallback reason: none; explicit selection does not fall back\n"));
         assert!(output.contains("  deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland.\n"));
+        assert!(output.contains("  compatibility: swayidle always honors keep-awake requests; this preference applies only to native backends.\n"));
     }
 
     #[test]
@@ -495,6 +518,69 @@ screen_idle_timeout=300
             definition.parse_value("kde"),
             Err(SettingsError::InvalidValue { .. })
         ));
+    }
+
+    #[test]
+    fn screen_honor_idle_inhibitors_defaults_to_disabled_and_accepts_values() {
+        let definition = SETTINGS_REGISTRY
+            .get_by_name("screen.honor_idle_inhibitors")
+            .unwrap();
+        assert_eq!(
+            definition.default_value(),
+            Some(SettingValue::Enum("disabled"))
+        );
+        assert_eq!(
+            definition.parse_value("enabled"),
+            Ok(SettingValue::Enum("enabled"))
+        );
+        assert_eq!(
+            definition.parse_value("disabled"),
+            Ok(SettingValue::Enum("disabled"))
+        );
+        assert!(matches!(
+            definition.parse_value("maybe"),
+            Err(SettingsError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn settings_runner_sets_and_unsets_idle_inhibitor_preference() {
+        let path = unique_test_path("idle-inhibitors");
+        fs::write(&path, "screen_honor_idle_inhibitors=disabled\n").unwrap();
+        let fake_service = FakeServiceController::active_or_enabled();
+        let restarts = fake_service.restarts.clone();
+        let runner = SettingsCommandRunner::with_applier(
+            SettingsStore::load(&path).unwrap(),
+            SettingsApplier::new(fake_service),
+        );
+        runner
+            .run(
+                SettingsCommand::Set {
+                    key: "screen.honor_idle_inhibitors".into(),
+                    value: "enabled".into(),
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "screen_honor_idle_inhibitors=enabled\n"
+        );
+        assert_eq!(restarts.get(), 1);
+
+        let runner = SettingsCommandRunner::with_applier(
+            SettingsStore::load(&path).unwrap(),
+            SettingsApplier::new(FakeServiceController::active_or_enabled()),
+        );
+        runner
+            .run(
+                SettingsCommand::Unset("screen.honor_idle_inhibitors".into()),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

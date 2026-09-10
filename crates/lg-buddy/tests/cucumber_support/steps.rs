@@ -21,6 +21,21 @@ fn screen_idle_blanking(world: &mut LgBuddyWorld, policy: String) {
     world.set_screen_idle_blank(&policy);
 }
 
+#[given(regex = r#"honoring app keep-awake requests is "(enabled|disabled)""#)]
+fn honor_idle_inhibitors(world: &mut LgBuddyWorld, policy: String) {
+    world.set_honor_idle_inhibitors(&policy);
+}
+
+#[given(regex = r#"GNOME has (\d+) idle inhibitors"#)]
+fn gnome_idle_inhibitors(world: &mut LgBuddyWorld, count: u32) {
+    world.set_gnome_idle_inhibitors(count);
+}
+
+#[given(regex = r#"GNOME changes to (\d+) idle inhibitors after ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn scheduled_gnome_idle_inhibitors(world: &mut LgBuddyWorld, count: u32, seconds: String) {
+    world.schedule_gnome_idle_inhibitors(count, seconds.parse().expect("inhibitor delay"));
+}
+
 #[given(regex = r#"the idle timeout is (\d+) seconds"#)]
 fn idle_timeout_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     world.set_idle_timeout_secs(seconds);

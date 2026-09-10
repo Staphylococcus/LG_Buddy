@@ -46,4 +46,11 @@ pub(crate) enum SessionObservation {
         source: EventSource,
         observed_at: Instant,
     },
+    /// Desktop permission for automatic blanking; never user activity or a
+    /// request to restore the screen.
+    IdleBlankingPermission {
+        allowed: bool,
+        source: EventSource,
+        observed_at: Instant,
+    },
 }
