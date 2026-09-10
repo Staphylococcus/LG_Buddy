@@ -64,7 +64,16 @@ impl WebOsTvClient {
         action: impl FnOnce(&mut WebOsClient) -> Result<T, WebOsAdapterFailure>,
     ) -> Result<T, TvError> {
         let mut session = self.lock_session(operation)?;
-        self.ensure_session(operation, &mut session)?;
+        self.run_on_session(&mut session, operation, action)
+    }
+
+    fn run_on_session<T>(
+        &self,
+        session: &mut Option<WebOsClient>,
+        operation: TvOperation,
+        action: impl FnOnce(&mut WebOsClient) -> Result<T, WebOsAdapterFailure>,
+    ) -> Result<T, TvError> {
+        self.ensure_session(operation, session)?;
 
         let result = action(
             session
@@ -266,12 +275,24 @@ impl TvClient for WebOsTvClient {
     }
 
     fn current_input(&self) -> Result<CurrentInput, TvError> {
-        self.with_session(TvOperation::ReadInput, |client| {
+        let operation = TvOperation::ReadInput;
+        let mut session = self.lock_session(operation)?;
+        let reused_session = session.is_some();
+        let read = |client: &mut WebOsClient| {
             client
                 .foreground_app()
                 .map(|app| CurrentInput::from_raw(app.app_id().to_string()))
                 .map_err(foreground_app_failure)
-        })
+        };
+        let result = self.run_on_session(&mut session, operation, read);
+        // A socket closed between events must not turn an input check into
+        // policy's power-off fallback. Retry only this read, once, when it
+        // invalidated a reused session; failures on a fresh session still return.
+        if reused_session && result.is_err() && session.is_none() {
+            self.run_on_session(&mut session, operation, read)
+        } else {
+            result
+        }
     }
 
     fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
@@ -961,6 +982,25 @@ mod tests {
                 .expect("verified session remains reusable"),
             CurrentInput::Hdmi(HdmiInput::Hdmi2)
         );
+        assert_eq!(server.snapshot().connection_count, 2);
+        server.finish();
+    }
+
+    #[test]
+    fn input_read_reconnects_only_once_after_a_cached_session_fails() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+        client.current_input().expect("establish initial session");
+        server.close_active_connection();
+        server.set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
+
+        let error = client
+            .current_input()
+            .expect_err("fresh connection also fails");
+
+        assert_eq!(error.kind(), TvErrorKind::Transport);
         assert_eq!(server.snapshot().connection_count, 2);
         server.finish();
     }

@@ -216,6 +216,53 @@ fn runtime_owner_lazily_reuses_native_session_across_screen_events() {
 }
 
 #[test]
+fn closed_session_recovers_input_before_next_idle_decision() {
+    use crate::web_os::WebOsPowerState;
+
+    let _lock = test_lock().lock().expect("runtime action test lock");
+    for (address, input, expected_state) in [
+        (8, WebOsTestInput::Hdmi2, WebOsPowerState::Active),
+        (9, WebOsTestInput::Hdmi3, WebOsPowerState::ScreenOff),
+    ] {
+        let server = server_at(address);
+        let fixture = Fixture::new(Ipv4Addr::new(127, 0, 0, address));
+        let _env = EnvGuard::for_fixture(&fixture);
+        let mut dispatcher = SessionEventDispatcher::new(RuntimeActionExecutor::default());
+        let mut output = Vec::new();
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::Idle)
+            .unwrap();
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::Active)
+            .unwrap();
+        assert_eq!(server.snapshot().connection_count, 1);
+
+        // Model switching inputs on the TV while the monitor's socket closes.
+        server.set_input(input);
+        server.close_active_connection();
+        output.clear();
+        dispatcher
+            .dispatch_event(&mut output, SessionEvent::Idle)
+            .unwrap();
+
+        let snapshot = server.snapshot();
+        assert_eq!(snapshot.power_state, expected_state);
+        assert_eq!(snapshot.input, input);
+        assert_eq!(snapshot.connection_count, 2);
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some(VALID_ACCESS_TOKEN.to_string()); 2]
+        );
+        assert!(!snapshot
+            .request_uris
+            .iter()
+            .any(|uri| uri == "ssap://system/turnOff"));
+        assert!(!String::from_utf8_lossy(&output).contains("Falling back to power_off"));
+        server.finish();
+    }
+}
+
+#[test]
 fn runtime_owner_reconnects_after_a_server_closed_session() {
     let _lock = test_lock().lock().expect("runtime action test lock");
     let ip = Ipv4Addr::new(127, 0, 0, 3);

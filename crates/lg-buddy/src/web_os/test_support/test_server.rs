@@ -759,6 +759,41 @@ impl WebOsTestServer {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn set_input(&self, input: WebOsTestInput) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .input = input;
+    }
+
+    /// Close an established connection between operations, leaving the TV
+    /// available for the next connection.
+    #[allow(dead_code)]
+    pub(crate) fn close_active_connection(&self) {
+        self.active_connection
+            .lock()
+            .expect("webOS test active connection")
+            .as_ref()
+            .expect("an established webOS connection")
+            .shutdown(Shutdown::Both)
+            .expect("close webOS test connection");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while self
+            .active_connection
+            .lock()
+            .expect("webOS test active connection")
+            .is_some()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection did not close"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[allow(dead_code)]
     pub(in crate::web_os) fn set_volume(&self, volume: i16) {
         assert!(volume == -1 || (0..=100).contains(&volume));
         self.runtime

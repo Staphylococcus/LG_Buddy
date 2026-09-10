@@ -871,8 +871,13 @@ options change. Unrelated settings changes preserve the connection. Client
 options keep foreground pairing and timeouts separate from unattended suspend
 and resume operations. Legacy clients are rebuilt per action, and one-shot
 commands drop their owner on completion. A consumed or invalidated native
-session reconnects only when a later operation needs it; there is no background
-connection maintenance.
+session reconnects on demand; there is no background connection maintenance.
+
+If an input query invalidates a reused session, the adapter retries that read
+once on a fresh connection before returning a failure to policy. This prevents
+a socket closed between events from triggering the screen-off fallback without
+checking the TV's current input. Fresh-session failures return normally, and
+effectful operations are never replayed by this recovery path.
 
 Native picture settings have two known service-invocation paths. A direct SSAP
 write sends `ssap://settings/setSystemSettings` on the websocket. The Luna path
