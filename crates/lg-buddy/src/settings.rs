@@ -1,5 +1,6 @@
 use std::io;
 
+mod activation;
 mod command;
 mod formatter;
 mod model;
@@ -18,6 +19,7 @@ pub use model::{
     SettingKey, SettingMutability, SettingOperation, SettingType, SettingValue, SettingsError,
     SettingsRegistry,
 };
+pub(crate) use mutation::execute_gui_settings_mutation;
 pub use mutation::{
     execute_settings_mutation, retry_settings_apply, SettingsMutationFailure,
     SettingsMutationOutcome, SettingsMutationStage,
@@ -84,6 +86,10 @@ impl SettingsApplier<SystemdUserServiceController> {
 impl<C: ServiceController> SettingsApplier<C> {
     pub fn new(service_controller: C) -> Self {
         Self { service_controller }
+    }
+
+    pub(crate) fn service_controller(&self) -> &C {
+        &self.service_controller
     }
 
     pub fn apply(&self, change: &SettingsChange) -> Result<SettingsApplyOutcome, SettingsError> {

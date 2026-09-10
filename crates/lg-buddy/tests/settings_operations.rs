@@ -343,3 +343,157 @@ exit 23
     .expect("complete retry apply");
     assert_eq!(fs::read(config.path()).unwrap(), saved);
 }
+
+#[test]
+fn sleep_activation_authorizes_before_saving_and_reuses_the_active_service() {
+    use lg_buddy::settings::{SettingsError, SettingsMutationStage};
+    let config = TestConfigFile::new("settings-authorization");
+    let original = "system_sleep_wake_policy=disabled\n";
+    config.write_contents(original);
+    let install_root = config.path().parent().unwrap().join("installed");
+    for (name, contents) in [
+        (
+            "usr/lib/lg-buddy/config-path",
+            config.path().to_str().unwrap(),
+        ),
+        ("etc/systemd/system/LG_Buddy_lifecycle.service", "fixture"),
+        (
+            "etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle",
+            "fixture",
+        ),
+    ] {
+        let path = install_root.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let authorization = ExecutableScript::new(
+        "settings-pkexec",
+        "pkexec",
+        r#"#!/bin/sh
+case "$(cat "$LG_BUDDY_CONFIG")" in
+  *system_sleep_wake_policy=disabled*) ;;
+  *) exit 99 ;;
+esac
+printf '%s\n' "$@" >> "$LG_BUDDY_TEST_AUTH_LOG"
+exit "$LG_BUDDY_TEST_AUTH_EXIT"
+"#,
+    );
+    let systemctl = ExecutableScript::new(
+        "settings-systemctl",
+        "systemctl",
+        r#"#!/bin/sh
+[ "$*" = 'is-active --quiet LG_Buddy_lifecycle.service' ] || exit 99
+[ "$LG_BUDDY_TEST_LIFECYCLE_ACTIVE" = 1 ]
+"#,
+    );
+    let log = install_root.join("authorization.log");
+    let mut env = TestEnv::new();
+    let path = std::env::join_paths(
+        std::iter::once(authorization.path().parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    env.set("PATH", path);
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_INSTALL_ROOT", &install_root);
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.set("LG_BUDDY_TEST_AUTH_LOG", &log);
+    env.set("LG_BUDDY_TEST_LIFECYCLE_ACTIVE", "0");
+    env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+    let backend = EnvironmentSettingsBackend;
+    let (mut app, opening) = SettingsApplication::open();
+    open_ready(&mut app, opening, &backend);
+
+    for (code, intent) in [
+        (
+            "126",
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::SystemSleepWakePolicy,
+                enabled: true,
+            },
+        ),
+        (
+            "127",
+            SettingsIntent::Reset(BehaviorSetting::SystemSleepWakePolicy),
+        ),
+    ] {
+        env.set("LG_BUDDY_TEST_AUTH_EXIT", code);
+        let started = app.handle_intent(intent).unwrap();
+        let operation = started.mutation_operation().unwrap().clone();
+        let mut stages = Vec::new();
+        let result = backend.write_setting(operation.clone(), &mut |stage| stages.push(stage));
+        assert!(matches!(
+            &result,
+            Err(SettingsMutationFailure::Activation(_))
+        ));
+        if code == "126" {
+            assert!(matches!(
+                &result,
+                Err(SettingsMutationFailure::Activation(
+                    SettingsError::ActivationCancelled
+                ))
+            ));
+        }
+        assert!(!stages.contains(&SettingsMutationStage::Persisting));
+        assert_eq!(fs::read_to_string(config.path()).unwrap(), original);
+        let finished = app.complete_mutation(&operation, result).unwrap();
+        let toggle = row(
+            finished.presentation(),
+            BehaviorSetting::SystemSleepWakePolicy,
+        );
+        assert_eq!(toggle.value_label(), "Disabled");
+        assert!(toggle.retry_apply_action().is_none());
+        assert_eq!(toggle.feedback().is_none(), code == "126");
+    }
+
+    env.set("LG_BUDDY_TEST_AUTH_EXIT", "0");
+    let enabled = run_mutation(
+        &mut app,
+        &backend,
+        SettingsIntent::SetEnabled {
+            setting: BehaviorSetting::SystemSleepWakePolicy,
+            enabled: true,
+        },
+    );
+    assert_eq!(
+        row(
+            enabled.presentation(),
+            BehaviorSetting::SystemSleepWakePolicy
+        )
+        .value_label(),
+        "Enabled"
+    );
+    assert!(fs::read_to_string(config.path())
+        .unwrap()
+        .contains("system_sleep_wake_policy=enabled"));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls,
+        "--disable-internal-agent\n/usr/bin/systemctl\nstart\nLG_Buddy_lifecycle.service\n"
+            .repeat(3)
+    );
+
+    run_mutation(
+        &mut app,
+        &backend,
+        SettingsIntent::SetEnabled {
+            setting: BehaviorSetting::SystemSleepWakePolicy,
+            enabled: false,
+        },
+    );
+    env.set("LG_BUDDY_TEST_LIFECYCLE_ACTIVE", "1");
+    env.set("LG_BUDDY_TEST_AUTH_EXIT", "99");
+    run_mutation(
+        &mut app,
+        &backend,
+        SettingsIntent::SetEnabled {
+            setting: BehaviorSetting::SystemSleepWakePolicy,
+            enabled: true,
+        },
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        calls,
+        "an active lifecycle service must not ask again"
+    );
+}

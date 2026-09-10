@@ -212,7 +212,9 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
     if "Add TV" in names:
         raise SystemExit("TVs exposed an unsupported second-TV action")
     if expected_state == "empty":
-        return (accessibles, None) if {"No TV configured", "Pair a TV"} <= names else None
+        if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible):
+            return None
+        return (accessibles, None) if {"No TV configured", "Pair a TV", "Main Menu"} <= names else None
     if any(value in names for value in ("Pair a TV", "Pair a TV…")):
         raise SystemExit("A configured TV exposed the first-TV pairing action")
     if tv_name not in names or (address and address not in names):

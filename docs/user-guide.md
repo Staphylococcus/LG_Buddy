@@ -12,8 +12,9 @@ up LG Buddy for the first time, start with the [installation instructions](../RE
 ## Open LG Buddy
 
 Open **LG Buddy** from your application launcher, or run `lg-buddy` with no
-arguments. Both open **Overview**. If no TV is configured, go to
-[TVs to pair one](#pair-your-first-tv). For a keyboard shortcut straight to
+arguments. With a saved TV, both open **Overview**. Without one, the app opens
+directly to [Pair a TV](#pair-your-first-tv), with navigation hidden until
+pairing succeeds. For a keyboard shortcut straight to
 brightness, bind `lg-buddy brightness` to your preferred key combination.
 
 LG Buddy manages one TV. Screenshots use sample TV data.
@@ -43,20 +44,23 @@ In the dialog:
 
 1. Enter the TV's IP and MAC addresses.
 2. Select the HDMI input connected to the computer. This sets the input LG
-   Buddy manages; it does not switch the TV's current source.
+   Buddy manages.
 3. Choose **Pair**, then approve the native webOS pairing request with the
    remote.
 
 Cancel is available until saving starts; once saving starts, the dialog stays
 open until the operation finishes. When verification and saving finish, the
-dialog closes, the TV appears in the app, and a **TV paired successfully** toast
-confirms the result. A failed attempt shows an error you can correct and submit
-again; a cancelled attempt does not save a TV.
+dialog closes and normal navigation becomes available. A fresh setup attempts
+the default Idle Blanking and TV Sleep & Wake behaviors; approve the desktop
+authorization prompt when a system operation needs it. Pairing again reactivates
+previously enabled behaviors and keeps disabled choices off. If a behavior cannot
+be activated or authorization is declined, that behavior stays off and can be
+enabled in **Settings** to retry. A failed pairing shows an error you can correct
+and submit again; a cancelled attempt does not save a TV.
 
 ![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 
-Pairing saves the TV connection. Automatic power and idle behavior also require
-the [installer’s setup](../README.md#install).
+Automatic power and idle behavior require the [installed payload](../README.md#install).
 
 ### Move the HDMI cable
 

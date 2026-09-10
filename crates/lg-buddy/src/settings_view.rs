@@ -11,7 +11,7 @@ use crate::presentation::settings::{
 };
 use crate::presentation::update_check::UpdateCheckReport;
 use crate::settings::{
-    execute_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
+    execute_gui_settings_mutation, retry_settings_apply, ConfigPathResolver, SettingsApplier,
     SettingsApplyOutcome, SettingsError, SettingsMutation, SettingsMutationFailure,
     SettingsMutationOutcome, SettingsMutationStage, SettingsStore,
 };
@@ -211,6 +211,9 @@ pub struct SettingsTransition {
 }
 
 impl SettingsTransition {
+    pub(crate) fn update_presentation_from(&mut self, other: Self) {
+        self.presentation = other.presentation;
+    }
     pub fn presentation(&self) -> &SettingsPresentation {
         &self.presentation
     }
@@ -339,13 +342,13 @@ impl SettingsBackend for EnvironmentSettingsBackend {
                 progress(SettingsMutationStage::Validating);
                 let mutation = SettingsMutation::set(&store, operation.key_name(), value)
                     .map_err(SettingsMutationFailure::Validation)?;
-                execute_settings_mutation(&path, mutation, &applier, progress)
+                execute_gui_settings_mutation(&path, mutation, &applier, progress)
             }
             SettingsMutationRequest::Reset => {
                 progress(SettingsMutationStage::Validating);
                 let mutation = SettingsMutation::unset(&store, operation.key_name())
                     .map_err(SettingsMutationFailure::Validation)?;
-                execute_settings_mutation(&path, mutation, &applier, progress)
+                execute_gui_settings_mutation(&path, mutation, &applier, progress)
             }
             SettingsMutationRequest::RetryApply => {
                 retry_settings_apply(&store, operation.key_name(), &applier, progress)
@@ -408,6 +411,13 @@ impl SettingsApplication {
                 diagnostic: None,
             },
         )
+    }
+
+    /// Re-read settings after pairing has published a profile. This also
+    /// supersedes the initial read when it is still in flight, so onboarding
+    /// always queues requested behaviors against the newly published configuration.
+    pub fn profile_changed(&mut self) -> SettingsTransition {
+        self.begin_read()
     }
 
     pub fn handle_intent(&mut self, intent: SettingsIntent) -> Option<SettingsTransition> {
@@ -611,27 +621,52 @@ impl SettingsApplication {
                 self.finish_mutation(Some(operation.setting()), diagnostic)
             }
             Err(failure) => {
+                let activation_failure = match &failure {
+                    SettingsMutationFailure::Activation(error) => Some(error),
+                    SettingsMutationFailure::Validation(_)
+                    | SettingsMutationFailure::Persistence(_) => None,
+                };
+                let activation_cancelled = activation_failure
+                    .is_some_and(|error| matches!(error, SettingsError::ActivationCancelled));
                 let status = match &failure {
                     SettingsMutationFailure::Validation(_) => SettingsEditStatus::ValidationFailed,
                     SettingsMutationFailure::Persistence(_) => {
                         SettingsEditStatus::PersistenceFailed
                     }
+                    SettingsMutationFailure::Activation(_) => SettingsEditStatus::ApplyFailed,
                 };
                 let preserve_retry_apply = pending.previous_row.retry_apply_action().is_some();
                 self.presentation.replace_row(pending.previous_row);
                 self.presentation
                     .set_controls_available(self.controls_available);
-                self.presentation.set_row_state(
-                    operation.setting(),
-                    status,
-                    Some(SettingsFeedback::new(
-                        SettingsFeedbackSeverity::Error,
-                        mutation_failure_message(&failure),
-                    )),
-                    preserve_retry_apply,
-                );
+                if activation_cancelled {
+                    // Authorization cancellation is an ordinary onboarding
+                    // choice. Restore the old off row without inventing a
+                    // retryable apply error.
+                    self.presentation.set_row_state(
+                        operation.setting(),
+                        SettingsEditStatus::Unchanged,
+                        None,
+                        false,
+                    );
+                } else {
+                    self.presentation.set_row_state(
+                        operation.setting(),
+                        status,
+                        Some(SettingsFeedback::new(
+                            SettingsFeedbackSeverity::Error,
+                            mutation_failure_message(&failure),
+                        )),
+                        if activation_failure.is_some() {
+                            false
+                        } else {
+                            preserve_retry_apply
+                        },
+                    );
+                }
                 self.state = SettingsApplicationState::Ready;
-                self.finish_mutation(Some(operation.setting()), Some(failure.error().to_string()))
+                let diagnostic = (!activation_cancelled).then(|| failure.error().to_string());
+                self.finish_mutation(Some(operation.setting()), diagnostic)
             }
         }
     }
@@ -944,6 +979,12 @@ fn mutation_failure_message(failure: &SettingsMutationFailure) -> String {
         SettingsMutationFailure::Persistence(_) => {
             "LG Buddy could not save this setting. Your previous value was kept.".to_string()
         }
+        SettingsMutationFailure::Activation(error) => match error {
+            SettingsError::ActivationCancelled => {
+                "Authorization was cancelled. The setting remains disabled.".to_string()
+            }
+            _ => "The service could not be activated, so the setting remains disabled.".to_string(),
+        },
     }
 }
 
@@ -1008,7 +1049,9 @@ mod tests {
     use crate::presentation::settings::{
         SettingsEditStatus, SettingsFeedback, SettingsFeedbackSeverity, SettingsRow, SettingsStatus,
     };
-    use crate::settings::{ConfigEnvReader, SettingValue, SettingsStore, SETTINGS_REGISTRY};
+    use crate::settings::{
+        execute_settings_mutation, ConfigEnvReader, SettingValue, SettingsStore, SETTINGS_REGISTRY,
+    };
 
     fn groups(contents: &str) -> Vec<SettingsGroup> {
         let store = ConfigEnvReader::parse("/tmp/config.env", contents).into_store();

@@ -84,8 +84,12 @@ when the GUI path is missing; the no-argument launcher requires the GUI.
 The local installer accepts the GUI and runtime as separate build artifacts.
 Official release bundles ship and verify both.
 
-The GUI launch does not replace `install.sh` or `configure.sh`. The complete GUI
-first-run, service, and update journey remains tracked in
+The fresh release-bundle installer installs the payload and launches the installed
+GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &
+Wake behaviors; unavailable or declined behaviors stay off and can be retried in
+Settings. `configure.sh` remains an explicit headless setup path: run it before
+`install.sh`. Configured installations and upgrades retain their saved settings.
+On-demand diagnostics and complete journey verification remain tracked in
 [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 Official release builds inject version identity into the binary:

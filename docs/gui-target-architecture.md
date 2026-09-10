@@ -6,8 +6,9 @@ the application owning state and the GTK crate rendering it.
 
 > The `v1.6.0` frontend covers Overview, TVs, Settings, first-TV pairing, and
 > About. The development tree also provides manual update checks and
-> user-confirmed release-bundle installation in Settings.
-> First-run completion and on-demand diagnostics remain
+> user-confirmed release-bundle installation in Settings, and first-run pairing
+> with default behavior activation. Unavailable or declined behaviors remain off
+> and can be retried in Settings. On-demand diagnostics remain
 > tracked for `v1.7.0` in [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
 ## Boundary
@@ -140,7 +141,14 @@ application owns the selected page; GTK reports page changes to the
 controller, which selects the page in `Application` and renders the resulting
 state.
 
-Overview is the normal root. It shows the primary TV summary and connection
+The coordinator initially shows the TVs loading view while reading local profiles.
+No saved TV means TVs-only mode, with both desktop and narrow navigation hidden.
+The app menu remains available. Pairing reveals normal navigation; unpairing
+returns to TVs-only mode without changing unrelated settings. An offline saved
+TV keeps normal navigation. A failed configuration read keeps Settings reachable
+and shows a read error rather than an empty pairing prompt.
+
+With a saved TV, Overview is the normal root. It shows the primary TV summary and connection
 state, OLED pixel brightness, TV volume, and mute. It has no separate Apply or
 Cancel workflow: moving a slider emits `SetBrightness` or `SetVolume`, and
 changing the sound button emits `SetMuted`. Writes remain asynchronous and
@@ -163,9 +171,21 @@ edit as a `PairingIntent`. Its application stages are Editing, Connecting,
 WaitingForConfirmation, Verifying, Saving, and Failed. Pairing verifies power,
 audio, and OLED brightness before publishing the profile. It saves the token
 and configuration through `pairing_store.rs`; the GUI does not own those files.
-On success the application publishes a `TV paired successfully` toast and
-refreshes the other views. Unpairing is a native destructive alert dialog and
-likewise delegates confirmation and removal to the application.
+On success the application refreshes the other views and activates each requested
+Idle Blanking and TV Sleep & Wake behavior, including saved enabled preferences
+when pairing again. Explicit off choices remain off. Requested behaviors are
+saved disabled until activation succeeds; an unavailable or declined behavior
+remains off, and its Settings toggle retries activation. Unpairing is a native
+destructive alert dialog and likewise delegates confirmation and removal to the
+application.
+
+The fresh installer creates an empty configuration only when absent and hands
+off to the installed foreground GUI. It enables the system units while deferring
+lifecycle start until pairing, and enables the user screen monitor and update
+timer for passive notifications and scheduled checks. TV Sleep & Wake requires
+graphical authorization when pairing activates it; pairing and user files remain
+unprivileged. Existing configured installations preserve their saved policies and
+do not run fresh-install activation on ordinary launch.
 
 Settings is built from the existing registry-backed `SettingsStore`. It shows
 three groups—Screen, Sleep & Wake, and Updates—with seven behavior settings.

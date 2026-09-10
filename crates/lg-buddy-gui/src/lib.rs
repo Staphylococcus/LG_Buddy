@@ -18,7 +18,7 @@ use lg_buddy::audio::{AudioWriteError, AudioWriteFailure};
 use lg_buddy::brightness::{
     BrightnessReadError, BrightnessReadFailure, BrightnessWriteError, BrightnessWriteFailure,
 };
-use lg_buddy::navigation::{ApplicationPage, Navigation};
+use lg_buddy::navigation::ApplicationPage;
 use lg_buddy::overview::{
     EnvironmentOverviewBackend, OverviewBackend, OverviewFrontendUpdate, OverviewIntent,
     OverviewOperation, OverviewSummaryError, OverviewTransition,
@@ -181,7 +181,6 @@ struct ApplicationController {
     pairing_backend: Arc<dyn PairingBackend>,
     settings_backend: Arc<dyn SettingsBackend>,
     update_install_backend: Arc<dyn UpdateInstallBackend>,
-    navigation: RefCell<Navigation>,
     backend: Arc<dyn OverviewBackend>,
     closed: Cell<bool>,
 }
@@ -266,7 +265,6 @@ impl ApplicationController {
                 pairing_backend,
                 settings_backend,
                 update_install_backend,
-                navigation: RefCell::new(Navigation::default()),
                 application: RefCell::new(application),
                 gtk_application: gtk_application.clone(),
                 window: window::ApplicationWindow::new(
@@ -300,6 +298,12 @@ impl ApplicationController {
     }
 
     fn apply_transition(controller: &Rc<Self>, transition: ApplicationTransition) {
+        controller
+            .window
+            .set_navigation_visible(transition.navigation().tabs_visible());
+        controller
+            .window
+            .navigate(transition.navigation().selected());
         if let Some(settings) = transition.settings() {
             Self::render_settings_transition(controller, settings);
         }
@@ -331,10 +335,6 @@ impl ApplicationController {
 
     fn navigate(controller: &Rc<Self>, page: ApplicationPage) {
         if !controller.closed.get() {
-            controller.navigation.borrow_mut().select(page);
-            controller
-                .window
-                .navigate(controller.navigation.borrow().selected());
             let transition = controller.application.borrow_mut().select_page(page);
             if let Some(transition) = transition {
                 Self::apply_transition(controller, transition);
@@ -592,7 +592,7 @@ impl ApplicationController {
     fn start_pairing(controller: &Rc<Self>, operation: PairingOperation) {
         enum Update {
             Progress(PairingStage),
-            Done(Result<lg_buddy::tvs::TvProfile, PairingError>),
+            Done(Result<lg_buddy::pairing::PairingOutcome, PairingError>),
             Stopped,
         }
         let backend = Arc::clone(&controller.pairing_backend);
@@ -912,10 +912,12 @@ mod tests {
 pub(crate) mod controller_test_support {
     use std::cell::Cell;
     use std::net::Ipv4Addr;
+    use std::rc::Rc;
     use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use adw::prelude::PreferencesRowExt;
     use gtk::glib;
     use gtk::prelude::*;
     use lg_buddy::audio::{AudioWriteError, AudioWriteFailure, AudioWriteOutcome};
@@ -927,7 +929,7 @@ pub(crate) mod controller_test_support {
     };
     use lg_buddy::tv::{AudioStatus, CurrentVolume, OledBrightness, VolumeLevel};
 
-    use super::{ApplicationController, APPLICATION_ID};
+    use super::{ApplicationController, ApplicationTransition, APPLICATION_ID};
 
     struct EmptyTvsBackend;
     struct DefaultSettingsBackend;
@@ -982,6 +984,36 @@ pub(crate) mod controller_test_support {
         ) -> Result<String, lg_buddy::tvs::TvsReadError> {
             panic!("an empty collection must not query a TV model")
         }
+    }
+
+    fn configure_application_navigation(
+        controller: &Rc<ApplicationController>,
+        opening: &ApplicationTransition,
+    ) {
+        let operation = opening
+            .tvs()
+            .expect("opening TVs transition")
+            .read_operation()
+            .expect("opening TVs read");
+        let profile = lg_buddy::tvs::TvProfile::new(
+            lg_buddy::tvs::TvId::primary(),
+            "Primary TV",
+            Ipv4Addr::new(192, 0, 2, 10),
+            "02:11:22:33:44:55".parse().unwrap(),
+            HdmiInput::Hdmi1,
+            TvPlatform::LgWebOs,
+            lg_buddy::tvs::TvCredentialState::Stored,
+        );
+        let transition = controller
+            .application
+            .borrow_mut()
+            .complete_tvs_read(operation, Ok(vec![profile]))
+            .expect("configured TVs read");
+        assert!(transition.navigation().tabs_visible());
+        ApplicationController::render_settings_transition(
+            controller,
+            opening.settings().expect("opening Settings read"),
+        );
     }
 
     struct BlockingTvsBackend {
@@ -1257,10 +1289,10 @@ pub(crate) mod controller_test_support {
             .expect("summary result receiver");
         pump_until(|| widget_contains_text(&controller.window.window().upcast(), "192.0.2.1"));
 
-        controller.window.choose_page(super::ApplicationPage::Tvs);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
         pump_for(Duration::from_millis(30));
         assert_eq!(
-            controller.navigation.borrow().selected(),
+            controller.window.visible_page(),
             super::ApplicationPage::Tvs
         );
         profiles_tx
@@ -1275,6 +1307,8 @@ pub(crate) mod controller_test_support {
             )])
             .unwrap();
         pump_until(|| widget_contains_text(&native_window.clone().upcast(), "Primary TV"));
+        ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
+        pump_for(Duration::from_millis(30));
         let tvs_focus = gtk::prelude::GtkWindowExt::focus(&native_window);
 
         controls
@@ -1292,7 +1326,7 @@ pub(crate) mod controller_test_support {
             .expect("audio result receiver");
         pump_until(|| scale_count(&controller.window.window().upcast()) == 2);
         assert_eq!(
-            controller.navigation.borrow().selected(),
+            controller.window.visible_page(),
             super::ApplicationPage::Tvs
         );
         assert_eq!(
@@ -1300,13 +1334,11 @@ pub(crate) mod controller_test_support {
             tvs_focus,
             "background Overview reads must preserve focus on TVs"
         );
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Overview);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Overview);
         model_tx.send("OLED42C2".to_string()).unwrap();
         pump_until(|| widget_contains_text(&native_window.clone().upcast(), "OLED42C2"));
         assert_eq!(
-            controller.navigation.borrow().selected(),
+            controller.window.visible_page(),
             super::ApplicationPage::Overview,
             "a background model result must not change the active page"
         );
@@ -1317,10 +1349,8 @@ pub(crate) mod controller_test_support {
 
         ApplicationController::handle_intent(&controller, OverviewIntent::SetBrightness(55));
         pump_until(|| controls.write_started.try_recv().is_ok());
-        controller.window.choose_page(super::ApplicationPage::Tvs);
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Overview);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Overview);
         assert!(
             controls.write_started.try_recv().is_err(),
             "navigation must not submit another write"
@@ -1450,10 +1480,8 @@ pub(crate) mod controller_test_support {
             Arc::new(EmptyTvsBackend),
             backend,
         );
-        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Settings);
+        configure_application_navigation(&controller, &opening);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
         controller.present();
         let native = controller.window.window();
         pump_until(|| {
@@ -1464,13 +1492,11 @@ pub(crate) mod controller_test_support {
             .emit_clicked();
         pump_until(|| widget_contains_text(native.upcast_ref(), "600"));
         assert_eq!(
-            controller.navigation.borrow().selected(),
+            controller.window.visible_page(),
             super::ApplicationPage::Settings
         );
-        controller.window.choose_page(super::ApplicationPage::Tvs);
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Settings);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
         pump_until(|| widget_contains_text(native.upcast_ref(), "120"));
         controller.shutdown();
         controller.window.close();
@@ -1579,10 +1605,8 @@ pub(crate) mod controller_test_support {
             Arc::new(EmptyTvsBackend),
             backend.clone(),
         );
-        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Settings);
+        configure_application_navigation(&controller, &opening);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
         controller.present();
         let native = controller.window.window();
         pump_until(|| find_button(native.upcast_ref(), "Check for updates").is_some());
@@ -1607,10 +1631,8 @@ pub(crate) mod controller_test_support {
         )
         .unwrap();
         let saved = std::fs::read(&path).unwrap();
-        controller.window.choose_page(super::ApplicationPage::Tvs);
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Settings);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
         pump_until(|| widget_contains_text(native.upcast_ref(), "Prerelease"));
         reply_tx.send(Ok(true)).unwrap();
         pump_until(|| check.is_sensitive());
@@ -1821,10 +1843,8 @@ pub(crate) mod controller_test_support {
             Arc::new(Settings),
             updater.clone(),
         );
-        ApplicationController::render_settings_transition(&controller, opening.settings().unwrap());
-        controller
-            .window
-            .choose_page(super::ApplicationPage::Settings);
+        configure_application_navigation(&controller, &opening);
+        ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
         controller.present();
         let native = controller.window.window();
         pump_until(|| {
@@ -1888,10 +1908,8 @@ pub(crate) mod controller_test_support {
                 &controller,
                 lg_buddy::settings_view::SettingsIntent::ConfirmUpdateInstall,
             );
-            controller.window.choose_page(super::ApplicationPage::Tvs);
-            controller
-                .window
-                .choose_page(super::ApplicationPage::Settings);
+            ApplicationController::navigate(&controller, super::ApplicationPage::Tvs);
+            ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
             reply_tx.send(WorkerReply::BeginInstall).unwrap();
             pump_until(|| widget_contains_text(native.upcast_ref(), "Installing update…"));
             ApplicationController::handle_intent(&controller, super::OverviewIntent::Cancel);
@@ -2035,13 +2053,8 @@ pub(crate) mod controller_test_support {
                     panic_after_save,
                 }),
             );
-            ApplicationController::render_settings_transition(
-                &controller,
-                opening.settings().unwrap(),
-            );
-            controller
-                .window
-                .choose_page(super::ApplicationPage::Settings);
+            configure_application_navigation(&controller, &opening);
+            ApplicationController::navigate(&controller, super::ApplicationPage::Settings);
             controller.present();
             let native = controller.window.window();
             pump_until(|| widget_contains_text(native.upcast_ref(), "Stable"));
@@ -2108,20 +2121,31 @@ pub(crate) mod controller_test_support {
     fn run_pairing_scenario() {
         use lg_buddy::pairing::{
             PairingBackend, PairingError, PairingFailure, PairingIntent, PairingOperation,
-            PairingStage,
+            PairingOutcome, PairingStage,
+        };
+        use lg_buddy::presentation::settings::{SettingsGroup, SettingsPresentation};
+        use lg_buddy::settings::{
+            execute_settings_mutation, ServiceController, SettingsApplier, SettingsError,
+            SettingsMutation, SettingsMutationFailure, SettingsMutationStage, SettingsStore,
+            UserServiceState, UserUnitEnableOutcome,
+        };
+        use lg_buddy::settings_view::{
+            BehaviorSetting, SettingsBackend, SettingsMutationOperation, SettingsMutationRequest,
+            SettingsReadError,
         };
         use lg_buddy::tvs::{TvCredentialState, TvId, TvProfile, TvsIntent};
         struct PairingMock {
             release: Mutex<mpsc::Receiver<()>>,
             reject: bool,
             panic: bool,
+            requested_behaviors: Vec<BehaviorSetting>,
         }
         impl PairingBackend for PairingMock {
             fn pair(
                 &self,
                 operation: &PairingOperation,
                 progress: &mut dyn FnMut(PairingStage),
-            ) -> Result<TvProfile, PairingError> {
+            ) -> Result<PairingOutcome, PairingError> {
                 assert!(!gtk::is_initialized_main_thread());
                 progress(PairingStage::WaitingForConfirmation);
                 self.release.lock().unwrap().recv().unwrap();
@@ -2134,7 +2158,7 @@ pub(crate) mod controller_test_support {
                 }
                 progress(PairingStage::Verifying);
                 let request = operation.request();
-                Ok(TvProfile::new(
+                let profile = TvProfile::new(
                     TvId::primary(),
                     "Primary TV",
                     request.address(),
@@ -2142,6 +2166,10 @@ pub(crate) mod controller_test_support {
                     request.input(),
                     TvPlatform::LgWebOs,
                     TvCredentialState::Stored,
+                );
+                Ok(PairingOutcome::new(
+                    profile,
+                    self.requested_behaviors.clone(),
                 ))
             }
         }
@@ -2157,25 +2185,168 @@ pub(crate) mod controller_test_support {
                 Ok("Test OLED".into())
             }
         }
-        for (cancel, reject, panic, name) in [
-            (false, false, false, "PairSuccess"),
-            (true, false, false, "PairCancel"),
-            (false, true, false, "PairRejected"),
-            (false, false, true, "PairWorkerStopped"),
+
+        struct ActiveScreenService;
+
+        impl ServiceController for ActiveScreenService {
+            fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError> {
+                assert_eq!(service, "LG_Buddy_screen.service");
+                Ok(UserServiceState::ActiveOrEnabled)
+            }
+
+            fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
+                assert_eq!(service, "LG_Buddy_screen.service");
+                Ok(())
+            }
+
+            fn enable_start_user_unit(
+                &self,
+                service: &str,
+            ) -> Result<UserUnitEnableOutcome, SettingsError> {
+                assert_eq!(service, "LG_Buddy_screen.service");
+                Ok(UserUnitEnableOutcome::EnabledStarted)
+            }
+
+            fn disable_stop_user_unit(&self, service: &str) -> Result<(), SettingsError> {
+                assert_eq!(service, "LG_Buddy_screen.service");
+                Ok(())
+            }
+        }
+
+        struct ActivationSettingsBackend {
+            path: std::path::PathBuf,
+            requests: Arc<Mutex<Vec<BehaviorSetting>>>,
+        }
+
+        impl SettingsBackend for ActivationSettingsBackend {
+            fn read_settings(&self) -> Result<Vec<SettingsGroup>, SettingsReadError> {
+                let store = SettingsStore::load(&self.path)
+                    .map_err(|error| SettingsReadError::unreadable(error.to_string()))?;
+                Ok(SettingsPresentation::from_store(&store).groups().to_vec())
+            }
+
+            fn check_for_updates(
+                &self,
+            ) -> Result<
+                lg_buddy::presentation::update_check::UpdateCheckReport,
+                lg_buddy::settings_view::UpdateCheckError,
+            > {
+                panic!("unexpected update check during pairing")
+            }
+
+            fn write_setting(
+                &self,
+                operation: SettingsMutationOperation,
+                progress: &mut dyn FnMut(SettingsMutationStage),
+            ) -> Result<lg_buddy::settings::SettingsMutationOutcome, SettingsMutationFailure>
+            {
+                let setting = operation.setting();
+                self.requests.lock().unwrap().push(setting);
+                if setting == BehaviorSetting::SystemSleepWakePolicy {
+                    return Err(SettingsMutationFailure::Activation(
+                        SettingsError::ActivationCancelled,
+                    ));
+                }
+                let SettingsMutationRequest::Set(value) = operation.request() else {
+                    panic!("pairing defaults must submit enabled values")
+                };
+                let store = SettingsStore::load(&self.path)
+                    .map_err(SettingsMutationFailure::Persistence)?;
+                let mutation = SettingsMutation::set(&store, operation.key_name(), value)
+                    .map_err(SettingsMutationFailure::Validation)?;
+                execute_settings_mutation(
+                    &self.path,
+                    mutation,
+                    &SettingsApplier::new(ActiveScreenService),
+                    progress,
+                )
+            }
+        }
+
+        fn switch_state(widget: &gtk::Widget, title: &str) -> Option<bool> {
+            if let Some(row) = widget.downcast_ref::<adw::SwitchRow>() {
+                if row.title() == title {
+                    return Some(row.is_active());
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(state) = switch_state(&current, title) {
+                    return Some(state);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        for (cancel, reject, panic, requested_behaviors, name) in [
+            (
+                false,
+                false,
+                false,
+                Vec::<BehaviorSetting>::new(),
+                "PairSuccess",
+            ),
+            (
+                true,
+                false,
+                false,
+                Vec::<BehaviorSetting>::new(),
+                "PairCancel",
+            ),
+            (
+                false,
+                true,
+                false,
+                Vec::<BehaviorSetting>::new(),
+                "PairRejected",
+            ),
+            (
+                false,
+                false,
+                true,
+                Vec::<BehaviorSetting>::new(),
+                "PairWorkerStopped",
+            ),
+            (
+                false,
+                false,
+                false,
+                vec![
+                    BehaviorSetting::ScreenIdleBlank,
+                    BehaviorSetting::SystemSleepWakePolicy,
+                ],
+                "PairActivationCancelled",
+            ),
         ] {
             let application = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             let (release, receiver) = mpsc::channel();
+            let settings_path = std::env::temp_dir().join(format!(
+                "lg-buddy-{name}-settings-{}.env",
+                std::process::id()
+            ));
+            std::fs::write(
+                &settings_path,
+                "screen_idle_blank=disabled\nsystem_sleep_wake_policy=disabled\n",
+            )
+            .unwrap();
+            let settings_requests = Arc::new(Mutex::new(Vec::new()));
+            let pairing_backend = Arc::new(PairingMock {
+                release: Mutex::new(receiver),
+                reject,
+                panic,
+                requested_behaviors: requested_behaviors.clone(),
+            });
+            let settings_backend: Arc<dyn SettingsBackend> = Arc::new(ActivationSettingsBackend {
+                path: settings_path.clone(),
+                requests: Arc::clone(&settings_requests),
+            });
             let (controller, opening) = ApplicationController::with_backends(
                 &application,
                 Arc::new(backend),
                 Arc::new(TvsMock),
-                Arc::new(PairingMock {
-                    release: Mutex::new(receiver),
-                    reject,
-                    panic,
-                }),
-                Arc::new(DefaultSettingsBackend),
+                pairing_backend,
+                settings_backend,
             );
             ApplicationController::render_tvs_transition(&controller, opening.tvs().unwrap());
             controller.present();
@@ -2186,6 +2357,8 @@ pub(crate) mod controller_test_support {
             pump_until(|| {
                 widget_contains_text(controller.window.window().upcast_ref(), "No TV configured")
             });
+            assert!(!controller.window.navigation_visible());
+            assert!(controller.window.main_menu_visible());
             for intent in [
                 TvsIntent::PairTv,
                 TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
@@ -2255,20 +2428,48 @@ pub(crate) mod controller_test_support {
                 });
                 assert!(!controller.application.borrow().is_pairing());
                 assert_eq!(
-                    controller.navigation.borrow().selected(),
-                    lg_buddy::navigation::ApplicationPage::Tvs
+                    controller.window.visible_page(),
+                    lg_buddy::navigation::ApplicationPage::Overview
                 );
+                assert!(controller.window.navigation_visible());
+                if !requested_behaviors.is_empty() {
+                    pump_until(|| {
+                        let requests = settings_requests.lock().unwrap();
+                        requests.len() == 2
+                            && switch_state(
+                                controller.window.window().upcast_ref(),
+                                "Idle blanking",
+                            ) == Some(true)
+                            && switch_state(
+                                controller.window.window().upcast_ref(),
+                                "TV sleep & wake",
+                            ) == Some(false)
+                    });
+                    assert_eq!(
+                        *settings_requests.lock().unwrap(),
+                        vec![
+                            BehaviorSetting::ScreenIdleBlank,
+                            BehaviorSetting::SystemSleepWakePolicy,
+                        ]
+                    );
+                    assert!(!widget_contains_text(
+                        controller.window.window().upcast_ref(),
+                        "Retry setup",
+                    ));
+                    assert!(controller.window.main_menu_visible());
+                    assert!(controller.window.navigation_visible());
+                }
             }
-            assert_eq!(
-                widget_contains_text(
+            assert!(
+                !widget_contains_text(
                     controller.window.window().upcast_ref(),
                     "TV paired successfully",
                 ),
-                !cancel && !reject && !panic,
-                "only successful pairing should show the confirmation toast",
+                "pairing completion does not present a success toast",
             );
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
             assert!(controller.closed.get());
+            let _ = std::fs::remove_file(settings_path);
         }
     }
 

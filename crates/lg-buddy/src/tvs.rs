@@ -271,6 +271,13 @@ pub struct TvsTransition {
 }
 
 impl TvsTransition {
+    pub(crate) fn update_presentation_from(&mut self, other: Self) {
+        self.presentation = other.presentation;
+    }
+
+    pub(crate) fn clear_toast(&mut self) {
+        self.toast_message = None;
+    }
     pub fn presentation(&self) -> &TvsPresentation {
         &self.presentation
     }
@@ -878,7 +885,7 @@ impl TvsApplication {
         }
     }
 
-    fn presentation(&self) -> TvsPresentation {
+    pub(crate) fn presentation(&self) -> TvsPresentation {
         let mut presentation = match &self.state {
             TvsState::Loading(_) => TvsPresentation::loading(),
             TvsState::Empty => TvsPresentation::empty(),

@@ -4,18 +4,21 @@
 
 use crate::audio::{AudioWriteError, AudioWriteOutcome};
 use crate::brightness::{BrightnessReadError, BrightnessWriteError, BrightnessWriteOutcome};
+use crate::navigation::Navigation;
 use crate::overview::{
     AudioReadError, OverviewApplication, OverviewAudioReadOperation, OverviewAudioWriteOperation,
     OverviewBrightnessReadOperation, OverviewBrightnessWriteOperation, OverviewFrontendUpdate,
     OverviewIntent, OverviewSummaryError, OverviewSummaryOperation, OverviewTransition,
     OverviewTvIdentity,
 };
-use crate::pairing::{PairingError, PairingFailure, PairingOperation, PairingStage};
+use crate::pairing::{
+    PairingError, PairingFailure, PairingOperation, PairingOutcome, PairingStage,
+};
 use crate::presentation::settings::SettingsGroup;
 use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome};
 use crate::settings_view::{
-    SettingsApplication, SettingsIntent, SettingsMutationOperation, SettingsReadError,
-    SettingsReadOperation, SettingsTransition,
+    BehaviorSetting, SettingsApplication, SettingsIntent, SettingsMutationOperation,
+    SettingsReadError, SettingsReadOperation, SettingsTransition,
 };
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
@@ -51,9 +54,14 @@ pub struct ApplicationTransition {
     overview: Option<OverviewTransition>,
     tvs: Option<TvsTransition>,
     settings: Option<SettingsTransition>,
+    navigation: Navigation,
 }
 
 impl ApplicationTransition {
+    pub fn navigation(&self) -> &Navigation {
+        &self.navigation
+    }
+
     pub fn overview(&self) -> Option<&OverviewTransition> {
         self.overview.as_ref()
     }
@@ -71,6 +79,10 @@ pub struct Application {
     overview: OverviewApplication,
     tvs: TvsApplication,
     settings: SettingsApplication,
+    navigation: Navigation,
+    pairing_behaviors: Vec<BehaviorSetting>,
+    pairing_settings_read: Option<SettingsReadOperation>,
+    closed: bool,
 }
 
 impl Application {
@@ -83,11 +95,16 @@ impl Application {
                 overview,
                 tvs,
                 settings,
+                navigation: Navigation::default(),
+                pairing_behaviors: Vec::new(),
+                pairing_settings_read: None,
+                closed: false,
             },
             ApplicationTransition {
                 overview: Some(overview_opening),
                 tvs: Some(tvs_opening),
                 settings: Some(settings_opening),
+                navigation: Navigation::default(),
             },
         )
     }
@@ -107,6 +124,9 @@ impl Application {
     }
 
     pub fn handle_tvs_intent(&mut self, intent: TvsIntent) -> Option<ApplicationTransition> {
+        if self.pairing_settings_read.is_some() {
+            return None;
+        }
         let transition = self.tvs.handle_intent(intent)?;
         Some(self.tvs_transition(transition))
     }
@@ -115,7 +135,16 @@ impl Application {
         &mut self,
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
+        if self.pairing_settings_read.is_some()
+            || (!self.pairing_behaviors.is_empty()
+                && (self.tvs.is_managing() || self.tvs.is_pairing()))
+        {
+            return None;
+        }
         let transition = self.settings.handle_intent(intent)?;
+        if !self.pairing_behaviors.is_empty() && transition.read_operation().is_some() {
+            self.pairing_settings_read = transition.read_operation();
+        }
         Some(self.settings_transition(transition))
     }
 
@@ -123,11 +152,14 @@ impl Application {
         &mut self,
         page: crate::navigation::ApplicationPage,
     ) -> Option<ApplicationTransition> {
+        if self.closed || !self.navigation.select(page) {
+            return None;
+        }
         match page {
-            crate::navigation::ApplicationPage::Settings => {
-                self.handle_settings_intent(SettingsIntent::Refresh)
-            }
-            _ => None,
+            crate::navigation::ApplicationPage::Settings => self
+                .handle_settings_intent(SettingsIntent::Refresh)
+                .or_else(|| Some(self.transition(None, None, None))),
+            _ => Some(self.transition(None, None, None)),
         }
     }
 
@@ -136,7 +168,29 @@ impl Application {
         operation: SettingsReadOperation,
         result: Result<Vec<SettingsGroup>, SettingsReadError>,
     ) -> Option<ApplicationTransition> {
-        let transition = self.settings.complete_read(operation, result)?;
+        let succeeded = result.is_ok();
+        let mut transition = self.settings.complete_read(operation, result)?;
+        if self.pairing_settings_read == Some(operation) {
+            self.pairing_settings_read = None;
+            if let Some(update) = self.settings.set_controls_available(true) {
+                transition.update_presentation_from(update);
+            }
+            if succeeded && !self.closed {
+                let requested = std::mem::take(&mut self.pairing_behaviors);
+                for setting in requested {
+                    if let Some(update) = self.settings.handle_intent(SettingsIntent::SetEnabled {
+                        setting,
+                        enabled: true,
+                    }) {
+                        if transition.mutation_operation().is_none() {
+                            transition = update;
+                        } else {
+                            transition.update_presentation_from(update);
+                        }
+                    }
+                }
+            }
+        }
         Some(self.settings_transition(transition))
     }
 
@@ -191,14 +245,7 @@ impl Application {
     }
 
     fn settings_transition(&mut self, transition: SettingsTransition) -> ApplicationTransition {
-        let tvs = self.tvs.set_controls_available(
-            !self.overview.has_pending_write() && !self.settings.is_mutating(),
-        );
-        ApplicationTransition {
-            overview: None,
-            tvs,
-            settings: Some(transition),
-        }
+        self.transition(None, None, Some(transition))
     }
 
     pub fn complete_overview(
@@ -264,10 +311,29 @@ impl Application {
     pub fn complete_pairing(
         &mut self,
         operation: &PairingOperation,
-        result: Result<TvProfile, PairingError>,
+        result: Result<PairingOutcome, PairingError>,
     ) -> Option<ApplicationTransition> {
-        let transition = self.tvs.complete_pairing(operation, result)?;
-        Some(self.tvs_transition(transition))
+        let requested = result
+            .as_ref()
+            .map(|outcome| outcome.requested_behaviors().to_vec())
+            .unwrap_or_default();
+        let mut transition = self
+            .tvs
+            .complete_pairing(operation, result.map(PairingOutcome::into_profile))?;
+        let paired = transition.profile_changed();
+        if paired {
+            transition.clear_toast();
+        }
+        let mut update = self.tvs_transition(transition);
+        if paired {
+            self.pairing_behaviors = requested;
+            let settings = self.settings.profile_changed();
+            self.pairing_settings_read = (!self.pairing_behaviors.is_empty())
+                .then(|| settings.read_operation())
+                .flatten();
+            update = self.transition(update.overview, update.tvs, Some(settings));
+        }
+        Some(update)
     }
 
     pub fn pairing_worker_stopped(
@@ -282,6 +348,7 @@ impl Application {
     }
 
     pub fn shutdown(&mut self) {
+        self.closed = true;
         self.overview.shutdown();
         self.tvs.shutdown();
         self.settings.shutdown();
@@ -289,20 +356,20 @@ impl Application {
 
     fn overview_transition(&mut self, transition: OverviewTransition) -> ApplicationTransition {
         if matches!(transition.update(), OverviewFrontendUpdate::Close) {
+            self.closed = true;
             self.tvs.shutdown();
             self.settings.shutdown();
         }
-        let tvs = self.tvs.set_controls_available(
-            !self.overview.has_pending_write() && !self.settings.is_mutating(),
-        );
-        ApplicationTransition {
-            overview: Some(transition),
-            tvs,
-            settings: None,
-        }
+        self.transition(Some(transition), None, None)
     }
 
     fn tvs_transition(&mut self, transition: TvsTransition) -> ApplicationTransition {
+        if transition.profile_changed() && transition.presentation().profiles().is_empty() {
+            self.pairing_behaviors.clear();
+            self.pairing_settings_read = None;
+        }
+        self.navigation
+            .update_profiles(transition.presentation().status());
         let overview = if transition.management_operation().is_some() {
             self.overview.profile_change_started()
         } else if transition.profile_changed() {
@@ -310,13 +377,42 @@ impl Application {
         } else {
             None
         };
-        let settings = self
-            .settings
-            .set_controls_available(!self.tvs.is_managing() && !self.tvs.is_pairing());
+        self.transition(overview, Some(transition), None)
+    }
+
+    fn transition(
+        &mut self,
+        overview: Option<OverviewTransition>,
+        mut tvs: Option<TvsTransition>,
+        mut settings: Option<SettingsTransition>,
+    ) -> ApplicationTransition {
+        if let Some(update) = self.tvs.set_controls_available(
+            !self.overview.has_pending_write()
+                && !self.settings.is_mutating()
+                && self.pairing_settings_read.is_none(),
+        ) {
+            if let Some(tvs) = &mut tvs {
+                tvs.update_presentation_from(update);
+            } else {
+                tvs = Some(update);
+            }
+        }
+        if let Some(update) = self.settings.set_controls_available(
+            !self.tvs.is_managing()
+                && !self.tvs.is_pairing()
+                && self.pairing_settings_read.is_none(),
+        ) {
+            if let Some(settings) = &mut settings {
+                settings.update_presentation_from(update);
+            } else {
+                settings = Some(update);
+            }
+        }
         ApplicationTransition {
             overview,
-            tvs: Some(transition),
+            tvs,
             settings,
+            navigation: self.navigation.clone(),
         }
     }
 }
@@ -365,12 +461,12 @@ mod tests {
     fn pairing_success_refreshes_overview_and_rejects_previous_results() {
         let (mut application, opening, operation) = pairing();
         let completed = application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .unwrap();
         let tvs = completed.tvs().unwrap();
         assert_eq!(tvs.presentation().profiles(), &[profile(&operation)]);
         assert!(tvs.presentation().pairing().is_none());
-        assert_eq!(tvs.toast_message(), Some("TV paired successfully"));
+        assert!(tvs.toast_message().is_none());
         let refreshed = completed
             .overview()
             .expect("pairing must refresh Overview without a renderer");
@@ -403,6 +499,220 @@ mod tests {
             };
             assert!(application.complete_overview(result).is_none());
         }
+    }
+
+    #[test]
+    fn empty_profile_hides_navigation_and_pairing_reveals_normal_destinations() {
+        use crate::navigation::ApplicationPage;
+        let (mut app, opening, operation) = pairing();
+        assert!(!opening.navigation().tabs_visible());
+        assert_eq!(opening.navigation().selected(), ApplicationPage::Tvs);
+        assert!(app.select_page(ApplicationPage::Settings).is_none());
+        assert!(app.select_page(ApplicationPage::Overview).is_none());
+        let paired = app
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
+            .unwrap();
+        assert!(paired.navigation().tabs_visible());
+        assert_eq!(paired.navigation().selected(), ApplicationPage::Overview);
+        assert!(paired.tvs().unwrap().toast_message().is_none());
+        app.handle_tvs_intent(TvsIntent::UnpairTv).unwrap();
+        let unpair = app.handle_tvs_intent(TvsIntent::ConfirmUnpair).unwrap();
+        let removed = app
+            .complete_tvs_management(
+                unpair.tvs().unwrap().management_operation().unwrap(),
+                Ok(TvsManagementOutcome::Unpaired),
+            )
+            .unwrap();
+        assert!(!removed.navigation().tabs_visible());
+        assert_eq!(removed.navigation().selected(), ApplicationPage::Tvs);
+        assert!(removed
+            .tvs()
+            .unwrap()
+            .presentation()
+            .pair_action()
+            .is_some());
+    }
+
+    #[test]
+    fn pairing_queues_independent_activation_after_reading_saved_off_policies() {
+        use crate::presentation::settings::{SettingsEditor, SettingsPresentation};
+        use crate::settings::{ConfigEnvReader, SettingsError};
+        let groups = || {
+            SettingsPresentation::from_store(
+                &ConfigEnvReader::parse(
+                    "/unused/config.env",
+                    "screen_idle_blank=disabled\nsystem_sleep_wake_policy=disabled\n",
+                )
+                .into_store(),
+            )
+            .groups()
+            .to_vec()
+        };
+        let requested = vec![
+            BehaviorSetting::ScreenIdleBlank,
+            BehaviorSetting::SystemSleepWakePolicy,
+        ];
+        let (mut app, opening, operation) = pairing();
+        let paired = app
+            .complete_pairing(
+                &operation,
+                Ok(PairingOutcome::new(profile(&operation), requested.clone())),
+            )
+            .unwrap();
+        assert!(paired.navigation().tabs_visible());
+        assert!(paired.tvs().unwrap().presentation().pairing().is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
+        assert!(app
+            .complete_settings_read(
+                opening.settings().unwrap().read_operation().unwrap(),
+                Ok(groups())
+            )
+            .is_none());
+        let mut update = app
+            .complete_settings_read(
+                paired.settings().unwrap().read_operation().unwrap(),
+                Ok(groups()),
+            )
+            .unwrap();
+        for setting in requested {
+            let activation = update
+                .settings()
+                .unwrap()
+                .mutation_operation()
+                .unwrap()
+                .clone();
+            assert_eq!(activation.setting(), setting);
+            // Failure to activate one behavior must not prevent the other attempt.
+            update = app
+                .complete_settings_mutation(
+                    &activation,
+                    Err(SettingsMutationFailure::Activation(
+                        SettingsError::ActivationCancelled,
+                    )),
+                )
+                .unwrap();
+            let row = update
+                .settings()
+                .unwrap()
+                .presentation()
+                .groups()
+                .iter()
+                .flat_map(|group| group.rows())
+                .find(|row| row.setting() == setting)
+                .unwrap();
+            assert!(matches!(
+                row.editor(),
+                SettingsEditor::Toggle { value: Some(false) }
+            ));
+            assert!(row.retry_apply_action().is_none());
+            assert!(update.navigation().tabs_visible());
+        }
+        assert!(update.settings().unwrap().mutation_operation().is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
+    }
+
+    #[test]
+    fn failed_post_pair_read_keeps_requests_for_retry_and_unpair_discards_them() {
+        use crate::presentation::settings::SettingsPresentation;
+        use crate::settings::ConfigEnvReader;
+        for unpair in [false, true] {
+            let (mut app, _, operation) = pairing();
+            let paired = app
+                .complete_pairing(
+                    &operation,
+                    Ok(PairingOutcome::new(
+                        profile(&operation),
+                        vec![BehaviorSetting::ScreenIdleBlank],
+                    )),
+                )
+                .unwrap();
+            let failed = app
+                .complete_settings_read(
+                    paired.settings().unwrap().read_operation().unwrap(),
+                    Err(SettingsReadError::unreadable("temporarily unreadable")),
+                )
+                .unwrap();
+            assert!(failed.navigation().tabs_visible());
+            if unpair {
+                app.handle_tvs_intent(TvsIntent::UnpairTv).unwrap();
+                let confirm = app.handle_tvs_intent(TvsIntent::ConfirmUnpair).unwrap();
+                assert!(app.handle_settings_intent(SettingsIntent::Retry).is_none());
+                app.complete_tvs_management(
+                    confirm.tvs().unwrap().management_operation().unwrap(),
+                    Ok(TvsManagementOutcome::Unpaired),
+                )
+                .unwrap();
+            }
+            let retry = app.handle_settings_intent(SettingsIntent::Retry).unwrap();
+            let ready = app
+                .complete_settings_read(
+                    retry.settings().unwrap().read_operation().unwrap(),
+                    Ok(SettingsPresentation::from_store(
+                        &ConfigEnvReader::parse(
+                            "/unused/config.env",
+                            "screen_idle_blank=disabled\n",
+                        )
+                        .into_store(),
+                    )
+                    .groups()
+                    .to_vec()),
+                )
+                .unwrap();
+            assert_eq!(
+                ready
+                    .settings()
+                    .unwrap()
+                    .mutation_operation()
+                    .map(|op| op.setting()),
+                (!unpair).then_some(BehaviorSetting::ScreenIdleBlank)
+            );
+        }
+    }
+
+    #[test]
+    fn configured_offline_tv_keeps_navigation() {
+        let (_, _, pairing_operation) = pairing();
+        let (mut app, opening) = Application::open();
+        let loaded = app
+            .complete_tvs_read(
+                opening.tvs().unwrap().read_operation().unwrap(),
+                Ok(vec![profile(&pairing_operation)]),
+            )
+            .unwrap();
+        assert!(loaded.navigation().tabs_visible());
+        assert_eq!(
+            loaded.navigation().selected(),
+            crate::navigation::ApplicationPage::Overview
+        );
+        let offline = app
+            .complete_tvs_model_read(
+                loaded
+                    .tvs()
+                    .unwrap()
+                    .model_read_operation()
+                    .unwrap()
+                    .clone(),
+                Err(TvsReadError::internal("offline")),
+            )
+            .unwrap();
+        assert!(offline.navigation().tabs_visible());
+        assert_eq!(offline.tvs().unwrap().presentation().profiles().len(), 1);
+    }
+
+    #[test]
+    fn unknown_configuration_keeps_settings_reachable_without_presenting_pairing() {
+        let (mut app, opening) = Application::open();
+        let failed = app
+            .complete_tvs_read(
+                opening.tvs().unwrap().read_operation().unwrap(),
+                Err(TvsReadError::internal("cannot read configuration")),
+            )
+            .unwrap();
+        assert!(failed.navigation().tabs_visible());
+        assert!(failed.tvs().unwrap().presentation().pair_action().is_none());
+        assert!(app
+            .select_page(crate::navigation::ApplicationPage::Settings)
+            .is_some());
     }
 
     #[test]
@@ -444,7 +754,7 @@ mod tests {
         assert!(cancelled.tvs().unwrap().presentation().pairing().is_none());
         assert!(operation.is_cancelled());
         assert!(application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .is_none());
         assert!(application.pairing_worker_stopped(&operation).is_none());
 
@@ -462,7 +772,7 @@ mod tests {
             .pairing_progress(&operation, PairingStage::Verifying)
             .is_none());
         assert!(application
-            .complete_pairing(&operation, Ok(profile(&operation)))
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
             .is_none());
         assert!(application.handle_tvs_intent(TvsIntent::PairTv).is_none());
     }
