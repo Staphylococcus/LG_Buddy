@@ -280,6 +280,9 @@ failure findings. Unavailable observations remain explicit partial results.
 Capability probes are not treated as proof of what a running service uses; TV
 connectivity is not proof of automation. Raw configuration values, credentials,
 protocol frames, and journal messages are excluded from the report.
+Native TV model reads require stored credentials. Compatibility profiles expose
+local credential metadata only, because that backend cannot guarantee a model
+read without initiating pairing.
 
 `diagnostics_view.rs` owns collection, export snapshots, and stale-completion
 handling. `Application` adds retained user-facing failures from the current GUI

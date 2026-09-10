@@ -14,7 +14,7 @@ use std::process::{ChildStdout, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::ScreenBackend;
+use crate::config::{ScreenBackend, TvPlatform};
 use crate::settings::{ConfigPathResolver, SettingValue, SettingsStore};
 use crate::tvs::{EnvironmentTvsBackend, TvCredentialState, TvsBackend};
 use crate::version::VersionInfo;
@@ -353,7 +353,6 @@ fn gnome_name_has_owner(command: &str, name: &str) -> Option<bool> {
         vec![
             "--user",
             "--no-pager",
-            "--quiet",
             "call",
             "org.freedesktop.DBus",
             "/org/freedesktop/DBus",
@@ -498,10 +497,11 @@ fn tv_section_from_backend(backend: &impl TvsBackend) -> DiagnosticSection {
         body.push_str(credential_observation(profile.credentials()));
         body.push('\n');
 
-        // The existing backend uses stored-credential-only authentication and a
-        // three-second model-read timeout.  It never starts pairing here.
-        match profile.credentials() {
-            TvCredentialState::Stored | TvCredentialState::LocalFile => {
+        // Only native webOS enforces stored-credential-only authentication.
+        // A compatibility credential file may lack a key for this TV, causing
+        // its model read to initiate pairing instead.
+        match (profile.platform(), profile.credentials()) {
+            (TvPlatform::LgWebOs, TvCredentialState::Stored) => {
                 match backend.read_model_name(profile) {
                     Ok(model) => {
                         body.push_str("credential-scoped model read: succeeded (model=");
@@ -513,6 +513,9 @@ fn tv_section_from_backend(backend: &impl TvsBackend) -> DiagnosticSection {
                     ),
                 }
             }
+            (TvPlatform::Bscpylgtv, _) => body.push_str(
+                "credential-scoped model read: skipped because the compatibility backend cannot guarantee a read without pairing\n",
+            ),
             _ => body.push_str(
                 "credential-scoped model read: skipped because no usable local credential was observed\n",
             ),
@@ -543,15 +546,24 @@ fn credential_observation(state: TvCredentialState) -> &'static str {
 
 fn journal_section() -> DiagnosticSection {
     let journalctl = command_path("LG_BUDDY_JOURNALCTL", "journalctl");
+    journal_section_from_command(&journalctl)
+}
+
+fn journal_section_from_command(journalctl: &PathBuf) -> DiagnosticSection {
     let mut body = String::new();
     let mut any_available = false;
     let mut actions = BTreeSet::new();
 
     for (scope, units) in [
-        (ServiceScope::User, [SCREEN_UNIT, UPDATE_TIMER]),
-        (ServiceScope::System, [LIFECYCLE_UNIT, ""]),
+        (
+            ServiceScope::User,
+            [SCREEN_UNIT, UPDATE_TIMER, "LG_Buddy_update_check.service"].as_slice(),
+        ),
+        (
+            ServiceScope::System,
+            [LIFECYCLE_UNIT, "LG_Buddy.service"].as_slice(),
+        ),
     ] {
-        let units = units.iter().copied().filter(|unit| !unit.is_empty());
         let mut args = Vec::new();
         if scope == ServiceScope::User {
             args.push("--user");
@@ -562,7 +574,7 @@ fn journal_section() -> DiagnosticSection {
         }
         args.extend(["--no-pager", "--quiet", "--lines=20", "--output=cat"]);
 
-        match run_bounded(&journalctl, &args, COMMAND_TIMEOUT) {
+        match run_bounded(journalctl, &args, COMMAND_TIMEOUT) {
             CommandResult {
                 status: Some(_),
                 stdout,
@@ -748,10 +760,13 @@ fn classify_journal(output: &[u8]) -> Vec<&'static str> {
     let text = String::from_utf8_lossy(output).to_ascii_lowercase();
     let mut classes = BTreeSet::new();
     for line in text.lines() {
-        if line.contains("failed") || line.contains("error") || line.contains("panic") {
+        let failed = line.contains("failed") || line.contains("error") || line.contains("panic");
+        if failed {
             classes.insert("error");
         }
-        if line.contains("timeout") || line.contains("timed out") {
+        // A configured timeout (for example the healthy swayidle startup
+        // message) is not evidence that an operation timed out.
+        if line.contains("timed out") || (failed && line.contains("timeout")) {
             classes.insert("timeout");
         }
         if line.contains("denied") || line.contains("permission") {
@@ -1074,6 +1089,144 @@ mod tests {
             classify_journal(b"failed: token=secret\nconnection refused\npermission denied\n");
         assert_eq!(classes, vec!["connectivity", "error", "permission"]);
         assert!(!classes.iter().any(|class| class.contains("secret")));
+    }
+
+    #[test]
+    fn journal_timeout_classification_requires_a_failure() {
+        assert!(
+            classify_journal(b"LG Buddy Monitor: Using swayidle backend (timeout: 300s).\n")
+                .is_empty()
+        );
+        assert_eq!(
+            classify_journal(b"LG_Buddy_screen.service: Failed with result 'timeout'.\n"),
+            vec!["error", "timeout"]
+        );
+        assert_eq!(
+            classify_journal(b"bscpylgtvcommand timed out after 3s\n"),
+            vec!["timeout"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busctl_owner_queries_preserve_positive_and_negative_replies() {
+        let path = fixture_script(
+            "busctl-owner",
+            r#"for arg in "$@"; do
+    [ "$arg" = "--quiet" ] && exit 0
+    name="$arg"
+done
+case "$name" in
+    org.gnome.Shell) printf 'b true\n' ;;
+    org.gnome.ScreenSaver) printf 'b false\n' ;;
+    *) exit 1 ;;
+esac"#,
+        );
+        let command = path.to_str().expect("fixture path");
+        assert_eq!(gnome_name_has_owner(command, "org.gnome.Shell"), Some(true));
+        assert_eq!(
+            gnome_name_has_owner(command, "org.gnome.ScreenSaver"),
+            Some(false)
+        );
+        assert_eq!(gnome_name_has_owner(command, "org.gnome.Unknown"), None);
+        fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_includes_update_worker_and_startup_failures_in_their_scopes() {
+        let path = fixture_script(
+            "journal-worker-failures",
+            r#"scope=system
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user) scope=user ;;
+        -u)
+            shift
+            case "$scope:$1" in
+                user:LG_Buddy_screen.service)
+                    printf 'LG Buddy Monitor: Using swayidle backend (timeout: 300s).\n' ;;
+                user:LG_Buddy_update_check.service)
+                    printf 'permission denied: private-update-detail\n' ;;
+                system:LG_Buddy.service)
+                    printf 'connection refused: private-startup-detail\n' ;;
+            esac ;;
+    esac
+    shift
+done"#,
+        );
+        let section = journal_section_from_command(&path);
+        let body = section.body();
+        assert!(body.contains("user journal (up to 20 entries; capture capped at 16 KiB): failure markers observed: permission"));
+        assert!(body.contains("system journal (up to 20 entries; capture capped at 16 KiB): failure markers observed: connectivity"));
+        assert!(!body.contains("timeout"));
+        assert!(!body.contains("private-update-detail"));
+        assert!(!body.contains("private-startup-detail"));
+        fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn tv_diagnostics_only_probe_native_profiles_with_stored_credentials() {
+        use crate::config::HdmiInput;
+        use crate::tvs::TvProfile;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ProfileBackend {
+            profile: TvProfile,
+            reads: AtomicUsize,
+        }
+
+        impl TvsBackend for ProfileBackend {
+            fn read_profiles(&self) -> Result<Vec<TvProfile>, TvsReadError> {
+                Ok(vec![self.profile.clone()])
+            }
+
+            fn read_model_name(&self, profile: &TvProfile) -> Result<String, TvsReadError> {
+                assert_eq!(profile.platform(), TvPlatform::LgWebOs);
+                assert_eq!(profile.credentials(), TvCredentialState::Stored);
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Ok("OLED fixture".to_string())
+            }
+        }
+
+        for platform in [TvPlatform::Bscpylgtv, TvPlatform::LgWebOs] {
+            for credentials in [
+                TvCredentialState::Stored,
+                TvCredentialState::LocalFile,
+                TvCredentialState::Missing,
+                TvCredentialState::Malformed,
+                TvCredentialState::Unreadable,
+                TvCredentialState::Unknown,
+            ] {
+                let backend = ProfileBackend {
+                    profile: TvProfile::new(
+                        "primary",
+                        "Fixture TV",
+                        "192.0.2.42".parse().unwrap(),
+                        "aa:bb:cc:dd:ee:ff".parse().unwrap(),
+                        HdmiInput::Hdmi1,
+                        platform,
+                        credentials,
+                    ),
+                    reads: AtomicUsize::new(0),
+                };
+                let section = tv_section_from_backend(&backend);
+                if platform == TvPlatform::LgWebOs && credentials == TvCredentialState::Stored {
+                    assert_eq!(backend.reads.load(Ordering::Relaxed), 1);
+                    assert!(section.body().contains("model read: succeeded"));
+                    assert!(section.body().contains("OLED fixture"));
+                } else {
+                    assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+                    assert!(section.body().contains("model read: skipped"));
+                    assert!(!section.body().contains("OLED fixture"));
+                }
+                if platform == TvPlatform::Bscpylgtv {
+                    assert!(section
+                        .body()
+                        .contains("cannot guarantee a read without pairing"));
+                }
+            }
+        }
     }
 
     #[test]
