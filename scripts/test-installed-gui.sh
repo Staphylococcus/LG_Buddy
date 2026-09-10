@@ -49,6 +49,7 @@ trap cleanup EXIT
 [ -x "$GUI_BINARY" ] || fail "GUI binary is not executable: $GUI_BINARY"
 [ -n "${DISPLAY:-}" ] || fail "DISPLAY is required for the installed GUI smoke test."
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || fail "A D-Bus session is required for the installed GUI smoke test."
+command -v pgrep >/dev/null || fail "pgrep is required for the installed GUI smoke test."
 
 RUNTIME_BINARY="$(realpath "$RUNTIME_BINARY")"
 GUI_BINARY="$(realpath "$GUI_BINARY")"

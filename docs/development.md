@@ -17,6 +17,7 @@ Compiling and testing the GTK frontend additionally requires:
 - `glib-compile-resources` (provided by the GLib development tools)
 - a graphical session or virtual display for renderer tests
 - `xdotool` for native pointer tests and the executable launch smoke test
+- `pgrep` (`procps` on Debian, `procps-ng` on Fedora/Arch) for installed GUI process checks
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 

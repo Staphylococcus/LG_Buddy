@@ -239,11 +239,11 @@ jobs:
           - name: Fedora 43
             image: fedora:43
             package_manager: dnf
-            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
+            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit procps-ng python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
           - name: Arch current
             image: archlinux:latest
             package_manager: pacman
-            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
+            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit procps-ng python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
     container:
       image: ${{ matrix.image }}
       options: --security-opt seccomp=unconfined

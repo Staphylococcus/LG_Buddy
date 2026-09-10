@@ -347,10 +347,15 @@ def is_checked(accessible: object) -> bool:
 
 
 def is_toggle_control(accessible: object) -> bool:
-    return role(accessible) in {
+    toggle_roles = {
         pyatspi.ROLE_CHECK_BOX,
         pyatspi.ROLE_TOGGLE_BUTTON,
     }
+    # Newer GTK/AT-SPI versions expose GtkSwitch with its own role.
+    switch_role = getattr(pyatspi, "ROLE_SWITCH", None)
+    if switch_role is not None:
+        toggle_roles.add(switch_role)
+    return role(accessible) in toggle_roles
 
 
 def wait_for_accessible(predicate, timeout: float, description: str):
@@ -394,9 +399,7 @@ def showing_named(name_value: str, roles=None, root: object | None = None):
 def activate_control(control_name: str, timeout: float) -> None:
     action_roles = {
         pyatspi.ROLE_PUSH_BUTTON,
-        pyatspi.ROLE_TOGGLE_BUTTON,
         pyatspi.ROLE_MENU_ITEM,
-        pyatspi.ROLE_CHECK_BOX,
     }
     for optional_role_name in ("ROLE_MENU_BUTTON",):
         optional_role = getattr(pyatspi, optional_role_name, None)
@@ -410,7 +413,7 @@ def activate_control(control_name: str, timeout: float) -> None:
             try:
                 if (
                     name(item) == control_name
-                    and role(item) in action_roles
+                    and (role(item) in action_roles or is_toggle_control(item))
                     and is_showing(item)
                     and is_sensitive(item)
                     and item.queryAction().doAction(0)
