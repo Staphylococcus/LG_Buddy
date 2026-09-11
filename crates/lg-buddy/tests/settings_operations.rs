@@ -2,6 +2,8 @@ mod support;
 
 use std::fs;
 
+use lg_buddy::config::load_config;
+use lg_buddy::inhibition::evaluate_inhibition_preference;
 use lg_buddy::presentation::settings::{
     SettingsEditStatus, SettingsFeedbackSeverity, SettingsPresentation, SettingsStatus,
 };
@@ -14,6 +16,77 @@ use lg_buddy::settings_view::{
     SettingsIntent, SettingsTransition,
 };
 use support::{ExecutableScript, TestConfigFile, TestEnv};
+
+#[test]
+fn inhibition_preference_follows_persisted_settings_and_existing_restart_application() {
+    let config = TestConfigFile::new("inhibition-preference-settings");
+    config.write_contents("tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\n");
+    let restart_snapshot = config.path().with_extension("applied");
+    let systemctl = ExecutableScript::new(
+        "inhibition-preference-systemctl",
+        "systemctl",
+        r#"#!/bin/sh
+[ "$1" = "--user" ] || exit 23
+case "$2" in
+  cat|is-active|is-enabled) exit 0 ;;
+  restart)
+    [ "$3" = "LG_Buddy_screen.service" ] || exit 23
+    cp "$LG_BUDDY_CONFIG" "$LG_BUDDY_TEST_RESTART_SNAPSHOT"
+    ;;
+  *) exit 23 ;;
+esac
+"#,
+    );
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.set("LG_BUDDY_TEST_RESTART_SNAPSHOT", &restart_snapshot);
+    env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+    let key = "screen.honor_idle_inhibitors";
+    assert!(evaluate_inhibition_preference(&load_config(config.path()).unwrap()).bypass_inhibition);
+
+    for (value, bypass) in [
+        (Some("enabled"), false),
+        (Some("disabled"), true),
+        (Some("enabled"), false),
+        (None, true),
+    ] {
+        let command = match value {
+            Some(value) => SettingsCommand::Set {
+                key: key.into(),
+                value: value.into(),
+            },
+            None => SettingsCommand::Unset(key.into()),
+        };
+        let runner = SettingsCommandRunner::new(SettingsStore::load(config.path()).unwrap());
+        let mut output = Vec::new();
+        runner.run(command, &mut output).unwrap();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("apply: restarted LG_Buddy_screen.service"));
+        // The normal apply path sees the new file, including resetting to the
+        // default. Evaluate what the restarted monitor would actually load.
+        assert_eq!(
+            fs::read(&restart_snapshot).unwrap(),
+            fs::read(config.path()).unwrap()
+        );
+        let result = evaluate_inhibition_preference(&load_config(&restart_snapshot).unwrap());
+        assert_eq!(result.bypass_inhibition, bypass);
+        let effective = SettingsStore::load(config.path())
+            .unwrap()
+            .effective_by_name(key)
+            .unwrap();
+        assert_eq!(
+            effective.value().unwrap().to_string(),
+            result.diagnostics.honoring.as_str()
+        );
+        if value.is_none() {
+            assert!(!fs::read_to_string(config.path())
+                .unwrap()
+                .contains("screen_honor_idle_inhibitors="));
+        }
+    }
+}
 
 const BEHAVIOR_CONFIG: &str = "screen_backend=auto
 screen_idle_blank=enabled

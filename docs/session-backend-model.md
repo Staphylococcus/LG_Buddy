@@ -108,13 +108,13 @@ when no native activity capability is available at startup; #132 removes it.
 Inhibition notifications, permission state and release timing have been removed
 from the activity stream and inactivity engine. The stored preference remains
 compatible, and monitor startup reports the temporary limitation. #222 provides
-standalone push inhibition and #223 provides pull inhibition; #224-#225 complete
-the subsystem and Boolean gate. This intermediate
+standalone push inhibition, #223 provides pull inhibition, and #224 evaluates the
+honoring preference; #225 integrates the subsystem and Boolean gate. This intermediate
 runtime must not be promoted to prerelease or main before that integration and
 #89's MVP readiness checks are complete. Explicit lock, ownership/restore and
 ordinary activity deadlines retain their existing policy.
 
-### Independent inhibition capabilities (#222, #223)
+### Independent inhibition capabilities (#222, #223, #224)
 
 An adapter can supply activity, inhibition, or both. Each capability independently
 uses push or pull according to its source. Activity observations stay in the
@@ -168,8 +168,25 @@ the same observed-inhibition rule as push. GNOME remains one push contribution.
 
 These capabilities are independently testable but are not started by the monitor yet.
 They read no preferences, apply no aggregate release delay, and send no
-activity events or TV actions. Those integration responsibilities remain in
-#224 and #225.
+activity events or TV actions. #225 owns their runtime integration.
+
+`evaluate_inhibition_preference(&Config)` is a separate, pure section. It reads
+the existing effective `screen_honor_idle_inhibitors` value and returns
+`bypass_inhibition` with diagnostics identifying the honoring policy. Disabled
+honoring (the existing default) returns `true`: bypass source restrictions and
+release delay. Enabled honoring returns `false`: the reconciler must evaluate
+both. This override must not be ANDed as a third source permission and never
+makes a non-idle session eligible to blank. It depends on no source availability,
+protocol I/O, activity state or release history. The legacy `swayidle` process
+still controls its own initial idle notification and honors its own inhibitors.
+
+CLI and GUI preference edits retain the existing persist-then-restart path for
+`LG_Buddy_screen.service`. A successful restart replaces the process and its
+pending attempts; the new runtime reads the new configuration. Apply failures
+remain reported separately from saved values and use the existing retry path.
+The preference evaluator retains no state. #225 must evaluate it for the current
+attempt and cancel any pending attempt before applying an in-process config
+reload; old completions cannot become authoritative under a new preference.
 
 ### PowerDevil route coverage
 
