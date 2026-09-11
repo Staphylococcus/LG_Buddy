@@ -417,6 +417,11 @@ dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
 those still require supported-host verification. NixOS development runs are
 not evidence of official NixOS support.
 
+Lifecycle activation selects `systemctl` only from `/usr/bin/systemctl` or
+`/run/current-system/sw/bin/systemctl`. The settings integration test shadows
+`systemctl` on PATH and overrides `LG_BUDDY_SYSTEMCTL` to verify that neither
+controls the executable passed to privileged authorization.
+
 The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
 GUI runtime dependency handling. They prove that an unconfirmed install does not
 invoke the package manager or GUI, an accepted install requests the correct
@@ -476,8 +481,10 @@ upload, retry, and already-published paths are covered without GitHub access.
 
 After a prerelease is public, `production-prerelease-canary` installs the same
 baseline and drives its real `updates install` command through a PTY against
-GitHub. It then clears the update cache and proves that the newly installed
-candidate sees itself as GitHub's newest published release. The canary records
+GitHub. It checks removal of the obsolete Python environment and preservation
+of configuration and native credentials. It then clears the update cache and
+proves that the newly installed candidate sees itself as GitHub's newest
+published release. The canary records
 that sanitized newest-release response, the release-by-tag response, tag ref,
 and asset redirects as a workflow artifact. Signed redirect queries and URL
 userinfo are never retained. The observed beta.2 newest-release fields also
