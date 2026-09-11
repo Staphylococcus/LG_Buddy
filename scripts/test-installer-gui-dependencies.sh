@@ -105,7 +105,7 @@ run_fresh_install() {
 tvs_primary_ip=192.0.2.10
 tvs_primary_mac=02:00:00:00:00:10
 tvs_primary_input=HDMI_1
-tvs_primary_platform=bscpylgtv
+tvs_primary_platform=lg_webos
 EOF
     (
         export PATH="$STUB_DIR:$PATH"
@@ -116,11 +116,10 @@ EOF
         export LG_BUDDY_SUDO_CMD="none"
         export LG_BUDDY_NONINTERACTIVE="1"
         export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
-        export LG_BUDDY_SKIP_PIP_INSTALL="1"
         export LG_BUDDY_TV_IP="192.0.2.10"
         export LG_BUDDY_TV_MAC="02:00:00:00:00:10"
         export LG_BUDDY_INPUT="HDMI_1"
-        export LG_BUDDY_TV_PLATFORM="bscpylgtv"
+        export LG_BUDDY_TV_PLATFORM="lg_webos"
         export LG_BUDDY_SCREEN_BACKEND="auto"
         export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
         export LG_BUDDY_GUI_RUNTIME_PROBE="$PROBE"
@@ -147,8 +146,7 @@ if run_fresh_install refusal "$REFUSAL_OUTPUT" 0 1; then
     echo "Noninteractive install unexpectedly installed missing GUI dependencies."
     exit 1
 fi
-grep -F -q '  [MISSING] GTK 4.14 or newer' "$REFUSAL_OUTPUT"
-grep -F -q '  [MISSING] libadwaita 1.5 or newer' "$REFUSAL_OUTPUT"
+grep -F -q '  [MISSING] GTK 4.14 and libadwaita 1.5 or newer' "$REFUSAL_OUTPUT"
 grep -F -q "$EXPECTED_MANUAL" "$REFUSAL_OUTPUT"
 [ ! -e "$PACKAGE_LOG" ] || {
     echo "Refused dependency installation invoked $PACKAGE_MANAGER."
@@ -207,4 +205,7 @@ fi
 [ -x "$WORK_DIR/success/root/usr/bin/lg-buddy" ]
 [ -x "$WORK_DIR/success/root/usr/bin/lg-buddy-gui" ]
 
+# The real candidate checks its loaded libraries without a graphical session.
+env -u DISPLAY -u WAYLAND_DISPLAY "$GUI_BINARY" --check-runtime
+[ ! -e "$WORK_DIR/success/root/usr/bin/LG_Buddy_PIP" ]
 echo "$PACKAGE_MANAGER installer dependency smoke passed."

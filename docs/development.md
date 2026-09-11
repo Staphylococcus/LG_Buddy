@@ -21,11 +21,10 @@ Compiling and testing the GTK frontend additionally requires:
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 
-Running the interactive installer, exercising the legacy TV fallback, and
-testing release bundles also requires:
-
-- `python3-venv`
-- `python3-pip`
+Python is a development/test dependency for release tooling, GUI observers,
+and legacy fixtures. The pinned historical installer smoke also needs `venv`
+and `pip` support. Fresh and native installations use the bundled Rust binaries
+and do not provision a Python environment.
 
 Backend-specific tools used in development and local testing:
 
@@ -203,12 +202,15 @@ dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
 
 The smoke test validates `release-manifest.json` against the archive name and
 bundled runtime and GUI before running installer code. It then installs into a temporary
-root and exercises upgrade refusal, preservation, Python repair, owned-file
+root and exercises upgrade refusal, native environment cleanup, healthy legacy
+preservation, unhealthy legacy refusal, owned-file
 replacement, service ordering, GTK/libadwaita dependency confirmation and
 refusal, installed identity, mocked GUI read/apply/failure/cancel behavior,
 lifecycle topology, and uninstall cleanup without mutating the host installation.
 The supported Fedora and Arch lanes repeat the dependency flow with their native
 package-manager mappings.
+The native installer runs use `test-without-python.sh` to restrict command
+lookup to native host tools. Python remains available to the outer test harness.
 
 For the complete installed GUI journey, build the local TV fixture and pass it
 to the existing smoke:

@@ -339,13 +339,19 @@ The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
 remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
 proves refusal before sudo, skips configuration, preserves config and native
-credentials byte-for-byte, conditionally preserves or repairs the Python
-environment, replaces the owned bundle assets, checks service action order, and
+credentials byte-for-byte, removes obsolete native-profile environments,
+preserves healthy legacy environments, refuses unhealthy ones before privilege,
+replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
 The installer dependency smoke uses package-manager fixtures to verify that
-missing GTK/libadwaita packages are installed and their versions checked before
-the candidate GUI executes. The installed GUI smoke then verifies the desktop
+missing GTK/libadwaita packages are installed and the runtime probe succeeds
+before candidate identity validation. The real probe also runs without a display.
+Fresh native installs and native upgrades run with Python, pip, and bscpylgtv
+absent from command lookup; the outer harness retains its Python tools. The
+pinned cross-version smoke repeats healthy preservation and unhealthy refusal
+for explicit and missing-key legacy profiles, then native cleanup.
+The installed GUI smoke verifies the desktop
 entry's no-argument `lg-buddy` launch opens the existing pairing prompt without
 navigation for an unconfigured installation, and normal Overview for a saved TV.
 `lg-buddy brightness` selects the brightness control even when another view is
@@ -441,7 +447,7 @@ unavailable-service-manager refusals. Table-driven cases exercise every path
 policy's permission contract and every declared candidate input. Candidate
 containment cases reject untrusted and non-sticky shared-writable ancestors
 while preserving root-owned sticky temporary directories. Virtualenv mutation
-checks are conditional on an actual compatibility-environment repair and refuse
+checks are conditional on native-profile environment removal and refuse
 unsafe roots or nested mount points before clearing. Run it with:
 
 ```bash

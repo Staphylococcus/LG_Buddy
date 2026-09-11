@@ -140,7 +140,7 @@ const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     ),
 ];
 
-const PYTHON_REPAIR_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
+const LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
     "/usr/bin/LG_Buddy_PIP",
     InstallerPathPolicy::RecursiveClear,
 )];
@@ -584,12 +584,20 @@ pub fn current_gui_host_preflight() -> CompatibilityReport {
     evaluate_gui_initial_preflight(&OsFilesystemFacts, &facts)
 }
 
-pub fn candidate_host_preflight(candidate_root: &Path, repair_python: bool) -> CompatibilityReport {
+pub fn candidate_host_preflight(
+    candidate_root: &Path,
+    remove_legacy_env: bool,
+) -> CompatibilityReport {
     let facts = match observe_current_process() {
         Ok(facts) => facts,
         Err(report) => return report,
     };
-    evaluate_candidate_host_preflight(&OsFilesystemFacts, &facts, candidate_root, repair_python)
+    evaluate_candidate_host_preflight(
+        &OsFilesystemFacts,
+        &facts,
+        candidate_root,
+        remove_legacy_env,
+    )
 }
 
 fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> {
@@ -693,7 +701,7 @@ fn evaluate_installed_state(
     expected_running_executable: &Path,
     executable_check: &'static str,
     executable_remedy: &'static str,
-    repair_python: bool,
+    remove_legacy_env: bool,
     require_gui: bool,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
@@ -772,14 +780,14 @@ fn evaluate_installed_state(
             );
         }
     }
-    if repair_python {
-        for requirement in PYTHON_REPAIR_PATH_REQUIREMENTS {
+    if remove_legacy_env {
+        for requirement in LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS {
             checker.check_requirement(
                 &facts.layout.system_path(requirement.path),
                 facts.system_owner_uid,
                 Some(system_trust),
                 requirement.policy,
-                "python-environment-repair",
+                "legacy-environment-removal",
             );
         }
     }
@@ -878,7 +886,7 @@ pub fn evaluate_candidate_host_preflight(
     filesystem: &impl FilesystemFacts,
     facts: &HostPreflightFacts,
     candidate_root: &Path,
-    repair_python: bool,
+    remove_legacy_env: bool,
 ) -> CompatibilityReport {
     let expected_candidate_executable = candidate_root.join("lg-buddy");
     let mut report = evaluate_installed_state(
@@ -887,7 +895,7 @@ pub fn evaluate_candidate_host_preflight(
         &expected_candidate_executable,
         "candidate-executable",
         "run the preflight with the verified candidate binary from this bundle",
-        repair_python,
+        remove_legacy_env,
         false,
     );
     report.extend(evaluate_candidate_preflight(
@@ -1756,8 +1764,8 @@ mod tests {
     }
 
     #[test]
-    fn python_environment_safety_is_required_only_when_repair_is_requested() {
-        let fixture = InstalledFixture::new("conditional-python-repair");
+    fn legacy_environment_safety_is_required_only_when_removal_is_requested() {
+        let fixture = InstalledFixture::new("conditional-legacy-removal");
         let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let mut candidate_facts = fixture.facts.clone();
@@ -1772,13 +1780,13 @@ mod tests {
         assert!(missing.compatible(), "{}", missing.render());
 
         fs::create_dir_all(&virtualenv).unwrap();
-        let repair = evaluate_candidate_host_preflight(
+        let removal = evaluate_candidate_host_preflight(
             &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             true,
         );
-        assert!(repair.compatible(), "{}", repair.render());
+        assert!(removal.compatible(), "{}", removal.render());
 
         fs::remove_dir(&virtualenv).unwrap();
         symlink(&fixture.config_directory, &virtualenv).unwrap();
@@ -1788,7 +1796,7 @@ mod tests {
             &fixture.candidate_root,
             false,
         );
-        let repair = evaluate_candidate_host_preflight(
+        let removal = evaluate_candidate_host_preflight(
             &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
@@ -1796,7 +1804,12 @@ mod tests {
         );
 
         assert!(preserving.compatible(), "{}", preserving.render());
-        assert_failure(&repair, "python-environment-repair", &virtualenv, "Symlink");
+        assert_failure(
+            &removal,
+            "legacy-environment-removal",
+            &virtualenv,
+            "Symlink",
+        );
     }
 
     #[test]
@@ -2119,7 +2132,7 @@ mod tests {
     }
 
     #[test]
-    fn python_repair_preflight_refuses_a_symlinked_installed_virtualenv() {
+    fn legacy_environment_removal_preflight_refuses_a_symlinked_installed_virtualenv() {
         let fixture = InstalledFixture::new("symlink-virtualenv");
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let target = fixture.root.join("external-virtualenv");
@@ -2137,11 +2150,16 @@ mod tests {
             true,
         );
 
-        assert_failure(&report, "python-environment-repair", &virtualenv, "Symlink");
+        assert_failure(
+            &report,
+            "legacy-environment-removal",
+            &virtualenv,
+            "Symlink",
+        );
     }
 
     #[test]
-    fn python_repair_preflight_refuses_a_nested_virtualenv_mount() {
+    fn legacy_environment_removal_preflight_refuses_a_nested_virtualenv_mount() {
         let fixture = InstalledFixture::new("nested-virtualenv-mount");
         let nested_mount = fixture
             .facts
@@ -2167,7 +2185,7 @@ mod tests {
 
         assert_failure(
             &report,
-            "python-environment-repair",
+            "legacy-environment-removal",
             &nested_mount,
             "nested mount point",
         );

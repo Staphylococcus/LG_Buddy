@@ -163,7 +163,13 @@ guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
 For first-time setup without the GUI, run `./configure.sh` from the extracted
 release archive before `./install.sh`. To select native control for an existing
 profile and verify it before saving, use `lg-buddy settings set tv.platform
-lg_webos`. The explicit `bscpylgtv` value remains a compatibility fallback.
+lg_webos`, accepting the pairing prompt on the TV. Existing `bscpylgtv`
+profiles, including older profiles without a platform key, remain supported
+through the final 1.x compatibility window when their installed environment
+works. Support ends in v2.0.0. The installer no longer creates or repairs that
+environment; if it is unhealthy, pair and select `lg_webos` before retrying.
+Upgrading a native profile removes the obsolete LG Buddy environment at
+`/usr/bin/LG_Buddy_PIP` while retaining configuration and credentials.
 
 These commands work without opening the GUI:
 

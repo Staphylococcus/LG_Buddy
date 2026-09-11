@@ -130,7 +130,6 @@ jobs:
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
               LG_BUDDY_GUI_TV_FIXTURE="$PWD/target/gui-journey-fixtures/gui_journey_tv" \
               ./scripts/test-release-bundle.sh \
-              --skip-pip-install \
               --work-dir "$RUNNER_TEMP/release-bundle-smoke" \
               --archive "dist/lg-buddy-${{ needs.validate.outputs.version }}-x86_64-unknown-linux-musl.tar.gz" \
               --expected-tag "${{ needs.validate.outputs.tag }}" \

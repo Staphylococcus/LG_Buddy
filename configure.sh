@@ -289,7 +289,7 @@ else
 
     echo "Choose the TV control platform:"
     echo "  1) lg_webos   (native LG Buddy platform; recommended)"
-    echo "  2) bscpylgtv  (Python compatibility fallback)"
+    echo "  2) bscpylgtv  (deprecated; existing working installations only, until v2.0.0)"
 
     case "$current_tv_platform" in
         lg_webos) default_platform_choice="1" ;;

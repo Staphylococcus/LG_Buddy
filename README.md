@@ -51,8 +51,8 @@ checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
 packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
 the requirements before proceeding. The prebuilt binaries require glibc 2.39
 or newer—the Ubuntu 24.04 runtime baseline.
-The release installer also needs Python 3 with `venv`/`pip` support
-for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
+Fresh and native installations do not require Python, pip, or bscpylgtv.
+TV Sleep & Wake activation requires `pkexec` and
 a desktop authorization agent. You can also install the prerequisites manually:
 
 <details>
@@ -61,19 +61,19 @@ a desktop authorization agent. You can also install the prerequisites manually:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip libgtk-4-1 libadwaita-1-0 pkexec
+sudo apt install libgtk-4-1 libadwaita-1-0 pkexec
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv gtk4 libadwaita polkit
+sudo dnf install gtk4 libadwaita polkit
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv gtk4 libadwaita polkit
+sudo pacman -S gtk4 libadwaita polkit
 ```
 
 </details>
