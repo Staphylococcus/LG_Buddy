@@ -339,13 +339,19 @@ The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
 remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
 proves refusal before sudo, skips configuration, preserves config and native
-credentials byte-for-byte, conditionally preserves or repairs the Python
-environment, replaces the owned bundle assets, checks service action order, and
+credentials byte-for-byte, removes obsolete native-profile environments,
+preserves healthy legacy environments, refuses unhealthy ones before privilege,
+replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
 The installer dependency smoke uses package-manager fixtures to verify that
-missing GTK/libadwaita packages are installed and their versions checked before
-the candidate GUI executes. The installed GUI smoke then verifies the desktop
+missing GTK/libadwaita packages are installed and the runtime probe succeeds
+before candidate identity validation. The real probe also runs without a display.
+Fresh native installs and native upgrades run with Python, pip, and bscpylgtv
+absent from command lookup; the outer harness retains its Python tools. The
+pinned cross-version smoke repeats healthy preservation and unhealthy refusal
+for explicit and missing-key legacy profiles, then native cleanup.
+The installed GUI smoke verifies the desktop
 entry's no-argument `lg-buddy` launch opens the existing pairing prompt without
 navigation for an unconfigured installation, and normal Overview for a saved TV.
 `lg-buddy brightness` selects the brightness control even when another view is
@@ -411,6 +417,11 @@ dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
 those still require supported-host verification. NixOS development runs are
 not evidence of official NixOS support.
 
+Lifecycle activation selects `systemctl` only from `/usr/bin/systemctl` or
+`/run/current-system/sw/bin/systemctl`. The settings integration test shadows
+`systemctl` on PATH and overrides `LG_BUDDY_SYSTEMCTL` to verify that neither
+controls the executable passed to privileged authorization.
+
 The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
 GUI runtime dependency handling. They prove that an unconfirmed install does not
 invoke the package manager or GUI, an accepted install requests the correct
@@ -441,7 +452,7 @@ unavailable-service-manager refusals. Table-driven cases exercise every path
 policy's permission contract and every declared candidate input. Candidate
 containment cases reject untrusted and non-sticky shared-writable ancestors
 while preserving root-owned sticky temporary directories. Virtualenv mutation
-checks are conditional on an actual compatibility-environment repair and refuse
+checks are conditional on native-profile environment removal and refuse
 unsafe roots or nested mount points before clearing. Run it with:
 
 ```bash
@@ -470,8 +481,10 @@ upload, retry, and already-published paths are covered without GitHub access.
 
 After a prerelease is public, `production-prerelease-canary` installs the same
 baseline and drives its real `updates install` command through a PTY against
-GitHub. It then clears the update cache and proves that the newly installed
-candidate sees itself as GitHub's newest published release. The canary records
+GitHub. It checks removal of the obsolete Python environment and preservation
+of configuration and native credentials. It then clears the update cache and
+proves that the newly installed candidate sees itself as GitHub's newest
+published release. The canary records
 that sanitized newest-release response, the release-by-tag response, tag ref,
 and asset redirects as a workflow artifact. Signed redirect queries and URL
 userinfo are never retained. The observed beta.2 newest-release fields also

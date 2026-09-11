@@ -398,8 +398,12 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
     let log = install_root.join("authorization.log");
     let mut env = TestEnv::new();
     let path = std::env::join_paths(
-        std::iter::once(authorization.path().parent().unwrap().to_path_buf())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        [
+            authorization.path().parent().unwrap().to_path_buf(),
+            systemctl.path().parent().unwrap().to_path_buf(),
+        ]
+        .into_iter()
+        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
     env.set("PATH", path);
@@ -476,8 +480,19 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         .unwrap()
         .contains("system_sleep_wake_policy=enabled"));
     let calls = fs::read_to_string(&log).unwrap();
-    let expected_call = "--disable-internal-agent\nsystemctl\nstart\nLG_Buddy_lifecycle.service\n";
-    assert_eq!(calls, expected_call.repeat(3));
+    let arguments: Vec<_> = calls.lines().collect();
+    assert_eq!(arguments.len(), 12);
+    for call in arguments.as_chunks::<4>().0 {
+        assert_eq!(call[0], "--disable-internal-agent");
+        assert!(
+            matches!(
+                call[1],
+                "/usr/bin/systemctl" | "/run/current-system/sw/bin/systemctl"
+            ),
+            "privileged activation must ignore PATH and LG_BUDDY_SYSTEMCTL: {call:?}"
+        );
+        assert_eq!(&call[2..], &["start", "LG_Buddy_lifecycle.service"]);
+    }
 
     run_mutation(
         &mut app,

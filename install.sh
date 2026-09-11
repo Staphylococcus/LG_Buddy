@@ -10,7 +10,6 @@ INSTALL_ROOT="${INSTALL_ROOT%/}"
 SUDO_CMD="${LG_BUDDY_SUDO_CMD:-sudo}"
 NONINTERACTIVE="${LG_BUDDY_NONINTERACTIVE:-0}"
 SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
-SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
 DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
 GUI_TARGET="x86_64-unknown-linux-gnu"
 DEFAULT_GUI_BINARY="$SCRIPT_DIR/docs/lg-buddy-gui-$GUI_TARGET"
@@ -33,8 +32,7 @@ SYSTEM_UPGRADE_INSTALL_ROOT=""
 SYSTEM_UPGRADE_CANDIDATE_ROOT=""
 SYSTEM_UPGRADE_CONFIG_OVERRIDE=""
 SYSTEM_UPGRADE_NM_HOOK=""
-SYSTEM_UPGRADE_REPAIR_PYTHON="0"
-SYSTEM_UPGRADE_SKIP_PIP="0"
+SYSTEM_UPGRADE_REMOVE_LEGACY="0"
 CONFIG_FILE=""
 FRESH_SETUP_MODE=0
 SYSTEM_UPGRADE_SKIP_SYSTEMD="0"
@@ -80,15 +78,14 @@ while [ "$#" -gt 0 ]; do
             SYSTEM_UPGRADE_MODE=1
             UPGRADE_MODE=1
             shift
-            [ "$#" -eq 7 ] || usage
+            [ "$#" -eq 6 ] || usage
             SYSTEM_UPGRADE_INSTALL_ROOT="$1"
             SYSTEM_UPGRADE_CANDIDATE_ROOT="$2"
             SYSTEM_UPGRADE_CONFIG_OVERRIDE="$3"
             SYSTEM_UPGRADE_NM_HOOK="$4"
-            SYSTEM_UPGRADE_REPAIR_PYTHON="$5"
-            SYSTEM_UPGRADE_SKIP_PIP="$6"
-            SYSTEM_UPGRADE_SKIP_SYSTEMD="$7"
-            shift 7
+            SYSTEM_UPGRADE_REMOVE_LEGACY="$5"
+            SYSTEM_UPGRADE_SKIP_SYSTEMD="$6"
+            shift 6
             ;;
         -h|--help)
             usage
@@ -295,20 +292,6 @@ check_dep() {
     fi
 }
 
-check_python3_venv() {
-    local tmp_venv_dir=""
-    tmp_venv_dir="$(mktemp -d)" || return 1
-
-    if python3 -m venv "$tmp_venv_dir" >/dev/null 2>&1 &&
-        "$tmp_venv_dir/bin/pip" --version >/dev/null 2>&1; then
-        rm -rf "$tmp_venv_dir"
-        return 0
-    fi
-
-    rm -rf "$tmp_venv_dir"
-    return 1
-}
-
 detect_package_manager() {
     if command -v apt &>/dev/null; then
         PM="apt"
@@ -364,64 +347,24 @@ gui_runtime_package() {
     esac
 }
 
-gui_runtime_version_at_least() {
-    local library="$1"
-    local symbol_prefix="$2"
-    local required_major="$3"
-    local required_minor="$4"
-
-    if [ -n "${LG_BUDDY_GUI_RUNTIME_PROBE:-}" ]; then
-        "$LG_BUDDY_GUI_RUNTIME_PROBE" \
-            "$library" "$symbol_prefix" "$required_major" "$required_minor"
-        return
-    fi
-
-    python3 - "$library" "$symbol_prefix" "$required_major" "$required_minor" <<'PY'
-import ctypes
-import sys
-
-library, prefix, required_major, required_minor = sys.argv[1:]
-try:
-    runtime = ctypes.CDLL(library)
-    major = getattr(runtime, f"{prefix}_get_major_version")
-    minor = getattr(runtime, f"{prefix}_get_minor_version")
-    major.argtypes = []
-    minor.argtypes = []
-    major.restype = ctypes.c_uint
-    minor.restype = ctypes.c_uint
-    installed = (major(), minor())
-except (AttributeError, OSError):
-    raise SystemExit(1)
-
-required = (int(required_major), int(required_minor))
-raise SystemExit(0 if installed >= required else 1)
-PY
+gui_runtime_available() {
+    "${LG_BUDDY_GUI_RUNTIME_PROBE:-$GUI_BINARY}" --check-runtime
 }
 
 check_gui_runtime_prerequisites() {
-    check_dep \
-        "GTK 4.14 or newer" \
-        "$(gui_runtime_package gtk)" \
-        "gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14"
-    check_dep \
-        "libadwaita 1.5 or newer" \
-        "$(gui_runtime_package libadwaita)" \
-        "gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5"
+    if gui_runtime_available >/dev/null 2>&1; then
+        echo "  [OK] GTK 4.14 and libadwaita 1.5 or newer"
+    else
+        echo "  [MISSING] GTK 4.14 and libadwaita 1.5 or newer"
+        MISSING_PKGS+=("$(gui_runtime_package gtk)" "$(gui_runtime_package libadwaita)")
+    fi
 }
 
 verify_gui_runtime_prerequisites() {
-    local missing=0
-
-    if ! gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14; then
-        echo "Error: GTK 4.14 or newer is still unavailable."
-        missing=1
+    if ! gui_runtime_available; then
+        echo "Error: GTK 4.14 and libadwaita 1.5 or newer are still unavailable."
+        return 1
     fi
-    if ! gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5; then
-        echo "Error: libadwaita 1.5 or newer is still unavailable."
-        missing=1
-    fi
-
-    [ "$missing" -eq 0 ] || return 1
 }
 
 print_manual_install_command() {
@@ -517,26 +460,17 @@ run_system_mutation_command() {
 }
 
 perform_privileged_runtime_installation() {
-    if [ "$UPGRADE_MODE" -eq 0 ] || [ "$REPAIR_PYTHON_ENVIRONMENT" -eq 1 ]; then
+    if [ "$REMOVE_LEGACY_ENVIRONMENT" -eq 1 ]; then
         MUTATION_STARTED=1
-        system_upgrade_message "Creating Python virtual environment at $VENV_DIR..."
-        # Recreate the helper venv so OS Python minor-version upgrades do not leave
-        # bscpylgtv installed under an interpreter-specific site-packages directory
-        # that the new `/usr/bin/python3` no longer reads.
-        run_system_mutation_command python3 -m venv --clear "$VENV_DIR"
-        system_upgrade_message "Done."
-
-        if [ "$SKIP_PIP_INSTALL" = "1" ]; then
-            system_upgrade_message "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
-        else
-            system_upgrade_message "Installing bscpylgtv into the virtual environment..."
-            run_system_mutation_command "$VENV_DIR/bin/pip" install bscpylgtv
-            system_upgrade_message "Done."
-        fi
+        system_upgrade_message "Removing the obsolete LG Buddy Python environment at $VENV_DIR..."
+        run_system_mutation_command rm -rf --one-file-system -- "$VENV_DIR"
     fi
 
     MUTATION_STARTED=1
     system_upgrade_message "Installing Rust runtime and support files..."
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        run_system_mutation_command install -d "$SYSTEM_BIN_DIR"
+    fi
     run_system_mutation_command install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
     run_system_mutation_command install -m 755 "$GUI_BINARY" "$GUI_INSTALL_PATH"
     if [ "$UPGRADE_MODE" -eq 0 ]; then
@@ -607,15 +541,14 @@ perform_privileged_installation() {
 
 run_system_upgrade_helper() {
     [ "$(id -u)" -eq 0 ] || exit 126
-    [ "$#" -eq 7 ] || exit 2
+    [ "$#" -eq 6 ] || exit 2
 
     INSTALL_ROOT="$1"
     SCRIPT_DIR="$2"
     SYSTEM_CONFIG_OVERRIDE_TMP="$3"
     NM_HOOK_TMP="$4"
-    REPAIR_PYTHON_ENVIRONMENT="$5"
-    SKIP_PIP_INSTALL="$6"
-    SKIP_SYSTEMD_ACTIONS="$7"
+    REMOVE_LEGACY_ENVIRONMENT="$5"
+    SKIP_SYSTEMD_ACTIONS="$6"
 
     case "$INSTALL_ROOT" in
         ""|/*) ;;
@@ -627,8 +560,8 @@ run_system_upgrade_helper() {
         /*:/*:/*) ;;
         *) exit 2 ;;
     esac
-    case "$REPAIR_PYTHON_ENVIRONMENT:$SKIP_PIP_INSTALL:$SKIP_SYSTEMD_ACTIONS" in
-        0:0:0|0:0:1|0:1:0|0:1:1|1:0:0|1:0:1|1:1:0|1:1:1) ;;
+    case "$REMOVE_LEGACY_ENVIRONMENT:$SKIP_SYSTEMD_ACTIONS" in
+        0:0|0:1|1:0|1:1) ;;
         *) exit 2 ;;
     esac
 
@@ -790,11 +723,8 @@ check_install_prerequisites() {
     MISSING_PKGS=()
     detect_package_manager
     check_gui_runtime_prerequisites
-    if [ "$UPGRADE_MODE" -eq 0 ]; then
-        check_dep "python3-venv" "python3-venv" "check_python3_venv"
-        if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-            check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
-        fi
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
     fi
     install_missing_prerequisites
     require_sleep_wake_pkexec
@@ -805,29 +735,24 @@ check_install_prerequisites() {
     fi
 }
 
-require_python_repair_prerequisites() {
-    echo "Checking Python compatibility-platform repair prerequisites..."
-    MISSING_PKGS=()
-    check_dep "python3-venv" "python3-venv" "check_python3_venv"
-    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-        echo "Upgrade requires Python environment repair, but these prerequisites are missing: ${MISSING_PKGS[*]}"
-        echo "Install them manually and rerun the upgrade. No installation files were changed."
-        exit 1
-    fi
-}
-
-python_environment_healthy() {
-    local python_version=""
-    local site_packages=""
-
-    python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" || return 1
-    site_packages="$VENV_DIR/lib/python$python_version/site-packages"
-
+legacy_environment_healthy() {
     [ -f "$VENV_DIR/pyvenv.cfg" ] &&
         [ -x "$VENV_DIR/bin/python" ] &&
-        [ -x "$VENV_DIR/bin/pip" ] &&
         [ -x "$VENV_DIR/bin/bscpylgtvcommand" ] &&
-        { [ -d "$site_packages/bscpylgtv" ] || [ -f "$site_packages/bscpylgtv.py" ]; }
+        "$VENV_DIR/bin/python" -I -B -c 'import bscpylgtv' >/dev/null 2>&1
+}
+
+check_legacy_environment() {
+    local migration_runtime="$RUNTIME_INSTALL_PATH"
+    [ -x "$migration_runtime" ] || migration_runtime="$RUNTIME_BINARY"
+    [ "$TV_PLATFORM" = "bscpylgtv" ] || return 0
+    if ! legacy_environment_healthy; then
+        echo "The existing bscpylgtv environment is missing or unhealthy; LG Buddy no longer installs or repairs it."
+        echo "As your regular user, run LG_BUDDY_CONFIG=\"$CONFIG_FILE\" \"$migration_runtime\" settings set tv.platform lg_webos, accept pairing on the TV, then retry this installation."
+        return 1
+    fi
+    echo "Preserving the healthy bscpylgtv environment unchanged."
+    echo "Deprecated: bscpylgtv is supported only through the final 1.x compatibility window and will be removed in v2.0.0. Pair and select lg_webos to migrate."
 }
 
 load_upgrade_configuration() {
@@ -905,8 +830,7 @@ if [ "$SYSTEM_UPGRADE_MODE" -eq 1 ]; then
         "$SYSTEM_UPGRADE_CANDIDATE_ROOT" \
         "$SYSTEM_UPGRADE_CONFIG_OVERRIDE" \
         "$SYSTEM_UPGRADE_NM_HOOK" \
-        "$SYSTEM_UPGRADE_REPAIR_PYTHON" \
-        "$SYSTEM_UPGRADE_SKIP_PIP" \
+        "$SYSTEM_UPGRADE_REMOVE_LEGACY" \
         "$SYSTEM_UPGRADE_SKIP_SYSTEMD"
     exit $?
 fi
@@ -914,7 +838,7 @@ fi
 trap cleanup EXIT
 
 resolve_runtime_binary
-REPAIR_PYTHON_ENVIRONMENT=0
+REMOVE_LEGACY_ENVIRONMENT=0
 
 if [ "$UPGRADE_MODE" -eq 0 ] && ! config_has_saved_tv_profile; then
     FRESH_SETUP_MODE=1
@@ -926,33 +850,30 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
     resolve_gui_binary
     resolve_app_icon
+    load_upgrade_configuration
+    check_legacy_environment
+    if [ "$TV_PLATFORM" = "lg_webos" ]; then
+        REMOVE_LEGACY_ENVIRONMENT=1
+        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --remove-legacy-env
+    fi
     check_install_prerequisites
     validate_candidate_binary_identity
-    load_upgrade_configuration
-
-    if [ "$TV_PLATFORM" = "lg_webos" ]; then
-        echo "Native TV platform selected; preserving the existing Python environment unchanged."
-    elif python_environment_healthy; then
-        echo "Python compatibility environment is healthy; preserving it unchanged."
-    else
-        REPAIR_PYTHON_ENVIRONMENT=1
-        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --repair-python
-        require_python_repair_prerequisites
-    fi
 else
     resolve_gui_binary
     resolve_app_icon
+    if [ "$FRESH_SETUP_MODE" -eq 0 ]; then
+        load_existing_configuration
+        check_legacy_environment
+    fi
     check_install_prerequisites
     validate_candidate_binary_identity
 
-if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    create_empty_config_if_absent
-    echo "Prepared an empty user configuration for first-run TV pairing."
-    echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
-    echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
-else
-    load_existing_configuration
-fi
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        create_empty_config_if_absent
+        echo "Prepared an empty user configuration for first-run TV pairing."
+        echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
+        echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
+    fi
 fi
 
 prepare_installation_files
@@ -967,8 +888,7 @@ if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
         "$SCRIPT_DIR" \
         "$SYSTEM_CONFIG_OVERRIDE_TMP" \
         "$NM_HOOK_TMP" \
-        "$REPAIR_PYTHON_ENVIRONMENT" \
-        "$SKIP_PIP_INSTALL" \
+        "$REMOVE_LEGACY_ENVIRONMENT" \
         "$SKIP_SYSTEMD_ACTIONS" | tee "$SYSTEM_UPGRADE_OUTPUT_TMP"
     HELPER_STATUS="${PIPESTATUS[0]}"
     set -e
@@ -996,7 +916,7 @@ if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
     MUTATION_STARTED=1
 fi
 
-# 4. CREATE VIRTUAL ENVIRONMENT
+# 4. INSTALL RUNTIME PAYLOAD
 if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
     perform_privileged_runtime_installation
 fi

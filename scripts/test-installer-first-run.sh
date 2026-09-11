@@ -70,7 +70,7 @@ case "${1:-}" in
             tv.ip) saved_value tvs_primary_ip ;;
             tv.mac) saved_value tvs_primary_mac ;;
             tv.input) saved_value tvs_primary_input ;;
-            tv.platform) printf '%s\n' bscpylgtv ;;
+            tv.platform) saved_value tvs_primary_platform || printf '%s\n' bscpylgtv ;;
             screen.idle_blank) printf '%s\n' disabled ;;
             screen.backend) printf '%s\n' auto ;;
             system.sleep_wake_policy) printf '%s\n' disabled ;;
@@ -108,32 +108,10 @@ chmod 644 "$BUNDLE/io.github.staphylococcus.LGBuddy.desktop" "$BUNDLE/docs/io.gi
 
 cat >"$STUB_DIR/python3" <<'EOF'
 #!/bin/sh
-set -eu
-
-if [ "${1:-}" = -m ] && [ "${2:-}" = venv ]; then
-    target=""
-    for argument do
-        target="$argument"
-    done
-    mkdir -p "$target/bin"
-    : >"$target/pyvenv.cfg"
-    cat >"$target/bin/pip" <<'PIP'
-#!/bin/sh
-case "${1:-}" in
-    --version) exit 0 ;;
-    *) exit 0 ;;
-esac
-PIP
-    cat >"$target/bin/python" <<'PYTHON'
-#!/bin/sh
-exit 0
-PYTHON
-    chmod 755 "$target/bin/pip" "$target/bin/python"
-    exit 0
-fi
-
-exit 1
+: >"${LG_BUDDY_UNEXPECTED_PYTHON:?}"
+exit 99
 EOF
+export LG_BUDDY_UNEXPECTED_PYTHON="$WORK_DIR/unexpected-python"
 cat >"$STUB_DIR/gui-runtime-probe" <<'EOF'
 #!/bin/sh
 exit 0
@@ -199,7 +177,6 @@ run_install() {
     LG_BUDDY_INSTALL_ROOT="$root" \
     LG_BUDDY_SUDO_CMD=none \
     LG_BUDDY_NONINTERACTIVE=1 \
-    LG_BUDDY_SKIP_PIP_INSTALL=1 \
     LG_BUDDY_GUI_RUNTIME_PROBE="$STUB_DIR/gui-runtime-probe" \
     LG_BUDDY_SYSTEMCTL_LOG="$systemctl_log" \
     LG_BUDDY_HANDOFF_MARKER="$handoff" \
@@ -207,6 +184,8 @@ run_install() {
         bash "$BUNDLE/install.sh" >"$output" 2>&1
     status=$?
     set -e
+    [ ! -e "$LG_BUDDY_UNEXPECTED_PYTHON" ] || { echo "Installer invoked Python."; exit 1; }
+    [ ! -e "$root/usr/bin/LG_Buddy_PIP" ] || { echo "Installer provisioned a Python environment."; exit 1; }
     RUN_STATUS="$status"
     RUN_ROOT="$root"
     RUN_HOME="$home"
@@ -295,7 +274,6 @@ if unshare -Ur true >/dev/null 2>&1 ||
             XDG_CONFIG_HOME="$ROOT_HOME/.config" \
             LG_BUDDY_INSTALL_ROOT="$ROOT_INSTALL_ROOT" \
             LG_BUDDY_SUDO_CMD=none \
-            LG_BUDDY_SKIP_PIP_INSTALL=1 \
             LG_BUDDY_GUI_RUNTIME_PROBE="$STUB_DIR/gui-runtime-probe" \
             bash "$BUNDLE/install.sh" >"$ROOT_OUTPUT" 2>&1; then
         cat "$ROOT_OUTPUT"
@@ -311,7 +289,7 @@ cat >"$WORK_DIR/configured/home/.config/lg-buddy/config.env" <<'EOF'
   tvs_primary_ip = 192.0.2.10 # existing profile
   tvs_primary_mac = 02:00:00:00:00:10
   tvs_primary_input = HDMI_2
-  tvs_primary_platform = bscpylgtv
+  tvs_primary_platform = lg_webos
 screen_idle_blank=disabled
 screen_backend=auto
 screen_idle_timeout=900

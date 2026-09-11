@@ -216,7 +216,7 @@ grep -F -x -q 'Icon=io.github.staphylococcus.LGBuddy' "$INSTALLED_DESKTOP_ENTRY"
 cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Production upgrade changed the user configuration."
 cmp -s "$POINTER_SNAPSHOT" "$INSTALLED_POINTER" || fail "Production upgrade changed the config pointer."
 cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Production upgrade changed the native credential."
-[ -e "$VENV_MARKER" ] || fail "Production native upgrade recreated the Python environment."
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Production native upgrade left the obsolete Python environment."
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
 "$INSTALLED_BINARY" settings describe screen.backend \
     | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'

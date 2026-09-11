@@ -639,12 +639,18 @@ Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
 
-The installer then reads the existing platform choice and checks the legacy
-Python environment without mutating either. Native installations and healthy
-compatibility environments preserve that directory unchanged. Only an
-unhealthy compatibility environment triggers a second candidate preflight for
-recursive repair; that conditional pass also refuses unsafe virtualenv roots
-and nested mounts before the directory is cleared.
+The installer reads the existing platform choice before dependency installation.
+A healthy legacy environment is preserved with a final deprecation notice; an
+unhealthy one is refused with the native pairing command before privileged
+mutation. Native upgrades run a second candidate preflight for removal of the
+obsolete `/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested
+mounts before removal. Configuration and credentials remain unchanged.
+
+Fresh installation never provisions Python. GTK/libadwaita requirements are
+checked through the bundled GUI's internal `--check-runtime` entrypoint, which
+reads the loaded library versions without initializing a display. A failed
+probe prompts for the distribution's GTK/libadwaita packages and is repeated
+before binary identity validation and installation.
 
 These checks are a conservative, evolving safety boundary, not an exhaustive
 host-support declaration or a promise that no later privileged operation can

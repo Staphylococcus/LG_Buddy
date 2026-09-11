@@ -228,7 +228,7 @@ export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 export PIP_DISABLE_PIP_VERSION_CHECK="1"
 export PIP_NO_PYTHON_VERSION_WARNING="1"
 
-(
+install_previous() (
     # The historical installer checks for Zenity but this noninteractive setup
     # never opens a dialog. Satisfy only that old availability check; any actual
     # invocation fails. The candidate runs outside this subshell without it.
@@ -240,6 +240,62 @@ export PIP_NO_PYTHON_VERSION_WARNING="1"
     cd "$PREVIOUS_BUNDLE"
     bash ./install.sh
 )
+
+# Exercise both legacy selectors against an actual installation of the pinned
+# archive. Refusal leaves the old runtime intact; a healthy environment survives
+# the upgrade byte-for-byte, with a final deprecation notice.
+for platform in explicit missing; do
+    (
+        export HOME="$WORK_DIR/legacy-$platform/home"
+        export XDG_CONFIG_HOME="$HOME/.config"
+        export LG_BUDDY_INSTALL_ROOT="$WORK_DIR/legacy-$platform/root"
+        mkdir -p "$HOME/Desktop" "$LG_BUDDY_INSTALL_ROOT"
+        install_previous >"$WORK_DIR/legacy-$platform-install.output" 2>&1
+        config="$XDG_CONFIG_HOME/lg-buddy/config.env"
+        if [ "$platform" = missing ]; then sed -i '/^tvs_primary_platform=/d' "$config"; fi
+        cp "$config" "$WORK_DIR/legacy-$platform-config.snapshot"
+        stubs="$WORK_DIR/legacy-$platform/stubs"
+        mkdir -p "$stubs"
+        cat >"$stubs/systemctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' running
+EOF
+        cat >"$stubs/sudo-spy" <<'EOF'
+#!/bin/sh
+: >"${LG_BUDDY_LEGACY_SUDO_MARKER:?}"
+exit 97
+EOF
+        chmod 755 "$stubs/systemctl" "$stubs/sudo-spy"
+        export PATH="$stubs:$PATH"
+        export LG_BUDDY_LEGACY_SUDO_MARKER="$WORK_DIR/legacy-$platform-sudo"
+        if LG_BUDDY_SUDO_CMD="$stubs/sudo-spy" bash "$CANDIDATE_BUNDLE/install.sh" --upgrade >"$WORK_DIR/legacy-$platform-refusal.output" 2>&1; then
+            fail "Cross-version upgrade recreated an unhealthy legacy environment."
+        fi
+        grep -F -q 'settings set tv.platform lg_webos' "$WORK_DIR/legacy-$platform-refusal.output"
+        [ ! -e "$LG_BUDDY_LEGACY_SUDO_MARKER" ] || fail "Legacy refusal requested privilege."
+        cmp -s "$PREVIOUS_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
+        cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
+
+        venv="$LG_BUDDY_INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+        site_packages="$("$venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+        mkdir -p "$site_packages/bscpylgtv"
+        printf '__version__ = "cross-version-smoke"\n' >"$site_packages/bscpylgtv/__init__.py"
+        cat >"$venv/bin/bscpylgtvcommand" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"backlight":72}'
+EOF
+        chmod 755 "$venv/bin/bscpylgtvcommand"
+        find "$venv" -type f -exec sha256sum {} + | sort >"$WORK_DIR/legacy-$platform-venv.snapshot"
+        bash "$CANDIDATE_BUNDLE/install.sh" --upgrade >"$WORK_DIR/legacy-$platform-upgrade.output" 2>&1
+        grep -F -q 'will be removed in v2.0.0' "$WORK_DIR/legacy-$platform-upgrade.output"
+        cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
+        cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
+        find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
+        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
+    )
+done
+
+install_previous
 
 CONFIG_FILE="$XDG_CONFIG_HOME/lg-buddy/config.env"
 INSTALLED_BINARY="$INSTALL_ROOT/usr/bin/lg-buddy"
@@ -401,11 +457,13 @@ chmod 755 "$INSTALLER_STUB_DIR/systemctl" "$INSTALLER_STUB_DIR/systemd-tmpfiles"
     export LG_BUDDY_SERVICE_ACTION_LOG="$SERVICE_ACTION_LOG"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="0"
     cd "$CANDIDATE_BUNDLE"
-    bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
+    bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
 )
 
 grep -F -q 'Upgrade complete!' "$UPGRADE_OUTPUT"
 cat >"$EXPECTED_SERVICE_ACTION_LOG" <<EOF
+systemctl is-system-running
+systemctl --user is-system-running
 systemctl is-system-running
 systemctl --user is-system-running
 tmpfiles --create $TMPFILES_CONFIG
@@ -426,7 +484,7 @@ cmp -s "$EXPECTED_SERVICE_ACTION_LOG" "$SERVICE_ACTION_LOG" || {
 cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Cross-version upgrade changed the user configuration."
 cmp -s "$POINTER_SNAPSHOT" "$INSTALLED_POINTER" || fail "Cross-version upgrade changed the installed config pointer."
 cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Cross-version upgrade changed the native credential."
-[ -e "$VENV_MARKER" ] || fail "Cross-version native upgrade recreated the Python environment."
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Cross-version native upgrade left the obsolete Python environment."
 
 cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_GUI"

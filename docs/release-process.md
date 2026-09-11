@@ -169,7 +169,7 @@ release or privilege-related effects. A verified candidate's binary performs a
 second pass for its own installer requirements and trusted external ancestor
 chain before privileged mutation.
 The checker assigns each target an installer-operation policy so replacement,
-directory mutation, recursive repair, exact drop-in, and candidate-input
+directory mutation, recursive removal, exact drop-in, and candidate-input
 requirements cannot silently lose their operation-specific safeguards.
 
 The installed GUI uses the same compatibility checks with its own installed
@@ -184,9 +184,11 @@ The extracted candidate exposes this second pass through the hidden
 `upgrade-preflight` installer entrypoint. `install.sh --upgrade` invokes it
 before sudo or installation writes, loads the existing config pointer and
 settings without rewriting them, and never runs configuration, discovery, or
-pairing. Native and healthy compatibility installations preserve their Python
-environment; an unhealthy compatibility environment must pass the additional
-recursive-repair checks before it is rebuilt. After replacing owned runtime and
+pairing. Native upgrades remove the obsolete LG Buddy Python environment after
+additional directory and mount checks. Healthy legacy environments are preserved
+through the final 1.x window; unhealthy ones are refused before privileged
+mutation with instructions to pair and select `lg_webos`. Fresh installations
+never create an environment. After replacing owned runtime and
 integration files, the installer reloads system integrations before user
 integrations and verifies that the installed binary matches the candidate.
 

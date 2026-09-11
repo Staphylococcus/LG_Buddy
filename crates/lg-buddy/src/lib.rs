@@ -95,7 +95,7 @@ pub enum Command {
     Updates(UpdatesCommand),
     UpgradePreflight {
         candidate_root: PathBuf,
-        repair_python: bool,
+        remove_legacy_env: bool,
         json: bool,
     },
 }
@@ -769,12 +769,12 @@ where
                     .ok_or(ParseError::MissingUpgradePreflightRoot)?
                     .as_ref(),
             );
-            let mut repair_python = false;
+            let mut remove_legacy_env = false;
             let mut json = false;
             let mut unexpected = Vec::new();
             for argument in args {
-                if argument.as_ref() == "--repair-python" && !repair_python {
-                    repair_python = true;
+                if argument.as_ref() == "--remove-legacy-env" && !remove_legacy_env {
+                    remove_legacy_env = true;
                 } else if argument.as_ref() == "--json" && !json {
                     json = true;
                 } else {
@@ -783,7 +783,7 @@ where
             }
             let command = Command::UpgradePreflight {
                 candidate_root,
-                repair_python,
+                remove_legacy_env,
                 json,
             };
             if !unexpected.is_empty() {
@@ -857,11 +857,13 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         }
         Command::UpgradePreflight {
             candidate_root,
-            repair_python,
+            remove_legacy_env,
             json,
         } => {
-            let report =
-                crate::upgrade_preflight::candidate_host_preflight(&candidate_root, repair_python);
+            let report = crate::upgrade_preflight::candidate_host_preflight(
+                &candidate_root,
+                remove_legacy_env,
+            );
             if json {
                 writeln!(
                     writer,
@@ -1703,7 +1705,7 @@ mod tests {
             parse_args(["upgrade-preflight", "/tmp/lg-buddy-candidate"]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
-                repair_python: false,
+                remove_legacy_env: false,
                 json: false,
             }))
         );
@@ -1711,11 +1713,11 @@ mod tests {
             parse_args([
                 "upgrade-preflight",
                 "/tmp/lg-buddy-candidate",
-                "--repair-python"
+                "--remove-legacy-env"
             ]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
-                repair_python: true,
+                remove_legacy_env: true,
                 json: false,
             }))
         );
@@ -2013,11 +2015,11 @@ mod tests {
                 "upgrade-preflight",
                 "/tmp/candidate",
                 "--json",
-                "--repair-python"
+                "--remove-legacy-env"
             ]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/candidate"),
-                repair_python: true,
+                remove_legacy_env: true,
                 json: true
             }))
         );
@@ -2038,7 +2040,7 @@ mod tests {
             Err(ParseError::UnexpectedArguments {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
-                    repair_python: false,
+                    remove_legacy_env: false,
                     json: false,
                 },
                 arguments: vec!["extra".to_string()],
@@ -2048,16 +2050,16 @@ mod tests {
             parse_args([
                 "upgrade-preflight",
                 "/tmp/candidate",
-                "--repair-python",
-                "--repair-python"
+                "--remove-legacy-env",
+                "--remove-legacy-env"
             ]),
             Err(ParseError::UnexpectedArguments {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
-                    repair_python: true,
+                    remove_legacy_env: true,
                     json: false,
                 },
-                arguments: vec!["--repair-python".to_string()],
+                arguments: vec!["--remove-legacy-env".to_string()],
             })
         );
     }
