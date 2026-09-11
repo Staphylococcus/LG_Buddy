@@ -71,26 +71,47 @@ These are the semantic events the runtime should reason about.
 
 ## Runtime Contract
 
-Native sources publish `SessionObservation` values: canonical session events,
-inactivity facts, or idle-blanking permission updates, with an `EventSource` and
-observation time. A pending permission refresh suspends automatic blanking
-without changing the last confirmed permission or renewing the deadline.
-Source modules do not decide whether to blank or restore the screen.
+Native sources publish activity observations with an `EventSource` and original
+observation time. In automatic operation the runner starts GNOME/Mutter and
+native Wayland adapters once. Each adapter owns discovery, subscriptions,
+validation and reconnection, including interfaces that appear after startup.
+Explicit `gnome` and `wayland` configurations restrict activity to that source.
+The compatibility `detect-backend` presentation remains until #218; its single
+reported value does not select the automatic runtime's source set.
 
-GNOME and native Wayland feed activity facts to the shared runner, which owns
-their configured inactivity deadline. `swayidle` owns its initial timeout but
-publishes `Idle` and independent desktop-activity observations back to the same
-runner. All three backends therefore share blank, restore, and post-blank
-power-off policy.
+`session/activity.rs` keeps bounded contributions per source and activity
+kind. Newer observations replace pending observations of the same kind. Delivery
+preserves the original monotonic time without deduplicating across sources or
+kinds. The inactivity engine decides how each observation affects policy;
+overlapping reports do not extend a deadline beyond their observation times or
+repeat an already completed restore. Valid observations survive a later
+connection failure; transport loss does not undo activity that already happened.
+Connection handles, owner changes and obsolete protocol objects stay private to
+each adapter. Input received during setup is delivered immediately without a
+separate readiness gate in the collector.
 
-`screen.honor_idle_inhibitors` defaults to `disabled`. When enabled, native
-sources also publish `IdleBlankingPermission`. The runner initially withholds
-automatic blanking until the source establishes permission, including when an
-inhibitor predates startup. Restoring permission starts a fresh full timeout;
-duplicate observations do not extend it. Permission changes are never activity
-or restore requests. Real desktop and gamepad input still share the inactivity
-deadline. Explicit lock behavior and an already pending post-blank power-off
-deadline are unaffected.
+The runner owns one inactivity deadline. Loss of one source leaves the others
+running; loss of all native activity sources suspends automatic idle blanking
+until an adapter can observe activity again. This policy queries each adapter's
+current `ActivityStatus`; that assessment never authorizes or rejects an event.
+A quiet usable adapter remains available. Availability, bounded failure reasons
+and the last activity time form runtime diagnostics.
+Gamepad input, explicit lock and post-blank power-off
+remain independent. Reconnection itself does not count as input. Worker shutdown
+cancels quiet connections and joins their threads.
+
+`swayidle` still owns its initial timeout and publishes `Idle` and independent
+desktop activity to the shared policy. Its existing automatic fallback remains
+when no native activity capability is available at startup; #132 removes it.
+
+**Dev boundary (#221):** native inhibition honoring is temporarily absent.
+Inhibition notifications, permission state and release timing have been removed
+from the activity stream and inactivity engine. The stored preference remains
+compatible, and monitor startup reports the temporary limitation. #222-#225
+implement the separate inhibition subsystem and Boolean gate. This intermediate
+runtime must not be promoted to prerelease or main before that integration and
+#89's MVP readiness checks are complete. Explicit lock, ownership/restore and
+ordinary activity deadlines retain their existing policy.
 
 ## Provider Map
 
@@ -113,29 +134,19 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (true,)` | Idle observation that cannot bypass LG Buddy's timeout | Implemented |
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
-| Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` (honoring disabled) | `UserActivity` | Implemented |
-| Mutter `WatchFired` for the current `AddUserActiveWatch` (honoring enabled) | `UserActivity` | Implemented |
-| `org.gnome.SessionManager.IsInhibited(8)` | Idle-blanking permission when honoring is enabled | Implemented |
+| Mutter `WatchFired` for the current `AddUserActiveWatch` | `UserActivity` | Implemented |
 
 Notes:
 
 - GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
-- Enabling inhibitor honoring additionally requires `org.gnome.SessionManager`.
-  The source reads its current aggregate idle-inhibition state at startup and
-  after trusted `InhibitorAdded`, `InhibitorRemoved`, or owner-change signals.
-  Automatic blanking pauses while each refresh is pending; an unchanged result
-  preserves the existing deadline. User input comes from Mutter's one-shot
-  user-active watches, rearmed after each signal. Unlike `GetIdletime`, these
-  do not treat the idle-counter reset on inhibitor release as activity.
-  Other inhibition flags do not block blanking. Losing the service or failing
-  to read its state ends the source with a diagnostic error rather than assuming
-  blanking is allowed. With the setting disabled, this extra dependency is not
-  queried or subscribed to.
+- Activity always uses Mutter's one-shot user-active watches, rearmed after each
+  signal. SessionManager is neither required nor queried by the activity source.
+  Unlike `GetIdletime`, watches do not treat the idle-counter reset on inhibitor
+  release as input. When the Mutter owner disappears or changes, the adapter
+  reacquires its bus subscriptions and watches internally.
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
-- With honoring disabled, Mutter idletime is used only to detect recent desktop
-  activity. Its absolute value does not trigger blanking.
 - ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
   wake signals reset the same LG Buddy deadline and remain restore observations
   evaluated by screen policy.
@@ -210,17 +221,14 @@ notifications from `get_input_idle_notification`. Its `resumed` maps to desktop
 activity; `idled` remains observational, so only LG Buddy's inactivity deadline
 can trigger blanking.
 
-When inhibitor honoring is enabled, a separate zero-timeout
-`get_idle_notification` observes permission on each seat. Blanking is allowed
-only once every seat reports idle. Its inhibitor-aware `resumed` withdraws
-permission without reporting input or restoring the TV. New seats initially
-withhold permission, and removing a seat recomputes the aggregate state.
+Only `get_input_idle_notification` is used by this activity adapter. Inhibitor
+queries belong to the separate subsystem under #223.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
-of the bound notifier, or removal of the last seat is fatal to the provider and
-causes the user service to retry. Explicit selection reports capability errors
-without falling back. `auto` selects native Wayland after the complete GNOME
-contract and before the deprecated `swayidle` compatibility backend.
+of the bound notifier, or removal of the last seat causes the adapter to rebuild
+its connection and subscriptions while other adapters keep running. Previously
+published observations remain valid. Explicit selection does not enable another native source. Automatic
+operation attempts both native interfaces without desktop-name selection.
 
 ### `swayidle`
 
@@ -257,6 +265,8 @@ The code split is:
 - `crates/lg-buddy/src/session/runner.rs`
   - source selection, worker lifetime, observation multiplexing, shared
     inactivity state, and policy dispatch
+- `crates/lg-buddy/src/session/activity.rs`
+  - bounded, identified contributions, observation ordering and source diagnostics
 - `crates/lg-buddy/src/session/actions.rs`
   - action dependency assembly and native TV client ownership across compatible
     events; one-shot commands use the same assembly with a finite lifetime
@@ -264,7 +274,7 @@ The code split is:
   - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME session-bus connection, subscriptions, owner validation, Mutter
-    polling, event loop, and observation mapping
+    activity watches, event loop, and observation mapping
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
 - `crates/lg-buddy/src/sources/linux/logind.rs`

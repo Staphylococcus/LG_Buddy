@@ -10,9 +10,72 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSystemLogind, RuntimeStateLayout,
-    TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSystemLogind,
+    RuntimeStateLayout, TestConfigFile, TestEnv,
 };
+
+#[test]
+fn monitor_recovers_gnome_activity_after_the_service_disappears() {
+    let _env = TestEnv::new();
+    let bus = MockSessionBusIdleMonitor::new("entrypoint-gnome-recovery-bus");
+    bus.set_shell_available(true);
+    bus.set_screen_saver_available(true);
+    bus.set_idle_monitor_available(true);
+    let logind = MockSystemLogind::new("entrypoint-gnome-recovery-logind");
+    logind.reset();
+    let mock = MockBscpylgtv::new("entrypoint-gnome-recovery-tv");
+    mock.set_input("HDMI_2");
+    mock.set_screen_on(false);
+    let wrapper = mock.command_wrapper("entrypoint-gnome-recovery-wrapper");
+    let config = TestConfigFile::new("entrypoint-gnome-recovery-config");
+    config.write_sample("HDMI_2");
+    let runtime = RuntimeStateLayout::new("entrypoint-gnome-recovery-runtime");
+    runtime.create_session_marker();
+    let log_path = config.path().with_file_name("monitor.log");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .arg("monitor")
+        .env("LG_BUDDY_CONFIG", config.path())
+        .env("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path())
+        .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
+        .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+        .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
+        .env("LG_BUDDY_SCREEN_BACKEND", "gnome")
+        .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "8")
+        .stdout(fs::File::create(&log_path).unwrap())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = || fs::read_to_string(&log_path).unwrap();
+    wait_until(Duration::from_secs(3), || {
+        output().contains("source=gnome available=true")
+    });
+    bus.set_idle_monitor_available(false);
+    wait_until(Duration::from_secs(2), || {
+        output().contains("Mutter IdleMonitor owner changed")
+    });
+    bus.set_idle_monitor_available(true);
+    wait_until(Duration::from_secs(4), || {
+        output().matches("source=gnome available=true").count() == 2
+    });
+    bus.schedule_user_activity(Duration::ZERO);
+    wait_until(Duration::from_secs(2), || {
+        mock.calls()
+            .iter()
+            .any(|call| call.command == "turn_screen_on")
+    });
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success(), "{result:?}\n{}", output());
+    assert_eq!(output().matches("Using GNOME backend").count(), 1);
+    assert_eq!(
+        mock.calls()
+            .iter()
+            .filter(|call| call.command == "turn_screen_on")
+            .count(),
+        1
+    );
+    runtime.assert_session_marker_absent();
+}
 
 #[test]
 fn desktop_entry_opens_the_application_through_the_stable_launcher() {

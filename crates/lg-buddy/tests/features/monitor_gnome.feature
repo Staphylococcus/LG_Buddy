@@ -105,7 +105,7 @@ Feature: GNOME monitor
     And GNOME monitor stays open for 0.6 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And stdout contains "Using GNOME backend."
+    And stdout contains "activity source=gnome"
     And stdout does not contain "Session became idle."
     And the TV client did not receive "get_input"
     And the TV client did not receive "turn_screen_off"
@@ -121,7 +121,7 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 1000, 0, 1000"
+    And genuine desktop input occurs after 0.5 seconds
     And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
@@ -142,7 +142,7 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "0"
+    And genuine desktop input occurs after 0.05 seconds
     And GNOME monitor stays open for 0.4 seconds
     When I run the command "monitor"
     Then the command succeeds
@@ -164,7 +164,7 @@ Feature: GNOME monitor
     And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And stdout contains "Using GNOME backend."
+    And stdout contains "activity source=gnome"
     And the TV client received "get_input"
     And the TV client received "turn_screen_off"
     And the session marker exists
@@ -277,7 +277,7 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 1000, 0"
+    And genuine desktop input occurs after 0.5 seconds
     And mock system logind reports LockedHint=true
     And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
@@ -399,7 +399,7 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And genuine desktop input occurs after 1.5 seconds
     And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
@@ -442,7 +442,7 @@ Feature: GNOME monitor
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And genuine desktop input occurs after 1.5 seconds
     And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
@@ -450,3 +450,26 @@ Feature: GNOME monitor
     And the TV client received "turn_screen_on" exactly 1 times
     And the session marker is absent
     And the TV screen is visible
+
+  Scenario: Native activity works without an inhibition service
+    Given a temporary LG Buddy config using input HDMI_2
+    And the idle timeout is 1 seconds
+    And LG Buddy session runtime is isolated
+    And a mock TV client
+    And the TV is on input HDMI_2
+    And the TV screen is blanked
+    And the session marker exists
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    And GNOME SessionManager is unavailable
+    And honoring app keep-awake requests is "enabled"
+    And GNOME emits no ScreenSaver signals
+    And genuine desktop input occurs after 0.2 seconds
+    And GNOME monitor stays open for 0.8 seconds
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "activity source=gnome"
+    And the TV client received "turn_screen_on" exactly 1 times
+    And the TV client did not receive "turn_screen_off"
+    And the TV screen is visible
+    And the session marker is absent
