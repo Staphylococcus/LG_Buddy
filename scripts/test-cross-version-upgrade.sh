@@ -291,7 +291,7 @@ EOF
         cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
         cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
         find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
-        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTVCOMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
+        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
     )
 done
 

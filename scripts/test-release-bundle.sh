@@ -758,6 +758,9 @@ CONFIG_SNAPSHOT="$WORK_DIR/config.snapshot"
 CONFIG_POINTER_SNAPSHOT="$WORK_DIR/config-pointer.snapshot"
 NATIVE_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/native-upgrade-marker"
 NATIVE_ACCESS_TOKEN_CONTENT='{"access_token":"release-smoke-native-token"}'
+LEGACY_CREDENTIAL_FILE="$(dirname "$CONFIG_FILE")/.aiopylgtv.sqlite"
+printf '%s\n' 'retained legacy credential fixture' >"$LEGACY_CREDENTIAL_FILE"
+cp "$LEGACY_CREDENTIAL_FILE" "$WORK_DIR/legacy-credential.snapshot"
 mkdir -p "$NATIVE_PROFILE_DIR"
 printf '%s\n' "$NATIVE_ACCESS_TOKEN_CONTENT" >"$NATIVE_ACCESS_TOKEN_FILE"
 chmod 600 "$NATIVE_ACCESS_TOKEN_FILE"
@@ -801,6 +804,7 @@ GUI_CANDIDATE_SNAPSHOT="$WORK_DIR/lg-buddy-gui.candidate"
 cp -p "$BUNDLE_GUI" "$GUI_CANDIDATE_SNAPSHOT"
 cat >"$BUNDLE_GUI" <<'EOF'
 #!/bin/sh
+[ "${1:-}" != "--check-runtime" ] || exit 0
 [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ] || exit 2
 printf 'lg-buddy 0.0.0\nversion: 0.0.0\nchannel: dev\ncommit: mismatched\n'
 EOF
@@ -824,6 +828,23 @@ grep -F -q 'stale installed runtime' "$INSTALLED_BINARY"
 grep -F -q 'stale installed integration' "$INSTALLED_GUI"
 cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
 cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+
+# Native cleanup must not follow an environment symlink into user data.
+mv "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" "$WORK_DIR/obsolete-environment"
+ln -s "$(dirname "$CONFIG_FILE")" "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+if (
+    export LG_BUDDY_SUDO_CMD="$SUDO_SPY"
+    export LG_BUDDY_SUDO_MARKER="$SUDO_MARKER"
+    cd "$BUNDLE_DIR"
+    bash ./install.sh --upgrade >"$WORK_DIR/unsafe-cleanup.output" 2>&1
+); then
+    fail "Native upgrade accepted an unsafe environment cleanup path."
+fi
+grep -F -q 'legacy-environment-removal' "$WORK_DIR/unsafe-cleanup.output"
+[ ! -e "$SUDO_MARKER" ] || fail "Unsafe environment cleanup requested privilege."
+cmp -s "$WORK_DIR/legacy-credential.snapshot" "$LEGACY_CREDENTIAL_FILE"
+rm "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+mv "$WORK_DIR/obsolete-environment" "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
 
 mv "$SYSTEM_SERVICE" "$SYSTEM_SERVICE.preflight-refusal"
 if (
@@ -1006,6 +1027,7 @@ cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || {
     echo "Native upgrade left the obsolete Python environment."
     exit 1
 }
+cmp -s "$WORK_DIR/legacy-credential.snapshot" "$LEGACY_CREDENTIAL_FILE"
 cmp -s "$BUNDLE_DIR/lg-buddy" "$INSTALLED_BINARY"
 cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 [ "$("$INSTALLED_GUI" --version)" = "$INSTALLED_VERSION_OUTPUT" ] || {
