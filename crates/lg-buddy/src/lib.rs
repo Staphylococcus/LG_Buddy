@@ -15,6 +15,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod diagnostics_view;
 pub mod events;
+pub mod inhibition;
 pub mod lifecycle;
 pub mod navigation;
 pub mod notifications;

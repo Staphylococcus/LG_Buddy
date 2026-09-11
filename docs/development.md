@@ -306,11 +306,13 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity deadline and phase synthesis |
+| `crates/lg-buddy/src/inhibition.rs` | Standalone push inhibition contract, Boolean aggregation and diagnostics (#222) |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
 | `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle and current-session lock-state adapter |
 | `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
+| `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs` | Independent SessionManager inhibition capability |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
 | `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |

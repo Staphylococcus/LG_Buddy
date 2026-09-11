@@ -405,7 +405,13 @@ The current split is:
   - emits `NetworkTeardownImminent` with the logind sleep-phase reading
 - `sources/desktop/gnome.rs`
   - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
-    polling, and translation into normalized observations
+    user-active watches, and translation into normalized observations
+- `inhibition.rs`
+  - independent push inhibition contract, Boolean aggregation and diagnostics;
+    standalone until the monitor integration in #225
+- `sources/desktop/gnome/inhibition.rs`
+  - SessionManager inhibition subscriptions, state refresh and recovery,
+    independent of GNOME activity
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
@@ -953,6 +959,14 @@ existing settings/CLI callers; it does not select the automatic native source
 set. See [Session backend model](session-backend-model.md) for the current
 contracts and the temporary dev-only absence of native inhibition honoring
 between #221 and #225.
+
+Adapters may expose activity and inhibition independently, each through push or
+pull according to the source. The standalone push inhibition section (#222)
+combines maintained Boolean permissions with diagnostics. Its GNOME capability
+requires only SessionManager and keeps subscriptions, state queries and owner
+recovery internal. It contributes no activity observations. #225 connects the
+two paths only at the `can_blank()` decision; runtime honoring remains absent
+until then.
 
 The runtime core owns:
 

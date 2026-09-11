@@ -107,11 +107,45 @@ when no native activity capability is available at startup; #132 removes it.
 **Dev boundary (#221):** native inhibition honoring is temporarily absent.
 Inhibition notifications, permission state and release timing have been removed
 from the activity stream and inactivity engine. The stored preference remains
-compatible, and monitor startup reports the temporary limitation. #222-#225
-implement the separate inhibition subsystem and Boolean gate. This intermediate
+compatible, and monitor startup reports the temporary limitation. #222 provides
+standalone push inhibition; #223-#225 complete the subsystem and Boolean gate. This intermediate
 runtime must not be promoted to prerelease or main before that integration and
 #89's MVP readiness checks are complete. Explicit lock, ownership/restore and
 ordinary activity deadlines retain their existing policy.
+
+### Independent inhibition capabilities (#222)
+
+An adapter can supply activity, inhibition, or both. Each capability independently
+uses push or pull according to its source. Activity observations stay in the
+activity path. Inhibition supplies permission; the intended meeting point is
+`can_blank()` at the automatic idle-blanking decision, integrated in #225.
+
+`inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
+state, and `evaluate()` returns a Boolean permission with matching diagnostics
+without protocol I/O. `evaluate_push_inhibition()` combines these permissions:
+every contributor must allow blanking, and diagnostics retain each result.
+
+GNOME's capability lives in `sources/desktop/gnome/inhibition.rs` and requires
+only SessionManager. It subscribes before querying `IsInhibited(8)` and refreshes
+that same contribution on `InhibitorAdded`/`InhibitorRemoved`. It validates the
+unique owner and reconciles queued changes before publishing a snapshot.
+While connected, it also refreshes after 30 seconds without a successful refresh
+to correct drift when notifications are missed. Event-driven refreshes restart
+that interval. These internal queries update the same maintained contribution;
+they do not make GNOME a second pull contributor.
+
+Only observed inhibition denies permission. Startup, absence and source loss
+contribute no inhibitor. A healthy quiet subscription and an in-progress refresh
+retain the last observed value; a completed read updates it. If reading or
+monitoring fails, the adapter drops that source's contribution and retries.
+Diagnostics retain the observation time, a bounded failure reason, and the last
+observed inhibited-to-clear transition. Source loss and subsequent recovery do
+not create an observed release.
+
+This capability is independently testable but is not started by the monitor yet.
+It reads no preferences, applies no aggregate release delay, and sends no
+activity events or TV actions. Those integration responsibilities remain in
+#224 and #225.
 
 ## Provider Map
 
@@ -138,7 +172,7 @@ Current mapping:
 
 Notes:
 
-- GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
+- GNOME activity requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
 - Activity always uses Mutter's one-shot user-active watches, rearmed after each
   signal. SessionManager is neither required nor queried by the activity source.
   Unlike `GetIdletime`, watches do not treat the idle-counter reset on inhibitor
@@ -221,8 +255,9 @@ notifications from `get_input_idle_notification`. Its `resumed` maps to desktop
 activity; `idled` remains observational, so only LG Buddy's inactivity deadline
 can trigger blanking.
 
-Only `get_input_idle_notification` is used by this activity adapter. Inhibitor
-queries belong to the separate subsystem under #223.
+Only `get_input_idle_notification` is used by this activity adapter. Idle-notify
+does not supply an inhibition capability; #216 tracks native Wayland inhibition
+coverage separately.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
 of the bound notifier, or removal of the last seat causes the adapter to rebuild
@@ -267,6 +302,8 @@ The code split is:
     inactivity state, and policy dispatch
 - `crates/lg-buddy/src/session/activity.rs`
   - bounded, identified contributions, observation ordering and source diagnostics
+- `crates/lg-buddy/src/inhibition.rs`
+  - independent push inhibition contract, Boolean aggregation, and diagnostics
 - `crates/lg-buddy/src/session/actions.rs`
   - action dependency assembly and native TV client ownership across compatible
     events; one-shot commands use the same assembly with a finite lifetime
@@ -275,6 +312,8 @@ The code split is:
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME session-bus connection, subscriptions, owner validation, Mutter
     activity watches, event loop, and observation mapping
+- `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs`
+  - independent SessionManager inhibition state, subscriptions and recovery
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
 - `crates/lg-buddy/src/sources/linux/logind.rs`
