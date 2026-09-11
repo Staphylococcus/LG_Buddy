@@ -253,6 +253,11 @@ fn gnome_shell_available(world: &mut LgBuddyWorld) {
     world.install_gnome_shell_stub();
 }
 
+#[given("GNOME SessionManager is unavailable")]
+fn gnome_session_manager_unavailable(world: &mut LgBuddyWorld) {
+    world.set_gnome_session_manager_available(false);
+}
+
 #[given("GNOME idle monitor is unavailable")]
 fn gnome_idle_monitor_unavailable(world: &mut LgBuddyWorld) {
     world.set_gnome_idle_monitor_available(false);

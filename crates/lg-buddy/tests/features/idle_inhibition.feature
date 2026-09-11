@@ -1,6 +1,7 @@
-Feature: App keep-awake requests
-  Users can choose whether desktop keep-awake requests prevent automatic blanking.
-  Keep-awake requests are not user input and must not restore the TV.
+Feature: Native activity during the dev inhibition refactor
+  Issue #221 removes inhibition from activity. Native honoring is temporarily
+  absent on dev until #225; this intermediate runtime cannot be promoted.
+  Activity remains independent of inhibition services and preferences.
 
   Background:
     Given a temporary LG Buddy config using input HDMI_2
@@ -21,71 +22,21 @@ Feature: App keep-awake requests
     And the TV client received "turn_screen_off" exactly 1 times
     And the TV screen is blanked
 
-  Scenario: Enabled keep-awake support covers playback already active at startup
+  Scenario: Native activity remains usable with the stored honoring preference enabled
     Given honoring app keep-awake requests is "enabled"
     And GNOME monitor stays open for 1.3 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
-    And the TV client did not receive "turn_screen_on"
-    And the TV screen is visible
-
-  Scenario: An inhibitor added before the blanking deadline survives a slow GNOME refresh
-    Given honoring app keep-awake requests is "enabled"
-    And GNOME has 0 idle inhibitors
-    And GNOME changes to 1 idle inhibitors after 0.8 seconds
-    And GNOME delays the next inhibited query by 0.5 seconds
-    And GNOME monitor stays open for 1.6 seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
-    And the TV screen is visible
-
-  Scenario: Ending one of several keep-awake requests does not permit blanking
-    Given honoring app keep-awake requests is "enabled"
-    And GNOME has 2 idle inhibitors
-    And GNOME changes to 1 idle inhibitors after 0.2 seconds
-    And GNOME monitor stays open for 1.5 seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
-    And the TV client did not receive "turn_screen_on"
-
-  Scenario Outline: Ending the last keep-awake request starts a fresh full timeout
-    Given honoring app keep-awake requests is "enabled"
-    And GNOME has 2 idle inhibitors
-    And GNOME changes to 1 idle inhibitors after 0.2 seconds
-    And GNOME changes to 0 idle inhibitors after 1.5 seconds
-    And GNOME monitor stays open for <duration> seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client received "turn_screen_off" exactly <blanks> times
-    And the TV client did not receive "turn_screen_on"
-
-    Examples:
-      | duration | blanks |
-      | 2.2      | 0      |
-      | 2.9      | 1      |
-
-  Scenario: Releasing inhibition does not restore an already blanked screen
-    Given honoring app keep-awake requests is "enabled"
+    And stdout contains "native inhibition honoring is temporarily unavailable on dev"
+    And the TV client received "turn_screen_off" exactly 1 times
     And the TV screen is blanked
-    And the session marker exists
-    And GNOME changes to 0 idle inhibitors after 0.2 seconds
-    And GNOME idle monitor will report idletimes "1000, 50, 300, 550"
-    And GNOME monitor stays open for 0.8 seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client did not receive "turn_screen_on"
-    And the TV screen is blanked
-    And the session marker exists
 
-  Scenario: Gamepad input still restores the screen during inhibition
+  Scenario: Gamepad input restores independently of desktop inhibition
     Given honoring app keep-awake requests is "enabled"
     And the TV screen is blanked
     And the session marker exists
     And gamepad activity is observed after 0.2 seconds
-    And GNOME monitor stays open for 1.6 seconds
+    And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_on" exactly 1 times
@@ -99,20 +50,6 @@ Feature: App keep-awake requests
     And the session marker exists
     And genuine desktop input occurs after 0.2 seconds
     And GNOME monitor stays open for 0.8 seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client received "turn_screen_on" exactly 1 times
-    And the TV client did not receive "turn_screen_off"
-    And the TV screen is visible
-    And the session marker is absent
-
-  Scenario: Genuine desktop input immediately after release restores the screen
-    Given honoring app keep-awake requests is "enabled"
-    And the TV screen is blanked
-    And the session marker exists
-    And GNOME changes to 0 idle inhibitors after 0.2 seconds
-    And genuine desktop input occurs after 0.3 seconds
-    And GNOME monitor stays open for 0.9 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_on" exactly 1 times

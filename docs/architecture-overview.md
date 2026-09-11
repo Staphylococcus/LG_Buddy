@@ -943,6 +943,15 @@ outcomes.
 
 Desktop backends are treated as adapters, not owners of policy.
 
+The automatic monitor composes available GNOME and Wayland activity sources.
+Each reconnects independently and contributes identified observations with their
+original time. `session/activity.rs` bounds pending observations and rejects
+obsolete source instances. The compatibility backend resolver still serves
+existing settings/CLI callers; it does not select the automatic native source
+set. See [Session backend model](session-backend-model.md) for the current
+contracts and the temporary dev-only absence of native inhibition honoring
+between #221 and #225.
+
 The runtime core owns:
 
 - config
@@ -977,10 +986,10 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 - the GNOME session-bus connection and subscriptions
 - ScreenSaver sender ownership validation and signal mapping
-- Mutter user-active watches when honoring inhibitors, legacy idletime polling
-  otherwise, and normalized activity observations
+- Mutter user-active watches independent of inhibition, and normalized activity
+  observations
 
-`sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
+`sources/desktop/wayland.rs` is the native Wayland adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.

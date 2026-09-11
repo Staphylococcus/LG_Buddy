@@ -34,8 +34,6 @@ enum InactivityPhase {
 pub struct InactivityEngine {
     blank_after: Duration,
     blank_at: Option<Instant>,
-    idle_blanking_allowed: bool,
-    idle_blanking_permission_pending: bool,
     provider_driven_blank: bool,
     power_off_after: Duration,
     power_off_at: Option<Instant>,
@@ -45,6 +43,7 @@ pub struct InactivityEngine {
     lock_activity_floor: Option<Instant>,
     post_lock_activity_grace_until: Option<Instant>,
     latest_independent_activity_at: Option<Instant>,
+    activity_floor: Option<Instant>,
 }
 
 impl InactivityEngine {
@@ -84,8 +83,6 @@ impl InactivityEngine {
         Self {
             blank_after,
             blank_at: Some(started_at + blank_after),
-            idle_blanking_allowed: true,
-            idle_blanking_permission_pending: false,
             provider_driven_blank: false,
             power_off_after,
             power_off_at: None,
@@ -95,6 +92,7 @@ impl InactivityEngine {
             lock_activity_floor: None,
             post_lock_activity_grace_until: None,
             latest_independent_activity_at: None,
+            activity_floor: None,
         }
     }
 
@@ -114,8 +112,6 @@ impl InactivityEngine {
         Self {
             blank_after,
             blank_at: Some(started_at + blank_after),
-            idle_blanking_allowed: true,
-            idle_blanking_permission_pending: false,
             provider_driven_blank: false,
             power_off_after,
             power_off_at: Some(started_at + power_off_after),
@@ -125,23 +121,19 @@ impl InactivityEngine {
             lock_activity_floor: None,
             post_lock_activity_grace_until: None,
             latest_independent_activity_at: None,
+            activity_floor: None,
         }
     }
 
     pub fn time_until_action(&self, now: Instant) -> Option<Duration> {
         match self.phase {
-            InactivityPhase::Unknown | InactivityPhase::Active
-                if self.can_blank_automatically() =>
-            {
-                self.blank_at
-                    .map(|deadline| deadline.saturating_duration_since(now))
-            }
+            InactivityPhase::Unknown | InactivityPhase::Active => self
+                .blank_at
+                .map(|deadline| deadline.saturating_duration_since(now)),
             InactivityPhase::Blanked => self
                 .power_off_at
                 .map(|deadline| deadline.saturating_duration_since(now)),
-            InactivityPhase::Unknown
-            | InactivityPhase::Active
-            | InactivityPhase::BlankRequested
+            InactivityPhase::BlankRequested
             | InactivityPhase::InactiveWithoutEscalation
             | InactivityPhase::TimedPowerOffAttempted => None,
         }
@@ -151,44 +143,11 @@ impl InactivityEngine {
         self.phase == InactivityPhase::Blanked && self.power_off_at.is_some()
     }
 
-    fn can_blank_automatically(&self) -> bool {
-        self.idle_blanking_allowed && !self.idle_blanking_permission_pending
-    }
-
-    pub fn defer_idle_blanking(&mut self) {
-        self.idle_blanking_permission_pending = true;
-    }
-
-    /// An inhibitor changes permission to blank, never activity or ownership.
-    /// Start a full timeout when permission returns, including after startup.
-    pub fn set_idle_blanking_allowed(&mut self, allowed: bool, observed_at: Instant) {
-        self.idle_blanking_permission_pending = false;
-        if self.idle_blanking_allowed == allowed {
-            return;
-        }
-        self.idle_blanking_allowed = allowed;
-        if allowed
-            && !self.provider_driven_blank
-            && matches!(
-                self.phase,
-                InactivityPhase::Unknown | InactivityPhase::Active
-            )
-        {
-            self.blank_at = Some(
-                self.blank_at
-                    .unwrap_or(observed_at)
-                    .max(observed_at + self.blank_after),
-            );
-        }
-    }
-
     pub fn observe_provider_idle(&mut self) -> InactivityDecision {
-        if self.can_blank_automatically()
-            && matches!(
-                self.phase,
-                InactivityPhase::Unknown | InactivityPhase::Active
-            )
-        {
+        if matches!(
+            self.phase,
+            InactivityPhase::Unknown | InactivityPhase::Active
+        ) {
             self.phase = InactivityPhase::BlankRequested;
             self.blank_at = None;
             return InactivityDecision::BlankNow;
@@ -217,6 +176,9 @@ impl InactivityEngine {
         observation: InactivityObservation,
         observed_at: Instant,
     ) -> InactivityDecision {
+        if self.activity_floor.is_some_and(|floor| observed_at < floor) {
+            return InactivityDecision::NoOp;
+        }
         let independent_activity = matches!(
             observation,
             InactivityObservation::DesktopActivityObserved
@@ -262,6 +224,8 @@ impl InactivityEngine {
             return InactivityDecision::NoOp;
         }
 
+        self.activity_floor = Some(observed_at);
+
         if self.provider_driven_blank {
             self.blank_at = None;
         } else {
@@ -301,13 +265,13 @@ impl InactivityEngine {
     pub fn observe_time(&mut self, observed_at: Instant) -> InactivityDecision {
         match self.phase {
             InactivityPhase::Unknown | InactivityPhase::Active
-                if self.can_blank_automatically()
-                    && self
-                        .blank_at
-                        .is_some_and(|deadline| observed_at >= deadline) =>
+                if self
+                    .blank_at
+                    .is_some_and(|deadline| observed_at >= deadline) =>
             {
                 self.phase = InactivityPhase::BlankRequested;
                 self.lock_activity_floor = self.session_locked_since;
+                self.activity_floor = Some(observed_at);
                 InactivityDecision::BlankNow
             }
             InactivityPhase::Blanked
@@ -370,198 +334,6 @@ mod tests {
 
     fn test_engine(started_at: Instant) -> InactivityEngine {
         InactivityEngine::new(Duration::from_secs(5), started_at)
-    }
-
-    #[test]
-    fn pending_permission_blocks_expiry_without_renewing_an_uninhibited_deadline() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.defer_idle_blanking();
-        let after_deadline = start + Duration::from_secs(6);
-        assert_eq!(engine.time_until_action(after_deadline), None);
-        assert_eq!(
-            engine.observe_time(after_deadline),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(engine.observe_provider_idle(), InactivityDecision::NoOp);
-
-        // An unrelated inhibitor change must not give us another full timeout.
-        engine.set_idle_blanking_allowed(true, after_deadline);
-        assert_eq!(
-            engine.time_until_action(after_deadline),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(
-            engine.observe_time(after_deadline),
-            InactivityDecision::BlankNow
-        );
-    }
-
-    #[test]
-    fn a_confirmed_inhibitor_keeps_a_pending_deadline_blocked_until_release() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.defer_idle_blanking();
-        let reply_at = start + Duration::from_secs(6);
-        engine.set_idle_blanking_allowed(false, reply_at);
-        assert_eq!(engine.time_until_action(reply_at), None);
-        assert_eq!(engine.observe_time(reply_at), InactivityDecision::NoOp);
-
-        engine.defer_idle_blanking();
-        let released = start + Duration::from_secs(10);
-        engine.set_idle_blanking_allowed(true, released);
-        assert_eq!(
-            engine.time_until_action(released),
-            Some(Duration::from_secs(5))
-        );
-    }
-
-    #[test]
-    fn pending_permission_preserves_explicit_lock_power_off_and_real_input() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.defer_idle_blanking();
-        assert_eq!(engine.observe_lock(start), InactivityDecision::BlankNow);
-        engine.complete_blank(true, start);
-        assert_eq!(
-            engine.time_until_action(start),
-            Some(InactivityEngine::DEFAULT_POWER_OFF_AFTER)
-        );
-        let mut power_off_engine = engine;
-        assert_eq!(
-            power_off_engine.observe_time(start + InactivityEngine::DEFAULT_POWER_OFF_AFTER),
-            InactivityDecision::TimedPowerOffNow,
-        );
-        assert_eq!(
-            engine.observe_activity(
-                InactivityObservation::DesktopActivityObserved,
-                start + Duration::from_secs(2),
-            ),
-            InactivityDecision::RestoreNow,
-        );
-    }
-
-    #[test]
-    fn inhibition_blocks_startup_until_permission_returns_with_a_fresh_timeout() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.set_idle_blanking_allowed(false, start);
-        let released = start + Duration::from_secs(30);
-        assert_eq!(engine.observe_time(released), InactivityDecision::NoOp);
-        assert_eq!(engine.time_until_action(released), None);
-
-        engine.set_idle_blanking_allowed(true, released);
-        assert_eq!(
-            engine.time_until_action(released),
-            Some(Duration::from_secs(5))
-        );
-        // Repeated observations must not indefinitely extend the deadline.
-        engine.set_idle_blanking_allowed(true, released + Duration::from_secs(4));
-        assert_eq!(
-            engine.observe_time(released + Duration::from_secs(4)),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(
-            engine.observe_time(released + Duration::from_secs(5)),
-            InactivityDecision::BlankNow
-        );
-    }
-
-    #[test]
-    fn inhibition_replaces_an_almost_expired_deadline_after_the_last_release() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.set_idle_blanking_allowed(false, start + Duration::from_secs(4));
-        assert_eq!(
-            engine.observe_time(start + Duration::from_secs(6)),
-            InactivityDecision::NoOp
-        );
-        engine.set_idle_blanking_allowed(true, start + Duration::from_secs(10));
-        assert_eq!(
-            engine.observe_time(start + Duration::from_secs(14)),
-            InactivityDecision::NoOp
-        );
-        assert_eq!(
-            engine.observe_time(start + Duration::from_secs(15)),
-            InactivityDecision::BlankNow
-        );
-    }
-
-    #[test]
-    fn inhibition_is_not_restore_activity_and_does_not_cancel_post_blank_power_off() {
-        let start = Instant::now();
-        let mut engine = InactivityEngine::new_with_power_off_after(
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            start,
-        );
-        assert_eq!(
-            engine.observe_time(start + Duration::from_secs(5)),
-            InactivityDecision::BlankNow
-        );
-        engine.complete_blank(true, start + Duration::from_secs(5));
-        engine.set_idle_blanking_allowed(false, start + Duration::from_secs(6));
-        engine.set_idle_blanking_allowed(true, start + Duration::from_secs(8));
-        assert!(engine.timed_power_off_pending());
-        assert_eq!(
-            engine.observe_time(start + Duration::from_secs(15)),
-            InactivityDecision::TimedPowerOffNow
-        );
-    }
-
-    #[test]
-    fn real_input_restores_while_inhibited_and_still_resets_the_shared_deadline() {
-        for observation in [
-            InactivityObservation::DesktopActivityObserved,
-            InactivityObservation::UserActivityObserved,
-        ] {
-            let start = Instant::now();
-            let mut engine = test_engine(start);
-            assert_eq!(
-                engine.observe_time(start + Duration::from_secs(5)),
-                InactivityDecision::BlankNow
-            );
-            engine.complete_blank(true, start + Duration::from_secs(5));
-            engine.set_idle_blanking_allowed(false, start + Duration::from_secs(6));
-            assert_eq!(
-                engine.observe_activity(observation, start + Duration::from_secs(7)),
-                InactivityDecision::RestoreNow
-            );
-            assert!(!engine.timed_power_off_pending());
-            assert_eq!(
-                engine.observe_time(start + Duration::from_secs(20)),
-                InactivityDecision::NoOp
-            );
-            engine.set_idle_blanking_allowed(true, start + Duration::from_secs(21));
-            assert_eq!(
-                engine.observe_activity(observation, start + Duration::from_secs(24)),
-                InactivityDecision::NoOp
-            );
-            assert_eq!(
-                engine.observe_time(start + Duration::from_secs(28)),
-                InactivityDecision::NoOp
-            );
-            assert_eq!(
-                engine.observe_time(start + Duration::from_secs(29)),
-                InactivityDecision::BlankNow
-            );
-        }
-    }
-
-    #[test]
-    fn an_explicit_lock_still_blanks_while_idle_blanking_is_inhibited() {
-        let start = Instant::now();
-        let mut engine = test_engine(start);
-        engine.set_idle_blanking_allowed(false, start);
-        assert_eq!(
-            engine.observe_lock(start + Duration::from_secs(1)),
-            InactivityDecision::BlankNow
-        );
-        engine.complete_blank(true, start + Duration::from_secs(1));
-        engine.set_idle_blanking_allowed(true, start + Duration::from_secs(2));
-        assert!(engine.timed_power_off_pending());
-        engine.observe_unlock();
-        assert!(engine.timed_power_off_pending());
     }
 
     #[test]
@@ -1082,6 +854,37 @@ mod tests {
                 started_at + Duration::from_secs(8),
             ),
             InactivityDecision::RestoreNow
+        );
+    }
+    #[test]
+    fn delayed_input_cannot_undo_a_newer_blank_or_extend_to_delivery_time() {
+        let start = Instant::now();
+        let mut engine = InactivityEngine::new(Duration::from_secs(1), start);
+        assert_eq!(
+            engine.observe_time(start + Duration::from_secs(1)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, start + Duration::from_secs(1));
+        assert_eq!(
+            engine.observe_activity(
+                InactivityObservation::DesktopActivityObserved,
+                start + Duration::from_millis(500)
+            ),
+            InactivityDecision::NoOp
+        );
+        assert!(engine.timed_power_off_pending());
+        let input_at = start + Duration::from_millis(1500);
+        assert_eq!(
+            engine.observe_activity(InactivityObservation::UserActivityObserved, input_at),
+            InactivityDecision::RestoreNow
+        );
+        assert_eq!(
+            engine.observe_activity(InactivityObservation::DesktopActivityObserved, start),
+            InactivityDecision::NoOp
+        );
+        assert_eq!(
+            engine.observe_time(input_at + Duration::from_secs(1)),
+            InactivityDecision::BlankNow
         );
     }
 }

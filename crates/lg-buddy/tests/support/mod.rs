@@ -452,6 +452,11 @@ impl MockSessionBusIdleMonitor {
         self.patch_state(|state| state.default_idletime = value);
     }
 
+    pub fn set_session_manager_available(&self, available: bool) {
+        self.patch_state(|state| state.session_manager_available = available);
+        wait_for_mock_bus_name_sync();
+    }
+
     pub fn set_idle_inhibitor_count(&self, count: u32) {
         self.patch_state(|state| {
             state.session_manager_available = true;

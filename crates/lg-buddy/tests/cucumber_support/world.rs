@@ -513,6 +513,11 @@ exit 1\n",
         bus.set_idle_monitor_available(true);
     }
 
+    pub fn set_gnome_session_manager_available(&mut self, value: bool) {
+        self.ensure_mock_session_bus_idle_monitor()
+            .set_session_manager_available(value);
+    }
+
     pub fn set_gnome_idle_monitor_available(&mut self, value: bool) {
         self.ensure_mock_session_bus_idle_monitor()
             .set_idle_monitor_available(value);

@@ -108,11 +108,10 @@ Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
 - GNOME monitor/runtime tests should use the private session-bus harness for
-  ScreenSaver signals, Mutter idletime, and SessionManager idle-inhibition
-  snapshots and signals
+  ScreenSaver signals and Mutter user-active watches
 - native Wayland provider tests should model registry discovery, protocol-version
   rejection, every advertised seat, input-notification resumed activity, separate
-  inhibitor-aware permission notifications, and fatal provider loss without
+  rejection of obsolete source instances, and provider loss without
   requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
@@ -256,15 +255,16 @@ Secondary concern:
 Examples:
 
 - GNOME signal mapping
-- GNOME monitor setup, sender ownership, idletime polling, and one-shot
-  user-active watches over the session-bus seam
-- delayed inhibitor replies crossing the blanking deadline, and inhibitor
-  release resetting Mutter's idle counter without reporting user input
+- GNOME monitor setup, sender ownership and one-shot user-active watches over
+  the session-bus seam, independent of SessionManager availability
+- overlapping source observations, source replacement, stale input and original
+  observation times surviving delayed delivery
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
-- opt-in idle inhibition at startup, overlapping inhibitors, a fresh timeout
-  after the last release, and release never acting as restore activity
+- the explicit dev-only absence of native inhibition after #221; #225 restores
+  integrated inhibition tests before promotion, including overlap, playback
+  before/after startup and a full timeout after the last release
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
   restore trigger, while observation-time tests cover pre-lock, post-lock grace,
@@ -280,11 +280,12 @@ than reconstructing provider buses and process protocols.
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection
-cases report a precise fallback reason, and `auto` retains the
-GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
+cases report a precise reason, and automatic native monitoring composes available
+sources. Existing swayidle fallback coverage remains until #132. Release-facing changes must
 keep the static x86_64 musl build and release-bundle smoke test green, including
 preservation and deprecation reporting for an existing `swayidle` config.
-For inhibitor changes, start real video playback before the monitor: disabled
+For the completed inhibition integration (#225), start real video playback
+before and after the monitor: disabled
 must still blank, enabled must remain visible past the timeout, and stopping
 playback must leave the screen visible for a fresh full timeout before blanking.
 

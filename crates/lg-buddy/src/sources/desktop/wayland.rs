@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::time::Instant;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::protocol::{wl_callback, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::ext::idle_notify::v1::client::{
     ext_idle_notification_v1, ext_idle_notifier_v1,
@@ -127,55 +132,6 @@ impl RegistryFacts {
 struct SeatBinding {
     seat: wl_seat::WlSeat,
     input_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
-    idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotificationKind {
-    Input(u32),
-    IdlePermission(u32),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotificationMeaning {
-    InputActivity,
-    IdlePermission(bool),
-}
-
-#[derive(Debug, Default)]
-struct IdlePermissionTracker {
-    seats: HashMap<u32, bool>,
-    allowed: bool,
-}
-
-impl IdlePermissionTracker {
-    fn add_seat(&mut self, name: u32) -> Option<bool> {
-        self.seats.insert(name, false);
-        self.recompute()
-    }
-
-    fn remove_seat(&mut self, name: u32) -> Option<bool> {
-        self.seats.remove(&name)?;
-        self.recompute()
-    }
-
-    fn set_idle(&mut self, name: u32, idle: bool) -> Option<bool> {
-        let previous = self.seats.get_mut(&name)?;
-        if *previous == idle {
-            return None;
-        }
-        *previous = idle;
-        self.recompute()
-    }
-
-    fn recompute(&mut self) -> Option<bool> {
-        let allowed = !self.seats.is_empty() && self.seats.values().all(|idle| *idle);
-        if self.allowed == allowed {
-            return None;
-        }
-        self.allowed = allowed;
-        Some(allowed)
-    }
 }
 
 struct WaylandProviderState<F> {
@@ -183,8 +139,6 @@ struct WaylandProviderState<F> {
     registry_facts: RegistryFacts,
     idle_notifier: Option<(u32, ext_idle_notifier_v1::ExtIdleNotifierV1)>,
     seats: HashMap<u32, SeatBinding>,
-    idle_permission: IdlePermissionTracker,
-    honor_idle_inhibitors: bool,
     initialized: bool,
     running: bool,
     error: Option<WaylandProviderError>,
@@ -195,14 +149,12 @@ impl<F> WaylandProviderState<F>
 where
     F: FnMut(SessionObservation) -> bool + 'static,
 {
-    fn new(on_observation: F, honor_idle_inhibitors: bool) -> Self {
+    fn new(on_observation: F) -> Self {
         Self {
             registry: None,
             registry_facts: RegistryFacts::default(),
             idle_notifier: None,
             seats: HashMap::new(),
-            idle_permission: IdlePermissionTracker::default(),
-            honor_idle_inhibitors,
             initialized: false,
             running: true,
             error: None,
@@ -214,14 +166,6 @@ where
         if !(self.on_observation)(observation) {
             self.running = false;
         }
-    }
-
-    fn publish_idle_permission_change(&mut self, allowed: bool) {
-        self.publish(SessionObservation::IdleBlankingPermission {
-            allowed,
-            source: EventSource::DesktopSession,
-            observed_at: Instant::now(),
-        });
     }
 
     fn bind_idle_notifier(
@@ -263,14 +207,8 @@ where
             SeatBinding {
                 seat,
                 input_notification: None,
-                idle_notification: None,
             },
         );
-        if self.honor_idle_inhibitors {
-            if let Some(allowed) = self.idle_permission.add_seat(name) {
-                self.publish_idle_permission_change(allowed);
-            }
-        }
         self.attach_seat(name, queue_handle);
     }
 
@@ -292,20 +230,8 @@ where
             return;
         }
 
-        binding.input_notification = Some(notifier.get_input_idle_notification(
-            0,
-            &binding.seat,
-            queue_handle,
-            NotificationKind::Input(name),
-        ));
-        if self.honor_idle_inhibitors {
-            binding.idle_notification = Some(notifier.get_idle_notification(
-                0,
-                &binding.seat,
-                queue_handle,
-                NotificationKind::IdlePermission(name),
-            ));
-        }
+        binding.input_notification =
+            Some(notifier.get_input_idle_notification(0, &binding.seat, queue_handle, name));
     }
 
     fn remove_global(&mut self, name: u32) {
@@ -320,19 +246,10 @@ where
             if let Some(notification) = binding.input_notification.take() {
                 notification.destroy();
             }
-            if let Some(notification) = binding.idle_notification.take() {
-                notification.destroy();
-            }
             true
         } else {
             false
         };
-
-        if removed_seat && self.honor_idle_inhibitors {
-            if let Some(allowed) = self.idle_permission.remove_seat(name) {
-                self.publish_idle_permission_change(allowed);
-            }
-        }
 
         if let Some(err) = global_removal_error(
             self.initialized,
@@ -367,29 +284,6 @@ fn global_removal_error(
 
 fn notification_is_activity(event: &ext_idle_notification_v1::Event) -> bool {
     matches!(event, ext_idle_notification_v1::Event::Resumed)
-}
-
-fn idle_notification_permission(event: &ext_idle_notification_v1::Event) -> Option<bool> {
-    match event {
-        ext_idle_notification_v1::Event::Idled => Some(true),
-        ext_idle_notification_v1::Event::Resumed => Some(false),
-        _ => None,
-    }
-}
-
-fn notification_meaning(
-    kind: NotificationKind,
-    event: &ext_idle_notification_v1::Event,
-) -> Option<NotificationMeaning> {
-    match kind {
-        NotificationKind::Input(_) if notification_is_activity(event) => {
-            Some(NotificationMeaning::InputActivity)
-        }
-        NotificationKind::IdlePermission(_) => {
-            idle_notification_permission(event).map(NotificationMeaning::IdlePermission)
-        }
-        _ => None,
-    }
 }
 
 impl<F> Dispatch<wl_registry::WlRegistry, ()> for WaylandProviderState<F>
@@ -479,35 +373,28 @@ where
     }
 }
 
-impl<F> Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, NotificationKind>
-    for WaylandProviderState<F>
+impl<F> Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, u32> for WaylandProviderState<F>
 where
     F: FnMut(SessionObservation) -> bool + 'static,
 {
     fn event(
         state: &mut Self,
-        _: &ext_idle_notification_v1::ExtIdleNotificationV1,
+        notification: &ext_idle_notification_v1::ExtIdleNotificationV1,
         event: ext_idle_notification_v1::Event,
-        kind: &NotificationKind,
+        seat_name: &u32,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        match notification_meaning(*kind, &event) {
-            Some(NotificationMeaning::InputActivity) => {
-                state.publish(SessionObservation::Inactivity {
-                    observation: InactivityObservation::DesktopActivityObserved,
-                    source: EventSource::DesktopSession,
-                    observed_at: Instant::now(),
-                });
-            }
-            Some(NotificationMeaning::IdlePermission(allowed)) => {
-                if let NotificationKind::IdlePermission(name) = *kind {
-                    if let Some(allowed) = state.idle_permission.set_idle(name, allowed) {
-                        state.publish_idle_permission_change(allowed);
-                    }
-                }
-            }
-            None => {}
+        let current = state
+            .seats
+            .get(seat_name)
+            .and_then(|binding| binding.input_notification.as_ref());
+        if current == Some(notification) && notification_is_activity(&event) {
+            state.publish(SessionObservation::Inactivity {
+                observation: InactivityObservation::DesktopActivityObserved,
+                source: EventSource::DesktopSession,
+                observed_at: Instant::now(),
+            });
         }
     }
 }
@@ -520,8 +407,8 @@ type InitializedWaylandProvider<F> = (
 
 fn initialize_provider<F>(
     connection: Connection,
-    honor_idle_inhibitors: bool,
     on_observation: F,
+    stop: &AtomicBool,
 ) -> Result<InitializedWaylandProvider<F>, WaylandProviderError>
 where
     F: FnMut(SessionObservation) -> bool + 'static,
@@ -529,17 +416,13 @@ where
     let display = connection.display();
     let mut event_queue = connection.new_event_queue();
     let queue_handle = event_queue.handle();
-    let mut state = WaylandProviderState::new(on_observation, honor_idle_inhibitors);
+    let mut state = WaylandProviderState::new(on_observation);
     state.registry = Some(display.get_registry(&queue_handle, ()));
 
-    event_queue
-        .roundtrip(&mut state)
-        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    roundtrip(&connection, &mut event_queue, &mut state, stop)?;
     let capabilities = state.registry_facts.capabilities()?;
     state.initialized = true;
-    event_queue
-        .roundtrip(&mut state)
-        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    roundtrip(&connection, &mut event_queue, &mut state, stop)?;
     if let Some(err) = state.take_error() {
         return Err(err);
     }
@@ -561,43 +444,144 @@ pub(crate) fn probe_wayland_capabilities_on(
     let queue_handle = event_queue.handle();
     let _registry = display.get_registry(&queue_handle, ());
     let mut state = WaylandCapabilityProbeState::default();
-    event_queue
-        .roundtrip(&mut state)
-        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    roundtrip(
+        &connection,
+        &mut event_queue,
+        &mut state,
+        &AtomicBool::new(false),
+    )?;
     state.registry_facts.capabilities()
+}
+
+pub(crate) fn reconnect_wayland() -> Result<Connection, WaylandProviderError> {
+    // Unlike connect_to_env, reconnect never consumes or mutates WAYLAND_SOCKET.
+    let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
+    let display = PathBuf::from(display);
+    let path = if display.is_absolute() {
+        display
+    } else {
+        PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+            WaylandProviderError::Connection("XDG_RUNTIME_DIR is unset".to_string())
+        })?)
+        .join(display)
+    };
+    let socket = UnixStream::connect(path)
+        .map_err(|err| WaylandProviderError::Connection(err.to_string()))?;
+    Connection::from_socket(socket).map_err(|err| WaylandProviderError::Connection(err.to_string()))
 }
 
 pub(crate) fn run_session_source<F>(
     connection: Connection,
-    honor_idle_inhibitors: bool,
-    mut publish: F,
+    publish: F,
+    stop: &AtomicBool,
+    connected: impl FnOnce(),
 ) -> Result<(), WaylandProviderError>
 where
     F: FnMut(SessionObservation) -> bool + 'static,
 {
-    let (mut event_queue, mut state, _) =
-        initialize_provider(connection, honor_idle_inhibitors, move |observation| {
-            publish(observation)
-        })?;
-
-    while state.running {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    let (mut event_queue, mut state, _) = initialize_provider(connection, publish, stop)?;
+    connected();
+    while state.running && !stop.load(Ordering::SeqCst) {
+        dispatch_once(&mut event_queue, &mut state)?;
         if let Some(err) = state.take_error() {
             return Err(err);
         }
     }
-
     Ok(())
+}
+
+// Bound connection setup as well as idle waits so one stalled interface cannot
+// hold the monitor's startup or cancellation indefinitely.
+fn roundtrip<State>(
+    connection: &Connection,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    stop: &AtomicBool,
+) -> Result<(), WaylandProviderError>
+where
+    State: Dispatch<wl_callback::WlCallback, Arc<AtomicBool>> + 'static,
+{
+    let done = Arc::new(AtomicBool::new(false));
+    connection
+        .display()
+        .sync(&queue.handle(), Arc::clone(&done));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !done.load(Ordering::SeqCst) {
+        if stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            return Err(WaylandProviderError::Dispatch(
+                "Wayland initialization cancelled or timed out".to_string(),
+            ));
+        }
+        dispatch_once(queue, state)?;
+    }
+    Ok(())
+}
+
+fn dispatch_once<State: 'static>(
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+) -> Result<(), WaylandProviderError> {
+    queue
+        .dispatch_pending(state)
+        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    queue
+        .flush()
+        .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+    if let Some(guard) = queue.prepare_read() {
+        let mut fd = libc::pollfd {
+            fd: guard.connection_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: fd points to one initialized pollfd, and the read guard owns
+        // the descriptor throughout this bounded wait.
+        let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+        if ready < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(WaylandProviderError::Dispatch(err.to_string()));
+            }
+        } else if ready > 0 {
+            guard
+                .read()
+                .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+impl<F: FnMut(SessionObservation) -> bool + 'static>
+    Dispatch<wl_callback::WlCallback, Arc<AtomicBool>> for WaylandProviderState<F>
+{
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        done: &Arc<AtomicBool>,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        done.store(true, Ordering::SeqCst);
+    }
+}
+impl Dispatch<wl_callback::WlCallback, Arc<AtomicBool>> for WaylandCapabilityProbeState {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        done: &Arc<AtomicBool>,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        done.store(true, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ext_idle_notification_v1, global_removal_error, idle_notification_permission,
-        notification_is_activity, notification_meaning, IdlePermissionTracker, NotificationKind,
-        NotificationMeaning, RegistryFacts, WaylandProviderCapabilities, WaylandProviderError,
+        ext_idle_notification_v1, global_removal_error, notification_is_activity, RegistryFacts,
+        WaylandProviderCapabilities, WaylandProviderError,
     };
 
     const NOTIFIER: &str = "ext_idle_notifier_v1";
@@ -699,58 +683,83 @@ mod tests {
             &ext_idle_notification_v1::Event::Resumed
         ));
     }
-
     #[test]
-    fn idle_permission_stays_blocked_until_every_seat_reports_idle() {
-        let mut tracker = IdlePermissionTracker::default();
-
-        assert_eq!(tracker.add_seat(11), None);
-        assert_eq!(tracker.add_seat(12), None);
-        assert!(!tracker.allowed);
-        assert_eq!(tracker.set_idle(11, true), None);
-        assert_eq!(tracker.set_idle(12, true), Some(true));
-        assert_eq!(tracker.set_idle(12, true), None);
-        assert!(tracker.allowed);
+    fn stalled_initialization_is_cancellable_without_compositor_events() {
+        let (client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = wayland_client::Connection::from_socket(client).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = std::sync::Arc::clone(&stop);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = super::run_session_source(
+                connection,
+                |_| true,
+                &worker_stop,
+                || panic!("a stalled compositor is not connected"),
+            );
+            sender.send(result).unwrap();
+        });
+        use std::io::Read;
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut request = [0; 256];
+        assert!(
+            peer.read(&mut request).unwrap() > 0,
+            "initialization must be pending before cancellation"
+        );
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .is_err());
+        worker.join().unwrap();
     }
-
     #[test]
-    fn seat_addition_and_removal_recompute_permission_meaningfully() {
-        let mut tracker = IdlePermissionTracker::default();
-        tracker.add_seat(11);
-        tracker.set_idle(11, true);
-        assert!(tracker.allowed);
-
-        assert_eq!(tracker.add_seat(12), Some(false));
-        assert!(!tracker.allowed);
-        assert_eq!(tracker.remove_seat(12), Some(true));
-        assert!(tracker.allowed);
-        assert_eq!(tracker.remove_seat(11), Some(false));
-        assert!(!tracker.allowed);
-    }
-
-    #[test]
-    fn inhibitor_notification_resumed_changes_permission_without_becoming_activity() {
-        assert_eq!(
-            idle_notification_permission(&ext_idle_notification_v1::Event::Idled),
-            Some(true)
+    fn an_obsolete_notification_cannot_report_input_for_a_reused_seat_name() {
+        use wayland_client::Dispatch;
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = wayland_client::Connection::from_socket(socket).unwrap();
+        let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = std::sync::Arc::clone(&observations);
+        let mut state = super::WaylandProviderState::new(move |value| {
+            output.lock().unwrap().push(value);
+            true
+        });
+        let queue = connection.new_event_queue();
+        let handle = queue.handle();
+        let registry = connection.display().get_registry(&handle, ());
+        state.registry_facts.add(10, NOTIFIER, 2);
+        state.bind_idle_notifier(&registry, &handle);
+        state.bind_seat(&registry, &handle, 11, 1);
+        let old = state.seats[&11]
+            .input_notification
+            .as_ref()
+            .unwrap()
+            .clone();
+        state.remove_global(11);
+        state.bind_seat(&registry, &handle, 11, 1);
+        let current = state.seats[&11]
+            .input_notification
+            .as_ref()
+            .unwrap()
+            .clone();
+        <super::WaylandProviderState<_> as Dispatch<_, u32>>::event(
+            &mut state,
+            &old,
+            ext_idle_notification_v1::Event::Resumed,
+            &11,
+            &connection,
+            &handle,
         );
-        assert_eq!(
-            idle_notification_permission(&ext_idle_notification_v1::Event::Resumed),
-            Some(false)
+        assert!(observations.lock().unwrap().is_empty());
+        <super::WaylandProviderState<_> as Dispatch<_, u32>>::event(
+            &mut state,
+            &current,
+            ext_idle_notification_v1::Event::Resumed,
+            &11,
+            &connection,
+            &handle,
         );
-        assert_eq!(
-            notification_meaning(
-                NotificationKind::Input(11),
-                &ext_idle_notification_v1::Event::Resumed
-            ),
-            Some(NotificationMeaning::InputActivity)
-        );
-        assert_eq!(
-            notification_meaning(
-                NotificationKind::IdlePermission(11),
-                &ext_idle_notification_v1::Event::Resumed
-            ),
-            Some(NotificationMeaning::IdlePermission(false))
-        );
+        assert_eq!(observations.lock().unwrap().len(), 1);
     }
 }
