@@ -4,6 +4,37 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::config::{Config, ScreenHonorIdleInhibitorsPolicy};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InhibitionPreferenceDiagnostics {
+    pub honoring: ScreenHonorIdleInhibitorsPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InhibitionPreferenceEvaluation {
+    /// Overrides source restrictions and release delay, never activity eligibility.
+    /// This is an override, not a third permission to AND with the source sections.
+    pub bypass_inhibition: bool,
+    pub diagnostics: InhibitionPreferenceDiagnostics,
+}
+
+/// Evaluate the preference from the runtime's loaded configuration, without
+/// source queries or retained state. Disabled honoring bypasses inhibition;
+/// enabled honoring leaves source permission and release delay to the reconciler.
+///
+/// Settings apply through a screen-service restart. A new runtime evaluates its
+/// newly loaded Config; old attempts cannot survive that process boundary. For
+/// an in-process reload, the reconciler must cancel the pending attempt before
+/// using the new configuration and must not reuse this result across attempts.
+pub fn evaluate_inhibition_preference(config: &Config) -> InhibitionPreferenceEvaluation {
+    let honoring = config.screen_honor_idle_inhibitors;
+    InhibitionPreferenceEvaluation {
+        bypass_inhibition: !honoring.is_enabled(),
+        diagnostics: InhibitionPreferenceDiagnostics { honoring },
+    }
+}
+
 /// Only observed inhibition denies permission; other statuses are diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InhibitionStatus {
@@ -138,8 +169,70 @@ impl InhibitionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{parse_config, ScreenBackend, ScreenIdleBlankPolicy};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn preference_uses_the_runtime_config_default_and_effective_value() {
+        for (setting, honoring, bypass) in [
+            ("", ScreenHonorIdleInhibitorsPolicy::Disabled, true),
+            (
+                "screen_honor_idle_inhibitors=enabled",
+                ScreenHonorIdleInhibitorsPolicy::Enabled,
+                false,
+            ),
+            (
+                "screen_honor_idle_inhibitors=disabled",
+                ScreenHonorIdleInhibitorsPolicy::Disabled,
+                true,
+            ),
+            // Keep the runtime loader's existing invalid-value fallback. The
+            // settings editor still rejects invalid new writes independently.
+            (
+                "screen_honor_idle_inhibitors=invalid",
+                ScreenHonorIdleInhibitorsPolicy::Disabled,
+                true,
+            ),
+        ] {
+            let config = parse_config(&format!(
+                "tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\n{setting}\n"
+            ))
+            .unwrap();
+            let result = evaluate_inhibition_preference(&config);
+            assert_eq!(result.bypass_inhibition, bypass);
+            assert_eq!(result.diagnostics.honoring, honoring);
+        }
+    }
+
+    #[test]
+    fn preference_has_no_desktop_or_activity_policy_gate() {
+        let mut config =
+            parse_config("tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\n").unwrap();
+        for backend in [
+            ScreenBackend::Auto,
+            ScreenBackend::Gnome,
+            ScreenBackend::Wayland,
+            ScreenBackend::Swayidle,
+        ] {
+            config.screen_backend = backend;
+            for idle_blank in [
+                ScreenIdleBlankPolicy::Enabled,
+                ScreenIdleBlankPolicy::Disabled,
+            ] {
+                config.screen_idle_blank = idle_blank;
+                for (honoring, bypass) in [
+                    (ScreenHonorIdleInhibitorsPolicy::Disabled, true),
+                    (ScreenHonorIdleInhibitorsPolicy::Enabled, false),
+                ] {
+                    config.screen_honor_idle_inhibitors = honoring;
+                    let result = evaluate_inhibition_preference(&config);
+                    assert_eq!(result.bypass_inhibition, bypass);
+                    assert_eq!(result.diagnostics.honoring, honoring);
+                }
+            }
+        }
+    }
 
     struct FakeAdapter(Mutex<InhibitionState>);
 

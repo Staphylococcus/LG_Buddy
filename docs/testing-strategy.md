@@ -299,6 +299,15 @@ cancellation during delayed replies, and replacement by a new unique owner.
 The mock supplies effective policy; it does not prove Plasma's filtering,
 overlap handling or application route coverage.
 
+Preference-section tests in `inhibition.rs` cover the runtime configuration's
+default and explicit values, its existing invalid-value fallback, and independence
+from desktop selection and activity policy. `tests/settings_operations.rs`
+exercises set, disable, re-enable and reset through the real settings writer and
+a mocked systemctl restart. It verifies that the restart sees the saved file and
+that the inhibition evaluator agrees with the effective setting after reload.
+Preference evaluation has no source or release-timing dependency. #225 owns the
+end-to-end override matrix and cancellation of attempts on in-process reload.
+
 For live Plasma validation of #223, record Plasma/PowerDevil and application
 versions and the application's inhibition route, then inspect effective state:
 

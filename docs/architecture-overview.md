@@ -407,7 +407,8 @@ The current split is:
   - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
     user-active watches, and translation into normalized observations
 - `inhibition.rs`
-  - independent push/pull inhibition contracts, Boolean aggregation and diagnostics;
+  - independent push/pull inhibition contracts, Boolean aggregation, preference
+    override evaluation from loaded configuration, and diagnostics;
     standalone until the monitor integration in #225
 - `sources/desktop/gnome/inhibition.rs`
   - SessionManager inhibition subscriptions, state refresh and recovery,
@@ -972,6 +973,12 @@ requires only SessionManager and keeps subscriptions, state queries and owner
 recovery internal. It contributes no activity observations. #225 connects the
 two paths only at the `can_blank()` decision; runtime honoring remains absent
 until then.
+
+The separate preference section (#224) evaluates the existing honoring setting
+without I/O. Disabled honoring supplies a bypass for inhibition restrictions and
+release delay; it does not grant activity eligibility. Settings retain their
+screen-service restart apply path. #225 owns cancelling pending attempts on
+in-process configuration changes and consuming the current preference.
 
 The runtime core owns:
 
