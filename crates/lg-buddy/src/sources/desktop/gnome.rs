@@ -1,3 +1,5 @@
+pub mod inhibition;
+
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;

@@ -277,6 +277,18 @@ Source-specific tests live with their source modules. Runner tests should use
 normalized observations and focus on multiplexing or policy behavior rather
 than reconstructing provider buses and process protocols.
 
+Push inhibition is tested independently of activity. Colocated tests in
+`inhibition.rs` cover Boolean aggregation and diagnostics; GNOME's inhibition
+module covers startup synchronization, queued changes, owner validation,
+cancellation, release history and periodic reconciliation of missed additions
+and removals. `tests/inhibition.rs` runs the production
+worker on the shared private D-Bus fixture with only SessionManager present. It
+checks existing and later playback inhibitors, overlap, quiet subscriptions,
+loss/recovery and prompt permission reads during a slow query. Only observed
+inhibition denies permission; tests verify that pending reads retain the last
+value and source loss removes its contribution. These are
+component checks; full monitor/TV acceptance remains part of #225.
+
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection

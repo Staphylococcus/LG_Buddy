@@ -367,6 +367,7 @@ struct MockSessionBusIdleMonitorState {
     inhibitor_plan: VecDeque<(Duration, u32)>,
     inhibitor_started_at: Option<Instant>,
     next_inhibitor_query_delay: Option<Duration>,
+    inhibition_query_count: usize,
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
     idletime_reset_at: Option<Instant>,
@@ -471,6 +472,13 @@ impl MockSessionBusIdleMonitor {
 
     pub fn delay_next_inhibited_query(&self, delay: Duration) {
         self.patch_state(|state| state.next_inhibitor_query_delay = Some(delay));
+    }
+
+    pub fn inhibition_query_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("mock session manager state lock")
+            .inhibition_query_count
     }
 
     pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
@@ -719,6 +727,7 @@ fn spawn_mock_idle_monitor_service(
                                 .lock()
                                 .expect("mock session manager state lock");
                             state.inhibitor_started_at.get_or_insert_with(Instant::now);
+                            state.inhibition_query_count += 1;
                             let inhibited = flags & 8 != 0 && state.idle_inhibitor_count > 0;
                             let delay = if inhibited {
                                 state.next_inhibitor_query_delay.take()
