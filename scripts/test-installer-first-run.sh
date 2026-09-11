@@ -134,10 +134,6 @@ fi
 
 exit 1
 EOF
-cat >"$STUB_DIR/zenity" <<'EOF'
-#!/bin/sh
-exit 0
-EOF
 cat >"$STUB_DIR/gui-runtime-probe" <<'EOF'
 #!/bin/sh
 exit 0
@@ -155,7 +151,7 @@ cat >"$STUB_DIR/pkexec" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 755 "$STUB_DIR/python3" "$STUB_DIR/zenity" "$STUB_DIR/gui-runtime-probe" \
+chmod 755 "$STUB_DIR/python3" "$STUB_DIR/gui-runtime-probe" \
     "$STUB_DIR/systemd-tmpfiles" "$STUB_DIR/systemctl" "$STUB_DIR/pkexec"
 
 run_install() {
@@ -192,7 +188,7 @@ run_install() {
             path_index=$((path_index + 1))
         done < <(printf '%s\n' "$PATH" | tr ':' '\n')
         command_path="$scenario_stub_dir:$filtered_path"
-        for command in python3 zenity gui-runtime-probe systemd-tmpfiles systemctl; do
+        for command in python3 gui-runtime-probe systemd-tmpfiles systemctl; do
             ln -s "$STUB_DIR/$command" "$scenario_stub_dir/$command"
         done
     fi

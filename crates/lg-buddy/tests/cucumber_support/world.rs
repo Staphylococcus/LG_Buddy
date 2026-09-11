@@ -24,7 +24,6 @@ pub struct LgBuddyWorld {
     swayidle: Option<MockSwayidle>,
     path_scripts: Vec<ExecutableScript>,
     brightness_gui_calls_path: Option<PathBuf>,
-    brightness_ui_calls_path: Option<PathBuf>,
     config_snapshot: Option<String>,
     systemctl_log_path: Option<PathBuf>,
     command_result: Option<CommandExecution>,
@@ -55,7 +54,6 @@ impl fmt::Debug for LgBuddyWorld {
             .field("swayidle", &self.swayidle.is_some())
             .field("path_scripts", &self.path_scripts.len())
             .field("brightness_gui_calls_path", &self.brightness_gui_calls_path)
-            .field("brightness_ui_calls_path", &self.brightness_ui_calls_path)
             .field("config_snapshot", &self.config_snapshot.is_some())
             .field("systemctl_log_path", &self.systemctl_log_path)
             .field("command_result", &self.command_result)
@@ -457,37 +455,6 @@ exit 1\n",
             .set("LG_BUDDY_SLEEP_RETRY_DELAY_SECS", "0");
     }
 
-    pub fn install_ping_stub(&mut self, reachable: bool) {
-        let status = if reachable { 0 } else { 1 };
-        let body = format!("#!/bin/sh\nexit {status}\n");
-        let script = ExecutableScript::new("cucumber-ping", "mock-ping", &body);
-        self.ensure_env().set("LG_BUDDY_PING", script.path());
-        self.path_scripts.push(script);
-    }
-
-    pub fn install_brightness_ui_stub(&mut self, selection: Option<u8>) {
-        self.ensure_mock_session_bus_idle_monitor()
-            .set_notifications_available(true);
-        let log_owner =
-            ExecutableScript::new("cucumber-zenity-log", "log-owner", "#!/bin/sh\nexit 0\n");
-        let calls_path = log_owner.path().with_extension("calls");
-        let body = match selection {
-            Some(value) => format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--scale\" ]; then\n  printf '%s\\n' '{value}'\n  exit 0\nfi\nif [ \"$1\" = \"--error\" ]; then\n  exit 0\nfi\nexit 1\n",
-                calls_path.display()
-            ),
-            None => format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--scale\" ]; then\n  exit 1\nfi\nif [ \"$1\" = \"--error\" ]; then\n  exit 0\nfi\nexit 1\n",
-                calls_path.display()
-            ),
-        };
-        let script = ExecutableScript::new("cucumber-zenity", "mock-zenity", &body);
-        self.ensure_env().set("LG_BUDDY_ZENITY", script.path());
-        self.brightness_ui_calls_path = Some(calls_path);
-        self.path_scripts.push(log_owner);
-        self.path_scripts.push(script);
-    }
-
     pub fn make_brightness_gui_unavailable(&mut self) {
         let anchor = ExecutableScript::new(
             "cucumber-missing-brightness-gui",
@@ -536,17 +503,6 @@ exit 1\n",
         assert!(
             !calls_path.exists(),
             "brightness GUI was unexpectedly launched"
-        );
-    }
-
-    pub fn assert_brightness_ui_not_opened(&self) {
-        let calls_path = self
-            .brightness_ui_calls_path
-            .as_ref()
-            .expect("brightness compatibility UI stub should be installed");
-        assert!(
-            !calls_path.exists(),
-            "brightness compatibility dialog was unexpectedly opened"
         );
     }
 

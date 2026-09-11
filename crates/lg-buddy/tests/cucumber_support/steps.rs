@@ -154,16 +154,6 @@ fn inherited_user_environment_is_cleared(world: &mut LgBuddyWorld) {
     world.clear_inherited_user_env();
 }
 
-#[given("the TV is reachable over ping")]
-fn tv_is_reachable_over_ping(world: &mut LgBuddyWorld) {
-    world.install_ping_stub(true);
-}
-
-#[given("the TV is unreachable over ping")]
-fn tv_is_unreachable_over_ping(world: &mut LgBuddyWorld) {
-    world.install_ping_stub(false);
-}
-
 #[given(regex = r#"the TV is on input (HDMI_[1-4])"#)]
 fn tv_on_input(world: &mut LgBuddyWorld, input: String) {
     world.tv_mut().set_input(&input);
@@ -189,11 +179,6 @@ fn tv_mute_state(world: &mut LgBuddyWorld, state: String) {
     world.set_tv_muted(state == "muted");
 }
 
-#[given(regex = r#"the brightness dialog returns (\d+)"#)]
-fn brightness_dialog_returns(world: &mut LgBuddyWorld, value: u8) {
-    world.install_brightness_ui_stub(Some(value));
-}
-
 #[given("the GTK brightness GUI is unavailable")]
 fn gtk_brightness_gui_is_unavailable(world: &mut LgBuddyWorld) {
     world.make_brightness_gui_unavailable();
@@ -209,16 +194,6 @@ fn failing_gtk_brightness_gui(world: &mut LgBuddyWorld, status: i32) {
     world.install_brightness_gui_stub(status);
 }
 
-#[given("the brightness dialog is cancelled")]
-fn brightness_dialog_is_cancelled(world: &mut LgBuddyWorld) {
-    world.install_brightness_ui_stub(None);
-}
-
-#[given("the brightness error dialog is available")]
-fn brightness_error_dialog_is_available(world: &mut LgBuddyWorld) {
-    world.install_brightness_ui_stub(None);
-}
-
 #[then(regex = r#"the GTK brightness GUI received "([^"]+)""#)]
 fn gtk_brightness_gui_received(world: &mut LgBuddyWorld, arguments: String) {
     world.assert_brightness_gui_received(&arguments);
@@ -227,11 +202,6 @@ fn gtk_brightness_gui_received(world: &mut LgBuddyWorld, arguments: String) {
 #[then("the GTK brightness GUI was not launched")]
 fn gtk_brightness_gui_not_launched(world: &mut LgBuddyWorld) {
     world.assert_brightness_gui_not_launched();
-}
-
-#[then("the brightness compatibility dialog was not opened")]
-fn brightness_compatibility_dialog_not_opened(world: &mut LgBuddyWorld) {
-    world.assert_brightness_ui_not_opened();
 }
 
 #[given("the TV screen is blanked")]

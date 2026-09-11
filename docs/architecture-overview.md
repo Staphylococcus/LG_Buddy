@@ -99,7 +99,7 @@ The main runtime consumers are:
 - the installed `lg-buddy` launcher with no arguments, which opens normal
   Overview through the matching GTK executable
 - the `lg-buddy brightness` launcher, which opens the matching GTK executable
-  focused on brightness and uses Zenity only when that executable is absent
+  focused on brightness
 - the `lg-buddy-gui` GTK window, which renders Overview, TVs, pairing, and
   Settings from typed application state and sends semantic user intents through
   the in-process Rust API
@@ -125,7 +125,6 @@ flowchart LR
     end
 
     subgraph Frontend["Frontend"]
-        ZENITY["zenity brightness dialog<br/>interactive prompt"]
         GTK["lg-buddy-gui<br/>Overview / TVs / Settings / dialogs"]
     end
 
@@ -199,8 +198,6 @@ flowchart LR
     NM --> MAIN
     TERMINAL --> MAIN
     MAIN -->|"normal / brightness launcher"| GTK
-    MAIN -.->|"brightness only; GUI absent"| ZENITY
-    ZENITY --> MAIN
     GTK -->|"semantic intents / worker completions"| APPLICATION
     APPLICATION --> VIEWS
     VIEWS --> PRESENTATION
@@ -518,19 +515,18 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the running CLI
-and launches its no-argument entrypoint for normal Overview. A missing GUI is an
-error on this path. The `brightness` command locates the same executable and
-launches its `brightness` entrypoint, which selects the brightness control even
-when another view is already open. Only an absent GUI on this focused path
-selects the temporary Zenity compatibility flow; an invalid installation or
-failed GUI process is returned directly without a second prompt. The
-`brightness get` and `brightness set` commands never enter either launcher and
-use the TV picture abstraction in `tv.rs` for typed OLED brightness validation
-and live TV read/write operations. The interactive Zenity brightness dialog
-delegates its TV operations back through those direct CLI commands. The GTK
-entrypoint opens one Overview alongside the primary TV summary, volume, and
-mute. Two icon-and-slider rows submit changes as the sliders move; the sound
+
+The installer supplies the matching runtime and GTK executable together, checks
+GTK/libadwaita versions, and offers to install missing runtime packages before
+proceeding. The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the
+running CLI and launches its no-argument entrypoint for normal Overview.
+The `brightness` command locates the same executable and launches its
+`brightness` entrypoint, which selects the brightness control even when another
+view is already open. The `brightness get` and `brightness set` commands never
+enter either launcher and use the TV picture abstraction in `tv.rs` for typed
+OLED brightness validation and live TV read/write operations. The GTK entrypoint
+opens one Overview alongside the primary TV summary, volume, and mute.
+Two icon-and-slider rows submit changes as the sliders move; the sound
 icon toggles mute. The core Overview application owns its declarations and semantic
 intents; GTK renders them without adding TV or configuration policy. Workers
 keep blocking operations off the GTK main loop. Capability state is independent,

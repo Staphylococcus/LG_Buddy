@@ -88,10 +88,9 @@ activation keeps one window.
 
 `lg-buddy brightness get` and `lg-buddy brightness set <0-100>` are direct
 headless TV operations. The bare `lg-buddy brightness` command is the
-brightness-focused GUI entrypoint; only this path uses the retained Zenity
-compatibility flow when the GUI executable is absent. A present but invalid
-GUI, or a GUI that starts and fails, is reported directly. The no-argument
-application launch requires the GUI.
+brightness-focused GUI entrypoint. The release bundle ships the matching GTK
+executable for both graphical launch paths. Installation owns providing that
+executable and satisfying its GTK/libadwaita runtime requirements.
 
 Other supported headless user commands remain independent of GTK:
 
@@ -405,5 +404,3 @@ service paths GTK-free.
 
 The frontend grew from the brightness MVP tracked in [issue #127](https://github.com/Staphylococcus/LG_Buddy/issues/127), but the current
 architecture is the shared Overview/application coordinator described here.
-The retained Zenity path is a compatibility fallback only; it is not the GTK
-frontend contract.
