@@ -667,6 +667,116 @@ extern "C" fn kill_mock_system_logind_daemon() {
     }
 }
 
+/// Contract mock for PowerDevil's effective answer, not its policy engine.
+/// Attaches to an existing private bus; a second instance replaces the owner.
+#[allow(dead_code)]
+pub struct MockPowerDevil {
+    state: Arc<Mutex<MockPowerDevilState>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct MockPowerDevilState {
+    inhibited: bool,
+    next_delay: Duration,
+    fail_next: bool,
+    queries: usize,
+}
+
+#[allow(dead_code)]
+impl MockPowerDevil {
+    pub fn new(address: &str) -> Self {
+        let state = Arc::new(Mutex::new(MockPowerDevilState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_state = Arc::clone(&state);
+        let worker_stop = Arc::clone(&stop);
+        let address = address.to_string();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let connection = DbusConnection::new_address(&address).unwrap();
+            let mut crossroads = Crossroads::new();
+            let interface =
+                crossroads.register("org.kde.Solid.PowerManagement.PolicyAgent", |builder| {
+                    builder.method(
+                        "HasInhibition",
+                        ("types",),
+                        ("has_inhibition",),
+                        move |_, _: &mut (), (types,): (u32,)| {
+                            assert_eq!(
+                                types, 4,
+                                "only effective screen inhibition should be queried"
+                            );
+                            let (inhibited, delay, fail) = {
+                                let mut state = worker_state.lock().unwrap();
+                                state.queries += 1;
+                                (
+                                    state.inhibited,
+                                    std::mem::take(&mut state.next_delay),
+                                    std::mem::take(&mut state.fail_next),
+                                )
+                            };
+                            thread::sleep(delay);
+                            if fail {
+                                Err(MethodErr::failed("PowerDevil check failed"))
+                            } else {
+                                Ok((inhibited,))
+                            }
+                        },
+                    );
+                });
+            crossroads.insert(
+                "/org/kde/Solid/PowerManagement/PolicyAgent",
+                &[interface],
+                (),
+            );
+            connection.start_receive(
+                dbus::message::MatchRule::new_method_call(),
+                Box::new(move |message, conn| {
+                    crossroads.handle_message(message, conn).unwrap();
+                    true
+                }),
+            );
+            connection
+                .request_name("org.kde.Solid.PowerManagement", true, true, true)
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            while !worker_stop.load(Ordering::SeqCst) {
+                connection.process(Duration::from_millis(10)).unwrap();
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        Self {
+            state,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn set_inhibited(&self, inhibited: bool) {
+        self.state.lock().unwrap().inhibited = inhibited;
+    }
+
+    pub fn delay_next_query(&self, delay: Duration) {
+        self.state.lock().unwrap().next_delay = delay;
+    }
+
+    pub fn fail_next_query(&self) {
+        self.state.lock().unwrap().fail_next = true;
+    }
+
+    pub fn query_count(&self) -> usize {
+        self.state.lock().unwrap().queries
+    }
+}
+
+impl Drop for MockPowerDevil {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
 fn start_private_session_bus() -> (String, i32) {
     let output = ProcessCommand::new(dbus_daemon_path())
         .args([

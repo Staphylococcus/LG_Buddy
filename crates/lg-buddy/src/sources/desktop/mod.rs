@@ -1,4 +1,5 @@
 pub mod gnome;
+pub mod powerdevil;
 pub mod swayidle;
 pub mod wayland;
 
