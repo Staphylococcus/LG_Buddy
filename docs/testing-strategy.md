@@ -347,7 +347,10 @@ The installed GUI smoke also verifies the desktop entry's no-argument
 `lg-buddy` launch opens the existing pairing prompt without navigation for an
 unconfigured installation, and normal Overview for a saved TV. `lg-buddy brightness` selects the
 brightness control even when another view is already open. A missing GUI fails
-the plain launcher; only the brightness path retains the Zenity fallback.
+both graphical launch paths with installation guidance, while headless
+brightness get/set remains available. The application presentation/intent tests
+cover brightness read, apply, cancellation, and failures; GTK tests cover rendering
+and intent routing.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
 covered by their current tests. First-run application tests cover saved-profile

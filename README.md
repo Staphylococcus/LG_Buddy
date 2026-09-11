@@ -48,7 +48,7 @@ ready to respond.
 
 Official bundles contain prebuilt binaries. They require GTK 4.14,
 libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
-The release installer also needs Python 3 with `venv`/`pip` support and Zenity
+The release installer also needs Python 3 with `venv`/`pip` support
 for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
 a desktop authorization agent. Install the prerequisites for your distribution:
 
@@ -58,19 +58,19 @@ a desktop authorization agent. Install the prerequisites for your distribution:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0 pkexec
+sudo apt install python3-venv python3-pip libgtk-4-1 libadwaita-1-0 pkexec
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita polkit
+sudo dnf install python3 python3-pip python3-virtualenv gtk4 libadwaita polkit
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita polkit
+sudo pacman -S python python-pip python-virtualenv gtk4 libadwaita polkit
 ```
 
 </details>

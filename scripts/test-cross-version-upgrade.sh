@@ -229,6 +229,14 @@ export PIP_DISABLE_PIP_VERSION_CHECK="1"
 export PIP_NO_PYTHON_VERSION_WARNING="1"
 
 (
+    # The historical installer checks for Zenity but this noninteractive setup
+    # never opens a dialog. Satisfy only that old availability check; any actual
+    # invocation fails. The candidate runs outside this subshell without it.
+    zenity() {
+        echo "Historical setup unexpectedly invoked Zenity." >&2
+        exit 1
+    }
+    export -f zenity
     cd "$PREVIOUS_BUNDLE"
     bash ./install.sh
 )

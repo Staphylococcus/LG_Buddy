@@ -26,7 +26,6 @@ testing release bundles also requires:
 
 - `python3-venv`
 - `python3-pip`
-- `zenity`
 
 Backend-specific tools used in development and local testing:
 
@@ -80,8 +79,9 @@ exercised with `cargo run -p lg-buddy`; it resolves `lg-buddy-gui` beside the
 running CLI executable and launches its normal Overview entrypoint.
 `cargo run -p lg-buddy -- brightness` remains the brightness-focused deep link.
 `LG_BUDDY_GUI` overrides that companion path for relocation and subprocess
-tests. Only the brightness path selects the temporary Zenity compatibility flow
-when the GUI path is missing; the no-argument launcher requires the GUI.
+tests. Both graphical launch paths require the matching GUI executable and
+report installation guidance when it is missing. Headless brightness get/set
+commands remain available without the GUI.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
 Official release bundles ship and verify both.

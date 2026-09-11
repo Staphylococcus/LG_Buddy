@@ -792,7 +792,6 @@ check_install_prerequisites() {
     check_gui_runtime_prerequisites
     if [ "$UPGRADE_MODE" -eq 0 ]; then
         check_dep "python3-venv" "python3-venv" "check_python3_venv"
-        check_dep "zenity" "zenity" "command -v zenity"
         if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
             check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
         fi
