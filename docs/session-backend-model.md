@@ -108,12 +108,13 @@ when no native activity capability is available at startup; #132 removes it.
 Inhibition notifications, permission state and release timing have been removed
 from the activity stream and inactivity engine. The stored preference remains
 compatible, and monitor startup reports the temporary limitation. #222 provides
-standalone push inhibition; #223-#225 complete the subsystem and Boolean gate. This intermediate
+standalone push inhibition and #223 provides pull inhibition; #224-#225 complete
+the subsystem and Boolean gate. This intermediate
 runtime must not be promoted to prerelease or main before that integration and
 #89's MVP readiness checks are complete. Explicit lock, ownership/restore and
 ordinary activity deadlines retain their existing policy.
 
-### Independent inhibition capabilities (#222)
+### Independent inhibition capabilities (#222, #223)
 
 An adapter can supply activity, inhibition, or both. Each capability independently
 uses push or pull according to its source. Activity observations stay in the
@@ -142,10 +143,54 @@ Diagnostics retain the observation time, a bounded failure reason, and the last
 observed inhibited-to-clear transition. Source loss and subsequent recovery do
 not create an observed release.
 
-This capability is independently testable but is not started by the monitor yet.
-It reads no preferences, applies no aggregate release delay, and sends no
+`PullInhibitionAdapter::query()` performs a fresh source check on each call.
+`evaluate_pull_inhibition()` queries every participating adapter, ANDs their
+permissions, and returns the same section result and per-source diagnostic
+shape as push evaluation. It runs on a worker; exclusive mutable access orders
+requests without a separate request-generation tracker. Cancellation returns
+no verdict. A completed result belongs to that attempt and cannot be reused to
+authorize a later blank attempt. #225 owns consuming completions for the current
+attempt and joining the sections.
+
+PowerDevil's capability lives in `sources/desktop/powerdevil.rs`. It opens a
+session-bus connection per check, discovers `org.kde.Solid.PowerManagement`
+without activating it, and queries `HasInhibition(4)` on
+`/org/kde/Solid/PowerManagement/PolicyAgent` using the resolved unique owner.
+It rechecks the owner before accepting the answer. No signals or background
+worker are required to maintain its state. Cancellation is checked between
+method calls and before completion; an in-flight call is bounded by the
+transport's one-second timeout. The next request handles discovery/recovery.
+Only diagnostic history survives between requests, recording inhibited-to-clear
+transitions within the same owner's successful observations. Failed checks,
+absence, cancelled in-flight checks and owner replacement break that continuity;
+recovery does not manufacture a release. Failures and absence are neutral under
+the same observed-inhibition rule as push. GNOME remains one push contribution.
+
+These capabilities are independently testable but are not started by the monitor yet.
+They read no preferences, apply no aggregate release delay, and send no
 activity events or TV actions. Those integration responsibilities remain in
 #224 and #225.
+
+### PowerDevil route coverage
+
+The query delegates policy to PowerDevil, including activation delays, filtering
+and user overrides; LG Buddy does not count requested inhibitors or separately
+interpret logind's list. The following routes were traced in upstream source,
+not validated in a live Plasma session:
+
+| Application route | Relationship to the effective screen-policy query |
+| --- | --- |
+| PowerDevil `AddInhibition(4, ...)` | Direct screen-policy contribution; suppressed requests are excluded. [Policy implementation](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilpolicyagent.cpp#L549-L588) |
+| KDE portal `Inhibit` with Idle flag `8` | Translates to PowerDevil policy `4`. Suspend-only flag `4` translates to policy `1`, not screen inhibition. [Portal implementation](https://github.com/KDE/xdg-desktop-portal-kde/blob/9427f3bc8712532f4599dc54b19bd4975609d7f9/src/inhibit.cpp#L165-L182) |
+| `org.freedesktop.ScreenSaver.Inhibit` in Plasma | KScreenLocker forwards the request to PowerDevil `AddInhibition(4, ...)`. [KScreenLocker implementation](https://github.com/KDE/kscreenlocker/blob/4f8927000c3f5c5caa52f775580487b5c782132a/interface.cpp#L46-L68) |
+| logind `idle` inhibitors | PowerDevil imports qualifying `block` inhibitors, excluding its own; LG Buddy consumes the resulting policy. [Import/filter implementation](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilpolicyagent.cpp#L423-L501) |
+| `org.freedesktop.PowerManagement.Inhibit` | PowerDevil maps this to session interruption policy `1`; it does not by itself inhibit screen policy `4`. [FDO connector](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilfdoconnector.cpp#L84-L93) |
+| Native Wayland idle inhibitor | KWin feeds this into its own input idle-inhibitor set. This is a separate path; PowerDevil coverage is not established. [KWin implementation](https://github.com/KDE/kwin/blob/b3e286c172bb9df7ee8ba8f1ef3a8ca21a8c770f/src/idle_inhibition.cpp#L58-L81) |
+
+These are version-specific source findings, not a promise that every application
+uses a covered route. Live Plasma validation and native Wayland coverage remain
+open under #216/#223; see [Testing strategy](testing-strategy.md). Idle-notify
+remains an activity protocol and is not used as an inhibition query.
 
 ## Provider Map
 

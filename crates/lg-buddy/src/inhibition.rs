@@ -1,7 +1,7 @@
-//! Inhibition capabilities are independent of activity tracking. The push
-//! section reads maintained permission; it performs no protocol I/O or TV action.
+//! Inhibition capabilities are independent of activity tracking. Push reads
+//! maintained permission; pull requests current permission. Neither acts on TVs.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Only observed inhibition denies permission; other statuses are diagnostic.
@@ -24,7 +24,7 @@ pub struct InhibitionDiagnostics {
     pub last_release_at: Option<Instant>,
 }
 
-/// Permission and diagnostics captured together from the same maintained state.
+/// Permission and diagnostics captured together from the same observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InhibitionEvaluation {
     pub allowed: bool,
@@ -38,8 +38,16 @@ pub trait PushInhibitionAdapter: Send + Sync {
     fn evaluate(&self) -> InhibitionEvaluation;
 }
 
+/// A source-owned, blocking check, suitable for execution on a worker. Each call
+/// queries current state; it never returns cached permission. Exclusive access
+/// orders requests, and cancellation discards the reply rather than granting a
+/// verdict. Protocol I/O and owner validation remain inside the adapter.
+pub trait PullInhibitionAdapter: Send {
+    fn query(&mut self, cancelled: &AtomicBool) -> Option<InhibitionEvaluation>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PushInhibitionEvaluation {
+pub struct InhibitionSectionEvaluation {
     pub allowed: bool,
     pub contributions: Vec<InhibitionEvaluation>,
 }
@@ -48,12 +56,36 @@ pub struct PushInhibitionEvaluation {
 /// diagnostics describe the same evaluation, even when an earlier source denies.
 pub fn evaluate_push_inhibition(
     adapters: &[&dyn PushInhibitionAdapter],
-) -> PushInhibitionEvaluation {
+) -> InhibitionSectionEvaluation {
     let contributions: Vec<_> = adapters.iter().map(|adapter| adapter.evaluate()).collect();
-    PushInhibitionEvaluation {
+    InhibitionSectionEvaluation {
         allowed: contributions.iter().all(|result| result.allowed),
         contributions,
     }
+}
+
+/// Query every pull contributor for this attempt, including when another
+/// denies permission. Run on a worker: cancellation is checked between bounded
+/// adapter calls and before returning. A cancelled attempt has no verdict, and
+/// completed permission must not be reused for a later blank attempt.
+pub fn evaluate_pull_inhibition(
+    adapters: &mut [&mut dyn PullInhibitionAdapter],
+    cancelled: &AtomicBool,
+) -> Option<InhibitionSectionEvaluation> {
+    let mut contributions = Vec::with_capacity(adapters.len());
+    for adapter in adapters {
+        if cancelled.load(Ordering::SeqCst) {
+            return None;
+        }
+        contributions.push(adapter.query(cancelled)?);
+    }
+    if cancelled.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(InhibitionSectionEvaluation {
+        allowed: contributions.iter().all(|result| result.allowed),
+        contributions,
+    })
 }
 
 /// Adapter-owned evidence. Source loss drops its inhibition contribution without
@@ -219,5 +251,90 @@ mod tests {
             panic!("expected unavailable");
         };
         assert_eq!(reason.chars().count(), 512);
+    }
+
+    struct FakePull {
+        state: InhibitionState,
+        queries: usize,
+        cancel: bool,
+    }
+
+    impl FakePull {
+        fn new(source: &'static str) -> Self {
+            Self {
+                state: InhibitionState::new(source),
+                queries: 0,
+                cancel: false,
+            }
+        }
+    }
+
+    impl PullInhibitionAdapter for FakePull {
+        fn query(&mut self, cancelled: &AtomicBool) -> Option<InhibitionEvaluation> {
+            self.queries += 1;
+            if self.cancel {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+            Some(self.state.evaluate())
+        }
+    }
+
+    #[test]
+    fn pull_section_queries_every_source_on_every_attempt_with_matching_diagnostics() {
+        let cancelled = AtomicBool::new(false);
+        let mut first = FakePull::new("first");
+        let mut second = FakePull::new("second");
+        for (index, (a, b)) in [(false, false), (true, false), (true, true), (false, true)]
+            .into_iter()
+            .enumerate()
+        {
+            first.state.observe(a, Instant::now());
+            second.state.observe(b, Instant::now());
+            let result =
+                evaluate_pull_inhibition(&mut [&mut first, &mut second], &cancelled).unwrap();
+            assert_eq!(result.allowed, !a && !b);
+            assert_eq!(
+                result.contributions,
+                [first.state.evaluate(), second.state.evaluate()]
+            );
+            assert_eq!((first.queries, second.queries), (index + 1, index + 1));
+        }
+        first.state.absent();
+        assert!(
+            !evaluate_pull_inhibition(&mut [&mut first, &mut second], &cancelled)
+                .unwrap()
+                .allowed
+        );
+        second.state.unavailable("failed current check");
+        let result = evaluate_pull_inhibition(&mut [&mut first, &mut second], &cancelled).unwrap();
+        assert!(result.allowed);
+        assert_eq!(
+            result.contributions,
+            [first.state.evaluate(), second.state.evaluate()]
+        );
+        assert!(
+            evaluate_pull_inhibition(&mut [], &cancelled)
+                .unwrap()
+                .allowed
+        );
+    }
+
+    #[test]
+    fn cancelled_pull_sections_have_no_verdict_or_further_queries() {
+        let cancelled = AtomicBool::new(true);
+        let mut first = FakePull::new("first");
+        let mut second = FakePull::new("second");
+        assert!(evaluate_pull_inhibition(&mut [&mut first], &cancelled).is_none());
+        assert!(evaluate_pull_inhibition(&mut [], &cancelled).is_none());
+        assert_eq!(first.queries, 0);
+
+        cancelled.store(false, Ordering::SeqCst);
+        first.cancel = true;
+        assert!(evaluate_pull_inhibition(&mut [&mut first, &mut second], &cancelled).is_none());
+        assert_eq!((first.queries, second.queries), (1, 0));
+
+        cancelled.store(false, Ordering::SeqCst);
+        // Even cancellation during the last adapter discards the whole verdict.
+        assert!(evaluate_pull_inhibition(&mut [&mut first], &cancelled).is_none());
     }
 }

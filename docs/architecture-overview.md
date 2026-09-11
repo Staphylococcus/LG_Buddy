@@ -407,11 +407,14 @@ The current split is:
   - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
     user-active watches, and translation into normalized observations
 - `inhibition.rs`
-  - independent push inhibition contract, Boolean aggregation and diagnostics;
+  - independent push/pull inhibition contracts, Boolean aggregation and diagnostics;
     standalone until the monitor integration in #225
 - `sources/desktop/gnome/inhibition.rs`
   - SessionManager inhibition subscriptions, state refresh and recovery,
     independent of GNOME activity
+- `sources/desktop/powerdevil.rs`
+  - fresh effective screen-policy queries, cancellation and owner validation;
+    independent of activity and GNOME's maintained inhibition
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
@@ -962,7 +965,9 @@ between #221 and #225.
 
 Adapters may expose activity and inhibition independently, each through push or
 pull according to the source. The standalone push inhibition section (#222)
-combines maintained Boolean permissions with diagnostics. Its GNOME capability
+combines maintained Boolean permissions with diagnostics. The pull section (#223)
+combines fresh, cancellable requests in the same diagnostic shape; its PowerDevil
+capability delegates screen policy to Plasma. The GNOME capability
 requires only SessionManager and keeps subscriptions, state queries and owner
 recovery internal. It contributes no activity observations. #225 connects the
 two paths only at the `can_blank()` decision; runtime honoring remains absent

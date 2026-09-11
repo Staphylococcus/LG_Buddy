@@ -1,12 +1,16 @@
 mod support;
 
-use lg_buddy::inhibition::{evaluate_push_inhibition, InhibitionStatus, PushInhibitionAdapter};
+use lg_buddy::inhibition::{
+    evaluate_pull_inhibition, evaluate_push_inhibition, InhibitionStatus, PullInhibitionAdapter,
+    PushInhibitionAdapter,
+};
 use lg_buddy::sources::desktop::gnome::inhibition::GnomeInhibition;
+use lg_buddy::sources::desktop::powerdevil::PowerDevilInhibition;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use support::{MockSessionBusIdleMonitor, TestEnv};
+use support::{MockPowerDevil, MockSessionBusIdleMonitor, TestEnv};
 
 // Run the production capability against a private bus, without activity or TV
 // machinery. Drop stops the worker even if an assertion fails.
@@ -48,7 +52,7 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn gnome_push_inhibition_works_without_activity_services() {
+fn independent_inhibition_capabilities_work_without_activity_services() {
     let mut env = TestEnv::new();
     let bus = MockSessionBusIdleMonitor::new("inhibition-capability");
     // libdbus caches the session-bus address process-wide. Exercise all scenarios
@@ -57,6 +61,107 @@ fn gnome_push_inhibition_works_without_activity_services() {
     a_late_source_is_discovered_and_loss_drops_its_contribution(&bus);
     playback_inhibitors_release_only_when_all_end(&bus);
     permission_reads_do_not_wait_for_dbus_and_a_quiet_worker_can_stop(&bus);
+    powerdevil_queries_current_permission_and_recovers(&bus);
+    powerdevil_discards_delayed_cancelled_and_obsolete_replies(&bus);
+}
+
+fn powerdevil_queries_current_permission_and_recovers(bus: &MockSessionBusIdleMonitor) {
+    let cancelled = AtomicBool::new(false);
+    let mut adapter = PowerDevilInhibition::default();
+    let absent = adapter.query(&cancelled).unwrap();
+    assert!(absent.allowed);
+    assert_eq!(absent.diagnostics.status, InhibitionStatus::Absent);
+
+    let service = MockPowerDevil::new(bus.address());
+    // Playback already active when the first request arrives.
+    service.set_inhibited(true);
+    assert!(
+        !evaluate_pull_inhibition(&mut [&mut adapter], &cancelled)
+            .unwrap()
+            .allowed
+    );
+    // The fixture supplies effective policy, including overlapping requests or
+    // a user suppressing them in Plasma. It emits no change notifications.
+    for inhibited in [true, false, false, true] {
+        service.set_inhibited(inhibited);
+        let previous_queries = service.query_count();
+        let result = evaluate_pull_inhibition(&mut [&mut adapter], &cancelled).unwrap();
+        assert_eq!(result.allowed, !inhibited);
+        assert_eq!(result.contributions.len(), 1);
+        assert_eq!(result.contributions[0].diagnostics.source, "powerdevil");
+        assert_eq!(service.query_count(), previous_queries + 1);
+    }
+    let release = adapter
+        .query(&cancelled)
+        .unwrap()
+        .diagnostics
+        .last_release_at;
+    assert!(release.is_some());
+    service.fail_next_query();
+    let failed = adapter.query(&cancelled).unwrap();
+    assert!(failed.allowed);
+    assert!(matches!(
+        failed.diagnostics.status,
+        InhibitionStatus::Unavailable(_)
+    ));
+    service.set_inhibited(false);
+    let recovered = adapter.query(&cancelled).unwrap();
+    assert_eq!(recovered.diagnostics.status, InhibitionStatus::Clear);
+    assert_eq!(recovered.diagnostics.last_release_at, release);
+    drop(service);
+    assert_eq!(
+        adapter.query(&cancelled).unwrap().diagnostics.status,
+        InhibitionStatus::Absent
+    );
+}
+
+fn powerdevil_discards_delayed_cancelled_and_obsolete_replies(bus: &MockSessionBusIdleMonitor) {
+    let cancelled = AtomicBool::new(false);
+    let mut adapter = PowerDevilInhibition::default();
+    let service = MockPowerDevil::new(bus.address());
+    service.delay_next_query(Duration::from_millis(400));
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| evaluate_pull_inhibition(&mut [&mut adapter], &cancelled));
+        wait_until(|| service.query_count() == 1);
+        // The caller is free while the source is replying. Cancelling discards
+        // the delayed clear response; it cannot authorize this or a later attempt.
+        cancelled.store(true, Ordering::SeqCst);
+        assert!(worker.join().unwrap().is_none());
+    });
+    cancelled.store(false, Ordering::SeqCst);
+    service.set_inhibited(true);
+    assert!(!adapter.query(&cancelled).unwrap().allowed);
+
+    // A reply arriving after the transport timeout cannot answer the next check.
+    service.set_inhibited(false);
+    service.delay_next_query(Duration::from_millis(1200));
+    let timed_out = adapter.query(&cancelled).unwrap();
+    assert!(matches!(
+        timed_out.diagnostics.status,
+        InhibitionStatus::Unavailable(_)
+    ));
+    service.set_inhibited(true);
+    assert!(!adapter.query(&cancelled).unwrap().allowed);
+
+    service.delay_next_query(Duration::from_millis(400));
+    service.set_inhibited(false);
+    let queries = service.query_count();
+    let replacement = thread::scope(|scope| {
+        let worker = scope.spawn(|| adapter.query(&cancelled));
+        wait_until(|| service.query_count() > queries);
+        let replacement = MockPowerDevil::new(bus.address());
+        replacement.set_inhibited(true);
+        let obsolete = worker.join().unwrap().unwrap();
+        assert!(matches!(
+            obsolete.diagnostics.status,
+            InhibitionStatus::Unavailable(_)
+        ));
+        assert_eq!(obsolete.diagnostics.last_release_at, None);
+        replacement
+    });
+    assert!(!adapter.query(&cancelled).unwrap().allowed);
+    replacement.set_inhibited(false);
+    assert!(adapter.query(&cancelled).unwrap().allowed);
 }
 
 fn playback_inhibitors_release_only_when_all_end(bus: &MockSessionBusIdleMonitor) {

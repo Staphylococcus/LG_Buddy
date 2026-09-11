@@ -289,6 +289,36 @@ inhibition denies permission; tests verify that pending reads retain the last
 value and source loss removes its contribution. These are
 component checks; full monitor/TV acceptance remains part of #225.
 
+Pull inhibition has colocated contract and adapter tests for fresh queries,
+Boolean aggregation, neutral absence/failure, bounded diagnostics, cancellation,
+owner replacement and release history. The same private-bus integration test
+also runs PowerDevil's production capability against `MockPowerDevil`, which
+exposes only `HasInhibition(4)` and emits no signals. It covers initial and later
+inhibition, effective clear answers, failure recovery, transport timeout, worker
+cancellation during delayed replies, and replacement by a new unique owner.
+The mock supplies effective policy; it does not prove Plasma's filtering,
+overlap handling or application route coverage.
+
+For live Plasma validation of #223, record Plasma/PowerDevil and application
+versions and the application's inhibition route, then inspect effective state:
+
+```sh
+busctl --user call org.kde.Solid.PowerManagement \
+  /org/kde/Solid/PowerManagement/PolicyAgent \
+  org.kde.Solid.PowerManagement.PolicyAgent HasInhibition u 4
+```
+
+Check playback that starts before the first query and after a clear query, two
+overlapping inhibitors with only one ending, and Plasma's per-application
+suppression/reenabling. Allow PowerDevil's own activation delay to pass. Record
+the effective answer after each change and repeat after PowerDevil restarts.
+Test at least the KDE portal idle route and ScreenSaver D-Bus route where used
+by the reporter's applications. Test native Wayland-only inhibition separately;
+do not infer its coverage from portal success. The source-traced route table in
+[Session backend model](session-backend-model.md#powerdevil-route-coverage) is
+not live validation. This work was implemented on GNOME; the Plasma checks and
+remaining native Wayland coverage belong to #216/#223 before MVP completion.
+
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection
