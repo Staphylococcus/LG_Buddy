@@ -343,14 +343,16 @@ credentials byte-for-byte, conditionally preserves or repairs the Python
 environment, replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
-The installed GUI smoke also verifies the desktop entry's no-argument
-`lg-buddy` launch opens the existing pairing prompt without navigation for an
-unconfigured installation, and normal Overview for a saved TV. `lg-buddy brightness` selects the
-brightness control even when another view is already open. A missing GUI fails
-both graphical launch paths with installation guidance, while headless
-brightness get/set remains available. The application presentation/intent tests
-cover brightness read, apply, cancellation, and failures; GTK tests cover rendering
-and intent routing.
+The installer dependency smoke uses package-manager fixtures to verify that
+missing GTK/libadwaita packages are installed and their versions checked before
+the candidate GUI executes. The installed GUI smoke then verifies the desktop
+entry's no-argument `lg-buddy` launch opens the existing pairing prompt without
+navigation for an unconfigured installation, and normal Overview for a saved TV.
+`lg-buddy brightness` selects the brightness control even when another view is
+already open. The application presentation/intent tests cover brightness read,
+apply, cancellation, and failures; GTK tests cover rendering and intent routing.
+Launcher tests separately cover a damaged installation with a missing GUI
+executable and direct headless brightness get/set operations.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
 covered by their current tests. First-run application tests cover saved-profile

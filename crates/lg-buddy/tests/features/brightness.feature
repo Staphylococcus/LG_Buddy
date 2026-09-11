@@ -7,7 +7,7 @@ Feature: Brightness
     Then the command succeeds
     And the GTK brightness GUI received "brightness"
 
-  Scenario: A failed GTK launch reports the installation failure
+  Scenario: A failed GTK launch reports its exit status
     Given the GTK brightness GUI exits with status 23
     When I run the command "brightness"
     Then the command fails
@@ -16,7 +16,7 @@ Feature: Brightness
     And stderr contains "exited with status 23"
     And the GTK brightness GUI received "brightness"
 
-  Scenario: Missing GTK GUI reports how to repair the installation without contacting the TV
+  Scenario: An incomplete installation reports the missing GUI executable
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the GTK brightness GUI is unavailable

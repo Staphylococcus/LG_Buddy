@@ -88,9 +88,9 @@ activation keeps one window.
 
 `lg-buddy brightness get` and `lg-buddy brightness set <0-100>` are direct
 headless TV operations. The bare `lg-buddy brightness` command is the
-brightness-focused GUI entrypoint. Both graphical launch paths require the
-matching GUI executable and report installation guidance when it is absent.
-A present but invalid GUI, or a GUI that starts and fails, is reported directly.
+brightness-focused GUI entrypoint. The release bundle ships the matching GTK
+executable for both graphical launch paths. Installation owns providing that
+executable and satisfying its GTK/libadwaita runtime requirements.
 
 Other supported headless user commands remain independent of GTK:
 

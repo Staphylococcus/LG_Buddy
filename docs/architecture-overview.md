@@ -515,18 +515,18 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the running CLI
-and launches its no-argument entrypoint for normal Overview. A missing GUI is an
-error on this path. The `brightness` command locates the same executable and
-launches its `brightness` entrypoint, which selects the brightness control even
-when another view is already open. Both graphical launch paths require the
-matching GUI executable and report installation guidance when it is missing.
-An invalid installation or failed GUI process is reported directly. The
-`brightness get` and `brightness set` commands never enter either launcher and
-use the TV picture abstraction in `tv.rs` for typed OLED brightness validation
-and live TV read/write operations. The GTK
-entrypoint opens one Overview alongside the primary TV summary, volume, and
-mute. Two icon-and-slider rows submit changes as the sliders move; the sound
+
+The installer supplies the matching runtime and GTK executable together, checks
+GTK/libadwaita versions, and offers to install missing runtime packages before
+proceeding. The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the
+running CLI and launches its no-argument entrypoint for normal Overview.
+The `brightness` command locates the same executable and launches its
+`brightness` entrypoint, which selects the brightness control even when another
+view is already open. The `brightness get` and `brightness set` commands never
+enter either launcher and use the TV picture abstraction in `tv.rs` for typed
+OLED brightness validation and live TV read/write operations. The GTK entrypoint
+opens one Overview alongside the primary TV summary, volume, and mute.
+Two icon-and-slider rows submit changes as the sliders move; the sound
 icon toggles mute. The core Overview application owns its declarations and semantic
 intents; GTK renders them without adding TV or configuration policy. Workers
 keep blocking operations off the GTK main loop. Capability state is independent,

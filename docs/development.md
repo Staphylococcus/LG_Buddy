@@ -79,12 +79,13 @@ exercised with `cargo run -p lg-buddy`; it resolves `lg-buddy-gui` beside the
 running CLI executable and launches its normal Overview entrypoint.
 `cargo run -p lg-buddy -- brightness` remains the brightness-focused deep link.
 `LG_BUDDY_GUI` overrides that companion path for relocation and subprocess
-tests. Both graphical launch paths require the matching GUI executable and
-report installation guidance when it is missing. Headless brightness get/set
-commands remain available without the GUI.
+tests. Both graphical launch paths use this GTK executable. Headless brightness
+get/set commands operate directly through the runtime.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
-Official release bundles ship and verify both.
+Official release bundles ship and verify both. Fresh installs and upgrades
+check GTK/libadwaita versions and offer to install missing packages through the
+distribution's package manager before validating and installing the binary pair.
 
 The fresh release-bundle installer installs the payload and launches the installed
 GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &

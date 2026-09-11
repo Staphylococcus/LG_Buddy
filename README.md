@@ -46,11 +46,14 @@ LG Buddy manages one TV. Connect it to the same network as your PC and enable
 are strongly recommended so the saved address stays valid and the TV remains
 ready to respond.
 
-Official bundles contain prebuilt binaries. They require GTK 4.14,
-libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
+Official bundles include the GTK desktop app and CLI together. The installer
+checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
+packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
+the requirements before proceeding. The prebuilt binaries require glibc 2.39
+or newer—the Ubuntu 24.04 runtime baseline.
 The release installer also needs Python 3 with `venv`/`pip` support
 for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
-a desktop authorization agent. Install the prerequisites for your distribution:
+a desktop authorization agent. You can also install the prerequisites manually:
 
 <details>
 <summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
@@ -75,9 +78,8 @@ sudo pacman -S python python-pip python-virtualenv gtk4 libadwaita polkit
 
 </details>
 
-The installer can also offer to install missing GTK/libadwaita packages on
-these distributions, with your confirmation. Older desktops that need the
-deprecated `swayidle` integration must install `swayidle` separately.
+Older desktops that need the deprecated `swayidle` integration must install
+`swayidle` separately.
 
 The shell installer supports conventional Linux installations with writable
 system locations. Official NixOS support is planned for 3.0.0; see
