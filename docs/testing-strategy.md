@@ -110,8 +110,8 @@ Examples:
 - GNOME monitor/runtime tests should use the private session-bus harness for
   ScreenSaver signals and Mutter user-active watches
 - native Wayland provider tests should model registry discovery, protocol-version
-  rejection, every advertised seat, input-notification resumed activity, separate
-  rejection of obsolete source instances, and provider loss without
+  rejection, every advertised seat, input-notification resumed activity during
+  setup, rejection of obsolete protocol objects, and provider loss without
   requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
@@ -257,7 +257,7 @@ Examples:
 - GNOME signal mapping
 - GNOME monitor setup, sender ownership and one-shot user-active watches over
   the session-bus seam, independent of SessionManager availability
-- overlapping source observations, source replacement, stale input and original
+- overlapping source observations, adapter recovery, stale input and original
   observation times surviving delayed delivery
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping

@@ -1,7 +1,9 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::{wait_for_retry, ActivityAdapter, ActivityPublisher, ActivityStatus};
 use crate::events::EventSource;
 use crate::session::inactivity::InactivityObservation;
 use crate::session::{SessionEvent, SessionObservation};
@@ -37,14 +39,46 @@ impl GnomeServiceStatus {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct GnomeSource {
+    status: Mutex<ActivityStatus>,
+}
+
+impl ActivityAdapter for GnomeSource {
+    fn run(&self, publish: ActivityPublisher, stop: &AtomicBool) {
+        while !stop.load(Ordering::SeqCst) {
+            let result = GnomeConnection::connect().and_then(|connection| {
+                *self.status.lock().expect("GNOME activity status") = ActivityStatus::Available;
+                connection.run(
+                    |observation| {
+                        publish(observation);
+                        !stop.load(Ordering::SeqCst)
+                    },
+                    stop,
+                )
+            });
+            *self.status.lock().expect("GNOME activity status") =
+                ActivityStatus::unavailable(result.err().map_or_else(
+                    || "activity monitoring stopped".to_string(),
+                    |err| err.to_string(),
+                ));
+            wait_for_retry(stop);
+        }
+    }
+
+    fn status(&self) -> ActivityStatus {
+        self.status.lock().expect("GNOME activity status").clone()
+    }
+}
+
+struct GnomeConnection {
     bus: Box<dyn SessionBusClient + Send>,
     trusted_screen_saver_signals: TrustedScreenSaverSignals,
     activity_watch: GnomeActivityWatch,
 }
 
 #[derive(Debug)]
-pub(crate) enum GnomeSourceError {
+enum GnomeSourceError {
     Unavailable(&'static str),
     Failed(String),
 }
@@ -60,8 +94,8 @@ impl fmt::Display for GnomeSourceError {
 
 impl std::error::Error for GnomeSourceError {}
 
-impl GnomeSource {
-    pub(crate) fn connect() -> Result<Self, GnomeSourceError> {
+impl GnomeConnection {
+    fn connect() -> Result<Self, GnomeSourceError> {
         let mut bus = new_session_bus_client().map_err(|err| {
             GnomeSourceError::Failed(format!("failed to open GNOME session bus client: {err}"))
         })?;
@@ -82,11 +116,7 @@ impl GnomeSource {
         })
     }
 
-    pub(crate) fn run<F>(
-        mut self,
-        mut publish: F,
-        stop: &AtomicBool,
-    ) -> Result<(), GnomeSourceError>
+    fn run<F>(mut self, mut publish: F, stop: &AtomicBool) -> Result<(), GnomeSourceError>
     where
         F: FnMut(SessionObservation) -> bool,
     {

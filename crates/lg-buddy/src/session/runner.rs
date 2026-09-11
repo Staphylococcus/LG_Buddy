@@ -36,7 +36,8 @@ use crate::session_bus::{new_system_bus_client, SessionBusClient};
 use crate::session_notifications::spawn_session_notification_service;
 use crate::sources::desktop::gnome::{monitor_test_timeout, GnomeSource};
 use crate::sources::desktop::swayidle::{run as run_swayidle_source, SwayidleSourceError};
-use crate::sources::desktop::wayland::run_session_source as run_wayland_session_source;
+use crate::sources::desktop::wayland::WaylandSource;
+use crate::sources::desktop::{ActivityAdapter, ActivityStatus};
 use crate::sources::linux::logind::{
     acquire_sleep_delay_inhibitor, add_logind_signal_match, map_prepare_for_sleep_signal,
     spawn_lock_observer, LogindLockObserver,
@@ -562,7 +563,7 @@ fn lifecycle_policy_enabled_from_config(config_path: &Path) -> Result<bool, Sess
 fn prepare_monitor_backend(
     probe: &mut SystemBackendProbe,
     configured: ScreenBackend,
-) -> Result<(BackendResolution, Option<wayland_client::Connection>), BackendDetectionError> {
+) -> Result<(BackendResolution, Option<WaylandSource>), BackendDetectionError> {
     // Probe both interfaces before starting threads: WAYLAND_SOCKET is a
     // one-shot inherited descriptor consumed by the initial connection.
     if configured == ScreenBackend::Auto {
@@ -571,13 +572,13 @@ fn prepare_monitor_backend(
         if gnome || wayland {
             return Ok((
                 BackendResolution::selected(ScreenBackend::Auto, None),
-                probe.take_wayland_connection(),
+                probe.take_wayland_source(),
             ));
         }
     }
     let resolution = resolve_backend_with_probe(probe, configured)?;
-    let connection = probe.take_wayland_connection();
-    Ok((resolution, connection))
+    let source = probe.take_wayland_source();
+    Ok((resolution, source))
 }
 
 fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
@@ -641,7 +642,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
         };
 
         match resolution {
-            Ok((resolution, mut wayland_connection)) => {
+            Ok((resolution, mut wayland_source)) => {
                 if configured == ScreenBackend::Auto && resolution.backend() != ScreenBackend::Auto
                 {
                     writeln!(
@@ -671,14 +672,14 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                         let mut dispatcher = SessionEventDispatcher::new(
                             executor.take().expect("executor available"),
                         );
-                        let connection = wayland_connection.take().ok_or_else(|| {
+                        let source = wayland_source.take().ok_or_else(|| {
                             SessionRunnerError::Failed {
                                 backend: ScreenBackend::Wayland,
-                                message: "native Wayland was selected without retaining its verified connection"
+                                message: "native Wayland was selected without retaining its verified adapter"
                                     .to_string(),
                             }
                         })?;
-                        return run_wayland_monitor(writer, &mut dispatcher, connection);
+                        return run_wayland_monitor(writer, &mut dispatcher, source);
                     }
                     ScreenBackend::Swayidle => {
                         let mut dispatcher = SessionEventDispatcher::new(
@@ -698,7 +699,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                             writer,
                             &mut dispatcher,
                             ScreenBackend::Auto,
-                            wayland_connection.take(),
+                            wayland_source.take(),
                         );
                     }
                 }
@@ -784,91 +785,55 @@ fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
 fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
-    connection: wayland_client::Connection,
+    source: WaylandSource,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
-    run_composed_monitor(writer, dispatcher, ScreenBackend::Wayland, Some(connection))
+    run_composed_monitor(writer, dispatcher, ScreenBackend::Wayland, Some(source))
 }
 
 fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     configured: ScreenBackend,
-    connection: Option<wayland_client::Connection>,
+    wayland: Option<WaylandSource>,
 ) -> Result<(), SessionRunnerError> {
     writeln!(
         writer,
         "LG Buddy Monitor: native inhibition honoring is temporarily unavailable on dev (#216)."
     )?;
+    let mut adapters: Vec<(ActivitySource, Arc<dyn ActivityAdapter>)> = Vec::new();
+    if configured != ScreenBackend::Wayland {
+        adapters.push((ActivitySource::Gnome, Arc::new(GnomeSource::default())));
+    }
+    if configured != ScreenBackend::Gnome {
+        adapters.push((
+            ActivitySource::Wayland,
+            Arc::new(wayland.unwrap_or_default()),
+        ));
+    }
+    let workers = adapters.clone();
     run_native_session_monitor(
         writer,
         dispatcher,
         configured,
+        &adapters,
         move |_sender, contributions, stop| {
             thread::spawn(move || {
-                let mut workers = Vec::new();
-                if configured != ScreenBackend::Wayland {
-                    let sources = Arc::clone(&contributions);
-                    let stop = Arc::clone(&stop);
-                    workers.push(thread::spawn(move || {
-                        while !stop.load(Ordering::SeqCst) {
-                            let instance = sources.begin(ActivitySource::Gnome);
-                            let result = GnomeSource::connect().and_then(|source| {
-                                sources.connected(instance);
-                                source.run(
-                                    |observation| {
-                                        sources.publish(instance, observation);
-                                        !stop.load(Ordering::SeqCst)
-                                    },
-                                    &stop,
-                                )
-                            });
-                            sources.unavailable(
-                                instance,
-                                &result.err().map_or_else(
-                                    || "disconnected".to_string(),
-                                    |err| err.to_string(),
-                                ),
+                let workers: Vec<_> = workers
+                    .into_iter()
+                    .map(|(source, adapter)| {
+                        let contributions = Arc::clone(&contributions);
+                        let stop = Arc::clone(&stop);
+                        thread::spawn(move || {
+                            adapter.run(
+                                Arc::new(move |observation| {
+                                    contributions.publish(source, observation);
+                                }),
+                                &stop,
                             );
-                            wait_for_source_retry(&stop);
-                        }
-                    }));
-                }
-                if configured != ScreenBackend::Gnome {
-                    let sources = Arc::clone(&contributions);
-                    let stop = Arc::clone(&stop);
-                    workers.push(thread::spawn(move || {
-                        let mut connection = connection;
-                        while !stop.load(Ordering::SeqCst) {
-                            let instance = sources.begin(ActivitySource::Wayland);
-                            let report = Arc::clone(&sources);
-                            let publish_stop = Arc::clone(&stop);
-                            let result = connection
-                                .take()
-                                .map(Ok)
-                                .unwrap_or_else(crate::sources::desktop::wayland::reconnect_wayland)
-                                .and_then(|connection| {
-                                    run_wayland_session_source(
-                                        connection,
-                                        move |observation| {
-                                            report.publish(instance, observation);
-                                            !publish_stop.load(Ordering::SeqCst)
-                                        },
-                                        &stop,
-                                        || sources.connected(instance),
-                                    )
-                                });
-                            sources.unavailable(
-                                instance,
-                                &result.err().map_or_else(
-                                    || "disconnected".to_string(),
-                                    |err| err.to_string(),
-                                ),
-                            );
-                            wait_for_source_retry(&stop);
-                        }
-                    }));
-                }
+                        })
+                    })
+                    .collect();
                 for worker in workers {
                     let _ = worker.join();
                 }
@@ -877,19 +842,11 @@ fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
     )
 }
 
-fn wait_for_source_retry(stop: &AtomicBool) {
-    for _ in 0..20 {
-        if stop.load(Ordering::SeqCst) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
 fn run_native_session_monitor<W, E, S>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     spawn_monitor: S,
 ) -> Result<(), SessionRunnerError>
 where
@@ -905,6 +862,7 @@ where
         writer,
         dispatcher,
         backend,
+        adapters,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
@@ -914,6 +872,7 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -931,6 +890,7 @@ where
         writer,
         dispatcher,
         backend,
+        adapters,
         InitialBlankTrigger::Deadline,
         spawn_monitor,
         spawn_lock_monitor,
@@ -947,6 +907,7 @@ fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
+    adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     initial_blank_trigger: InitialBlankTrigger,
     spawn_monitor: S,
     spawn_lock_monitor: L,
@@ -1002,10 +963,7 @@ where
         if test_timeout_reached(started_at, test_timeout) {
             break;
         }
-        for (instance, observation, observed_at) in contributions.drain() {
-            if !contributions.accept(instance, observed_at) {
-                continue;
-            }
+        for (_, observation, observed_at) in contributions.drain() {
             handle_inactivity_observation(
                 writer,
                 dispatcher,
@@ -1015,25 +973,24 @@ where
                 observed_at,
             )?;
         }
-        let snapshots = contributions.snapshot();
-        let diagnostics: Vec<_> = snapshots
+        let diagnostics: Vec<_> = adapters
             .iter()
-            .map(|snapshot| {
-                (
-                    snapshot.source,
-                    snapshot.connected,
-                    snapshot.diagnostic.clone(),
-                )
-            })
+            .map(|(source, adapter)| (*source, adapter.status()))
             .collect();
         if diagnostics != last_diagnostics {
-            for snapshot in &snapshots {
-                writeln!(writer, "LG Buddy Monitor: activity source={} instance={} connected={} last_activity_age_ms={:?} detail={}", snapshot.source.name(), snapshot.generation, snapshot.connected, snapshot.latest_activity.map(|at| at.elapsed().as_millis()), snapshot.diagnostic.as_deref().unwrap_or(if snapshot.connected { "ready" } else { "connecting" }))?;
+            for (source, status) in &diagnostics {
+                let detail = match status {
+                    ActivityStatus::Available => "ready",
+                    ActivityStatus::Unavailable(reason) => reason,
+                };
+                writeln!(writer, "LG Buddy Monitor: activity source={} available={} last_activity_age_ms={:?} detail={}", source.name(), status.is_available(), contributions.latest_activity(*source).map(|at| at.elapsed().as_millis()), detail)?;
             }
             last_diagnostics = diagnostics;
         }
         let has_activity = initial_blank_trigger == InitialBlankTrigger::Provider
-            || contributions.has_connected_source();
+            || adapters
+                .iter()
+                .any(|(_, adapter)| adapter.status().is_available());
         let wait = if has_activity || inactivity.timed_power_off_pending() {
             inactivity
                 .time_until_action(Instant::now())
@@ -1046,10 +1003,7 @@ where
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Read activity published while waiting before acting on a deadline.
-                for (instance, observation, observed_at) in contributions.drain() {
-                    if !contributions.accept(instance, observed_at) {
-                        continue;
-                    }
+                for (_, observation, observed_at) in contributions.drain() {
                     handle_inactivity_observation(
                         writer,
                         dispatcher,
@@ -1060,7 +1014,9 @@ where
                     )?;
                 }
                 if initial_blank_trigger == InitialBlankTrigger::Provider
-                    || contributions.has_connected_source()
+                    || adapters
+                        .iter()
+                        .any(|(_, adapter)| adapter.status().is_available())
                     || inactivity.timed_power_off_pending()
                 {
                     handle_inactivity_timeout(writer, dispatcher, &mut inactivity, Instant::now())?;
@@ -1188,6 +1144,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         writer,
         dispatcher,
         ScreenBackend::Swayidle,
+        &[],
         InitialBlankTrigger::Provider,
         move |sender, _contributions, stop| {
             thread::spawn(move || {
@@ -2734,6 +2691,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            &[],
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let result = activity_receiver
@@ -2786,6 +2744,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Wayland,
+            &[],
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
@@ -2831,6 +2790,7 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            &[],
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let locked_at = Instant::now();
@@ -3020,7 +2980,59 @@ system_sleep_wake_policy={policy}
         assert_eq!(dispatcher.executor.screen_on_calls, 1);
     }
     #[test]
-    fn composed_sources_restore_once_and_keep_running_after_one_disconnects() {
+    fn ignored_provider_wake_does_not_discard_delayed_input_from_another_source() {
+        use super::{ActivityContributions, ActivitySource};
+        use crate::session::SessionObservation;
+
+        let sources = ActivityContributions::default();
+        let gnome = ActivitySource::Gnome;
+        let wayland = ActivitySource::Wayland;
+        let started_at = Instant::now();
+        let mut inactivity =
+            InactivityEngine::new_with_restore_pending(Duration::from_secs(5), started_at);
+        inactivity.observe_lock(started_at);
+        let mut dispatcher = SessionEventDispatcher::new(FakeActionExecutor::default());
+        let mut output = Vec::new();
+
+        for (source, observation, seconds, restores) in [
+            (gnome, InactivityObservation::WakeRequested, 3, 0),
+            (
+                wayland,
+                InactivityObservation::DesktopActivityObserved,
+                2,
+                1,
+            ),
+            (gnome, InactivityObservation::DesktopActivityObserved, 2, 1),
+        ] {
+            sources.publish(
+                source,
+                SessionObservation::Inactivity {
+                    observation,
+                    source: EventSource::DesktopSession,
+                    observed_at: started_at + Duration::from_secs(seconds),
+                },
+            );
+            for (_, observation, observed_at) in sources.drain() {
+                handle_inactivity_observation(
+                    &mut output,
+                    &mut dispatcher,
+                    &mut inactivity,
+                    EventSource::DesktopSession,
+                    observation,
+                    observed_at,
+                )
+                .unwrap();
+            }
+            assert_eq!(dispatcher.executor.screen_on_calls, restores);
+        }
+        assert_eq!(
+            inactivity.time_until_action(started_at + Duration::from_secs(3)),
+            Some(Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn composed_sources_restore_once_without_availability_reports() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let runtime_dir = unique_config_path("composed-activity");
         ScreenOwnershipMarker::new(runtime_dir.clone())
@@ -3039,13 +3051,12 @@ system_sleep_wake_policy={policy}
             &mut output,
             &mut dispatcher,
             ScreenBackend::Auto,
+            &[],
             |sender, sources, _stop| {
                 thread::spawn(move || {
                     use super::ActivitySource;
-                    let gnome = sources.begin(ActivitySource::Gnome);
-                    let wayland = sources.begin(ActivitySource::Wayland);
-                    sources.connected(gnome);
-                    sources.connected(wayland);
+                    let gnome = ActivitySource::Gnome;
+                    let wayland = ActivitySource::Wayland;
                     let at = Instant::now();
                     let input = crate::session::SessionObservation::Inactivity {
                         observation: InactivityObservation::DesktopActivityObserved,
@@ -3060,7 +3071,6 @@ system_sleep_wake_policy={policy}
                             backend: ScreenBackend::Auto,
                             message: err.to_string(),
                         });
-                    sources.unavailable(gnome, "owner replaced");
                     sources.publish(
                         gnome,
                         crate::session::SessionObservation::Event {
@@ -3084,7 +3094,6 @@ system_sleep_wake_policy={policy}
         assert_eq!(dispatcher.executor.screen_on_calls, 1);
         assert_eq!(dispatcher.executor.screen_off_calls, 0);
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("source=wayland"));
-        assert!(output.contains("owner replaced"));
+        assert!(output.contains("requests screen restore"));
     }
 }

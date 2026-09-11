@@ -944,9 +944,11 @@ outcomes.
 Desktop backends are treated as adapters, not owners of policy.
 
 The automatic monitor composes available GNOME and Wayland activity sources.
-Each reconnects independently and contributes identified observations with their
-original time. `session/activity.rs` bounds pending observations and rejects
-obsolete source instances. The compatibility backend resolver still serves
+Each adapter lives for the application lifetime, manages its own connections,
+and contributes validated observations with their original time.
+`session/activity.rs` bounds pending observations without tracking connections or
+invalidating facts on connection loss. The runner queries adapter activity
+availability separately for idle policy and diagnostics. The compatibility backend resolver still serves
 existing settings/CLI callers; it does not select the automatic native source
 set. See [Session backend model](session-backend-model.md) for the current
 contracts and the temporary dev-only absence of native inhibition honoring

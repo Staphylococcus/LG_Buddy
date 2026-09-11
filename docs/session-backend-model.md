@@ -72,23 +72,31 @@ These are the semantic events the runtime should reason about.
 ## Runtime Contract
 
 Native sources publish activity observations with an `EventSource` and original
-observation time. In automatic operation the runner connects GNOME/Mutter and
-native Wayland independently, including interfaces that appear after startup.
+observation time. In automatic operation the runner starts GNOME/Mutter and
+native Wayland adapters once. Each adapter owns discovery, subscriptions,
+validation and reconnection, including interfaces that appear after startup.
 Explicit `gnome` and `wayland` configurations restrict activity to that source.
 The compatibility `detect-backend` presentation remains until #218; its single
 reported value does not select the automatic runtime's source set.
 
-`session/activity.rs` keeps bounded contributions per source instance and activity
+`session/activity.rs` keeps bounded contributions per source and activity
 kind. Newer observations replace pending observations of the same kind. Delivery
-uses the original monotonic time, coalesces overlap and rejects older input.
-Disconnect clears that instance's pending observations; obsolete instances cannot
-publish or change the replacement's availability. A quiet connection stays
-available. Connection state, instance, last activity time and bounded failure
-reasons form the runtime diagnostics.
+preserves the original monotonic time without deduplicating across sources or
+kinds. The inactivity engine decides how each observation affects policy;
+overlapping reports do not extend a deadline beyond their observation times or
+repeat an already completed restore. Valid observations survive a later
+connection failure; transport loss does not undo activity that already happened.
+Connection handles, owner changes and obsolete protocol objects stay private to
+each adapter. Input received during setup is delivered immediately without a
+separate readiness gate in the collector.
 
 The runner owns one inactivity deadline. Loss of one source leaves the others
 running; loss of all native activity sources suspends automatic idle blanking
-until a source reconnects. Gamepad input, explicit lock and post-blank power-off
+until an adapter can observe activity again. This policy queries each adapter's
+current `ActivityStatus`; that assessment never authorizes or rejects an event.
+A quiet usable adapter remains available. Availability, bounded failure reasons
+and the last activity time form runtime diagnostics.
+Gamepad input, explicit lock and post-blank power-off
 remain independent. Reconnection itself does not count as input. Worker shutdown
 cancels quiet connections and joins their threads.
 
@@ -134,8 +142,8 @@ Notes:
 - Activity always uses Mutter's one-shot user-active watches, rearmed after each
   signal. SessionManager is neither required nor queried by the activity source.
   Unlike `GetIdletime`, watches do not treat the idle-counter reset on inhibitor
-  release as input. Losing the Mutter owner ends only that source instance; the
-  runner reconnects it independently.
+  release as input. When the Mutter owner disappears or changes, the adapter
+  reacquires its bus subscriptions and watches internally.
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
@@ -217,9 +225,9 @@ Only `get_input_idle_notification` is used by this activity adapter. Inhibitor
 queries belong to the separate subsystem under #223.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
-of the bound notifier, or removal of the last seat ends this source instance.
-The runner invalidates its contribution and reconnects while other sources keep
-running. Explicit selection does not enable another native source. Automatic
+of the bound notifier, or removal of the last seat causes the adapter to rebuild
+its connection and subscriptions while other adapters keep running. Previously
+published observations remain valid. Explicit selection does not enable another native source. Automatic
 operation attempts both native interfaces without desktop-name selection.
 
 ### `swayidle`

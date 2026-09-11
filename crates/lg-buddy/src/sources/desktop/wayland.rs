@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wayland_client::protocol::{wl_callback, wl_registry, wl_seat};
@@ -14,11 +14,101 @@ use wayland_protocols::ext::idle_notify::v1::client::{
     ext_idle_notification_v1, ext_idle_notifier_v1,
 };
 
+use super::{wait_for_retry, ActivityAdapter, ActivityPublisher, ActivityStatus};
 use crate::events::EventSource;
 use crate::session::inactivity::InactivityObservation;
 use crate::session::SessionObservation;
 
 const REQUIRED_IDLE_NOTIFIER_VERSION: u32 = 2;
+
+pub(crate) struct WaylandSource {
+    initial_connection: Mutex<Option<Connection>>,
+    status: Mutex<ActivityStatus>,
+}
+
+impl Default for WaylandSource {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl WaylandSource {
+    fn new(connection: Option<Connection>) -> Self {
+        Self {
+            initial_connection: Mutex::new(connection),
+            status: Mutex::default(),
+        }
+    }
+
+    /// Probe before application threads start, retaining any inherited socket
+    /// inside this adapter for monitoring rather than opening it a second time.
+    pub(crate) fn probe_capabilities(
+        &self,
+    ) -> Result<WaylandProviderCapabilities, WaylandProviderError> {
+        let mut initial = self
+            .initial_connection
+            .lock()
+            .expect("initial Wayland connection");
+        let connection = match initial.as_ref() {
+            Some(connection) => connection.clone(),
+            None => connect_wayland()?,
+        };
+        let capabilities = probe_wayland_capabilities_on(connection.clone())?;
+        *initial = Some(connection);
+        Ok(capabilities)
+    }
+
+    fn run_connection(
+        &self,
+        connection: Connection,
+        publish: ActivityPublisher,
+        stop: &AtomicBool,
+    ) -> Result<(), WaylandProviderError> {
+        let (mut event_queue, mut state, _) = initialize_provider(
+            connection,
+            move |observation| {
+                publish(observation);
+                true
+            },
+            stop,
+        )?;
+        *self.status.lock().expect("Wayland activity status") = ActivityStatus::Available;
+        while state.running && !stop.load(Ordering::SeqCst) {
+            dispatch_once(&mut event_queue, &mut state)?;
+            if let Some(err) = state.take_error() {
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ActivityAdapter for WaylandSource {
+    fn run(&self, publish: ActivityPublisher, stop: &AtomicBool) {
+        let mut connection = self
+            .initial_connection
+            .lock()
+            .expect("initial Wayland connection")
+            .take();
+        while !stop.load(Ordering::SeqCst) {
+            let result = connection
+                .take()
+                .map(Ok)
+                .unwrap_or_else(reconnect_wayland)
+                .and_then(|connection| self.run_connection(connection, Arc::clone(&publish), stop));
+            *self.status.lock().expect("Wayland activity status") =
+                ActivityStatus::unavailable(result.err().map_or_else(
+                    || "activity monitoring stopped".to_string(),
+                    |err| err.to_string(),
+                ));
+            wait_for_retry(stop);
+        }
+    }
+
+    fn status(&self) -> ActivityStatus {
+        self.status.lock().expect("Wayland activity status").clone()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaylandProviderCapabilities {
@@ -430,13 +520,13 @@ where
     Ok((event_queue, state, capabilities))
 }
 
-pub(crate) fn connect_wayland() -> Result<Connection, WaylandProviderError> {
+fn connect_wayland() -> Result<Connection, WaylandProviderError> {
     // `connect_to_env` removes an inherited WAYLAND_SOCKET from the process
     // environment. Monitor startup must call this before spawning any threads.
     Connection::connect_to_env().map_err(|err| WaylandProviderError::Connection(err.to_string()))
 }
 
-pub(crate) fn probe_wayland_capabilities_on(
+fn probe_wayland_capabilities_on(
     connection: Connection,
 ) -> Result<WaylandProviderCapabilities, WaylandProviderError> {
     let display = connection.display();
@@ -453,7 +543,7 @@ pub(crate) fn probe_wayland_capabilities_on(
     state.registry_facts.capabilities()
 }
 
-pub(crate) fn reconnect_wayland() -> Result<Connection, WaylandProviderError> {
+fn reconnect_wayland() -> Result<Connection, WaylandProviderError> {
     // Unlike connect_to_env, reconnect never consumes or mutates WAYLAND_SOCKET.
     let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_else(|| "wayland-0".into());
     let display = PathBuf::from(display);
@@ -468,26 +558,6 @@ pub(crate) fn reconnect_wayland() -> Result<Connection, WaylandProviderError> {
     let socket = UnixStream::connect(path)
         .map_err(|err| WaylandProviderError::Connection(err.to_string()))?;
     Connection::from_socket(socket).map_err(|err| WaylandProviderError::Connection(err.to_string()))
-}
-
-pub(crate) fn run_session_source<F>(
-    connection: Connection,
-    publish: F,
-    stop: &AtomicBool,
-    connected: impl FnOnce(),
-) -> Result<(), WaylandProviderError>
-where
-    F: FnMut(SessionObservation) -> bool + 'static,
-{
-    let (mut event_queue, mut state, _) = initialize_provider(connection, publish, stop)?;
-    connected();
-    while state.running && !stop.load(Ordering::SeqCst) {
-        dispatch_once(&mut event_queue, &mut state)?;
-        if let Some(err) = state.take_error() {
-            return Err(err);
-        }
-    }
-    Ok(())
 }
 
 // Bound connection setup as well as idle waits so one stalled interface cannot
@@ -683,6 +753,136 @@ mod tests {
             &ext_idle_notification_v1::Event::Resumed
         ));
     }
+    // Model only the registry, sync and input-notification messages consumed by
+    // this adapter. Hold the final sync reply so input definitely precedes setup.
+    fn serve_input_during_setup(
+        mut peer: std::os::unix::net::UnixStream,
+        finish_setup: std::sync::mpsc::Receiver<()>,
+    ) {
+        use std::io::{Read, Write};
+        fn number(bytes: &[u8]) -> u32 {
+            u32::from_ne_bytes(bytes[..4].try_into().unwrap())
+        }
+        fn event(peer: &mut std::os::unix::net::UnixStream, id: u32, opcode: u32, body: &[u8]) {
+            peer.write_all(&id.to_ne_bytes()).unwrap();
+            peer.write_all(&(((body.len() as u32 + 8) << 16) | opcode).to_ne_bytes())
+                .unwrap();
+            peer.write_all(body).unwrap();
+        }
+        fn global(
+            peer: &mut std::os::unix::net::UnixStream,
+            registry: u32,
+            name: u32,
+            interface: &str,
+            version: u32,
+        ) {
+            let mut body = name.to_ne_bytes().to_vec();
+            body.extend_from_slice(&(interface.len() as u32 + 1).to_ne_bytes());
+            body.extend_from_slice(interface.as_bytes());
+            body.push(0);
+            while !body.len().is_multiple_of(4) {
+                body.push(0);
+            }
+            body.extend_from_slice(&version.to_ne_bytes());
+            event(peer, registry, 0, &body);
+        }
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .unwrap();
+        let mut registry = 0;
+        let mut notifier = 0;
+        let mut syncs = 0;
+        loop {
+            let mut header = [0; 8];
+            match peer.read_exact(&mut header) {
+                Ok(()) => (),
+                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return,
+                Err(err) => panic!("mock Wayland read: {err}"),
+            }
+            let id = number(&header);
+            let size_opcode = number(&header[4..]);
+            let opcode = size_opcode & 0xffff;
+            let mut body = vec![0; (size_opcode >> 16) as usize - 8];
+            peer.read_exact(&mut body).unwrap();
+            if id == 1 && opcode == 1 {
+                registry = number(&body);
+                global(&mut peer, registry, 10, NOTIFIER, 2);
+                global(&mut peer, registry, 11, SEAT, 1);
+            } else if id == 1 && opcode == 0 {
+                syncs += 1;
+                if syncs == 2 {
+                    finish_setup
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                }
+                let callback = number(&body);
+                event(&mut peer, callback, 0, &0u32.to_ne_bytes());
+                event(&mut peer, 1, 1, &callback.to_ne_bytes());
+            } else if id == registry && opcode == 0 {
+                if number(&body) == 10 {
+                    notifier = number(&body[body.len() - 4..]);
+                }
+            } else if id == notifier && opcode == 2 {
+                let notification = number(&body);
+                event(&mut peer, notification, 0, &[]);
+                event(&mut peer, notification, 1, &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn input_is_published_before_initialization_completes_and_quiet_shutdown_finishes() {
+        use super::{ActivityAdapter, WaylandSource};
+        use crate::session::{inactivity::InactivityObservation, SessionObservation};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        use std::time::{Duration, Instant};
+        let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (finish_setup, setup) = mpsc::channel();
+        let server = std::thread::spawn(move || serve_input_during_setup(peer, setup));
+        let source = Arc::new(WaylandSource::new(Some(
+            wayland_client::Connection::from_socket(socket).unwrap(),
+        )));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (input, observed) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let adapter = Arc::clone(&source);
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            adapter.run(
+                Arc::new(move |observation| {
+                    input.send(observation).unwrap();
+                }),
+                &worker_stop,
+            );
+            finished.send(()).unwrap();
+        });
+        let observation = observed.recv_timeout(Duration::from_secs(1));
+        let status_during_setup = source.status();
+        finish_setup.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !source.status().is_available() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status_after_setup = source.status();
+        stop.store(true, Ordering::SeqCst);
+        completion
+            .recv_timeout(Duration::from_secs(1))
+            .expect("quiet adapter stops");
+        worker.join().unwrap();
+        server.join().unwrap();
+        assert!(matches!(
+            observation.unwrap(),
+            SessionObservation::Inactivity {
+                observation: InactivityObservation::DesktopActivityObserved,
+                ..
+            }
+        ));
+        assert!(!status_during_setup.is_available());
+        assert!(status_after_setup.is_available());
+    }
+
     #[test]
     fn stalled_initialization_is_cancellable_without_compositor_events() {
         let (client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -691,12 +891,9 @@ mod tests {
         let worker_stop = std::sync::Arc::clone(&stop);
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let result = super::run_session_source(
-                connection,
-                |_| true,
-                &worker_stop,
-                || panic!("a stalled compositor is not connected"),
-            );
+            let source = super::WaylandSource::new(None);
+            let result =
+                source.run_connection(connection, std::sync::Arc::new(|_| {}), &worker_stop);
             sender.send(result).unwrap();
         });
         use std::io::Read;

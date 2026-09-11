@@ -11,9 +11,7 @@ use crate::sources::desktop::gnome::{
     GNOME_IDLE_MONITOR_NAME, GNOME_REQUIRED_SERVICES_REASON, GNOME_SCREEN_SAVER_NAME,
     GNOME_SHELL_NAME,
 };
-use crate::sources::desktop::wayland::{
-    connect_wayland, probe_wayland_capabilities_on, WaylandProviderCapabilities,
-};
+use crate::sources::desktop::wayland::{WaylandProviderCapabilities, WaylandSource};
 
 pub const SWAYIDLE_DEPRECATION_NOTICE: &str =
     "swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland";
@@ -122,13 +120,13 @@ pub trait BackendProbe {
 
 #[derive(Default)]
 pub struct SystemBackendProbe {
-    wayland_connection: RefCell<Option<wayland_client::Connection>>,
+    wayland_source: RefCell<Option<WaylandSource>>,
     inherited_wayland_socket_consumed: Cell<bool>,
 }
 
 impl SystemBackendProbe {
-    pub fn take_wayland_connection(&mut self) -> Option<wayland_client::Connection> {
-        self.wayland_connection.get_mut().take()
+    pub(crate) fn take_wayland_source(&mut self) -> Option<WaylandSource> {
+        self.wayland_source.get_mut().take()
     }
 }
 
@@ -167,22 +165,17 @@ impl BackendProbe for SystemBackendProbe {
     }
 
     fn wayland_capabilities(&self) -> Result<WaylandProviderCapabilities, String> {
-        let connection = match self.wayland_connection.borrow().as_ref() {
-            Some(connection) => connection.clone(),
-            None => {
-                let inherited_socket_without_display = env::var_os("WAYLAND_SOCKET").is_some()
-                    && env::var_os("WAYLAND_DISPLAY").is_none();
-                let result = connect_wayland().map_err(|err| err.to_string());
-                if inherited_socket_without_display && env::var_os("WAYLAND_SOCKET").is_none() {
-                    self.inherited_wayland_socket_consumed.set(true);
-                }
-                result?
-            }
-        };
-        let capabilities =
-            probe_wayland_capabilities_on(connection.clone()).map_err(|err| err.to_string())?;
-        *self.wayland_connection.borrow_mut() = Some(connection);
-        Ok(capabilities)
+        let inherited_socket_without_display =
+            env::var_os("WAYLAND_SOCKET").is_some() && env::var_os("WAYLAND_DISPLAY").is_none();
+        let result = self
+            .wayland_source
+            .borrow_mut()
+            .get_or_insert_with(WaylandSource::default)
+            .probe_capabilities();
+        if inherited_socket_without_display && env::var_os("WAYLAND_SOCKET").is_none() {
+            self.inherited_wayland_socket_consumed.set(true);
+        }
+        result.map_err(|err| err.to_string())
     }
 
     fn swayidle_fallback_available(&self) -> Result<(), String> {
