@@ -26,6 +26,21 @@ fn honor_idle_inhibitors(world: &mut LgBuddyWorld, policy: String) {
     world.set_honor_idle_inhibitors(&policy);
 }
 
+#[given(regex = r#"PowerDevil screen inhibition is "(active|clear)""#)]
+fn powerdevil_inhibition(world: &mut LgBuddyWorld, state: String) {
+    world.set_powerdevil_inhibited(state == "active");
+}
+
+#[given("PowerDevil fails its next inhibition query")]
+fn powerdevil_failure(world: &mut LgBuddyWorld) {
+    world.fail_next_powerdevil_query();
+}
+
+#[given(regex = r#"PowerDevil delays its next inhibition query by ([0-9]+(?:\.[0-9]+)?) seconds"#)]
+fn powerdevil_delay(world: &mut LgBuddyWorld, seconds: String) {
+    world.delay_next_powerdevil_query(seconds.parse().expect("query delay"));
+}
+
 #[given(regex = r#"GNOME has (\d+) idle inhibitors"#)]
 fn gnome_idle_inhibitors(world: &mut LgBuddyWorld, count: u32) {
     world.set_gnome_idle_inhibitors(count);

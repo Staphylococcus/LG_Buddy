@@ -1,7 +1,7 @@
 use crate::support::{
     prime_isolated_path_dependencies, ExecutableScript, MockBscpylgtv, MockNmOnline,
-    MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout, TestConfigFile,
-    TestEnv,
+    MockPowerDevil, MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout,
+    TestConfigFile, TestEnv,
 };
 use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, MockWebOsVersion, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
@@ -19,6 +19,7 @@ pub struct LgBuddyWorld {
     tv: Option<MockBscpylgtv>,
     webos_tv: Option<MockWebOsTv>,
     system_logind: Option<MockSystemLogind>,
+    powerdevil: Option<MockPowerDevil>,
     session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
     swayidle: Option<MockSwayidle>,
@@ -526,6 +527,26 @@ exit 1\n",
     pub fn set_gnome_idle_inhibitors(&mut self, count: u32) {
         self.ensure_mock_session_bus_idle_monitor()
             .set_idle_inhibitor_count(count);
+    }
+
+    pub fn set_powerdevil_inhibited(&mut self, inhibited: bool) {
+        let service = MockPowerDevil::new(self.ensure_mock_session_bus_idle_monitor().address());
+        service.set_inhibited(inhibited);
+        self.powerdevil = Some(service);
+    }
+
+    pub fn fail_next_powerdevil_query(&self) {
+        self.powerdevil
+            .as_ref()
+            .expect("PowerDevil fixture")
+            .fail_next_query();
+    }
+
+    pub fn delay_next_powerdevil_query(&self, seconds: f64) {
+        self.powerdevil
+            .as_ref()
+            .expect("PowerDevil fixture")
+            .delay_next_query(std::time::Duration::from_secs_f64(seconds));
     }
 
     pub fn schedule_gnome_idle_inhibitors(&mut self, count: u32, after_secs: f64) {

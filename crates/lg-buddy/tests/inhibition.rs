@@ -1,8 +1,8 @@
 mod support;
 
 use lg_buddy::inhibition::{
-    evaluate_pull_inhibition, evaluate_push_inhibition, InhibitionStatus, PullInhibitionAdapter,
-    PushInhibitionAdapter,
+    evaluate_pull_inhibition, evaluate_push_inhibition, Inhibition, InhibitionStatus,
+    PullInhibitionAdapter, PushInhibitionAdapter,
 };
 use lg_buddy::sources::desktop::gnome::inhibition::GnomeInhibition;
 use lg_buddy::sources::desktop::powerdevil::PowerDevilInhibition;
@@ -63,6 +63,68 @@ fn independent_inhibition_capabilities_work_without_activity_services() {
     permission_reads_do_not_wait_for_dbus_and_a_quiet_worker_can_stop(&bus);
     powerdevil_queries_current_permission_and_recovers(&bus);
     powerdevil_discards_delayed_cancelled_and_obsolete_replies(&bus);
+    composed_gate_uses_both_capabilities_and_the_observed_release_clock(&bus);
+}
+
+fn composed_gate_uses_both_capabilities_and_the_observed_release_clock(
+    bus: &MockSessionBusIdleMonitor,
+) {
+    let mut config = lg_buddy::config::parse_config(
+        "tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\nscreen_honor_idle_inhibitors=enabled\n"
+    ).unwrap();
+    let push = Arc::new(GnomeInhibition::default());
+    let service = MockPowerDevil::new(bus.address());
+    bus.set_idle_inhibitor_count(1);
+    service.set_inhibited(true);
+    let delay = Duration::from_secs(10);
+    let mut gate = Inhibition::new(
+        &config,
+        delay,
+        vec![push.clone()],
+        vec![Box::new(PowerDevilInhibition::default())],
+    );
+    wait_until(|| !push.evaluate().allowed);
+    let check = |gate: &mut Inhibition, now| {
+        let mut allowed = false;
+        wait_until(|| {
+            allowed = gate.can_blank(now);
+            gate.diagnostics().unwrap().pull.is_some()
+        });
+        let diagnostic = gate.diagnostics().unwrap();
+        assert_eq!(diagnostic.can_blank, allowed);
+        assert_eq!(diagnostic.push.as_ref().unwrap().contributions.len(), 1);
+        assert_eq!(diagnostic.pull.as_ref().unwrap().contributions.len(), 1);
+        allowed
+    };
+    let now = Instant::now();
+    assert!(!check(&mut gate, now));
+    bus.schedule_idle_inhibitor_count(Duration::ZERO, 0);
+    wait_until(|| push.evaluate().allowed);
+    assert!(!check(&mut gate, now + delay), "PowerDevil still inhibits");
+    service.set_inhibited(false);
+    // The next successful query records PowerDevil's real observation time.
+    gate.cancel();
+    assert!(!check(&mut gate, Instant::now()));
+    let release_deadline = gate.diagnostics().unwrap().release_not_before.unwrap();
+    assert!(check(&mut gate, release_deadline));
+    assert_eq!(
+        gate.diagnostics().unwrap().release_not_before,
+        Some(release_deadline),
+        "clear queries do not restart the clock"
+    );
+    service.set_inhibited(true);
+    assert!(!check(&mut gate, release_deadline + Duration::from_secs(1)));
+    let before = service.query_count();
+    config.screen_honor_idle_inhibitors =
+        lg_buddy::config::ScreenHonorIdleInhibitorsPolicy::Disabled;
+    gate.configure(&config, delay);
+    assert!(gate.can_blank(Instant::now()));
+    assert_eq!(
+        service.query_count(),
+        before,
+        "override does not need a successful pull"
+    );
+    drop(gate);
 }
 
 fn powerdevil_queries_current_permission_and_recovers(bus: &MockSessionBusIdleMonitor) {

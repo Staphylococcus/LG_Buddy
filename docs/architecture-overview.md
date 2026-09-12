@@ -407,9 +407,8 @@ The current split is:
   - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
     user-active watches, and translation into normalized observations
 - `inhibition.rs`
-  - independent push/pull inhibition contracts, Boolean aggregation, preference
-    override evaluation from loaded configuration, and diagnostics;
-    standalone until the monitor integration in #225
+  - independent push/pull inhibition, preference override, release timing,
+    cancellable checks and diagnostics behind the Boolean blanking gate
 - `sources/desktop/gnome/inhibition.rs`
   - SessionManager inhibition subscriptions, state refresh and recovery,
     independent of GNOME activity
@@ -961,24 +960,25 @@ invalidating facts on connection loss. The runner queries adapter activity
 availability separately for idle policy and diagnostics. The compatibility backend resolver still serves
 existing settings/CLI callers; it does not select the automatic native source
 set. See [Session backend model](session-backend-model.md) for the current
-contracts and the temporary dev-only absence of native inhibition honoring
-between #221 and #225.
+activity and inhibition contracts, timing and coverage limits.
 
 Adapters may expose activity and inhibition independently, each through push or
-pull according to the source. The standalone push inhibition section (#222)
-combines maintained Boolean permissions with diagnostics. The pull section (#223)
+pull according to the source. The push inhibition section
+combines maintained Boolean permissions with diagnostics. The pull section
 combines fresh, cancellable requests in the same diagnostic shape; its PowerDevil
 capability delegates screen policy to Plasma. The GNOME capability
 requires only SessionManager and keeps subscriptions, state queries and owner
-recovery internal. It contributes no activity observations. #225 connects the
-two paths only at the `can_blank()` decision; runtime honoring remains absent
-until then.
+recovery internal. It contributes no activity observations. The `Inhibition`
+facade joins the sections, owns release timing and cancellable pull work, and
+exposes `can_blank()` when the ordinary activity deadline is due. A denial leaves
+that deadline unchanged and is retried at a bounded cadence. Explicit lock and
+post-blank policy remain independent.
 
-The separate preference section (#224) evaluates the existing honoring setting
+The separate preference section evaluates the existing honoring setting
 without I/O. Disabled honoring supplies a bypass for inhibition restrictions and
 release delay; it does not grant activity eligibility. Settings retain their
-screen-service restart apply path. #225 owns cancelling pending attempts on
-in-process configuration changes and consuming the current preference.
+screen-service restart apply path. The facade also cancels pending attempts
+before applying an in-process preference or timeout change.
 
 The runtime core owns:
 

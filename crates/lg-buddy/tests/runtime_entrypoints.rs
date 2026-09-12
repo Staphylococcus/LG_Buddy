@@ -10,9 +10,68 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    ExecutableScript, MockBscpylgtv, MockNmOnline, MockSessionBusIdleMonitor, MockSystemLogind,
-    RuntimeStateLayout, TestConfigFile, TestEnv,
+    ExecutableScript, MockBscpylgtv, MockNmOnline, MockPowerDevil, MockSessionBusIdleMonitor,
+    MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
+
+#[test]
+fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
+    let _env = TestEnv::new();
+    let bus = MockSessionBusIdleMonitor::new("monitor-inhibition-resume-bus");
+    bus.set_shell_available(true);
+    bus.set_screen_saver_available(true);
+    bus.set_idle_monitor_available(true);
+    bus.set_idle_inhibitor_count(0);
+    let powerdevil = MockPowerDevil::new(bus.address());
+    powerdevil.delay_next_query(Duration::from_millis(600));
+    let logind = MockSystemLogind::new("monitor-inhibition-resume-logind");
+    logind.reset();
+    let mock = MockBscpylgtv::new("monitor-inhibition-resume-tv");
+    mock.set_input("HDMI_2");
+    let wrapper = mock.command_wrapper("monitor-inhibition-resume-wrapper");
+    let config = TestConfigFile::new("monitor-inhibition-resume-config");
+    config.write_sample("HDMI_2");
+    let contents = fs::read_to_string(config.path()).unwrap();
+    fs::write(
+        config.path(),
+        format!("{contents}\nscreen_honor_idle_inhibitors=enabled\n"),
+    )
+    .unwrap();
+    let runtime = RuntimeStateLayout::new("monitor-inhibition-resume-runtime");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .arg("monitor")
+        .env("LG_BUDDY_CONFIG", config.path())
+        .env("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path())
+        .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
+        .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+        .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
+        .env("XDG_SESSION_ID", "test-session")
+        .env("LG_BUDDY_SCREEN_BACKEND", "gnome")
+        .env("LG_BUDDY_IDLE_TIMEOUT", "1")
+        .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "2.8")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until(Duration::from_secs(2), || powerdevil.query_count() > 0);
+    // The old query captured clear. Playback starts across a lifecycle change;
+    // the completed old reply must not authorize a post-resume blank.
+    powerdevil.set_inhibited(true);
+    logind.queue_prepare_for_sleep_signal(true);
+    logind.queue_prepare_for_sleep_signal(false);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        powerdevil.query_count() >= 2,
+        "resume must trigger a fresh query"
+    );
+    assert!(
+        mock.calls().is_empty(),
+        "invalidation must neither blank nor dispatch sleep/wake TV actions"
+    );
+    runtime.assert_session_marker_absent();
+}
 
 #[test]
 fn monitor_recovers_gnome_activity_after_the_service_disappears() {
