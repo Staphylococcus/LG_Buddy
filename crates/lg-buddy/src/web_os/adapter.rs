@@ -993,7 +993,7 @@ mod tests {
         let token_fixture = TestAccessTokenStore::new();
         let client = client_for_server(&server, &token_fixture);
         client.current_input().expect("establish initial session");
-        server.close_active_connection();
+        server.close_active_connections();
         server.set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
 
         let error = client

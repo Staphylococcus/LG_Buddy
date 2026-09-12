@@ -128,6 +128,10 @@ This layer asks:
 
 This is the thinnest layer, but it is the one that keeps the other two honest.
 
+The [GNOME/Plasma VM validation record](desktop-session-validation.md) documents
+desktop switching with a retained user manager, tested inhibition routes, a
+startup race, and the remaining lifecycle and native Wayland coverage gaps.
+
 ### What belongs here
 
 - readable acceptance scenarios for the main flows

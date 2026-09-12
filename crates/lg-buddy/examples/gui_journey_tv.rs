@@ -2,11 +2,15 @@
 //!
 //! Start it with one control directory argument. The fixture publishes one
 //! atomic `state.json` there and consumes atomically-written command files:
-//! `stateful`, `pairing-rejected`, `stall`, `interrupted`, or `stop`.
+//! `stateful`, `pairing-rejected`, `stall`, `interrupted`, `wake [delay-ms]`, `ready`, or `stop`.
+//! Optionally listen for WoL: `<control-dir> <bind-address> <mac> [wake-delay-ms]`.
 
+use lg_buddy::config::MacAddress;
+use lg_buddy::wol::MAGIC_PACKET_LEN;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -49,7 +53,7 @@ impl Scenario {
             "stall" => Ok(Self::Stall),
             "interrupted" => Ok(Self::Interrupted),
             other => Err(format!(
-                "unsupported fixture command `{other}`; use stateful, pairing-rejected, stall, interrupted, or stop"
+                "unsupported fixture command `{other}`; use stateful, pairing-rejected, stall, interrupted, wake [delay-ms], ready, or stop"
             )),
         }
     }
@@ -85,7 +89,7 @@ impl Fixture {
         Self::start(scenario)
     }
 
-    fn state(&self, status: &str, scenario: Scenario) -> String {
+    fn state(&self, status: &str, scenario: Scenario, wake: Option<&WakeListener>) -> String {
         let snapshot = self.tv.snapshot();
         format!(
             "{}\n",
@@ -93,6 +97,7 @@ impl Fixture {
                 "status": status,
                 "scenario": scenario.name(),
                 "endpoint": "wss://127.0.0.1:3001",
+                "wol_address": wake.map(|listener| listener.socket.local_addr().unwrap().to_string()),
                 "power_on": snapshot.power_on,
                 "screen_on": snapshot.screen_on,
                 "input": snapshot.input,
@@ -100,6 +105,10 @@ impl Fixture {
                 "volume": snapshot.volume,
                 "muted": snapshot.muted,
                 "connection_count": snapshot.connection_count,
+                "active_connection_count": snapshot.active_connection_count,
+                "tv_ready": snapshot.ready,
+                "wake_count": snapshot.wake_count,
+                "power_off_count": snapshot.power_off_count,
                 "pairing_prompt_count": snapshot.pairing_prompt_count,
                 "registration_tokens": snapshot.registration_tokens,
             })
@@ -109,15 +118,68 @@ impl Fixture {
 
 enum Command {
     Scenario(Scenario),
+    Wake(Duration),
+    Ready,
     Stop,
 }
 
+struct WakeListener {
+    socket: UdpSocket,
+    mac: MacAddress,
+    ready_after: Duration,
+}
+
+impl WakeListener {
+    fn poll(&self, tv: &MockWebOsTv) -> io::Result<()> {
+        // One datagram per iteration keeps command/stop handling responsive.
+        let mut packet = [0u8; MAGIC_PACKET_LEN + 1];
+        match self.socket.recv(&mut packet) {
+            Ok(len) if valid_magic_packet(&packet[..len], &self.mac) => {
+                tv.simulate_wake(self.ready_after);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+}
+
+fn valid_magic_packet(packet: &[u8], mac: &MacAddress) -> bool {
+    packet.len() == MAGIC_PACKET_LEN
+        && packet[..6] == [0xff; 6]
+        && packet[6..]
+            .chunks_exact(6)
+            .all(|chunk| chunk == mac.octets())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os();
-    let _program = args.next();
-    let control_dir = args.next().ok_or("usage: gui_journey_tv <control-dir>")?;
+    const USAGE: &str =
+        "usage: gui_journey_tv <control-dir> [<wol-bind-address> <mac> [wake-delay-ms]]";
+    let mut args = env::args_os().skip(1);
+    let control_dir = args.next().ok_or(USAGE)?;
+    let wake_listener = if let Some(address) = args.next() {
+        let mac = args.next().ok_or(USAGE)?;
+        let ready_after = args
+            .next()
+            .map(|value| value.to_string_lossy().parse::<u64>())
+            .transpose()?
+            .unwrap_or(0);
+        let socket = UdpSocket::bind(address.to_string_lossy().as_ref())?;
+        socket.set_nonblocking(true)?;
+        Some(WakeListener {
+            socket,
+            mac: mac
+                .to_string_lossy()
+                .parse()
+                .map_err(|_| "invalid WoL MAC address")?,
+            ready_after: Duration::from_millis(ready_after),
+        })
+    } else {
+        None
+    };
     if args.next().is_some() {
-        return Err("usage: gui_journey_tv <control-dir>".into());
+        return Err(USAGE.into());
     }
     let control_dir = PathBuf::from(control_dir);
     fs::create_dir_all(&control_dir)?;
@@ -128,7 +190,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut scenario = Scenario::Stateful;
     let mut fixture = Fixture::start(scenario);
-    atomic_write(&state_path, &fixture.state("ready", scenario))?;
+    atomic_write(
+        &state_path,
+        &fixture.state("ready", scenario, wake_listener.as_ref()),
+    )?;
     let mut last_state = String::new();
 
     loop {
@@ -139,8 +204,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     fixture = fixture.restart(scenario);
                     last_state.clear();
                 }
+                Command::Wake(delay) => fixture.tv.simulate_wake(delay),
+                Command::Ready => fixture.tv.finish_wake(),
                 Command::Stop => {
-                    let stopped = fixture.state("stopped", scenario);
+                    let stopped = fixture.state("stopped", scenario, wake_listener.as_ref());
                     drop(fixture);
                     atomic_write(&state_path, &stopped)?;
                     return Ok(());
@@ -148,7 +215,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let state = fixture.state("ready", scenario);
+        if let Some(listener) = &wake_listener {
+            listener.poll(&fixture.tv)?;
+        }
+        let state = fixture.state("ready", scenario, wake_listener.as_ref());
         if state != last_state {
             atomic_write(&state_path, &state)?;
             last_state = state;
@@ -160,6 +230,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_command(raw: &str) -> Result<Command, String> {
     match raw.trim() {
         "stop" => Ok(Command::Stop),
+        "wake" => Ok(Command::Wake(Duration::ZERO)),
+        "ready" => Ok(Command::Ready),
+        value if value.starts_with("wake ") => {
+            let delay = value[5..].trim().parse::<u64>().map_err(|_| {
+                "wake delay must be a non-negative number of milliseconds".to_string()
+            })?;
+            Ok(Command::Wake(Duration::from_millis(delay)))
+        }
         value => Ok(Command::Scenario(Scenario::parse(value)?)),
     }
 }

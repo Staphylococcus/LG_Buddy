@@ -4,6 +4,7 @@ pub use lg_buddy::web_os::{
 };
 use serde_json::Value;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 mod test_support;
 
@@ -38,6 +39,10 @@ pub struct MockWebOsTvSnapshot {
     pub volume: i16,
     pub muted: bool,
     pub connection_count: u64,
+    pub active_connection_count: usize,
+    pub ready: bool,
+    pub wake_count: u64,
+    pub power_off_count: u64,
     pub pairing_prompt_count: u64,
     pub registration_tokens: Vec<Option<String>>,
 }
@@ -91,6 +96,16 @@ impl MockWebOsTv {
         self.server.set_muted(muted);
     }
 
+    #[allow(dead_code)] // Used by the process fixture, which shares this adapter.
+    pub fn simulate_wake(&self, ready_after: Duration) {
+        self.server.simulate_wake(ready_after);
+    }
+
+    #[allow(dead_code)] // Used by the process fixture, which shares this adapter.
+    pub fn finish_wake(&self) {
+        self.server.finish_wake();
+    }
+
     pub fn snapshot(&self) -> MockWebOsTvSnapshot {
         self.assert_healthy();
         let snapshot = self.server.snapshot();
@@ -102,6 +117,10 @@ impl MockWebOsTv {
             volume: snapshot.volume,
             muted: snapshot.muted,
             connection_count: snapshot.connection_count,
+            active_connection_count: snapshot.active_connection_count,
+            ready: snapshot.ready,
+            wake_count: snapshot.wake_count,
+            power_off_count: snapshot.power_off_count,
             pairing_prompt_count: snapshot.pairing_prompt_count,
             registration_tokens: snapshot.registration_tokens,
         }
