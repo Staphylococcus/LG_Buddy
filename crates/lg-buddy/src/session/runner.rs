@@ -857,11 +857,30 @@ where
         Arc<AtomicBool>,
     ) -> JoinHandle<()>,
 {
+    // Assemble production inhibition here, alongside the production lock
+    // observer. Tests can omit it instead of relying on an installed config
+    // and real desktop inhibition services.
+    let inhibition = match resolve_config_path_from_env() {
+        Ok(path) => {
+            let config = load_config(&path).map_err(|err| SessionRunnerError::Failed {
+                backend,
+                message: format!("failed to load inhibition config: {err}"),
+            })?;
+            Some(Inhibition::new(
+                &config,
+                Duration::from_millis(resolve_idle_timeout_ms()),
+                vec![Arc::new(GnomeInhibition::default())],
+                vec![Box::new(PowerDevilInhibition::default())],
+            ))
+        }
+        Err(ConfigPathError::NotConfigured) => None,
+    };
     run_native_session_monitor_with_lock_monitor(
         writer,
         dispatcher,
         backend,
         adapters,
+        inhibition,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
@@ -872,6 +891,7 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
+    inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -891,6 +911,7 @@ where
         backend,
         adapters,
         InitialBlankTrigger::Deadline,
+        inhibition,
         spawn_monitor,
         spawn_lock_monitor,
     )
@@ -902,12 +923,14 @@ enum InitialBlankTrigger {
     Provider,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     initial_blank_trigger: InitialBlankTrigger,
+    mut inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -923,27 +946,6 @@ where
 {
     let blank_after = Duration::from_millis(resolve_idle_timeout_ms());
     let power_off_after = resolve_timed_power_off_after();
-    // Inhibition capabilities are independent of the chosen activity sources.
-    // The legacy provider continues to own its initial timeout and inhibition.
-    let mut inhibition = if initial_blank_trigger == InitialBlankTrigger::Deadline {
-        match resolve_config_path_from_env() {
-            Ok(path) => {
-                let config = load_config(&path).map_err(|err| SessionRunnerError::Failed {
-                    backend,
-                    message: format!("failed to load inhibition config: {err}"),
-                })?;
-                Some(Inhibition::new(
-                    &config,
-                    blank_after,
-                    vec![Arc::new(GnomeInhibition::default())],
-                    vec![Box::new(PowerDevilInhibition::default())],
-                ))
-            }
-            Err(ConfigPathError::NotConfigured) => None,
-        }
-    } else {
-        None
-    };
     let started_at = Instant::now();
     let marker_exists = session_screen_ownership_marker_exists(backend)?;
     let mut inactivity = if marker_exists && initial_blank_trigger == InitialBlankTrigger::Provider
@@ -1193,6 +1195,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         ScreenBackend::Swayidle,
         &[],
         InitialBlankTrigger::Provider,
+        None,
         move |sender, _contributions, stop| {
             thread::spawn(move || {
                 let event_sender = sender.clone();
@@ -2759,6 +2762,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let result = activity_receiver
@@ -2812,6 +2816,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Wayland,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
@@ -2858,6 +2863,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let locked_at = Instant::now();
@@ -3106,6 +3112,13 @@ system_sleep_wake_policy={policy}
     #[test]
     fn composed_sources_restore_once_without_availability_reports() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // The shared loop's injected capabilities must not require an installed
+        // config. A developer's real config otherwise hides this CI regression.
+        let previous_config = std::env::var_os("LG_BUDDY_CONFIG");
+        std::env::set_var(
+            "LG_BUDDY_CONFIG",
+            unique_config_path("missing-monitor-config"),
+        );
         let runtime_dir = unique_config_path("composed-activity");
         ScreenOwnershipMarker::new(runtime_dir.clone())
             .create()
@@ -3124,6 +3137,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, sources, _stop| {
                 thread::spawn(move || {
                     use super::ActivitySource;
@@ -3161,6 +3175,10 @@ system_sleep_wake_policy={policy}
         std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
         std::env::remove_var("LG_BUDDY_IDLE_TIMEOUT");
         std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        match previous_config {
+            Some(path) => std::env::set_var("LG_BUDDY_CONFIG", path),
+            None => std::env::remove_var("LG_BUDDY_CONFIG"),
+        }
         fs::remove_dir_all(runtime_dir).unwrap();
         result.unwrap();
         assert_eq!(dispatcher.executor.screen_on_calls, 1);
