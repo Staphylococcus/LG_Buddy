@@ -38,11 +38,12 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
 
-On dev, #221 removes native inhibition from the activity path. The persisted
-**Allow apps to prevent idle blanking** setting is temporarily ineffective until
-#225 integrates the separate subsystem. This intermediate work cannot be
-promoted to prerelease or main. Activity tests require Mutter user-active watches;
-SessionManager availability must not determine whether activity monitoring works.
+Native monitoring honors the opt-in **Allow apps to prevent idle blanking**
+setting through independent GNOME SessionManager and PowerDevil inhibition
+capabilities. Activity tests require Mutter user-active watches; SessionManager
+availability must not determine whether activity monitoring works. Private-bus
+fixtures cover the integrated gate. Live Plasma/application-route validation and
+native Wayland inhibition coverage remain open before the #89 MVP can be promoted.
 
 The C toolchain is required because `cargo build` now compiles vendored
 `libdbus` as part of the dependency graph. On common Linux distributions that
@@ -306,7 +307,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity deadline and phase synthesis |
-| `crates/lg-buddy/src/inhibition.rs` | Standalone push/pull inhibition contracts, Boolean aggregation, preference override and diagnostics (#222/#223/#224) |
+| `crates/lg-buddy/src/inhibition.rs` | Push/pull inhibition, preference override, release timing and cancellable Boolean blanking gate |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
 | `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle and current-session lock-state adapter |

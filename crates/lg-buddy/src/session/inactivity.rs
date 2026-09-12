@@ -262,13 +262,20 @@ impl InactivityEngine {
         }
     }
 
-    pub fn observe_time(&mut self, observed_at: Instant) -> InactivityDecision {
+    pub fn observe_time(
+        &mut self,
+        observed_at: Instant,
+        can_blank: impl FnOnce() -> bool,
+    ) -> InactivityDecision {
         match self.phase {
             InactivityPhase::Unknown | InactivityPhase::Active
                 if self
                     .blank_at
                     .is_some_and(|deadline| observed_at >= deadline) =>
             {
+                if !can_blank() {
+                    return InactivityDecision::NoOp;
+                }
                 self.phase = InactivityPhase::BlankRequested;
                 self.lock_activity_floor = self.session_locked_since;
                 self.activity_floor = Some(observed_at);
@@ -337,20 +344,72 @@ mod tests {
     }
 
     #[test]
+    fn boolean_gate_is_consulted_only_when_idle_and_does_not_consume_denied_deadline() {
+        let start = Instant::now();
+        let mut engine = test_engine(start);
+        assert_eq!(
+            engine.observe_time(start, || panic!("not idle")),
+            InactivityDecision::NoOp
+        );
+        let before = engine;
+        let due = start + Duration::from_secs(5);
+        assert_eq!(engine.observe_time(due, || false), InactivityDecision::NoOp);
+        assert_eq!(
+            engine, before,
+            "inhibition must not change activity or phase"
+        );
+        assert_eq!(engine.time_until_action(due), Some(Duration::ZERO));
+        assert_eq!(
+            engine.observe_time(due + Duration::from_secs(2), || true),
+            InactivityDecision::BlankNow
+        );
+        assert_eq!(
+            engine.observe_time(due + Duration::from_secs(3), || panic!("already requested")),
+            InactivityDecision::NoOp
+        );
+    }
+
+    #[test]
+    fn input_rearms_a_denied_deadline_and_explicit_lock_bypasses_the_gate() {
+        let start = Instant::now();
+        let mut engine = test_engine(start);
+        let due = start + Duration::from_secs(5);
+        assert_eq!(engine.observe_time(due, || false), InactivityDecision::NoOp);
+        engine.observe_activity(InactivityObservation::UserActivityObserved, due);
+        assert_eq!(
+            engine.observe_time(due + Duration::from_secs(1), || panic!(
+                "input postponed blanking"
+            )),
+            InactivityDecision::NoOp
+        );
+        assert_eq!(
+            engine.observe_lock(due + Duration::from_secs(1)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, due);
+        assert_eq!(
+            engine.observe_time(due + InactivityEngine::DEFAULT_POWER_OFF_AFTER, || panic!(
+                "post-blank policy is independent"
+            )),
+            InactivityDecision::TimedPowerOffNow
+        );
+    }
+
+    #[test]
     fn timeout_blanks_once() {
         let started_at = Instant::now();
         let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_millis(4_999)),
+            engine.observe_time(started_at + Duration::from_millis(4_999), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(6)),
+            engine.observe_time(started_at + Duration::from_secs(6), || true),
             InactivityDecision::NoOp
         );
     }
@@ -368,11 +427,11 @@ mod tests {
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(9)),
+            engine.observe_time(started_at + Duration::from_secs(9), || true),
             InactivityDecision::BlankNow
         );
     }
@@ -402,11 +461,11 @@ mod tests {
         );
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_millis(4_999)),
+            engine.observe_time(started_at + Duration::from_millis(4_999), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::TimedPowerOffNow
         );
     }
@@ -421,20 +480,20 @@ mod tests {
         );
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, started_at + Duration::from_secs(7));
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(11)),
+            engine.observe_time(started_at + Duration::from_secs(11), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(12)),
+            engine.observe_time(started_at + Duration::from_secs(12), || true),
             InactivityDecision::TimedPowerOffNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(20)),
+            engine.observe_time(started_at + Duration::from_secs(20), || true),
             InactivityDecision::NoOp
         );
     }
@@ -449,12 +508,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(false, started_at + Duration::from_secs(5));
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(30)),
+            engine.observe_time(started_at + Duration::from_secs(30), || true),
             InactivityDecision::NoOp
         );
         assert!(!engine.timed_power_off_pending());
@@ -471,7 +530,7 @@ mod tests {
         let deadline = started_at + Duration::from_secs(10);
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, started_at + Duration::from_secs(5));
@@ -479,7 +538,10 @@ mod tests {
             engine.observe_activity(InactivityObservation::UserActivityObserved, deadline),
             InactivityDecision::RestoreNow
         );
-        assert_eq!(engine.observe_time(deadline), InactivityDecision::NoOp);
+        assert_eq!(
+            engine.observe_time(deadline, || true),
+            InactivityDecision::NoOp
+        );
     }
 
     #[test]
@@ -491,7 +553,7 @@ mod tests {
         assert_eq!(engine.observe_provider_idle(), InactivityDecision::BlankNow);
         engine.complete_blank(true, started_at);
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::TimedPowerOffNow
         );
     }
@@ -511,7 +573,7 @@ mod tests {
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(30)),
+            engine.observe_time(started_at + Duration::from_secs(30), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(engine.observe_provider_idle(), InactivityDecision::BlankNow);
@@ -527,12 +589,12 @@ mod tests {
         );
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(1)),
+            engine.observe_time(started_at + Duration::from_secs(1), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, started_at + Duration::from_secs(1));
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(2)),
+            engine.observe_time(started_at + Duration::from_secs(2), || true),
             InactivityDecision::TimedPowerOffNow
         );
         assert_eq!(
@@ -543,12 +605,12 @@ mod tests {
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(4)),
+            engine.observe_time(started_at + Duration::from_secs(4), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, started_at + Duration::from_secs(4));
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::TimedPowerOffNow
         );
     }
@@ -558,7 +620,7 @@ mod tests {
         let started_at = Instant::now();
         let mut engine = test_engine(started_at);
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
 
@@ -570,11 +632,11 @@ mod tests {
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(10)),
+            engine.observe_time(started_at + Duration::from_secs(10), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(11)),
+            engine.observe_time(started_at + Duration::from_secs(11), || true),
             InactivityDecision::BlankNow
         );
     }
@@ -593,11 +655,11 @@ mod tests {
                 InactivityDecision::RestoreNow
             );
             assert_eq!(
-                engine.observe_time(started_at + Duration::from_secs(5)),
+                engine.observe_time(started_at + Duration::from_secs(5), || true),
                 InactivityDecision::NoOp
             );
             assert_eq!(
-                engine.observe_time(started_at + Duration::from_secs(9)),
+                engine.observe_time(started_at + Duration::from_secs(9), || true),
                 InactivityDecision::BlankNow
             );
         }
@@ -623,11 +685,11 @@ mod tests {
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(7)),
+            engine.observe_time(started_at + Duration::from_secs(7), || true),
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(9)),
+            engine.observe_time(started_at + Duration::from_secs(9), || true),
             InactivityDecision::BlankNow
         );
     }
@@ -642,7 +704,7 @@ mod tests {
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         assert_eq!(engine.time_until_action(started_at), None);
@@ -665,7 +727,7 @@ mod tests {
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(7)),
+            engine.observe_time(started_at + Duration::from_secs(7), || true),
             InactivityDecision::BlankNow
         );
     }
@@ -729,7 +791,7 @@ mod tests {
         let mut engine = test_engine(started_at);
 
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(5)),
+            engine.observe_time(started_at + Duration::from_secs(5), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, started_at + Duration::from_secs(5));
@@ -838,7 +900,7 @@ mod tests {
             InactivityDecision::RestoreNow
         );
         assert_eq!(
-            engine.observe_time(started_at + Duration::from_secs(7)),
+            engine.observe_time(started_at + Duration::from_secs(7), || true),
             InactivityDecision::BlankNow
         );
         assert_eq!(
@@ -861,7 +923,7 @@ mod tests {
         let start = Instant::now();
         let mut engine = InactivityEngine::new(Duration::from_secs(1), start);
         assert_eq!(
-            engine.observe_time(start + Duration::from_secs(1)),
+            engine.observe_time(start + Duration::from_secs(1), || true),
             InactivityDecision::BlankNow
         );
         engine.complete_blank(true, start + Duration::from_secs(1));
@@ -883,7 +945,7 @@ mod tests {
             InactivityDecision::NoOp
         );
         assert_eq!(
-            engine.observe_time(input_at + Duration::from_secs(1)),
+            engine.observe_time(input_at + Duration::from_secs(1), || true),
             InactivityDecision::BlankNow
         );
     }

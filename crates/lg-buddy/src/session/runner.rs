@@ -24,6 +24,7 @@ use crate::config::{
     DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
+use crate::inhibition::Inhibition;
 use crate::lifecycle::LifecycleEvent;
 use crate::session::activity::{ActivityContributions, ActivitySource};
 use crate::session::gamepad::{
@@ -34,7 +35,9 @@ use crate::session::inactivity::{InactivityDecision, InactivityEngine, Inactivit
 use crate::session::{SessionEvent, SessionObservation};
 use crate::session_bus::{new_system_bus_client, SessionBusClient};
 use crate::session_notifications::spawn_session_notification_service;
+use crate::sources::desktop::gnome::inhibition::GnomeInhibition;
 use crate::sources::desktop::gnome::{monitor_test_timeout, GnomeSource};
+use crate::sources::desktop::powerdevil::PowerDevilInhibition;
 use crate::sources::desktop::swayidle::{run as run_swayidle_source, SwayidleSourceError};
 use crate::sources::desktop::wayland::WaylandSource;
 use crate::sources::desktop::{ActivityAdapter, ActivityStatus};
@@ -797,10 +800,6 @@ fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
     configured: ScreenBackend,
     wayland: Option<WaylandSource>,
 ) -> Result<(), SessionRunnerError> {
-    writeln!(
-        writer,
-        "LG Buddy Monitor: native inhibition honoring is temporarily unavailable on dev (#216)."
-    )?;
     let mut adapters: Vec<(ActivitySource, Arc<dyn ActivityAdapter>)> = Vec::new();
     if configured != ScreenBackend::Wayland {
         adapters.push((ActivitySource::Gnome, Arc::new(GnomeSource::default())));
@@ -858,11 +857,30 @@ where
         Arc<AtomicBool>,
     ) -> JoinHandle<()>,
 {
+    // Assemble production inhibition here, alongside the production lock
+    // observer. Tests can omit it instead of relying on an installed config
+    // and real desktop inhibition services.
+    let inhibition = match resolve_config_path_from_env() {
+        Ok(path) => {
+            let config = load_config(&path).map_err(|err| SessionRunnerError::Failed {
+                backend,
+                message: format!("failed to load inhibition config: {err}"),
+            })?;
+            Some(Inhibition::new(
+                &config,
+                Duration::from_millis(resolve_idle_timeout_ms()),
+                vec![Arc::new(GnomeInhibition::default())],
+                vec![Box::new(PowerDevilInhibition::default())],
+            ))
+        }
+        Err(ConfigPathError::NotConfigured) => None,
+    };
     run_native_session_monitor_with_lock_monitor(
         writer,
         dispatcher,
         backend,
         adapters,
+        inhibition,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
@@ -873,6 +891,7 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
+    inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -892,6 +911,7 @@ where
         backend,
         adapters,
         InitialBlankTrigger::Deadline,
+        inhibition,
         spawn_monitor,
         spawn_lock_monitor,
     )
@@ -903,12 +923,14 @@ enum InitialBlankTrigger {
     Provider,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     initial_blank_trigger: InitialBlankTrigger,
+    mut inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
 ) -> Result<(), SessionRunnerError>
@@ -964,6 +986,9 @@ where
             break;
         }
         for (_, observation, observed_at) in contributions.drain() {
+            if let Some(inhibition) = &mut inhibition {
+                inhibition.cancel();
+            }
             handle_inactivity_observation(
                 writer,
                 dispatcher,
@@ -978,6 +1003,9 @@ where
             .map(|(source, adapter)| (*source, adapter.status()))
             .collect();
         if diagnostics != last_diagnostics {
+            if let Some(inhibition) = &mut inhibition {
+                inhibition.cancel();
+            }
             for (source, status) in &diagnostics {
                 let detail = match status {
                     ActivityStatus::Available => "ready",
@@ -987,23 +1015,16 @@ where
             }
             last_diagnostics = diagnostics;
         }
-        let has_activity = initial_blank_trigger == InitialBlankTrigger::Provider
-            || adapters
-                .iter()
-                .any(|(_, adapter)| adapter.status().is_available());
-        let wait = if has_activity || inactivity.timed_power_off_pending() {
-            inactivity
-                .time_until_action(Instant::now())
-                .unwrap_or(Duration::from_millis(50))
-                .min(Duration::from_millis(50))
-        } else {
-            Duration::from_millis(50)
-        };
-        let message = match receiver.recv_timeout(wait) {
+        // A denied gate leaves the original deadline due. Keep a bounded poll
+        // cadence rather than repeatedly waiting zero time on that deadline.
+        let message = match receiver.recv_timeout(Duration::from_millis(50)) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Read activity published while waiting before acting on a deadline.
                 for (_, observation, observed_at) in contributions.drain() {
+                    if let Some(inhibition) = &mut inhibition {
+                        inhibition.cancel();
+                    }
                     handle_inactivity_observation(
                         writer,
                         dispatcher,
@@ -1019,12 +1040,35 @@ where
                         .any(|(_, adapter)| adapter.status().is_available())
                     || inactivity.timed_power_off_pending()
                 {
-                    handle_inactivity_timeout(writer, dispatcher, &mut inactivity, Instant::now())?;
+                    let now = Instant::now();
+                    handle_inactivity_timeout(writer, dispatcher, &mut inactivity, now, || {
+                        inhibition.as_mut().is_none_or(|gate| gate.can_blank(now))
+                    })?;
+                } else if let Some(inhibition) = &mut inhibition {
+                    inhibition.cancel();
                 }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        if matches!(
+            &message,
+            RunnerMessage::ActivityObservation { .. }
+                | RunnerMessage::SessionEvent {
+                    event: SessionEvent::Active
+                        | SessionEvent::WakeRequested
+                        | SessionEvent::UserActivity
+                        | SessionEvent::Lock
+                        | SessionEvent::Unlock
+                        | SessionEvent::BeforeSleep
+                        | SessionEvent::AfterResume,
+                    ..
+                }
+        ) {
+            if let Some(inhibition) = &mut inhibition {
+                inhibition.cancel();
+            }
+        }
         match message {
             RunnerMessage::ActivityObservation {
                 source,
@@ -1110,6 +1154,11 @@ where
             RunnerMessage::Diagnostic(message) => {
                 writeln!(writer, "LG Buddy Monitor: {message}")?;
             }
+            RunnerMessage::EligibilityChanged => {
+                if let Some(inhibition) = &mut inhibition {
+                    inhibition.cancel();
+                }
+            }
             RunnerMessage::MonitorExited(result) => {
                 monitor_result = result;
                 break;
@@ -1146,6 +1195,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         ScreenBackend::Swayidle,
         &[],
         InitialBlankTrigger::Provider,
+        None,
         move |sender, _contributions, stop| {
             thread::spawn(move || {
                 let event_sender = sender.clone();
@@ -1226,9 +1276,15 @@ fn resolve_lifecycle_monitor_test_event_limit() -> Option<usize> {
 
 fn spawn_logind_lock_monitor(sender: mpsc::Sender<RunnerMessage>) -> LogindLockObserver {
     let observation_sender = sender.clone();
+    let lifecycle_sender = sender.clone();
     spawn_lock_observer(
         move |observation| send_source_observation(&observation_sender, observation),
         move |err| report_logind_lock_monitor_error(&sender, err),
+        move || {
+            lifecycle_sender
+                .send(RunnerMessage::EligibilityChanged)
+                .is_ok()
+        },
     )
 }
 
@@ -1444,6 +1500,7 @@ fn run_gamepad_activity_process(sender: mpsc::Sender<RunnerMessage>, stop: Arc<A
 }
 
 enum RunnerMessage {
+    EligibilityChanged,
     SessionEvent {
         event: SessionEvent,
         source: EventSource,
@@ -1628,8 +1685,9 @@ fn handle_inactivity_timeout<W: Write, E: SessionActionExecutor>(
     dispatcher: &mut SessionEventDispatcher<E>,
     inactivity: &mut InactivityEngine,
     observed_at: Instant,
+    can_blank: impl FnOnce() -> bool,
 ) -> Result<(), SessionRunnerError> {
-    match inactivity.observe_time(observed_at) {
+    match inactivity.observe_time(observed_at, can_blank) {
         InactivityDecision::BlankNow => handle_blank_request(
             writer,
             dispatcher,
@@ -2425,6 +2483,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank when the LG Buddy timeout expires");
         handle_inactivity_timeout(
@@ -2432,6 +2491,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("do not blank repeatedly");
 
@@ -2461,6 +2521,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank at inactivity deadline");
         handle_inactivity_timeout(
@@ -2468,6 +2529,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("power off at post-blank deadline");
         handle_inactivity_timeout(
@@ -2475,6 +2537,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(3),
+            || true,
         )
         .expect("do not retry timed power-off");
 
@@ -2508,6 +2571,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("screen-off skip completes");
         handle_inactivity_timeout(
@@ -2515,6 +2579,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(30),
+            || true,
         )
         .expect("no escalation follows the skip");
 
@@ -2544,6 +2609,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank at inactivity deadline");
         handle_inactivity_observation(
@@ -2560,6 +2626,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("canceled escalation remains canceled");
 
@@ -2586,6 +2653,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank when the timeout expires");
         let mut output = Vec::new();
@@ -2604,6 +2672,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("activity reset should keep the screen active");
 
@@ -2630,6 +2699,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank when the timeout expires");
 
@@ -2692,6 +2762,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let result = activity_receiver
@@ -2745,6 +2816,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Wayland,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(150));
@@ -2791,6 +2863,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
                     let locked_at = Instant::now();
@@ -2882,6 +2955,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("blank when the timeout expires");
 
@@ -2900,6 +2974,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("the original deadline must stay retired");
         handle_inactivity_timeout(
@@ -2907,6 +2982,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_millis(2_100),
+            || true,
         )
         .expect("blank at the reset deadline");
 
@@ -2930,6 +3006,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(1),
+            || true,
         )
         .expect("initial blank attempt should be logged");
         handle_inactivity_timeout(
@@ -2937,6 +3014,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             &mut inactivity,
             started_at + Duration::from_secs(2),
+            || true,
         )
         .expect("elapsed time should not retry blank");
 
@@ -3034,6 +3112,13 @@ system_sleep_wake_policy={policy}
     #[test]
     fn composed_sources_restore_once_without_availability_reports() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // The shared loop's injected capabilities must not require an installed
+        // config. A developer's real config otherwise hides this CI regression.
+        let previous_config = std::env::var_os("LG_BUDDY_CONFIG");
+        std::env::set_var(
+            "LG_BUDDY_CONFIG",
+            unique_config_path("missing-monitor-config"),
+        );
         let runtime_dir = unique_config_path("composed-activity");
         ScreenOwnershipMarker::new(runtime_dir.clone())
             .create()
@@ -3052,6 +3137,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            None,
             |sender, sources, _stop| {
                 thread::spawn(move || {
                     use super::ActivitySource;
@@ -3089,6 +3175,10 @@ system_sleep_wake_policy={policy}
         std::env::remove_var("LG_BUDDY_SESSION_RUNTIME_DIR");
         std::env::remove_var("LG_BUDDY_IDLE_TIMEOUT");
         std::env::remove_var(super::GAMEPAD_ACTIVITY_SOURCE_ENV);
+        match previous_config {
+            Some(path) => std::env::set_var("LG_BUDDY_CONFIG", path),
+            None => std::env::remove_var("LG_BUDDY_CONFIG"),
+        }
         fs::remove_dir_all(runtime_dir).unwrap();
         result.unwrap();
         assert_eq!(dispatcher.executor.screen_on_calls, 1);

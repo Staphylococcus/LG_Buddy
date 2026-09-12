@@ -104,22 +104,42 @@ cancels quiet connections and joins their threads.
 desktop activity to the shared policy. Its existing automatic fallback remains
 when no native activity capability is available at startup; #132 removes it.
 
-**Dev boundary (#221):** native inhibition honoring is temporarily absent.
-Inhibition notifications, permission state and release timing have been removed
-from the activity stream and inactivity engine. The stored preference remains
-compatible, and monitor startup reports the temporary limitation. #222 provides
-standalone push inhibition, #223 provides pull inhibition, and #224 evaluates the
-honoring preference; #225 integrates the subsystem and Boolean gate. This intermediate
-runtime must not be promoted to prerelease or main before that integration and
-#89's MVP readiness checks are complete. Explicit lock, ownership/restore and
-ordinary activity deadlines retain their existing policy.
-
-### Independent inhibition capabilities (#222, #223, #224)
+### Independent inhibition and the blanking gate
 
 An adapter can supply activity, inhibition, or both. Each capability independently
 uses push or pull according to its source. Activity observations stay in the
-activity path. Inhibition supplies permission; the intended meeting point is
-`can_blank()` at the automatic idle-blanking decision, integrated in #225.
+activity path. The native monitor starts GNOME's push inhibition and PowerDevil's
+pull inhibition independently of the configured activity sources. Their only
+policy meeting point is `can_blank()` at an automatic idle-blanking decision.
+
+The inactivity engine invokes this Boolean gate only when its ordinary activity
+deadline is due. A false result leaves the deadline and phase untouched. Explicit
+lock, restore/ownership and post-blank power-off retain their existing semantics.
+The runner checks deadlines at a bounded 50 ms cadence, so a denied deadline
+does not cause a busy loop.
+
+`Inhibition` owns the source sections, honoring preference, release delay and
+pending pull work. Push workers live with the facade; one pull worker retains
+adapter diagnostic history and services bounded requests. Each attempt has its
+own cancellation flag and reply channel. Input, activity availability changes,
+logind sleep/resume or owner changes, configuration changes and shutdown discard
+affected pending checks. The logind observer supplies cancellation separately
+from activity and never duplicates the lifecycle service's TV actions.
+
+`can_blank()` performs no protocol I/O. Pending work returns false for that
+attempt; completed failures remain neutral source contributions. Both sections
+must allow and the configured idle timeout must have elapsed since the latest
+observed release. Release timestamps come from adapters, not from aggregate
+Boolean changes, so repeated clear checks, delayed delivery, absence and recovery
+do not manufacture releases. Pull-only transitions between checks cannot be
+reconstructed. A completed pull answer is consumed once; another attempt needs a
+fresh query. Retries are limited to once per second after completion. Push source
+changes invalidate pending work; refreshing an unchanged value does not.
+
+`diagnostics()` returns the same evaluation as the most recent Boolean call,
+including the preference, evaluated source contributions, pending work and
+release deadline. A missing section means it was not evaluated on that call.
+Diagnostics are separate from the inactivity engine's decision.
 
 `inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
 state, and `evaluate()` returns a Boolean permission with matching diagnostics
@@ -149,8 +169,8 @@ permissions, and returns the same section result and per-source diagnostic
 shape as push evaluation. It runs on a worker; exclusive mutable access orders
 requests without a separate request-generation tracker. Cancellation returns
 no verdict. A completed result belongs to that attempt and cannot be reused to
-authorize a later blank attempt. #225 owns consuming completions for the current
-attempt and joining the sections.
+authorize a later blank attempt. The facade consumes completions only for the
+current attempt and joins the sections.
 
 PowerDevil's capability lives in `sources/desktop/powerdevil.rs`. It opens a
 session-bus connection per check, discovers `org.kde.Solid.PowerManagement`
@@ -166,9 +186,8 @@ absence, cancelled in-flight checks and owner replacement break that continuity;
 recovery does not manufacture a release. Failures and absence are neutral under
 the same observed-inhibition rule as push. GNOME remains one push contribution.
 
-These capabilities are independently testable but are not started by the monitor yet.
-They read no preferences, apply no aggregate release delay, and send no
-activity events or TV actions. #225 owns their runtime integration.
+The adapters read no preferences, apply no aggregate release delay, and send no
+activity events or TV actions. Their facade owns that reconciliation.
 
 `evaluate_inhibition_preference(&Config)` is a separate, pure section. It reads
 the existing effective `screen_honor_idle_inhibitors` value and returns
@@ -184,9 +203,9 @@ CLI and GUI preference edits retain the existing persist-then-restart path for
 `LG_Buddy_screen.service`. A successful restart replaces the process and its
 pending attempts; the new runtime reads the new configuration. Apply failures
 remain reported separately from saved values and use the existing retry path.
-The preference evaluator retains no state. #225 must evaluate it for the current
-attempt and cancel any pending attempt before applying an in-process config
-reload; old completions cannot become authoritative under a new preference.
+The preference evaluator retains no state. The facade consumes the loaded policy
+and `configure()` cancels any pending attempt before changing the preference or
+release delay. Old completions cannot become authoritative under a new policy.
 
 ### PowerDevil route coverage
 
@@ -365,7 +384,8 @@ The code split is:
 - `crates/lg-buddy/src/session/activity.rs`
   - bounded, identified contributions, observation ordering and source diagnostics
 - `crates/lg-buddy/src/inhibition.rs`
-  - independent push inhibition contract, Boolean aggregation, and diagnostics
+  - push/pull contracts, source reconciliation, preference, release timing,
+    cancellable checks and Boolean gate diagnostics
 - `crates/lg-buddy/src/session/actions.rs`
   - action dependency assembly and native TV client ownership across compatible
     events; one-shot commands use the same assembly with a finite lifetime

@@ -262,9 +262,9 @@ Examples:
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
-- the explicit dev-only absence of native inhibition after #221; #225 restores
-  integrated inhibition tests before promotion, including overlap, playback
-  before/after startup and a full timeout after the last release
+- the Boolean inhibition gate, including overlapping sources, playback
+  before/after startup, a full timeout after the last observed release, and
+  cancelled input/configuration/lifecycle attempts without stale actions
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
   restore trigger, while observation-time tests cover pre-lock, post-lock grace,
@@ -287,7 +287,9 @@ checks existing and later playback inhibitors, overlap, quiet subscriptions,
 loss/recovery and prompt permission reads during a slow query. Only observed
 inhibition denies permission; tests verify that pending reads retain the last
 value and source loss removes its contribution. These are
-component checks; full monitor/TV acceptance remains part of #225.
+component checks. `idle_inhibition.feature` exercises the real monitor and TV
+policy with private GNOME/PowerDevil services: playback, release delay, neutral
+query failure, delayed replies cancelled by gamepad input, restore and lock.
 
 Pull inhibition has colocated contract and adapter tests for fresh queries,
 Boolean aggregation, neutral absence/failure, bounded diagnostics, cancellation,
@@ -305,8 +307,11 @@ from desktop selection and activity policy. `tests/settings_operations.rs`
 exercises set, disable, re-enable and reset through the real settings writer and
 a mocked systemctl restart. It verifies that the restart sees the saved file and
 that the inhibition evaluator agrees with the effective setting after reload.
-Preference evaluation has no source or release-timing dependency. #225 owns the
-end-to-end override matrix and cancellation of attempts on in-process reload.
+Preference evaluation has no source or release-timing dependency. Facade tests
+cover the override, release timing, cancellation on policy changes, and bounded
+retries. Engine tests use only Boolean gates and verify that denial changes
+neither the activity deadline nor the phase. Private-bus composition tests check
+GNOME and PowerDevil together through the production facade.
 
 For live Plasma validation of #223, record Plasma/PowerDevil and application
 versions and the application's inhibition route, then inspect effective state:
