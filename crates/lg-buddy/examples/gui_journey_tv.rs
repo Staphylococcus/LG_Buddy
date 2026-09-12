@@ -149,8 +149,10 @@ fn valid_magic_packet(packet: &[u8], mac: &MacAddress) -> bool {
     packet.len() == MAGIC_PACKET_LEN
         && packet[..6] == [0xff; 6]
         && packet[6..]
-            .chunks_exact(6)
-            .all(|chunk| chunk == mac.octets())
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .all(|chunk| *chunk == mac.octets())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
