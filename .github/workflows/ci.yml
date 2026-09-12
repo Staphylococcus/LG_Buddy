@@ -50,6 +50,7 @@ jobs:
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
           cargo build --locked -p lg-buddy --example gui_journey_tv
+          python3 scripts/test-tv-fixture.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
           dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh \

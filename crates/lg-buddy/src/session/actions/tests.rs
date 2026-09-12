@@ -239,7 +239,7 @@ fn closed_session_recovers_input_before_next_idle_decision() {
 
         // Model switching inputs on the TV while the monitor's socket closes.
         server.set_input(input);
-        server.close_active_connection();
+        server.close_active_connections();
         output.clear();
         dispatcher
             .dispatch_event(&mut output, SessionEvent::Idle)
