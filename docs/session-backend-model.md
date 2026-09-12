@@ -211,8 +211,9 @@ release delay. Old completions cannot become authoritative under a new policy.
 
 The query delegates policy to PowerDevil, including activation delays, filtering
 and user overrides; LG Buddy does not count requested inhibitors or separately
-interpret logind's list. The following routes were traced in upstream source,
-not validated in a live Plasma session:
+interpret logind's list. The following table records upstream source tracing;
+subsequent live checks are documented in the
+[desktop validation record](desktop-session-validation.md).
 
 | Application route | Relationship to the effective screen-policy query |
 | --- | --- |
@@ -224,9 +225,11 @@ not validated in a live Plasma session:
 | Native Wayland idle inhibitor | KWin feeds this into its own input idle-inhibitor set. This is a separate path; PowerDevil coverage is not established. [KWin implementation](https://github.com/KDE/kwin/blob/b3e286c172bb9df7ee8ba8f1ef3a8ca21a8c770f/src/idle_inhibition.cpp#L58-L81) |
 
 These are version-specific source findings, not a promise that every application
-uses a covered route. Live Plasma validation and native Wayland coverage remain
-open under #216/#223; see [Testing strategy](testing-strategy.md). Idle-notify
-remains an activity protocol and is not used as an inhibition query.
+uses a covered route. The [desktop validation record](desktop-session-validation.md)
+documents subsequent live checks and confirms that native-only mpv inhibition
+does not reach PowerDevil. PowerDevil is the agreed Plasma inhibition boundary
+for the MVP; native-only KWin coverage is outside that gate. Idle-notify remains
+an activity protocol and is not used as an inhibition query.
 
 ## Provider Map
 
@@ -337,8 +340,8 @@ activity; `idled` remains observational, so only LG Buddy's inactivity deadline
 can trigger blanking.
 
 Only `get_input_idle_notification` is used by this activity adapter. Idle-notify
-does not supply an inhibition capability; #216 tracks native Wayland inhibition
-coverage separately.
+does not supply an inhibition capability. Native-only KWin inhibition is outside
+the agreed GNOME/Plasma MVP scope.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
 of the bound notifier, or removal of the last seat causes the adapter to rebuild

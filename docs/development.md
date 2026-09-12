@@ -42,8 +42,9 @@ Native monitoring honors the opt-in **Allow apps to prevent idle blanking**
 setting through independent GNOME SessionManager and PowerDevil inhibition
 capabilities. Activity tests require Mutter user-active watches; SessionManager
 availability must not determine whether activity monitoring works. Private-bus
-fixtures cover the integrated gate. Live Plasma/application-route validation and
-native Wayland inhibition coverage remain open before the #89 MVP can be promoted.
+fixtures cover the integrated gate. The [desktop validation record](desktop-session-validation.md)
+documents live GNOME/Plasma coverage. PowerDevil is the agreed Plasma inhibition
+boundary for the #89 MVP; native-only KWin inhibition is outside that gate.
 
 The C toolchain is required because `cargo build` now compiles vendored
 `libdbus` as part of the dependency graph. On common Linux distributions that

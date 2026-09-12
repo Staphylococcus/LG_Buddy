@@ -567,21 +567,36 @@ fn prepare_monitor_backend(
     probe: &mut SystemBackendProbe,
     configured: ScreenBackend,
 ) -> Result<(BackendResolution, Option<WaylandSource>), BackendDetectionError> {
+    let resolution = resolve_monitor_backend(probe, configured)?;
+    Ok((resolution, probe.take_wayland_source()))
+}
+
+fn resolve_monitor_backend(
+    probe: &impl BackendProbe,
+    configured: ScreenBackend,
+) -> Result<BackendResolution, BackendDetectionError> {
     // Probe both interfaces before starting threads: WAYLAND_SOCKET is a
     // one-shot inherited descriptor consumed by the initial connection.
     if configured == ScreenBackend::Auto {
         let gnome = resolve_backend_with_probe(probe, ScreenBackend::Gnome).is_ok();
         let wayland = probe.wayland_capabilities().is_ok();
         if gnome || wayland {
-            return Ok((
-                BackendResolution::selected(ScreenBackend::Auto, None),
-                probe.take_wayland_source(),
-            ));
+            return Ok(BackendResolution::selected(ScreenBackend::Auto, None));
         }
     }
     let resolution = resolve_backend_with_probe(probe, configured)?;
-    let source = probe.take_wayland_source();
-    Ok((resolution, source))
+    // A native interface may appear between the first probes and the legacy
+    // fallback probe. Automatic monitoring still composes both adapters.
+    if configured == ScreenBackend::Auto
+        && matches!(
+            resolution.backend(),
+            ScreenBackend::Gnome | ScreenBackend::Wayland
+        )
+    {
+        Ok(BackendResolution::selected(ScreenBackend::Auto, None))
+    } else {
+        Ok(resolution)
+    }
 }
 
 fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
@@ -1815,6 +1830,99 @@ mod tests {
 
     fn env_lock() -> &'static Mutex<()> {
         crate::session::test_env_lock()
+    }
+
+    struct StartingDesktop {
+        backend: ScreenBackend,
+        probes: std::cell::Cell<usize>,
+        ready_after: usize,
+    }
+
+    impl StartingDesktop {
+        fn available(&self, backend: ScreenBackend) -> bool {
+            if self.backend != backend {
+                return false;
+            }
+            let count = self.probes.get();
+            self.probes.set(count + 1);
+            count >= self.ready_after
+        }
+    }
+
+    impl crate::backend::BackendProbe for StartingDesktop {
+        fn has_command(&self, command: &str) -> bool {
+            command == "swayidle" && self.backend == ScreenBackend::Swayidle
+        }
+
+        fn gnome_shell_available(&self) -> bool {
+            self.available(ScreenBackend::Gnome)
+        }
+
+        fn gnome_screen_saver_available(&self) -> bool {
+            true
+        }
+
+        fn gnome_idle_monitor_available(&self) -> bool {
+            true
+        }
+
+        fn wayland_capabilities(
+            &self,
+        ) -> Result<crate::sources::desktop::wayland::WaylandProviderCapabilities, String> {
+            if self.available(ScreenBackend::Wayland) {
+                Ok(
+                    crate::sources::desktop::wayland::WaylandProviderCapabilities {
+                        idle_notifier_version: 2,
+                        seat_count: 1,
+                    },
+                )
+            } else {
+                Err("compositor is starting".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_monitor_composes_native_sources_that_appear_during_fallback_probing() {
+        for backend in [ScreenBackend::Gnome, ScreenBackend::Wayland] {
+            let probe = StartingDesktop {
+                backend,
+                probes: std::cell::Cell::new(0),
+                ready_after: 1,
+            };
+            let resolution = super::resolve_monitor_backend(&probe, ScreenBackend::Auto).unwrap();
+            assert_eq!(resolution.backend(), ScreenBackend::Auto, "{backend:?}");
+            assert_eq!(probe.probes.get(), 2);
+        }
+    }
+
+    #[test]
+    fn monitor_preserves_explicit_selection_and_automatic_swayidle_compatibility() {
+        for backend in [
+            ScreenBackend::Gnome,
+            ScreenBackend::Wayland,
+            ScreenBackend::Swayidle,
+        ] {
+            let probe = StartingDesktop {
+                backend,
+                probes: std::cell::Cell::new(0),
+                ready_after: 0,
+            };
+            assert_eq!(
+                super::resolve_monitor_backend(&probe, backend)
+                    .unwrap()
+                    .backend(),
+                backend
+            );
+            if backend == ScreenBackend::Swayidle {
+                assert_eq!(
+                    super::resolve_monitor_backend(&probe, ScreenBackend::Auto)
+                        .unwrap()
+                        .backend(),
+                    backend
+                );
+            }
+        }
     }
 
     #[derive(Debug, Default)]

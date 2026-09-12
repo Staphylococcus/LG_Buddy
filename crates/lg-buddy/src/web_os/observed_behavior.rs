@@ -385,3 +385,25 @@ fn power_off_transitions_active_tv_and_rejects_immediate_registration() {
     assert_eq!(server.snapshot().connection_count, 2);
     server.finish();
 }
+
+// Two LG Buddy services operated together against the physical TV:
+// https://github.com/Staphylococcus/LG_Buddy/issues/217#issuecomment-5647209853
+// This characterizes shared TV state, not compositor HDMI signal availability.
+#[test]
+fn independent_clients_observe_the_same_tv_screen_state() {
+    let server =
+        WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+    let mut monitor = server.connect_authenticated().expect("monitor connection");
+    let mut lifecycle = server
+        .connect_authenticated()
+        .expect("lifecycle connection");
+    assert_eq!(server.snapshot().active_connection_count, 2);
+    monitor.turn_screen_off().expect("blank through monitor");
+    assert_eq!(lifecycle.power_state().unwrap(), WebOsPowerState::ScreenOff);
+    lifecycle
+        .turn_screen_on()
+        .expect("unblank through other client");
+    assert_eq!(monitor.power_state().unwrap(), WebOsPowerState::Active);
+    assert_eq!(server.snapshot().connection_count, 2);
+    server.finish();
+}

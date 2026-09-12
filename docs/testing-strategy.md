@@ -128,6 +128,10 @@ This layer asks:
 
 This is the thinnest layer, but it is the one that keeps the other two honest.
 
+The [GNOME/Plasma VM validation record](desktop-session-validation.md) documents
+desktop switching with a retained user manager, tested inhibition routes, a
+startup race, lifecycle recovery, and the boundary of native Wayland inhibition coverage.
+
 ### What belongs here
 
 - readable acceptance scenarios for the main flows
@@ -330,8 +334,9 @@ Test at least the KDE portal idle route and ScreenSaver D-Bus route where used
 by the reporter's applications. Test native Wayland-only inhibition separately;
 do not infer its coverage from portal success. The source-traced route table in
 [Session backend model](session-backend-model.md#powerdevil-route-coverage) is
-not live validation. This work was implemented on GNOME; the Plasma checks and
-remaining native Wayland coverage belong to #216/#223 before MVP completion.
+not itself live validation. The [desktop validation record](desktop-session-validation.md)
+contains the subsequent Plasma checks. PowerDevil is the agreed MVP inhibition
+boundary; native-only KWin inhibition does not block #217 or the MVP.
 
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
