@@ -149,9 +149,12 @@ D-Bus endpoint (`Session1.GetMonitorDiagnostics`). The graphical diagnostic
 report reads one snapshot from the current unique bus owner, without starting
 a service or querying inhibitors. Activity availability and contribution ages
 are separate from the inhibition preference, push/pull check results, pending
-work, release delay and aggregate. Evaluation age belongs to the captured
-Boolean call; reading the report never grants permission for another attempt.
-Activity/lifecycle cancellation clears the previous evaluation.
+work, release delay and aggregate. The report distinguishes the current gate,
+pending work and pull retry timing from the last completed evaluation for
+the current idle attempt. That completed evaluation retains its own age,
+sections and aggregate between retries; it is explicitly historical and never
+grants permission for another call. Activity/lifecycle cancellation clears both
+the current and completed observations.
 
 Expected interfaces and KWin provisioning history have separate report sections.
 A successful setup record is historical; the running monitor reports the KWin

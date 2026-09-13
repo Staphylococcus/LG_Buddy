@@ -94,6 +94,19 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
         assert!(inhibition.contains("aggregate can_blank: false"));
         assert!(inhibition.contains("evaluation age:"));
     }
+    // Between bounded retries, completed source evidence remains readable as
+    // history, separately from the current gate's lack of fresh permission.
+    thread::sleep(Duration::from_millis(150));
+    let (_, history, _) = read().unwrap();
+    assert!(history.contains("Latest completed evaluation"), "{history}");
+    assert!(
+        history.contains("source: powerdevil; result: inhibited"),
+        "{history}"
+    );
+    assert!(
+        history.contains("current gate can_blank: false"),
+        "{history}"
+    );
     assert_eq!(
         powerdevil.query_count(),
         checks,

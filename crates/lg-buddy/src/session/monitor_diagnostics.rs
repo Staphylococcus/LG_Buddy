@@ -24,6 +24,8 @@ struct Snapshot {
     configured: Option<ScreenBackend>,
     activity: Vec<(&'static str, ActivityStatus, Option<Instant>)>,
     inhibition: Option<BlankingEvaluation>,
+    completed_inhibition: Option<BlankingEvaluation>,
+    pull_retry_at: Option<Instant>,
     preference: Option<InhibitionPreferenceEvaluation>,
     next_action_at: Option<Instant>,
     timed_power_off_pending: bool,
@@ -63,6 +65,10 @@ impl MonitorDiagnostics {
                 })
                 .collect(),
             inhibition: inhibition.and_then(Inhibition::diagnostics).cloned(),
+            completed_inhibition: inhibition
+                .and_then(Inhibition::completed_diagnostics)
+                .cloned(),
+            pull_retry_at: inhibition.and_then(Inhibition::pull_retry_at),
             preference: inhibition.map(Inhibition::preference_diagnostics),
             next_action_at: inactivity
                 .time_until_action(now)
@@ -142,13 +148,38 @@ impl MonitorDiagnostics {
             )
             .unwrap();
         }
-        if let Some(evaluation) = &state.inhibition {
+        if let Some(current) = &state.inhibition {
             writeln!(
                 inhibition,
-                "evaluation age: {}\naggregate can_blank: {}\npull work pending: {}",
+                "current gate can_blank: {}\npull work pending: {}",
+                current.can_blank, current.checking
+            )
+            .unwrap();
+            if !current.checking {
+                if let Some(retry_at) = state.pull_retry_at {
+                    writeln!(
+                        inhibition,
+                        "pull retry interval remaining: {} ms",
+                        retry_at.saturating_duration_since(now).as_millis()
+                    )
+                    .unwrap();
+                }
+            }
+            let evaluation = if let Some(completed) = &state.completed_inhibition {
+                inhibition
+                    .push_str("Latest completed evaluation for this idle attempt (historical):\n");
+                completed
+            } else {
+                inhibition.push_str(
+                    "No completed evaluation for this idle attempt; current partial evaluation:\n",
+                );
+                current
+            };
+            writeln!(
+                inhibition,
+                "evaluation age: {}\naggregate can_blank: {}",
                 age(Some(evaluation.evaluated_at), now),
-                evaluation.can_blank,
-                evaluation.checking
+                evaluation.can_blank
             )
             .unwrap();
             section(&mut inhibition, "push", evaluation.push.as_ref(), now);
