@@ -344,8 +344,10 @@ Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection
 cases report a precise reason, and automatic native monitoring composes available
-sources. Existing swayidle fallback coverage remains until #132. Release-facing changes must
-keep the static x86_64 musl build and release-bundle smoke test green, including
+sources. Verify automatic monitoring never probes or starts swayidle, even when
+it is installed, and retain explicit legacy swayidle coverage. Release-facing
+changes must keep the static x86_64 musl build and release-bundle smoke test green
+on a host without swayidle, including
 preservation and deprecation reporting for an existing `swayidle` config.
 For the completed inhibition integration (#225), start real video playback
 before and after the monitor: disabled

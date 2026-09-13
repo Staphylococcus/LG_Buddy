@@ -135,14 +135,37 @@ particular compatible desktop. See the [session backend model](session-backend-m
 for compatibility details, including the deprecated `swayidle` option.
 
 This preference applies to the native GNOME and Wayland integrations. The
-deprecated `swayidle` integration always honors app inhibition, including when
-**Automatic** falls back to it. Selecting `swayidle` hides this preference.
+deprecated, explicitly selected `swayidle` integration always honors app
+inhibition. Selecting `swayidle` hides this preference. **Automatic** uses native
+sources only and never falls back to swayidle.
 
 Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**,
 **Desktop integration**, and **Idle timeout**
 while keeping their saved values for when you turn it back on. **Restore policy**
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.
+
+<a id="external-idle-automation"></a>
+## External idle automation
+
+When native idle monitoring is unavailable, disable **Idle blanking** to keep
+TV controls, GUI/CLI operation, session notifications and separately configured
+TV Sleep & Wake available. Missing optional inhibition sources do not require
+this: LG Buddy continues checking the sources that are available.
+
+You can manage an external swayidle process through the public screen commands:
+
+```bash
+lg-buddy settings set screen.idle_blank disabled
+swayidle -w timeout 300 'lg-buddy screen off' resume 'lg-buddy screen on'
+```
+
+You own swayidle installation, startup and timing. Leave LG Buddy's session
+service enabled. The public commands retain TV input checks, ownership and
+restore policy. This basic recipe does not provide integrated gamepad activity,
+lock-triggered blanking or delayed power-off. It is separate from the deprecated
+built-in `screen.backend=swayidle` integration, which remains available for
+existing explicit configurations until 2.0.0.
 
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad

@@ -586,8 +586,8 @@ fn resolve_monitor_backend(
         }
     }
     let resolution = resolve_backend_with_probe(probe, configured)?;
-    // A native interface may appear between the first probes and the legacy
-    // fallback probe. Automatic monitoring still composes both adapters.
+    // A native interface may appear between the first probes and the compatibility
+    // detection retry. Automatic monitoring still composes both adapters.
     if configured == ScreenBackend::Auto
         && matches!(
             resolution.backend(),
@@ -634,7 +634,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
 
     // Native probing must consume an inherited WAYLAND_SOCKET before this
     // thread starts. The same probe is retained for every later retry so the
-    // automatic fallback policy cannot forget that one-shot socket state.
+    // native retries cannot forget that one-shot socket state.
     let _session_service = match spawn_session_notification_service() {
         Ok(service) => Some(service),
         Err(err) => {
@@ -1901,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_preserves_explicit_selection_and_automatic_swayidle_compatibility() {
+    fn monitor_preserves_explicit_selection_and_no_automatic_swayidle() {
         for backend in [
             ScreenBackend::Gnome,
             ScreenBackend::Wayland,
@@ -1919,12 +1919,7 @@ mod tests {
                 backend
             );
             if backend == ScreenBackend::Swayidle {
-                assert_eq!(
-                    super::resolve_monitor_backend(&probe, ScreenBackend::Auto)
-                        .unwrap()
-                        .backend(),
-                    backend
-                );
+                assert!(super::resolve_monitor_backend(&probe, ScreenBackend::Auto).is_err());
             }
         }
     }

@@ -267,12 +267,14 @@ fn diagnostic_configured_backend(
 
 fn conservative_backend_observation(configured: ScreenBackend, session: &str) -> String {
     let mut body = String::new();
-    body.push_str("swayidle fallback command: ");
-    body.push_str(if command_available("swayidle") {
-        "available in PATH\n"
-    } else {
-        "not found in PATH\n"
-    });
+    if configured == ScreenBackend::Swayidle {
+        body.push_str("explicit legacy swayidle command: ");
+        body.push_str(if command_available("swayidle") {
+            "available in PATH\n"
+        } else {
+            "not found in PATH\n"
+        });
+    }
 
     body.push_str("GNOME session interfaces: ");
     let gnome = gnome_interface_observation();
@@ -295,7 +297,7 @@ fn conservative_backend_observation(configured: ScreenBackend, session: &str) ->
             }
         }
         ScreenBackend::Auto => {
-            body.push_str("capability observation: automatic selection is configured; GNOME names and swayidle availability above are bounded observations. Native Wayland registry probing was omitted because its roundtrip is not bounded and may consume an inherited socket.\n");
+            body.push_str("capability observation: automatic native source composition is configured; the GNOME names above are bounded observations. Native Wayland registry probing was omitted because its roundtrip is not bounded and may consume an inherited socket.\n");
         }
     }
     body.push_str("These are current capability observations, not proof that a running service is using the backend.\n");

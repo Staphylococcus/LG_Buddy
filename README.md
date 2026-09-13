@@ -27,7 +27,7 @@ Screenshots use sample TV data.
 
 ## Desktop Compatibility
 
-| What you can do | GNOME | Compatible native Wayland | Wayland with `swayidle` | Other Linux sessions |
+| What you can do | GNOME | Compatible native Wayland | Explicit legacy `swayidle` | Other Linux sessions |
 | --- | --- | --- | --- | --- |
 | Turn the TV on and off with your PC | ✅ | ✅ | ✅ | ✅ |
 | Blank the panel while away and restore it on return | ✅ | ✅ | ✅ | ❌ |
@@ -35,8 +35,8 @@ Screenshots use sample TV data.
 | Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ | ✅ |
 | Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ | ✅ |
 
-Most modern Linux desktop environments are supported. Automatic desktop detection is the default; most users
-can leave it selected. If the TV does not blank or restore as expected, follow
+Automatic monitoring uses the available native GNOME and Wayland sources.
+The normal path does not probe or require swayidle. If the TV does not blank or restore as expected, follow
 the [screen behavior and troubleshooting guide](docs/user-guide.md#automatic-screen-blanking).
 
 ## Before You Install
@@ -78,8 +78,10 @@ sudo pacman -S gtk4 libadwaita polkit
 
 </details>
 
-Older desktops that need the deprecated `swayidle` integration must install
-`swayidle` separately.
+Existing explicit `swayidle` configurations remain supported until 2.0.0 and
+require a separately installed command. Automatic monitoring never selects it.
+Without native idle support, disable **Idle blanking** to keep other LG Buddy
+features available, or use [external idle automation](docs/user-guide.md#external-idle-automation).
 
 The shell installer supports conventional Linux installations with writable
 system locations. Official NixOS support is planned for 3.0.0; see
