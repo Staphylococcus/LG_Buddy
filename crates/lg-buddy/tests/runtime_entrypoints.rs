@@ -47,7 +47,9 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
         .env_remove("WAYLAND_SOCKET")
         .env("LG_BUDDY_IDLE_TIMEOUT", "1")
         .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
-        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "15")
+        // Full diagnostics include several separately bounded host probes.
+        // Keep the monitor alive through those probes, then stop it explicitly.
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -97,6 +99,11 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
         checks,
         "reading diagnostics must not query or authorize inhibition"
     );
+    bus.schedule_user_activity(Duration::ZERO);
+    wait_until(Duration::from_secs(2), || {
+        read()
+            .is_some_and(|(_, inhibition, _)| inhibition.contains("No active blanking evaluation"))
+    });
     // libdbus caches its session address process-wide; earlier integration
     // tests use different private buses. Collect in a fresh application process.
     let report = std::process::Command::new(std::env::current_exe().unwrap())
@@ -109,11 +116,6 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
         .output()
         .unwrap();
     assert!(report.status.success(), "{report:?}");
-    bus.schedule_user_activity(Duration::ZERO);
-    wait_until(Duration::from_secs(2), || {
-        read()
-            .is_some_and(|(_, inhibition, _)| inhibition.contains("No active blanking evaluation"))
-    });
     assert!(child.try_wait().unwrap().is_none());
     child.kill().unwrap();
     child.wait().unwrap();
