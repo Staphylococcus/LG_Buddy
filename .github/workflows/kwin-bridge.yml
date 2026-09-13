@@ -1,0 +1,39 @@
+name: KWin bridge prebuilts
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: [43, 44]
+    container:
+      image: fedora:${{ matrix.fedora }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Install matching KWin build and loader-test dependencies
+        run: >-
+          dnf --setopt=install_weak_deps=False install -y
+          kwin kwin-devel cmake gcc-c++ extra-cmake-modules qt6-qtbase-devel
+          libepoxy-devel libdrm-devel binutils findutils
+          dbus-daemon systemd mesa-dri-drivers xkeyboard-config
+      - name: Build versioned prebuilt and metadata
+        run: bash data/kwin/build.sh data/kwin/source dist/kwin
+      - name: Check provisioning and privileged installation
+        run: bash scripts/test-kwin-setup.sh
+      - name: Verify the plugin in a real headless KWin
+        run: timeout 60 dbus-run-session -- bash scripts/test-kwin-plugin.sh dist/kwin
+      - name: Upload the verified prebuilt
+        uses: actions/upload-artifact@v6
+        with:
+          name: kwin-bridge-fedora-${{ matrix.fedora }}
+          path: dist/kwin/
+          if-no-files-found: error

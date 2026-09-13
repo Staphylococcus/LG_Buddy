@@ -86,6 +86,16 @@ install -m 644 "$REPO_ROOT/io.github.staphylococcus.LGBuddy.desktop" \
 install -m 644 "$REPO_ROOT/README.md" "$BUNDLE_DIR/README.md"
 install -m 644 "$REPO_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
 cp -R "$REPO_ROOT/docs/." "$BUNDLE_DIR/docs/"
+# Keep optional bridge assets under docs/ for older verified bundle readers.
+install -d "$BUNDLE_DIR/docs/kwin"
+cp -R "$REPO_ROOT/data/kwin/." "$BUNDLE_DIR/docs/kwin/"
+if [ -d "$REPO_ROOT/target/kwin-bridges" ]; then
+    install -d "$BUNDLE_DIR/docs/kwin/prebuilt"
+    cp -R "$REPO_ROOT/target/kwin-bridges/." "$BUNDLE_DIR/docs/kwin/prebuilt/"
+fi
+find "$BUNDLE_DIR/docs/kwin" -type d -exec chmod 755 {} +
+find "$BUNDLE_DIR/docs/kwin" -type f -exec chmod 644 {} +
+chmod 755 "$BUNDLE_DIR/docs/kwin/setup.sh" "$BUNDLE_DIR/docs/kwin/build.sh"
 install -m 755 "$GUI_BINARY_PATH" "$BUNDLE_DIR/$GUI_BUNDLE_PATH"
 install -m 644 "$APP_ICON_SOURCE" "$BUNDLE_DIR/$APP_ICON_BUNDLE_PATH"
 # Documentation uses the source-tree icon path; older updaters require bundled

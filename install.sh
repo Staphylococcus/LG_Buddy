@@ -175,6 +175,9 @@ initialize_install_paths() {
     SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
     CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
     COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
+    KWIN_PAYLOAD_DIR="$SCRIPT_DIR/data/kwin"
+    if [ ! -d "$KWIN_PAYLOAD_DIR" ]; then KWIN_PAYLOAD_DIR="$SCRIPT_DIR/docs/kwin"; fi
+    KWIN_INSTALL_DIR="${SYSTEM_LIB_DIR}/kwin"
     SYSTEM_SLEEP_HOOK_PATH="$(prefix_path "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook")"
     SYSTEMD_SYSTEM_DIR="$(prefix_path "/etc/systemd/system")"
     SYSTEMD_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service"
@@ -206,6 +209,7 @@ initialize_install_paths() {
     LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
     USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
     USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
+    USER_KWIN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_kwin.service"
     USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
     USER_UPDATE_CHECK_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service"
     USER_UPDATE_CHECK_TIMER_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.timer"
@@ -488,6 +492,12 @@ perform_privileged_runtime_installation() {
     if [ "$UPGRADE_MODE" -eq 0 ]; then
         run_system_mutation_command install -d "$SYSTEM_LIB_DIR"
         run_system_mutation_command install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
+    fi
+    if [ -d "$KWIN_PAYLOAD_DIR" ]; then
+        run_system_mutation_command rm -rf -- "$KWIN_INSTALL_DIR"
+        run_system_mutation_command install -d "$KWIN_INSTALL_DIR"
+        run_system_mutation_command cp -R "$KWIN_PAYLOAD_DIR/." "$KWIN_INSTALL_DIR/"
+        run_system_mutation_command chmod 755 "$KWIN_INSTALL_DIR/setup.sh" "$KWIN_INSTALL_DIR/build.sh"
     fi
     system_upgrade_message "Installing LG Buddy desktop entry..."
     run_system_mutation_command install -d "$APPLICATIONS_DIR"
@@ -878,6 +888,11 @@ fi
 
 prepare_installation_files
 
+if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ] && [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+    # Finish/cancel optional setup before replacing its build inputs on upgrade.
+    systemctl --user stop LG_Buddy_kwin.service || true
+fi
+
 if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
     echo "Requesting graphical authorization for system installation changes..."
     SYSTEM_UPGRADE_OUTPUT_TMP="$(mktemp)"
@@ -944,6 +959,10 @@ mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
 install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
 echo "Done."
 
+if [ -f "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" ]; then
+    install -m 644 "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" "$USER_KWIN_SERVICE_PATH"
+fi
+
 echo "Installing screen monitor user service..."
 install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
 mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
@@ -955,6 +974,11 @@ fi
 if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
     echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
 else
+    if [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+        systemctl --user enable LG_Buddy_kwin.service
+        # Optional setup must not hold up activity monitoring or the GUI.
+        systemctl --user restart --no-block LG_Buddy_kwin.service || true
+    fi
     systemctl --user enable LG_Buddy_screen.service
     systemctl --user restart LG_Buddy_screen.service
     if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
