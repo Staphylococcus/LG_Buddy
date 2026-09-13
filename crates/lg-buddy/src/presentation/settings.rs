@@ -60,6 +60,9 @@ pub struct SettingsChoice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsEditor {
+    AutomaticIntegration {
+        configured: Option<String>,
+    },
     Toggle {
         value: Option<bool>,
     },
@@ -191,6 +194,12 @@ impl SettingsPresentation {
     /// Keep dependent settings intact while only presenting controls that apply.
     /// Missing or invalid blanking values retain the controls for diagnosis.
     pub fn row_visible(&self, setting: BehaviorSetting) -> bool {
+        if setting == BehaviorSetting::ScreenBackend {
+            return !matches!(
+                self.row(setting).map(SettingsRow::editor),
+                Some(SettingsEditor::AutomaticIntegration { configured: Some(value) }) if value == "auto"
+            );
+        }
         if !matches!(
             setting,
             BehaviorSetting::ScreenBackend
@@ -214,11 +223,8 @@ impl SettingsPresentation {
 
         let backend_is_swayidle = self
             .row(BehaviorSetting::ScreenBackend)
-            .and_then(|row| {
-                let selected = row.editor().selected_choice()?;
-                row.editor().choices()?.get(selected)
-            })
-            .is_some_and(|choice| choice.value() == "swayidle");
+            .is_some_and(|row| matches!(row.editor(),
+                SettingsEditor::AutomaticIntegration { configured: Some(value) } if value == "swayidle"));
         !backend_is_swayidle
     }
 
@@ -374,28 +380,28 @@ impl SettingsEditor {
     pub fn as_toggle(&self) -> Option<Option<bool>> {
         match self {
             Self::Toggle { value } => Some(*value),
-            Self::Choice { .. } | Self::Number { .. } => None,
+            _ => None,
         }
     }
 
     pub fn choices(&self) -> Option<&[SettingsChoice]> {
         match self {
             Self::Choice { options, .. } => Some(options),
-            Self::Toggle { .. } | Self::Number { .. } => None,
+            _ => None,
         }
     }
 
     pub fn selected_choice(&self) -> Option<usize> {
         match self {
             Self::Choice { selected, .. } => *selected,
-            Self::Toggle { .. } | Self::Number { .. } => None,
+            _ => None,
         }
     }
 
     pub fn number_text(&self) -> Option<&str> {
         match self {
             Self::Number { text } => Some(text),
-            Self::Toggle { .. } | Self::Choice { .. } => None,
+            _ => None,
         }
     }
 }
@@ -556,7 +562,9 @@ pub(crate) fn row_from_effective(setting: &EffectiveSetting) -> SettingsRow {
 
     let editor = editor_for(behavior_setting, setting, definition.value_type());
     let commit_policy = match editor {
-        SettingsEditor::Number { .. } => SettingsCommitPolicy::OnFinalize,
+        SettingsEditor::Number { .. } | SettingsEditor::AutomaticIntegration { .. } => {
+            SettingsCommitPolicy::OnFinalize
+        }
         SettingsEditor::Toggle { .. } | SettingsEditor::Choice { .. } => {
             SettingsCommitPolicy::OnChange
         }
@@ -565,7 +573,11 @@ pub(crate) fn row_from_effective(setting: &EffectiveSetting) -> SettingsRow {
     SettingsRow {
         setting: behavior_setting,
         title: setting_title(setting.key_name()).to_string(),
-        description: definition.description().to_string(),
+        description: if behavior_setting == BehaviorSetting::ScreenBackend {
+            format!("Saved override: {current_value_label}. Automatic integration discovers the available desktop interfaces on each login and keeps your behavior settings.")
+        } else {
+            definition.description().to_string()
+        },
         value_label: current_value_label,
         source_label: source_label(setting.source()).to_string(),
         default_label: definition
@@ -579,11 +591,8 @@ pub(crate) fn row_from_effective(setting: &EffectiveSetting) -> SettingsRow {
         editor_enabled: true,
         edit_status: SettingsEditStatus::Unchanged,
         feedback: None,
-        reset_action: Some(SettingsAction::new(
-            "Reset",
-            true,
-            SettingsIntent::Reset(behavior_setting),
-        )),
+        reset_action: (behavior_setting != BehaviorSetting::ScreenBackend)
+            .then(|| SettingsAction::new("Reset", true, SettingsIntent::Reset(behavior_setting))),
         retry_apply_action: None,
     }
 }
@@ -604,9 +613,10 @@ fn editor_for(
                 _ => None,
             }),
         },
-        BehaviorSetting::ScreenBackend
-        | BehaviorSetting::ScreenRestorePolicy
-        | BehaviorSetting::UpdatesChannel => {
+        BehaviorSetting::ScreenBackend => SettingsEditor::AutomaticIntegration {
+            configured: effective.value().map(|value| value.to_string()),
+        },
+        BehaviorSetting::ScreenRestorePolicy | BehaviorSetting::UpdatesChannel => {
             let SettingType::Enum(enum_type) = value_type else {
                 unreachable!("choice setting must be an enum")
             };
@@ -642,7 +652,7 @@ fn editor_for(
 
 fn setting_title(key: &str) -> &'static str {
     match key {
-        "screen.backend" => "Desktop integration",
+        "screen.backend" => "Legacy desktop integration",
         "screen.idle_blank" => "Idle blanking",
         "screen.honor_idle_inhibitors" => "Allow apps to prevent idle blanking",
         "screen.idle_timeout" => "Idle timeout",

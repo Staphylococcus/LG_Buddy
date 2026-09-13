@@ -32,6 +32,7 @@ use crate::session::gamepad::{
     SystemGamepadActivitySource, SystemGamepadDeviceEventMonitor,
 };
 use crate::session::inactivity::{InactivityDecision, InactivityEngine, InactivityObservation};
+use crate::session::monitor_diagnostics::MonitorDiagnostics;
 use crate::session::{SessionEvent, SessionObservation};
 use crate::session_bus::{new_system_bus_client, SessionBusClient};
 use crate::session_notifications::spawn_session_notification_service;
@@ -604,9 +605,11 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     executor: E,
 ) -> Result<(), SessionRunnerError> {
+    let snapshot = MonitorDiagnostics::default();
     let screen_idle_blank_enabled = screen_idle_blank_enabled_from_config()?;
     if !screen_idle_blank_enabled {
-        let _session_service = match spawn_session_notification_service() {
+        snapshot.waiting(None, "idle blanking disabled; passive session service");
+        let _session_service = match spawn_session_notification_service(snapshot.clone()) {
             Ok(service) => Some(service),
             Err(err) => {
                 writeln!(
@@ -630,12 +633,13 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     let test_timeout = monitor_test_timeout();
     let mut probe = SystemBackendProbe::default();
     let initial_resolution = prepare_monitor_backend(&mut probe, initial_configured);
+    snapshot.waiting(Some(initial_configured), "starting native discovery");
     let mut initial_attempt = Some((initial_configured, initial_resolution));
 
     // Native probing must consume an inherited WAYLAND_SOCKET before this
     // thread starts. The same probe is retained for every later retry so the
     // native retries cannot forget that one-shot socket state.
-    let _session_service = match spawn_session_notification_service() {
+    let _session_service = match spawn_session_notification_service(snapshot.clone()) {
         Ok(service) => Some(service),
         Err(err) => {
             writeln!(
@@ -662,6 +666,9 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
 
         match resolution {
             Ok((resolution, mut wayland_source)) => {
+                if configured != ScreenBackend::Auto {
+                    writeln!(writer, "LG Buddy Monitor: legacy override={}; activity discovery is restricted until an explicit switch to automatic integration.", configured.as_str())?;
+                }
                 if configured == ScreenBackend::Auto && resolution.backend() != ScreenBackend::Auto
                 {
                     writeln!(
@@ -685,7 +692,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                         let mut dispatcher = SessionEventDispatcher::new(
                             executor.take().expect("executor available"),
                         );
-                        return run_gnome_monitor(writer, &mut dispatcher);
+                        return run_gnome_monitor(writer, &mut dispatcher, &snapshot);
                     }
                     ScreenBackend::Wayland => {
                         let mut dispatcher = SessionEventDispatcher::new(
@@ -698,13 +705,13 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                                     .to_string(),
                             }
                         })?;
-                        return run_wayland_monitor(writer, &mut dispatcher, source);
+                        return run_wayland_monitor(writer, &mut dispatcher, source, &snapshot);
                     }
                     ScreenBackend::Swayidle => {
                         let mut dispatcher = SessionEventDispatcher::new(
                             executor.take().expect("executor available"),
                         );
-                        return run_swayidle_monitor(writer, &mut dispatcher);
+                        return run_swayidle_monitor(writer, &mut dispatcher, &snapshot);
                     }
                     ScreenBackend::Auto => {
                         let mut dispatcher = SessionEventDispatcher::new(
@@ -719,6 +726,7 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                             &mut dispatcher,
                             ScreenBackend::Auto,
                             wayland_source.take(),
+                            &snapshot,
                         );
                     }
                 }
@@ -728,6 +736,10 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                     writer,
                     "LG Buddy Monitor: screen idle backend unavailable: {err}"
                 )?;
+                snapshot.waiting(
+                    Some(configured),
+                    format!("waiting for native activity: {err}"),
+                );
                 wait_for_backend_retry_or_test_timeout(started, test_timeout);
             }
         }
@@ -796,18 +808,26 @@ fn test_timeout_reached(started: Instant, test_timeout: Option<Duration>) -> boo
 fn run_gnome_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
+    snapshot: &MonitorDiagnostics,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using GNOME backend.")?;
-    run_composed_monitor(writer, dispatcher, ScreenBackend::Gnome, None)
+    run_composed_monitor(writer, dispatcher, ScreenBackend::Gnome, None, snapshot)
 }
 
 fn run_wayland_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     source: WaylandSource,
+    snapshot: &MonitorDiagnostics,
 ) -> Result<(), SessionRunnerError> {
     writeln!(writer, "LG Buddy Monitor: Using native Wayland backend.")?;
-    run_composed_monitor(writer, dispatcher, ScreenBackend::Wayland, Some(source))
+    run_composed_monitor(
+        writer,
+        dispatcher,
+        ScreenBackend::Wayland,
+        Some(source),
+        snapshot,
+    )
 }
 
 fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
@@ -815,6 +835,7 @@ fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
     dispatcher: &mut SessionEventDispatcher<E>,
     configured: ScreenBackend,
     wayland: Option<WaylandSource>,
+    snapshot: &MonitorDiagnostics,
 ) -> Result<(), SessionRunnerError> {
     let mut adapters: Vec<(ActivitySource, Arc<dyn ActivityAdapter>)> = Vec::new();
     if configured != ScreenBackend::Wayland {
@@ -832,6 +853,7 @@ fn run_composed_monitor<W: Write, E: SessionActionExecutor>(
         dispatcher,
         configured,
         &adapters,
+        snapshot,
         move |_sender, contributions, stop| {
             thread::spawn(move || {
                 let workers: Vec<_> = workers
@@ -862,6 +884,7 @@ fn run_native_session_monitor<W, E, S>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
+    snapshot: &MonitorDiagnostics,
     spawn_monitor: S,
 ) -> Result<(), SessionRunnerError>
 where
@@ -899,17 +922,20 @@ where
         dispatcher,
         backend,
         adapters,
+        snapshot,
         inhibition,
         spawn_monitor,
         |sender| Some(spawn_logind_lock_monitor(sender)),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_native_session_monitor_with_lock_monitor<W, E, S, L>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
+    snapshot: &MonitorDiagnostics,
     inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
@@ -929,6 +955,7 @@ where
         dispatcher,
         backend,
         adapters,
+        snapshot,
         InitialBlankTrigger::Deadline,
         inhibition,
         spawn_monitor,
@@ -948,6 +975,7 @@ fn run_session_monitor_with_lock_monitor<W, E, S, L>(
     dispatcher: &mut SessionEventDispatcher<E>,
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
+    snapshot: &MonitorDiagnostics,
     initial_blank_trigger: InitialBlankTrigger,
     mut inhibition: Option<Inhibition>,
     spawn_monitor: S,
@@ -1034,6 +1062,13 @@ where
             }
             last_diagnostics = diagnostics;
         }
+        snapshot.publish(
+            backend,
+            adapters,
+            &contributions,
+            inhibition.as_ref(),
+            &inactivity,
+        );
         // A denied gate leaves the original deadline due. Keep a bounded poll
         // cadence rather than repeatedly waiting zero time on that deadline.
         let message = match receiver.recv_timeout(Duration::from_millis(50)) {
@@ -1191,6 +1226,7 @@ where
 fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
     writer: &mut W,
     dispatcher: &mut SessionEventDispatcher<E>,
+    snapshot: &MonitorDiagnostics,
 ) -> Result<(), SessionRunnerError> {
     let idle_timeout_secs = resolve_idle_timeout_secs();
     let marker = ScreenOwnershipMarker::from_env(StateScope::Session).map_err(|err| {
@@ -1213,6 +1249,7 @@ fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
         dispatcher,
         ScreenBackend::Swayidle,
         &[],
+        snapshot,
         InitialBlankTrigger::Provider,
         None,
         move |sender, _contributions, stop| {
@@ -2869,6 +2906,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            &super::MonitorDiagnostics::default(),
             None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
@@ -2923,6 +2961,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Wayland,
             &[],
+            &super::MonitorDiagnostics::default(),
             None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
@@ -2970,6 +3009,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            &super::MonitorDiagnostics::default(),
             None,
             |sender, _contributions, _stop| {
                 thread::spawn(move || {
@@ -3244,6 +3284,7 @@ system_sleep_wake_policy={policy}
             &mut dispatcher,
             ScreenBackend::Auto,
             &[],
+            &super::MonitorDiagnostics::default(),
             None,
             |sender, sources, _stop| {
                 thread::spawn(move || {

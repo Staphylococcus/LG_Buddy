@@ -125,6 +125,7 @@ pub fn evaluate_pull_inhibition(
 /// section was not evaluated on this call (bypass, pending work or retry delay).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlankingEvaluation {
+    pub evaluated_at: Instant,
     pub can_blank: bool,
     pub preference: InhibitionPreferenceEvaluation,
     pub push: Option<InhibitionSectionEvaluation>,
@@ -155,6 +156,7 @@ fn reconcile(
             && pull.as_ref().is_some_and(|section| section.allowed)
             && release_not_before.is_none_or(|deadline| now >= deadline));
     BlankingEvaluation {
+        evaluated_at: now,
         can_blank,
         preference,
         push,
@@ -260,6 +262,10 @@ impl Inhibition {
 
     pub fn diagnostics(&self) -> Option<&BlankingEvaluation> {
         self.diagnostics.as_ref()
+    }
+
+    pub fn preference_diagnostics(&self) -> InhibitionPreferenceEvaluation {
+        self.preference
     }
 
     pub fn can_blank(&mut self, now: Instant) -> bool {

@@ -114,7 +114,7 @@ impl ConfigEnvEditor {
     }
 }
 
-fn atomic_write_config(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(super) fn atomic_write_config(path: &Path, contents: &[u8]) -> io::Result<()> {
     // Continue updating an existing symlink's target instead of replacing the
     // link itself. A dangling link cannot be safely resolved for publication.
     let path = match fs::symlink_metadata(path) {
