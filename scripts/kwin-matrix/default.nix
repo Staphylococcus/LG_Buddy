@@ -46,14 +46,17 @@ let
     }) ];
   };
   inherit (pkgs) lib;
-  kwin = pkgs.kdePackages.kwin.overrideAttrs {
+  kwin = pkgs.kdePackages.kwin.overrideAttrs (old: {
     version = target.version;
+    # KWin 6.6.6 already includes this NixOS capability fix upstream.
+    patches = builtins.filter (patch: !(lib.versionAtLeast kwinVersion "6.6.6"
+      && lib.hasInfix "Lower-CAP_SYS_NICE" (toString patch))) (old.patches or [ ]);
     src = pkgs.fetchzip {
       url = "https://api.github.com/repos/KDE/kwin/tarball/${target.rev}";
       extension = "tar.gz";
       sha256 = target.sha256;
     };
-  };
+  });
   plugin = pkgs.stdenv.mkDerivation {
     pname = "lg-buddy-kwin-bridge";
     version = "${kwinVersion}-qt${env.qt_version}";
