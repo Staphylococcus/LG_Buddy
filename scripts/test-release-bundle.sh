@@ -1015,12 +1015,15 @@ systemctl is-system-running
 systemctl --user is-system-running
 systemctl is-system-running
 systemctl --user is-system-running
+systemctl --user stop LG_Buddy_kwin.service
 tmpfiles --create $TMPFILES_CONFIG
 systemctl daemon-reload
 systemctl enable LG_Buddy.service
 systemctl enable LG_Buddy_lifecycle.service
 systemctl restart LG_Buddy_lifecycle.service
 systemctl --user daemon-reload
+systemctl --user enable LG_Buddy_kwin.service
+systemctl --user restart --no-block LG_Buddy_kwin.service
 systemctl --user enable LG_Buddy_screen.service
 systemctl --user restart LG_Buddy_screen.service
 systemctl --user disable --now LG_Buddy_update_check.timer
