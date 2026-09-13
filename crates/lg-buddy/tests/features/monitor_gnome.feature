@@ -433,17 +433,18 @@ Feature: GNOME monitor
     And the TV is powered on
     And the TV screen is visible
 
+  # Allow watch registration and signal delivery, then stop before a second idle deadline.
   Scenario: GNOME early user activity restores a blanked TV before the session becomes active again
     Given a temporary LG Buddy config using input HDMI_2
-    And the idle timeout is 1 seconds
+    And the idle timeout is 2 seconds
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And genuine desktop input occurs after 1.5 seconds
-    And GNOME monitor stays open for 1.8 seconds
+    And genuine desktop input occurs after 2.5 seconds
+    And GNOME monitor stays open for 4 seconds
     When I run the command "monitor"
     Then the command succeeds
     And the TV client received "turn_screen_off" exactly 1 times

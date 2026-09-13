@@ -101,6 +101,7 @@ assert pkgs.qt6.qtbase.version == env.qt_version;
     LG_BUDDY_TEST_KWIN = "${kwin}/bin/kwin_wayland";
     LG_BUDDY_TEST_QT = env.qt_version;
     LG_BUDDY_TEST_LIBRARY_PATH = lib.makeLibraryPath [ kwin pkgs.qt6.qtbase pkgs.stdenv.cc.cc.lib ];
+    __EGL_VENDOR_LIBRARY_FILENAMES = "${pkgs.mesa.drivers}/share/glvnd/egl_vendor.d/50_mesa.json";
     LIBGL_DRIVERS_PATH = "${pkgs.mesa.drivers}/lib/dri";
     QT_PLUGIN_PATH = "${kwin}/lib/qt-6/plugins:${pkgs.qt6.qtbase}/lib/qt-6/plugins";
     QT_QPA_PLATFORM_PLUGIN_PATH = "${kwin}/lib/qt-6/plugins/platforms";

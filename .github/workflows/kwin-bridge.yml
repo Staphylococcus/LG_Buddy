@@ -26,6 +26,7 @@ jobs:
         run: echo "builds=$(python3 scripts/kwin_matrix.py matrix)" >> "$GITHUB_OUTPUT"
 
   build:
+    name: KWin ${{ matrix.series }} / Qt ${{ matrix.qt_minor }}
     needs: matrix
     runs-on: ubuntu-24.04
     timeout-minutes: 360

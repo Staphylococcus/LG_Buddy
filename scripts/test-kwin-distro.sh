@@ -14,7 +14,7 @@ while IFS= read -r -d '' metadata; do
     candidate_minor="$(cut -d . -f 2 <<< "$candidate_qt")"
     (( candidate_minor <= qt_minor )) || continue
     [ -z "$(readelf -d "${metadata%/*}/plugin.so" | sed -n '/RUNPATH\|RPATH/p')" ]
-    timeout --kill-after=5 60 dbus-run-session -- bash scripts/test-kwin-plugin.sh "${metadata%/*}"
+    timeout --kill-after=5 60 dbus-run-session --config-file=scripts/kwin-matrix/session.conf -- bash scripts/test-kwin-plugin.sh "${metadata%/*}"
     count=$((count + 1))
 done < <(find "$artifact_root" -name metadata.tsv -type f -print0)
 [ "$count" -gt 0 ]

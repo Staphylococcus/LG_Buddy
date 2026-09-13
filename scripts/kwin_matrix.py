@@ -15,7 +15,7 @@ MANIFEST = ROOT / "scripts/kwin-matrix/targets.json"
 BRIDGE = ROOT / "data/kwin/source"
 INPUTS = (
     "scripts/kwin_matrix.py", "scripts/kwin-matrix/default.nix",
-    "scripts/test-kwin-plugin.sh",
+    "scripts/test-kwin-plugin.sh", "scripts/kwin-matrix/session.conf",
     "data/kwin/source/CMakeLists.txt", "data/kwin/source/main.cpp",
     "data/kwin/source/metadata.json",
 )
@@ -137,6 +137,7 @@ def verify(directory, rows, bridge_id=None, root=ROOT):
 def build(directory, rows, cores, jobs):
     directory.mkdir(parents=True, exist_ok=True)
     for row in rows:
+        expected_inputs = input_identity([row])
         nix_args = ["scripts/kwin-matrix/default.nix", "--argstr", "kwinVersion", row["kwin_version"],
                     "--argstr", "qtMinor", row["qt_minor"]]
         print(f"Building KWin {row['kwin_version']} / Qt {row['qt_version']}", flush=True)
@@ -148,9 +149,12 @@ def build(directory, rows, cores, jobs):
         if len(artifacts) != 1 or not artifacts[0].is_dir():
             raise ValueError(f"Invalid Nix plugin output: {output}")
         artifact = artifacts[0]
-        command = shlex.join(["timeout", "--kill-after=5", "60", "dbus-run-session", "--", "bash", "scripts/test-kwin-plugin.sh", str(output)])
+        command = shlex.join(["timeout", "--kill-after=5", "60", "dbus-run-session", "--config-file=scripts/kwin-matrix/session.conf", "--", "bash", "scripts/test-kwin-plugin.sh", str(output)])
         subprocess.run(["nix-shell", *nix_args, "-A", "testEnvironment", "--pure", "--run", command,
                         "--cores", str(cores), "--max-jobs", str(jobs)], cwd=ROOT, check=True)
+        current_row = targets(load_manifest(), qt_minor=row["qt_minor"], kwin_version=row["kwin_version"])[0]
+        if current_row != row or input_identity([row]) != expected_inputs:
+            raise ValueError("KWin build inputs changed during the build; rerun with stable inputs")
         destination = directory / artifact.name
         if destination.exists():
             # Re-running a partial matrix rechecks the loader before refreshing its record.
@@ -159,7 +163,7 @@ def build(directory, rows, cores, jobs):
             shutil.copytree(artifact, destination)
             destination.chmod(0o755)
         metadata = (destination / "metadata.tsv").read_text().strip().split("\t")
-        record = {"target": row, "inputs_sha256": input_identity([row]),
+        record = {"target": row, "inputs_sha256": expected_inputs,
                   "plugin_sha256": metadata[4], "loader_test": "passed"}
         (destination / "build.json").write_text(json.dumps(record, indent=2) + "\n")
         read_artifact(destination, source_identity())

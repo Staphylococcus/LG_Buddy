@@ -128,7 +128,7 @@ built with a newer minor than the host. Qt's
 also requires compatible toolchains, system environments and Qt configurations.
 KWin's private interface and downstream builds still require actual loader tests.
 
-Both existing stripped plugins are 27,560 bytes; independently XZ-compressed,
+The original Fedora stripped plugins were 27,560 bytes; independently XZ-compressed,
 they are 6,288 and 6,300 bytes. At those measured sizes, 75 artifacts would be
 about **1.97 MiB unpacked or 461 KiB compressed**, excluding metadata/archive
 overhead. Two system-library baselines would budget 150 artifacts, about
