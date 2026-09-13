@@ -335,8 +335,10 @@ by the reporter's applications. Test native Wayland-only inhibition separately;
 do not infer its coverage from portal success. The source-traced route table in
 [Session backend model](session-backend-model.md#powerdevil-route-coverage) is
 not itself live validation. The [desktop validation record](desktop-session-validation.md)
-contains the subsequent Plasma checks. PowerDevil is the agreed MVP inhibition
-boundary; native-only KWin inhibition does not block #217 or the MVP.
+contains the subsequent Plasma checks. [KWin integration](kwin-integration.md)
+describes the native-source tests and provisioning matrix added under #233.
+KWin absence is a supported coverage mode; its progression through prebuilt,
+local compilation and ordinary absence is part of the #216 MVP validation.
 
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`

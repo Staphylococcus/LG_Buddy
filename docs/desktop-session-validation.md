@@ -160,9 +160,10 @@ Native-only mpv inhibition was separately reproduced with `--no-config
 --no-audio --loop-file=inf --vo=wlshm` and a generated clip. Its trace created a
 `zwp_idle_inhibitor_v1`, while PowerDevil reported no effective screen inhibitor
 and LG Buddy blanked after ten seconds. KWin's native route is distinct; it
-must not be inferred from portal or ScreenSaver success. **PowerDevil is the
-agreed Plasma inhibition boundary for the MVP.** Native-only KWin coverage is
-outside #217's gate. Idle-notify remains an activity interface; activity and
+must not be inferred from portal or ScreenSaver success. This is the baseline
+from the #217 candidate. The additional [KWin source and provisioning tests](kwin-integration.md)
+belong to #233/#216; completing this lifecycle record does not establish native
+inhibition coverage. Idle-notify remains an activity interface; activity and
 inhibition meet only at `can_blank()`.
 
 ## VM blockers diagnosed and removed

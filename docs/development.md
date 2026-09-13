@@ -39,12 +39,13 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - `org.gnome.Mutter.IdleMonitor`
 
 Native monitoring honors the opt-in **Allow apps to prevent idle blanking**
-setting through independent GNOME SessionManager and PowerDevil inhibition
+setting through independent GNOME SessionManager, PowerDevil and optional KWin inhibition
 capabilities. Activity tests require Mutter user-active watches; SessionManager
 availability must not determine whether activity monitoring works. Private-bus
 fixtures cover the integrated gate. The [desktop validation record](desktop-session-validation.md)
-documents live GNOME/Plasma coverage. PowerDevil is the agreed Plasma inhibition
-boundary for the #89 MVP; native-only KWin inhibition is outside that gate.
+documents live GNOME/Plasma coverage. Plasma uses both PowerDevil and native KWin
+inhibition. See [KWin integration](kwin-integration.md) for plugin delivery and
+the supported prebuilt, local-build and absent-source modes.
 
 The C toolchain is required because `cargo build` now compiles vendored
 `libdbus` as part of the dependency graph. On common Linux distributions that
@@ -200,6 +201,13 @@ artifacts to exist under:
 ./target/<gui-target>/release/lg-buddy-gui
 ```
 
+Release CI also puts its verified KWin prebuilts in `target/kwin-bridges/` before
+bundling. For a local bundle smoke, download those artifacts from a CI run of the
+same plugin source, or build on a matching Plasma development host with
+`bash data/kwin/build.sh data/kwin/source target/kwin-bridges`. The bundle smoke
+requires at least one prebuilt and verifies its metadata/source identity. A local
+bundle without prebuilts still supports compilation/ordinary source absence.
+
 Smoke test a generated release bundle with:
 
 ```bash
@@ -315,6 +323,8 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
 | `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs` | Independent SessionManager inhibition capability |
+| `crates/lg-buddy/src/sources/desktop/kwin.rs` | Optional pull inhibition through the native KWin plugin |
+| `data/kwin/` | Plugin source, compatible artifact selection and optional setup |
 | `crates/lg-buddy/src/sources/desktop/powerdevil.rs` | Independent pull inhibition through PowerDevil's effective screen policy |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
 | `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |

@@ -62,10 +62,15 @@ jobs:
               --base-sha "$BASE_SHA" \
               --github-output "$GITHUB_OUTPUT"
 
+  kwin-bridges:
+    if: needs.validate.outputs.prepare == 'true'
+    needs: validate
+    uses: ./.github/workflows/kwin-bridge.yml
+
   build-release-bundle:
     if: needs.validate.outputs.prepare == 'true'
     runs-on: ubuntu-24.04
-    needs: validate
+    needs: [validate, kwin-bridges]
 
     steps:
       - name: Check out merged release commit
@@ -100,6 +105,13 @@ jobs:
           pkg-config --atleast-version=1.5 libadwaita-1
           cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
           cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
+
+      - name: Download verified KWin plugins
+        uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
 
       - name: Create release bundle
         run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist

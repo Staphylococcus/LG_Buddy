@@ -965,8 +965,9 @@ activity and inhibition contracts, timing and coverage limits.
 Adapters may expose activity and inhibition independently, each through push or
 pull according to the source. The push inhibition section
 combines maintained Boolean permissions with diagnostics. The pull section
-combines fresh, cancellable requests in the same diagnostic shape; its PowerDevil
-capability delegates screen policy to Plasma. The GNOME capability
+combines fresh, cancellable requests in the same diagnostic shape. PowerDevil
+supplies effective screen policy; an optional [KWin plugin](kwin-integration.md)
+supplies the compositor's native inhibition state. The GNOME capability
 requires only SessionManager and keeps subscriptions, state queries and owner
 recovery internal. It contributes no activity observations. The `Inhibition`
 facade joins the sections, owns release timing and cancellable pull work, and

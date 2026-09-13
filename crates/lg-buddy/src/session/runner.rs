@@ -37,6 +37,7 @@ use crate::session_bus::{new_system_bus_client, SessionBusClient};
 use crate::session_notifications::spawn_session_notification_service;
 use crate::sources::desktop::gnome::inhibition::GnomeInhibition;
 use crate::sources::desktop::gnome::{monitor_test_timeout, GnomeSource};
+use crate::sources::desktop::kwin::KWinInhibition;
 use crate::sources::desktop::powerdevil::PowerDevilInhibition;
 use crate::sources::desktop::swayidle::{run as run_swayidle_source, SwayidleSourceError};
 use crate::sources::desktop::wayland::WaylandSource;
@@ -885,7 +886,10 @@ where
                 &config,
                 Duration::from_millis(resolve_idle_timeout_ms()),
                 vec![Arc::new(GnomeInhibition::default())],
-                vec![Box::new(PowerDevilInhibition::default())],
+                vec![
+                    Box::new(PowerDevilInhibition::default()),
+                    Box::new(KWinInhibition::default()),
+                ],
             ))
         }
         Err(ConfigPathError::NotConfigured) => None,

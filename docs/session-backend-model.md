@@ -108,7 +108,7 @@ when no native activity capability is available at startup; #132 removes it.
 
 An adapter can supply activity, inhibition, or both. Each capability independently
 uses push or pull according to its source. Activity observations stay in the
-activity path. The native monitor starts GNOME's push inhibition and PowerDevil's
+activity path. The native monitor starts GNOME's push inhibition and PowerDevil/KWin
 pull inhibition independently of the configured activity sources. Their only
 policy meeting point is `can_blank()` at an automatic idle-blanking decision.
 
@@ -227,8 +227,8 @@ subsequent live checks are documented in the
 These are version-specific source findings, not a promise that every application
 uses a covered route. The [desktop validation record](desktop-session-validation.md)
 documents subsequent live checks and confirms that native-only mpv inhibition
-does not reach PowerDevil. PowerDevil is the agreed Plasma inhibition boundary
-for the MVP; native-only KWin coverage is outside that gate. Idle-notify remains
+does not reach PowerDevil. The separate [KWin source](kwin-integration.md)
+queries the effective native inhibitor set when its plugin is available. Idle-notify remains
 an activity protocol and is not used as an inhibition query.
 
 ## Provider Map
@@ -340,8 +340,8 @@ activity; `idled` remains observational, so only LG Buddy's inactivity deadline
 can trigger blanking.
 
 Only `get_input_idle_notification` is used by this activity adapter. Idle-notify
-does not supply an inhibition capability. Native-only KWin inhibition is outside
-the agreed GNOME/Plasma MVP scope.
+does not supply an inhibition capability. The separate KWin plugin supplies
+native inhibition without changing this activity adapter.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
 of the bound notifier, or removal of the last seat causes the adapter to rebuild

@@ -16,6 +16,7 @@ pub mod diagnostics;
 pub mod diagnostics_view;
 pub mod events;
 pub mod inhibition;
+pub mod kwin_bridge;
 pub mod lifecycle;
 pub mod navigation;
 pub mod notifications;
@@ -91,6 +92,7 @@ pub enum Command {
     Monitor,
     Lifecycle,
     DetectBackend,
+    KWinBridge(kwin_bridge::KWinBridgeCommand),
     Dev(DevCommand),
     Settings(SettingsCommand),
     Updates(UpdatesCommand),
@@ -453,6 +455,7 @@ impl Command {
             Self::Monitor => "monitor",
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
+            Self::KWinBridge(_) => "kwin-bridge",
             Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
@@ -477,6 +480,7 @@ impl Command {
             Self::Monitor => "TODO: implemented via command handler",
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
+            Self::KWinBridge(_) => "TODO: implemented via command handler",
             Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
@@ -764,6 +768,12 @@ where
         }
         "settings" => return parse_settings_command(args),
         "updates" => return parse_updates_command(args),
+        "kwin-bridge" => {
+            let arguments: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
+            return kwin_bridge::KWinBridgeCommand::parse(&arguments)
+                .map(|command| ParseOutcome::Command(Command::KWinBridge(command)))
+                .ok_or_else(|| ParseError::UnknownCommand("kwin-bridge: expected info, check, load <plugin-id>, or unload <plugin-id>".into()));
+        }
         "upgrade-preflight" => {
             let candidate_root = PathBuf::from(
                 args.next()
@@ -840,6 +850,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Brightness(command) => run_brightness(writer, command),
         Command::Volume(command) => run_volume(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
+        Command::KWinBridge(command) => kwin_bridge::run(command, writer).map_err(RunError::Io),
         Command::Screen(ScreenCommand::Off) => run_screen_off(writer),
         Command::Screen(ScreenCommand::On) => run_screen_on(writer),
         Command::ScreenOff => run_screen_off(writer),

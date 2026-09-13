@@ -369,6 +369,24 @@ for name in ("README.md", "docs/user-guide.md"):
 print("Bundled documentation image links verified.")
 PY
 assert_file "$BUNDLE_DIR/docs/development.md"
+assert_file "$BUNDLE_DIR/docs/kwin-integration.md"
+assert_executable "$BUNDLE_DIR/docs/kwin/setup.sh"
+assert_executable "$BUNDLE_DIR/docs/kwin/build.sh"
+assert_file "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service"
+assert_file "$BUNDLE_DIR/docs/kwin/source/CMakeLists.txt"
+assert_file "$BUNDLE_DIR/docs/kwin/source/main.cpp"
+assert_file "$BUNDLE_DIR/docs/kwin/source/metadata.json"
+KWIN_SOURCE_ID="$(cd "$BUNDLE_DIR/docs/kwin/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum | cut -d ' ' -f1)"
+KWIN_PREBUILT_COUNT=0
+while IFS= read -r -d '' metadata; do
+    IFS=$'\t' read -r kwin qt arch source_id digest extra < "$metadata"
+    [[ "$kwin" =~ ^6\.[0-9]+\.[0-9]+$ && "$qt" =~ ^6\.[0-9]+\.[0-9]+$ ]]
+    [ "$arch" = x86_64 ] && [ "$source_id" = "$KWIN_SOURCE_ID" ] && [ -z "$extra" ]
+    [ "$(sha256sum "${metadata%/*}/plugin.so" | cut -d ' ' -f1)" = "$digest" ]
+    assert_mode "${metadata%/*}/plugin.so" 644
+    KWIN_PREBUILT_COUNT=$((KWIN_PREBUILT_COUNT + 1))
+done < <(find "$BUNDLE_DIR/docs/kwin/prebuilt" -name metadata.tsv -type f -print0)
+[ "$KWIN_PREBUILT_COUNT" -gt 0 ] || fail "Release bundle contains no verified KWin prebuilts."
 assert_file "$BUNDLE_DIR/docs/release-process.md"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
@@ -596,6 +614,10 @@ cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 }
 [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Fresh native install provisioned a Python environment."
 assert_file "$INSTALLED_POINTER"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/setup.sh"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/build.sh"
+diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
+cmp -s "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service" "$HOME/.config/systemd/user/LG_Buddy_kwin.service"
 assert_lifecycle_topology_installed
 assert_file "$DESKTOP_ENTRY"
 [ ! -e "$LEGACY_DESKTOP_ENTRY" ] || fail "Fresh install left the legacy desktop entry behind."
@@ -993,12 +1015,15 @@ systemctl is-system-running
 systemctl --user is-system-running
 systemctl is-system-running
 systemctl --user is-system-running
+systemctl --user stop LG_Buddy_kwin.service
 tmpfiles --create $TMPFILES_CONFIG
 systemctl daemon-reload
 systemctl enable LG_Buddy.service
 systemctl enable LG_Buddy_lifecycle.service
 systemctl restart LG_Buddy_lifecycle.service
 systemctl --user daemon-reload
+systemctl --user enable LG_Buddy_kwin.service
+systemctl --user restart --no-block LG_Buddy_kwin.service
 systemctl --user enable LG_Buddy_screen.service
 systemctl --user restart LG_Buddy_screen.service
 systemctl --user disable --now LG_Buddy_update_check.timer
@@ -1042,6 +1067,8 @@ cmp -s "$BUNDLE_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
 [ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Upgrade left the legacy user desktop entry behind."
 cmp -s "$BUNDLE_ICON" "$INSTALLED_ICON"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
+diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
+cmp -s "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service" "$HOME/.config/systemd/user/LG_Buddy_kwin.service"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER"
 assert_lifecycle_topology_installed
@@ -1118,6 +1145,8 @@ export LG_BUDDY_REMOVE_CONFIG="1"
     echo "Installed binary still present after uninstall: $INSTALLED_BINARY"
     exit 1
 }
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/kwin" ] || fail "KWin payload remains after uninstall."
+[ ! -e "$HOME/.config/systemd/user/LG_Buddy_kwin.service" ] || fail "KWin setup unit remains after uninstall."
 [ ! -e "$INSTALLED_GUI" ] || {
     echo "Installed GUI still present after uninstall: $INSTALLED_GUI"
     exit 1

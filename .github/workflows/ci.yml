@@ -12,6 +12,9 @@ permissions:
   contents: read
 
 jobs:
+  kwin-bridges:
+    uses: ./.github/workflows/kwin-bridge.yml
+
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -64,11 +67,14 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
 
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
+
+      - name: Verify KWin provisioning fallbacks
+        run: bash scripts/test-kwin-setup.sh
 
       - name: Run first-run installer smoke
         run: bash ./scripts/test-installer-first-run.sh
@@ -88,7 +94,7 @@ jobs:
   bundle-smoke-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: verify
+    needs: [verify, kwin-bridges]
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
 
@@ -124,6 +130,13 @@ jobs:
           pkg-config --atleast-version=1.5 libadwaita-1
           cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
           cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
+
+      - name: Download verified KWin plugins
+        uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
 
       - name: Create release bundle
         run: |

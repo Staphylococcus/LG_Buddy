@@ -472,6 +472,8 @@ systemctl enable LG_Buddy.service
 systemctl enable LG_Buddy_lifecycle.service
 systemctl restart LG_Buddy_lifecycle.service
 systemctl --user daemon-reload
+systemctl --user enable LG_Buddy_kwin.service
+systemctl --user restart --no-block LG_Buddy_kwin.service
 systemctl --user enable LG_Buddy_screen.service
 systemctl --user restart LG_Buddy_screen.service
 systemctl --user disable --now LG_Buddy_update_check.timer
@@ -500,6 +502,8 @@ cmp -s "$CANDIDATE_BUNDLE/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
 [ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Cross-version upgrade left the legacy user desktop entry behind."
 cmp -s "$CANDIDATE_ICON" "$INSTALLED_ICON"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
+cmp -s "$CANDIDATE_BUNDLE/docs/kwin/LG_Buddy_kwin.service" "$HOME_DIR/.config/systemd/user/LG_Buddy_kwin.service"
+diff -r "$CANDIDATE_BUNDLE/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_TIMER"
 grep -F -q 'exec /usr/bin/lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
