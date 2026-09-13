@@ -1,21 +1,42 @@
 #!/bin/bash
-# Real KWin loader/ABI smoke for every CI prebuilt, inside a disposable container.
+# Real KWin loader/ABI smoke for every CI prebuilt, inside an isolated build environment or disposable container.
 set -euo pipefail
 artifact_root="${1:?artifact directory required}"
 metadata="$(find "$artifact_root" -type f -name metadata.tsv -print -quit)"
+[ -n "$metadata" ]
+[ "$(find "$artifact_root" -type f -name metadata.tsv | wc -l)" -eq 1 ]
 IFS=$'\t' read -r version qt arch source_id digest < "$metadata"
 plugin_id="lg_buddy_inhibition_$(id -u)_$digest"
-plugin_file="/usr/lib64/qt6/plugins/kwin/plugins/$plugin_id.so"
-install -m 644 "${metadata%/*}/plugin.so" "$plugin_file"
+[ "$(sha256sum "${metadata%/*}/plugin.so" | cut -d ' ' -f1)" = "$digest" ]
+kwin_executable="${LG_BUDDY_TEST_KWIN:-/usr/bin/kwin_wayland}"
 export XDG_RUNTIME_DIR="$(mktemp -d)"
 chmod 700 "$XDG_RUNTIME_DIR"
+cleanup() {
+    if [ -n "${kwin_pid:-}" ]; then
+        kill "$kwin_pid" 2>/dev/null || true
+        wait "$kwin_pid" 2>/dev/null || true
+    fi
+    [ ! -f "$XDG_RUNTIME_DIR/kwin.log" ] || cat "$XDG_RUNTIME_DIR/kwin.log"
+    rm -r -- "$XDG_RUNTIME_DIR"
+}
+trap cleanup EXIT
+unset DISPLAY WAYLAND_DISPLAY WAYLAND_SOCKET QT_QPA_PLATFORM
+export HOME="$XDG_RUNTIME_DIR/home"
+export XDG_CONFIG_HOME="$HOME/config" XDG_CACHE_HOME="$HOME/cache" XDG_DATA_HOME="$HOME/data"
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+plugin_file="$XDG_RUNTIME_DIR/plugins/kwin/plugins/$plugin_id.so"
+install -D -m 644 "${metadata%/*}/plugin.so" "$plugin_file"
+export QT_PLUGIN_PATH="$XDG_RUNTIME_DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+if [ -n "${LG_BUDDY_TEST_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="$LG_BUDDY_TEST_LIBRARY_PATH"
+fi
 export KWIN_COMPOSE=O2 LIBGL_ALWAYS_SOFTWARE=1
 # Fedora's executable carries CAP_SYS_NICE, which Docker does not grant. A
 # disposable copy drops file capabilities; the virtual backend needs none.
-cp /usr/bin/kwin_wayland "$XDG_RUNTIME_DIR/kwin_wayland"
+cp "$kwin_executable" "$XDG_RUNTIME_DIR/kwin_wayland"
+[ "$("$XDG_RUNTIME_DIR/kwin_wayland" --version | awk '{print $NF}')" = "$version" ]
 "$XDG_RUNTIME_DIR/kwin_wayland" --virtual --no-lockscreen --no-global-shortcuts > "$XDG_RUNTIME_DIR/kwin.log" 2>&1 &
 kwin_pid=$!
-trap 'kill "$kwin_pid" 2>/dev/null || true; wait "$kwin_pid" 2>/dev/null || true; cat "$XDG_RUNTIME_DIR/kwin.log"; rm -f "$plugin_file"; rm -rf "$XDG_RUNTIME_DIR"' EXIT
 ready=0
 for _ in {1..150}; do
     kill -0 "$kwin_pid" 2>/dev/null || break
@@ -23,6 +44,9 @@ for _ in {1..150}; do
     sleep 0.1
 done
 [ "$ready" -eq 1 ]
+if [ -n "${LG_BUDDY_TEST_QT:-}" ]; then
+    busctl --user call org.kde.KWin /KWin org.kde.KWin supportInformation | grep -F "Qt Version: $LG_BUDDY_TEST_QT" >/dev/null
+fi
 [ "$(busctl --user call org.kde.KWin /Plugins org.kde.KWin.Plugins LoadPlugin s "$plugin_id")" = 'b true' ]
 service=io.github.staphylococcus.LGBuddy.KWinInhibition
 path=/io/github/staphylococcus/LGBuddy/KWinInhibition

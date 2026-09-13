@@ -67,14 +67,16 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-distro.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
 
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
 
       - name: Verify KWin provisioning fallbacks
-        run: bash scripts/test-kwin-setup.sh
+        run: |
+          bash scripts/test-kwin-setup.sh
+          python3 scripts/test_kwin_matrix.py
 
       - name: Run first-run installer smoke
         run: bash ./scripts/test-installer-first-run.sh
@@ -141,7 +143,7 @@ jobs:
       - name: Create release bundle
         run: |
           umask 0002
-          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
+          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist --require-kwin-matrix
 
       - name: Build GUI journey fixtures
         env:
