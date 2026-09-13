@@ -3,6 +3,12 @@
 # A failed provisioning attempt leaves the KWin source absent.
 set -uo pipefail
 
+# Establish the privileged PATH before even resolving this script's directory.
+if [ "$EUID" -eq 0 ]; then
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+fi
+
 payload_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 runtime=/usr/bin/lg-buddy
 
@@ -99,7 +105,7 @@ privileged() {
     # Match the installer privilege route, using trusted absolute executables.
     if [ "$(id -u)" -eq 0 ]; then
         /bin/bash "$payload_dir/setup.sh" "$@"
-    elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n true 2>/dev/null; then
+    elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
         /usr/bin/sudo -n /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/pkexec ]; then
         /usr/bin/pkexec --disable-internal-agent /bin/bash "$payload_dir/setup.sh" "$@"

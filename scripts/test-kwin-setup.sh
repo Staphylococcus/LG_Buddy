@@ -129,7 +129,13 @@ if [ "$(id -u)" -eq 0 ] && [ -d /usr/lib64/qt6/plugins/kwin/plugins ]; then
     ! bash "$helper" --system-install 1000 "$system_root" "$id" "$fixture/system/plugin.so"
     ln -s plugin.so "$fixture/system/symlink.so"
     ! bash "$helper" --system-install 424242 "$system_root" "$id" "$fixture/system/symlink.so"
-    bash "$helper" --system-install 424242 "$system_root" "$id" "$fixture/system/plugin.so"
+    mkdir "$fixture/shadow-bin"
+    for command in dirname id sha256sum install; do
+        printf '#!/bin/sh\necho unsafe > "%s"\nexit 1\n' "$fixture/shadow-executed" > "$fixture/shadow-bin/$command"
+        chmod 755 "$fixture/shadow-bin/$command"
+    done
+    PATH="$fixture/shadow-bin:$PATH" /bin/bash "$helper" --system-install 424242 "$system_root" "$id" "$fixture/system/plugin.so"
+    test ! -e "$fixture/shadow-executed"
     test "$(stat -c '%u:%a' "$system_root/kwin/plugins/$id.so")" = 0:644
     test "$(sha256sum "$system_root/kwin/plugins/$id.so" | cut -d ' ' -f1)" = "$digest"
     echo corrupted > "$system_root/kwin/plugins/$id.so"
