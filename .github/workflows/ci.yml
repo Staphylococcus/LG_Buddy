@@ -120,8 +120,8 @@ jobs:
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
           sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools pkexec python3-pyatspi strace xdotool xvfb
-          # Prove current installation and GUI behavior without the retired dialog tool.
-          sudo apt-get purge -y zenity
+          # Prove current installation and GUI behavior without the retired dialog tool or external idle command.
+          sudo apt-get purge -y zenity swayidle
 
       - name: Build headless runtime and GTK GUI
         env:

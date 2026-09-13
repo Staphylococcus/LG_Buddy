@@ -10,13 +10,14 @@ Feature: Detect backend
     Then the command succeeds
     And stdout is "gnome"
 
-  Scenario: swayidle is selected when GNOME and native Wayland are unavailable
+  Scenario: automatic detection ignores installed swayidle without native sources
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And swayidle is installed
     When I run the command "detect-backend"
-    Then the command succeeds
-    And stdout is "swayidle"
+    Then the command fails
+    And stderr contains "no native activity source available"
+    And stderr contains "screen.idle_blank to disabled"
 
   Scenario: Backend override wins
     Given a temporary LG Buddy config using input HDMI_2

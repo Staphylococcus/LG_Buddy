@@ -1048,9 +1048,10 @@ asymmetric:
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
-`swayidle` remains an explicit and automatic compatibility fallback during the
-1.x migration window, but emits a deprecation notice and is not offered by
-fresh interactive configuration. Removal is planned for 2.0.0 after native
+`swayidle` remains an explicit legacy integration during the 1.x migration
+window and emits a deprecation notice. Automatic monitoring never probes or
+starts it, and fresh interactive configuration does not offer it. Removal is
+planned for 2.0.0 after native
 Wayland remains field-validated across supported compositors and unsupported
 sessions have precise diagnostics.
 

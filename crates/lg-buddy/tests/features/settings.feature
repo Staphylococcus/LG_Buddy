@@ -60,14 +60,14 @@ Feature: Settings CLI
     Then the command succeeds
     And stdout is "auto"
 
-  Scenario: settings describe explains the swayidle compatibility fallback
+  Scenario: settings describe reports native absence even with swayidle installed
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And swayidle is installed
     When I run the command "settings describe screen.backend"
     Then the command succeeds
     And stdout contains "current: auto"
-    And stdout contains "resolved backend: swayidle"
+    And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
     And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
 

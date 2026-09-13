@@ -101,8 +101,11 @@ remain independent. Reconnection itself does not count as input. Worker shutdown
 cancels quiet connections and joins their threads.
 
 `swayidle` still owns its initial timeout and publishes `Idle` and independent
-desktop activity to the shared policy. Its existing automatic fallback remains
-when no native activity capability is available at startup; #132 removes it.
+desktop activity to the shared policy. This path is available only for an
+explicit legacy selection. Automatic monitoring never probes or launches
+swayidle; it retries native discovery while
+no native activity source is available. Disabling built-in idle blanking keeps
+the passive session service and other GUI/CLI features available.
 
 ### Independent inhibition and the blanking gate
 
@@ -365,7 +368,7 @@ Notes:
   field-validated across supported compositors and the 1.x migration window.
 - `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
 - Its source-owned timeout always honors compositor inhibition, independently
-  of `screen.honor_idle_inhibitors`, including when `auto` falls back to it.
+  of `screen.honor_idle_inhibitors`.
   The preference is hidden for explicit `swayidle` selections; this compatibility
   backend does not offer the native default-off behavior.
 - `swayidle` does not provide a Mutter-style early activity surface.

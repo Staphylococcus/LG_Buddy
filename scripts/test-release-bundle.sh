@@ -3,6 +3,12 @@
 set -euo pipefail
 umask 0022
 
+# Normal installed operation must not acquire an external idle dependency.
+if command -v swayidle >/dev/null 2>&1; then
+    echo "Release-bundle smoke requires a host without swayidle." >&2
+    exit 1
+fi
+
 usage() {
     echo "Usage: $0 --archive <path-to-release.tar.gz> [--work-dir <dir>] [--expected-tag <tag> --expected-version <version> --expected-channel <channel> --expected-target <target> --expected-commit <sha>]"
     exit 1

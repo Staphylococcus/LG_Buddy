@@ -30,7 +30,7 @@ pub(super) const BACKEND: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic selects a compatible integration. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
+    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic composes available native integrations. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
 };
 
 pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
