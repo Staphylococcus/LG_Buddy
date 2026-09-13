@@ -201,6 +201,13 @@ artifacts to exist under:
 ./target/<gui-target>/release/lg-buddy-gui
 ```
 
+Release CI also puts its verified KWin prebuilts in `target/kwin-bridges/` before
+bundling. For a local bundle smoke, download those artifacts from a CI run of the
+same plugin source, or build on a matching Plasma development host with
+`bash data/kwin/build.sh data/kwin/source target/kwin-bridges`. The bundle smoke
+requires at least one prebuilt and verifies its metadata/source identity. A local
+bundle without prebuilts still supports compilation/ordinary source absence.
+
 Smoke test a generated release bundle with:
 
 ```bash

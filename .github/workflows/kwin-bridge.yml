@@ -29,6 +29,8 @@ jobs:
         run: bash data/kwin/build.sh data/kwin/source dist/kwin
       - name: Check provisioning and privileged installation
         run: bash scripts/test-kwin-setup.sh
+      - name: Remove development packages before testing the prebuilt
+        run: dnf remove -y '*-devel' gcc gcc-c++ cmake extra-cmake-modules
       - name: Verify the plugin in a real headless KWin
         run: timeout 60 dbus-run-session -- bash scripts/test-kwin-plugin.sh dist/kwin
       - name: Upload the verified prebuilt

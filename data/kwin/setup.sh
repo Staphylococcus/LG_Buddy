@@ -82,10 +82,10 @@ system_action() {
                 local kwin_package
                 kwin_package="$(dpkg-query -W -f='${Version}' kwin-common)" || return 1
                 /usr/bin/apt-get install -y --no-install-recommends \
-                    "kwin-dev=$kwin_package" cmake g++ make extra-cmake-modules \
+                    "kwin-dev=$kwin_package" cmake g++ make pkg-config extra-cmake-modules \
                     qt6-base-dev qt6-declarative-dev libepoxy-dev libdrm-dev libvulkan-dev
             elif [ -x /usr/bin/pacman ]; then
-                /usr/bin/pacman -S --needed --noconfirm gcc cmake make extra-cmake-modules \
+                /usr/bin/pacman -S --needed --noconfirm gcc cmake make pkgconf extra-cmake-modules \
                     qt6-base qt6-declarative wayland libepoxy libdrm vulkan-headers
             else
                 return 1
