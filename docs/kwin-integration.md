@@ -131,14 +131,15 @@ built with a newer minor than the host. Qt's
 also requires compatible toolchains, system environments and Qt configurations.
 KWin's private interface and downstream builds still require actual loader tests.
 
-The original Fedora stripped plugins were 27,560 bytes; independently XZ-compressed,
-they are 6,288 and 6,300 bytes. At those measured sizes, 75 artifacts would be
-about **1.97 MiB unpacked or 461 KiB compressed**, excluding metadata/archive
-overhead. Two system-library baselines would budget 150 artifacts, about
-**3.94 MiB unpacked or 923 KiB compressed**. These are size estimates, not measured
-expanded bundles. The count is bounded by the chosen versions, architectures and
-library baselines; arbitrary downstream builds are handled by the existing
-fallback chain. New stable versions extend the dated grid.
+The generated plugins are **31,192 bytes each**, or **6,516–6,608 bytes** when
+individually XZ-compressed. At those measured sizes, 75 artifacts would be about
+**2.23 MiB unpacked or at most 484 KiB individually compressed**, excluding
+metadata/archive overhead. Two system-library baselines would budget 150
+artifacts, about **4.46 MiB unpacked or 968 KiB individually compressed**. These
+are estimates for the candidate grid, not measured expanded bundles. The count
+is bounded by the chosen versions, architectures and library baselines; arbitrary
+downstream builds use the existing fallback chain. New stable versions extend
+the dated grid.
 
 ### Initial shipped variants
 
@@ -153,6 +154,12 @@ on their upstream minimum Qt minor, plus the current Qt 6.11 baseline for 6.7:
 | 6.6 | 6.10.2 | 7 |
 | 6.7 | 6.10.2, 6.11.2 | 12 |
 | **Total** | | **33** |
+
+All 33 variants were built and loaded on 2026-09-13. The plugin files total
+**1,029,336 bytes (0.98 MiB)**; metadata adds 62,532 bytes. The complete collection
+with metadata is **300,239 bytes (293 KiB) as tar.gz** or **21,040 bytes (21 KiB)
+as tar.xz**. Compressing the collection together benefits from the plugins' shared
+code. Release bundles retain their existing tar.gz format.
 
 For example, Frameworks 6.15's KArchive does not compile with Qt 6.11's changed
 `QString::arg` overloads. We do not carry unrelated historical KDE ports merely
@@ -200,6 +207,14 @@ replacement, delayed replies, cancellation, failure and recovery.
 
 `scripts/test-kwin-plugin.sh` loads each CI artifact into a disposable headless
 KWin, calls its getter and build identity, unloads it and checks compositor survival.
+The complete 33-artifact local run passed these checks. Fedora 43 additionally
+loaded the 6.7.5 / Qt 6.10.2 plugin on Qt 6.10.3; Fedora 44 loaded both Qt 6.10.2
+and Qt 6.11.2 variants on Qt 6.11.2, without Nix or a compiler. A bundle packaging
+check using the previously verified, unchanged application binaries also proved
+that the extracted archive retained all 33 artifacts and the exact matrix manifest;
+an incomplete collection was rejected before an archive was created. These are
+loader and packaging checks; desktop inhibition behavior is covered separately.
+
 `scripts/test-kwin-desktop.py` requires a disposable Plasma installation with the
 repository's stateful TV and uinput fixtures, a ten-second idle deadline and
 honoring enabled. It tests native mpv playback before/after monitor startup,
