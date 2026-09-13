@@ -28,7 +28,7 @@ plugin_file="$XDG_RUNTIME_DIR/plugins/kwin/plugins/$plugin_id.so"
 install -D -m 644 "${metadata%/*}/plugin.so" "$plugin_file"
 export QT_PLUGIN_PATH="$XDG_RUNTIME_DIR/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 if [ -n "${LG_BUDDY_TEST_LIBRARY_PATH:-}" ]; then
-    export LD_LIBRARY_PATH="$LG_BUDDY_TEST_LIBRARY_PATH"
+    export LD_LIBRARY_PATH="$LG_BUDDY_TEST_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 export KWIN_COMPOSE=O2 LIBGL_ALWAYS_SOFTWARE=1
 # Fedora's executable carries CAP_SYS_NICE, which Docker does not grant. A
