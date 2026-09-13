@@ -10,13 +10,26 @@ let
     sha256 = pin.hash;
   };
   kdePkgs = import (source kdeEnv) { system = "x86_64-linux"; };
+  importKdeRecipes = kdeEnv.rev != env.qt_nixpkgs.rev;
+  needsPlasmaUpdate = builtins.compareVersions kwinVersion kdePkgs.kdePackages.kwin.version > 0;
   pkgs = import (source env.qt_nixpkgs) {
     system = "x86_64-linux";
     # Import the matching KDE recipes into one complete Qt/system package set.
     # Mixing prebuilt Qt libraries into a different base mixes libc/glib too.
-    overlays = if kdeEnv == env.qt_nixpkgs then [ ] else [ (final: prev: {
+    overlays = if !importKdeRecipes && !needsPlasmaUpdate then [ ] else [ (final: prev: {
       libgbm = prev.libgbm or prev.mesa;
-      kdePackages = (final.callPackage ((source kdeEnv) + "/pkgs/kde") { }).overrideScope (kdeFinal: kdePrev: {
+      kdePackages = (if importKdeRecipes then final.callPackage ((source kdeEnv) + "/pkgs/kde") { }
+        else prev.kdePackages).overrideScope (kdeFinal: kdePrev: {
+        # Later maintenance releases require Plasma libraries at least as new
+        # as themselves. Keep the proven Qt/Frameworks baseline and update the
+        # Plasma sources only for targets beyond the recipe snapshot.
+        sources = kdePrev.sources // prev.lib.optionalAttrs needsPlasmaUpdate
+          (prev.lib.mapAttrs (name: pin: (prev.fetchzip {
+            url = "https://api.github.com/repos/KDE/${name}/tarball/${pin.rev}";
+            extension = "tar.gz";
+            sha256 = pin.sha256;
+          }) // { version = kdeEnv.plasma.version; }) kdeEnv.plasma.sources);
+      } // prev.lib.optionalAttrs importKdeRecipes {
         lib = kdePkgs.lib;
         libsForQt5 = final.libsForQt5 // {
           __internalKF5 = final.libsForQt5.__internalKF5 or final.libsForQt5;

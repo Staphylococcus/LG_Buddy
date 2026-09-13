@@ -47,6 +47,13 @@ def load_manifest(path=MANIFEST):
     for series, pin in manifest["kde_environments"].items():
         if not re.fullmatch(r"6\.\d+", series) or not re.fullmatch(r"[a-f0-9]{40}", pin["rev"]) or not re.fullmatch(r"sha256-[A-Za-z0-9+/]{43}=", pin["hash"]):
             raise ValueError(f"Unpinned KDE environment: {series}")
+        if "plasma" in pin:
+            plasma = pin["plasma"]
+            if not re.fullmatch(re.escape(series) + r"\.\d+", plasma["version"]) or not plasma["sources"]:
+                raise ValueError(f"Invalid Plasma dependency set: {series}")
+            for name, source in plasma["sources"].items():
+                if not re.fullmatch(r"[a-z][a-z0-9-]+", name) or not re.fullmatch(r"[a-f0-9]{40}", source["rev"]) or not re.fullmatch(r"[0-9abcdfghijklmnpqrsvwxyz]{52}", source["sha256"]):
+                    raise ValueError(f"Unpinned Plasma dependency: {series}/{name}")
     for target in manifest["kwin"]:
         version = target["version"]
         if not re.fullmatch(r"6\.\d+\.\d+", version) or version in versions:
@@ -136,7 +143,8 @@ def verify(directory, rows, bridge_id=None, root=ROOT):
 
 def build(directory, rows, cores, jobs):
     directory.mkdir(parents=True, exist_ok=True)
-    for row in rows:
+    # Check the upper bound first: maintenance releases can raise dependency floors.
+    for row in reversed(rows):
         expected_inputs = input_identity([row])
         nix_args = ["scripts/kwin-matrix/default.nix", "--argstr", "kwinVersion", row["kwin_version"],
                     "--argstr", "qtMinor", row["qt_minor"]]

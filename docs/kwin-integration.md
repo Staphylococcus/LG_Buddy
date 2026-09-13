@@ -104,6 +104,9 @@ repositories are used for additional compatibility tests, not historical builds.
 Upstream 6.4 requires Qt 6.8, 6.5 requires Qt 6.9, and 6.6/6.7 require Qt 6.10
 (verified in `CMakeLists.txt` for all 27 target tags). Qt and the system-library
 baseline are pinned together, with KDE dependencies selected for each KWin series.
+Later patch releases also require matching Plasma library versions. Where they
+postdate the KDE recipe snapshot, the manifest pins maintenance releases of those
+libraries while retaining the same Qt and Frameworks baseline.
 
 ### Qt combinations and size budget
 

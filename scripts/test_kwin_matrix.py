@@ -103,6 +103,7 @@ class KWinMatrixTests(unittest.TestCase):
         path = self.output / "targets.json"
         for change in (lambda m: m["kwin"][0].update(rev="master"),
                        lambda m: m["kwin"].append(m["kwin"][0]),
+                       lambda m: m["kde_environments"]["6.4"]["plasma"]["sources"]["kdecoration"].update(rev="master"),
                        lambda m: m["environments"]["6.8"]["qt_nixpkgs"].update(rev="nixos-unstable")):
             altered = copy.deepcopy(self.manifest)
             change(altered)
