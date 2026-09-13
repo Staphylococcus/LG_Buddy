@@ -114,7 +114,7 @@ jobs:
           path: target/kwin-bridges
 
       - name: Create release bundle
-        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist
+        run: ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "${{ needs.validate.outputs.version }}" --output-dir dist --require-kwin-matrix
 
       - name: Build GUI journey fixtures
         env:

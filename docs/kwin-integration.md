@@ -35,12 +35,11 @@ is skipped). Those checks select candidates; actual KWin loading and successful
 getter/build-identity replies establish availability. Both D-Bus names must belong
 to the same compositor during setup verification.
 
-The initial CI matrix builds against the current Fedora 43 and Fedora 44 x86_64
-repositories. Each artifact records the exact KWin/Qt versions resolved in that
-run, and must load into a real headless KWin before bundling. This is not a promise
-of compatibility with every package carrying the same KWin version: rejection
-on a different system-library baseline proceeds to the next candidate/local build.
-Expanding the prebuilt matrix does not change runtime policy.
+CI builds the pinned x86_64 matrix below and tests each artifact in its matching
+headless KWin. Fedora 43 and 44 additionally test the portable outputs using only
+distribution runtime packages. Matching versions do not establish compatibility
+with every downstream build: an actual loader rejection proceeds through the
+existing fallback chain.
 
 Plugin files use a per-user, content-addressed name in the system Qt plugin
 directory. Installation uses the existing privilege route, verifies the copied
@@ -68,6 +67,135 @@ The release bundle keeps the source, metadata, helper scripts and prebuilts unde
 `docs/kwin/` because older verified bundle readers permit additional payload there.
 They are covered by the existing archive checksum and safe extraction contract.
 
+## Prebuilt target matrix
+
+The target starts at **Plasma/KWin 6.4.0**, matching the native Wayland activity
+floor established in [#84](https://github.com/Staphylococcus/LG_Buddy/issues/84).
+KWin 6.4.0 implements `ext_idle_notifier_v1` version 2 and its input-only request;
+the runtime still probes that protocol and an advertised seat rather than gating
+activity on a desktop version. The inhibition getter and native plugin factory
+also exist in 6.4.0. See upstream's
+[idle-notify implementation](https://github.com/KDE/kwin/blob/v6.4.0/src/wayland/idlenotify_v1.cpp),
+[getter](https://github.com/KDE/kwin/blob/v6.4.0/src/input.h), and
+[versioned plugin interface](https://github.com/KDE/kwin/blob/v6.4.0/src/plugin.h).
+
+Target **every stable patch release from that floor**, initially on x86_64 to
+match the application bundle. The release-tag snapshot on 2026-09-13 is:
+
+| Plasma/KWin series | Exact versions to build (inclusive) | Version count |
+| --- | --- | ---: |
+| 6.4 | 6.4.0 through 6.4.6 | 7 |
+| 6.5 | 6.5.0 through 6.5.6 | 7 |
+| 6.6 | 6.6.0 through 6.6.6 | 7 |
+| 6.7 | 6.7.0 through 6.7.5 | 6 |
+| **Total** | | **27** |
+
+The [KDE KWin release tags](https://github.com/KDE/kwin/tags) define the exact
+versions. Releases below 6.4.0 and development, beta or release-candidate tags
+are outside this prebuilt target. Add subsequent stable releases without dropping
+earlier targets; changing the floor is a separate support decision. Downstream
+backports remain governed by runtime capability discovery.
+
+Each version needs a separately compiled plugin: the plugin interface includes
+the full KWin version. `scripts/kwin-matrix/targets.json` pins upstream revisions,
+source hashes, Qt patch versions and KDE build environments. Moving distribution
+repositories are used for additional compatibility tests, not historical builds.
+
+Upstream 6.4 requires Qt 6.8, 6.5 requires Qt 6.9, and 6.6/6.7 require Qt 6.10
+(verified in `CMakeLists.txt` for all 27 target tags). Qt and the system-library
+baseline are pinned together, with KDE dependencies selected for each KWin series.
+Later patch releases also require matching Plasma library versions. Where they
+postdate the KDE recipe snapshot, the manifest pins maintenance releases of those
+libraries while retaining the same Qt and Frameworks baseline.
+
+### Qt combinations and size budget
+
+As of 2026-09-13, the newest stable Qt minor is 6.11, with patch release 6.11.2
+in the [official release index](https://download.qt.io/official_releases/qt/).
+Enumerating every Qt minor from each KWin series' minimum through 6.11 gives
+this conservative candidate grid for one x86_64 system-library baseline:
+
+| KWin targets | Qt minor build variants | Candidate artifacts |
+| --- | --- | ---: |
+| 6.4.0 through 6.4.6 | 6.8, 6.9, 6.10, 6.11 | 28 |
+| 6.5.0 through 6.5.6 | 6.9, 6.10, 6.11 | 21 |
+| 6.6.0 through 6.6.6 | 6.10, 6.11 | 14 |
+| 6.7.0 through 6.7.5 | 6.10, 6.11 | 12 |
+| **Total** | | **75** |
+
+Qt patch releases do not normally require separate artifacts: its
+[plugin loader rules](https://doc.qt.io/qt-6/deployment-plugins.html) allow patches
+within a minor and plugins built with an older minor, while refusing a plugin
+built with a newer minor than the host. Qt's
+[binary compatibility contract](https://doc.qt.io/qt-6/qt-releases.html#binary-compatibility)
+also requires compatible toolchains, system environments and Qt configurations.
+KWin's private interface and downstream builds still require actual loader tests.
+
+The generated plugins are **31,192 bytes each**, or **6,516–6,608 bytes** when
+individually XZ-compressed. At those measured sizes, 75 artifacts would be about
+**2.23 MiB unpacked or at most 484 KiB individually compressed**, excluding
+metadata/archive overhead. Two system-library baselines would budget 150
+artifacts, about **4.46 MiB unpacked or 968 KiB individually compressed**. These
+are estimates for the candidate grid, not measured expanded bundles. The count
+is bounded by the chosen versions, architectures and library baselines; arbitrary
+downstream builds use the existing fallback chain. New stable versions extend
+the dated grid.
+
+### Initial shipped variants
+
+The 75 combinations above are a size ceiling, not a requirement to port historical
+Plasma dependencies to every newer Qt. Initial builds cover all 27 KWin versions
+on their upstream minimum Qt minor, plus the current Qt 6.11 baseline for 6.7:
+
+| KWin series | Pinned Qt versions | Artifacts |
+| --- | --- | ---: |
+| 6.4 | 6.8.3 | 7 |
+| 6.5 | 6.9.2 | 7 |
+| 6.6 | 6.10.2 | 7 |
+| 6.7 | 6.10.2, 6.11.2 | 12 |
+| **Total** | | **33** |
+
+All 33 variants were built and loaded on 2026-09-13. The plugin files total
+**1,029,336 bytes (0.98 MiB)**; metadata adds 62,532 bytes. The complete collection
+with metadata is **300,239 bytes (293 KiB) as tar.gz** or **21,040 bytes (21 KiB)
+as tar.xz**. Compressing the collection together benefits from the plugins' shared
+code. Release bundles retain their existing tar.gz format.
+
+For example, Frameworks 6.15's KArchive does not compile with Qt 6.11's changed
+`QString::arg` overloads. We do not carry unrelated historical KDE ports merely
+to populate that theoretical grid. Older-Qt plugins remain candidates on newer
+Qt; Fedora's loader checks exercise that reuse. Additional variants should answer
+an observed compatibility gap. No KWin version in the stated range is dropped.
+
+### Building and checking coverage
+
+Nix is used only for the CI build environments. Exported plugins contain no Nix
+store references or runtime search paths. Nix is not installed on users' machines
+by bridge setup, and the local compilation fallback keeps its existing tools.
+
+```sh
+# Generate and load every target (a cold build compiles the matching KWin builds).
+python3 scripts/kwin_matrix.py build --directory target/kwin-bridges
+
+# Require every pinned variant and verify its source, toolchain and loader record.
+python3 scripts/kwin_matrix.py verify --directory target/kwin-bridges
+
+# Build one combination for investigation, in a separate output directory.
+python3 scripts/kwin_matrix.py build --directory target/kwin-probe \
+  --kwin-version 6.4.0 --qt-minor 6.8
+```
+
+The reusable `kwin-bridge.yml` workflow groups builds by KWin series and Qt minor.
+It caches only artifacts that passed the loader test, keyed by their exact build
+and test inputs. Each artifact includes `metadata.tsv` and `build.json`, recording
+the source revision, toolchain pins, plugin checksum and successful loader check.
+A final coverage job rejects missing, duplicate, stale or corrupt artifacts.
+
+CI and release bundling use `--require-kwin-matrix`; a partial collection cannot
+produce their release bundle. The copied payload is checked again and includes
+`docs/kwin/matrix.json`. Ad hoc local bundles may omit that flag and retain the
+ordinary local-build/no-source fallbacks.
+
 ## Validation
 
 `scripts/test-kwin-setup.sh` exercises the production selection/fallback path
@@ -79,6 +207,14 @@ replacement, delayed replies, cancellation, failure and recovery.
 
 `scripts/test-kwin-plugin.sh` loads each CI artifact into a disposable headless
 KWin, calls its getter and build identity, unloads it and checks compositor survival.
+The complete 33-artifact local run passed these checks. Fedora 43 additionally
+loaded the 6.7.5 / Qt 6.10.2 plugin on Qt 6.10.3; Fedora 44 loaded both Qt 6.10.2
+and Qt 6.11.2 variants on Qt 6.11.2, without Nix or a compiler. A bundle packaging
+check using the previously verified, unchanged application binaries also proved
+that the extracted archive retained all 33 artifacts and the exact matrix manifest;
+an incomplete collection was rejected before an archive was created. These are
+loader and packaging checks; desktop inhibition behavior is covered separately.
+
 `scripts/test-kwin-desktop.py` requires a disposable Plasma installation with the
 repository's stateful TV and uinput fixtures, a ten-second idle deadline and
 honoring enabled. It tests native mpv playback before/after monitor startup,
