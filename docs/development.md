@@ -158,6 +158,21 @@ The GUI launch checks cover both no-argument normal Overview launch and the
 brightness deep link, including focus handoff from another view. Installed
 smoke keeps the desktop entry, runtime, and GUI together.
 
+PR CI runs verification and the KWin checks first, then builds the candidate
+bundle and GUI journey fixtures once. Ubuntu bundle checks and Fedora/Arch
+checks consume those artifacts in parallel. The required `bundle-smoke-test`
+check also fails if artifact production fails or is skipped. No installed or
+cross-version checks are omitted.
+
+The root ownership checks execute the library test binary that Cargo already
+built for the ordinary suite. The TV fixture shares the GNU debug build and
+glibc baseline of the `0.0.0` update-journey app pair, avoiding another musl
+dependency build. Fedora and Arch exercise the same downloaded fixture.
+Rust dependency caches are keyed by job, compiler, Cargo inputs and build
+environment. GitHub scopes PR caches to that PR, so they accelerate subsequent
+revisions and reruns; a new PR may still start cold. Workspace binaries retain
+their normal builds and embedded candidate identity checks.
+
 Optional hardware smoke for gamepad activity:
 
 ```bash
