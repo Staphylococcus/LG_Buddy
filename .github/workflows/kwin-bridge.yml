@@ -12,6 +12,7 @@ on:
       - .github/workflows/kwin-bridge.yml
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -42,13 +43,43 @@ jobs:
         with:
           path: dist/kwin
           key: kwin-bridge-${{ matrix.series }}-${{ matrix.qt_minor }}-${{ matrix.inputs_sha256 }}
-      - name: Install the CI-only Nix builder
+      - name: Reuse verified dev artifacts across release branches
+        id: reuse
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KWIN_SERIES: ${{ matrix.series }}
+          QT_MINOR: ${{ matrix.qt_minor }}
+        run: |
+          # Actions caches are branch-scoped. Promotion and release builds can
+          # reuse a successful dev push's artifacts after checking exact inputs.
+          run_id="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/kwin-bridge.yml/runs" \
+              -f branch=dev -f event=push -f status=success -f per_page=1 \
+              --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)"
+          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "No completed dev prebuilt run; building from source."
+              exit 0
+          fi
+          candidate="$(mktemp -d "$RUNNER_TEMP/kwin-reuse.XXXXXX")"
+          if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name "kwin-bridge-$KWIN_SERIES-qt$QT_MINOR" --dir "$candidate" && \
+              python3 scripts/kwin_matrix.py verify --directory "$candidate" \
+                  --series "$KWIN_SERIES" --qt-minor "$QT_MINOR"; then
+              mkdir -p dist
+              mv -T "$candidate" dist/kwin
+              echo "reused=true" >> "$GITHUB_OUTPUT"
+              echo "Reused verified KWin artifacts from dev run $run_id."
+          else
+              echo "Dev artifacts unavailable or inputs differ; building from source."
+          fi
+      - name: Install the CI-only Nix builder
+        if: steps.cache.outputs.cache-hit != 'true' && steps.reuse.outputs.reused != 'true'
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           install_url: https://releases.nixos.org/nix/nix-2.34.8/install
       - name: Build and load every exact KWin/Qt target
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-hit != 'true' && steps.reuse.outputs.reused != 'true'
         env:
           KWIN_SERIES: ${{ matrix.series }}
           QT_MINOR: ${{ matrix.qt_minor }}
