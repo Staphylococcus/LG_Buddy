@@ -112,17 +112,29 @@ impl Drop for LogindLockObserver {
     }
 }
 
-pub(crate) fn spawn_lock_observer<F, E>(mut publish: F, report_error: E) -> LogindLockObserver
+pub(crate) fn spawn_lock_observer<F, E, C>(
+    mut publish: F,
+    report_error: E,
+    mut lifecycle_changed: C,
+) -> LogindLockObserver
 where
     F: FnMut(SessionObservation) -> bool + Send + 'static,
     E: FnOnce(LogindSessionError) + Send + 'static,
+    C: FnMut() -> bool + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let handle = thread::spawn(move || {
         let result = new_system_bus_client()
             .map_err(Into::into)
-            .and_then(|mut bus| run_lock_observer_process(&mut bus, &mut publish, &thread_stop));
+            .and_then(|mut bus| {
+                run_lock_observer_process(
+                    &mut bus,
+                    &mut publish,
+                    &thread_stop,
+                    &mut lifecycle_changed,
+                )
+            });
         if let Err(err) = result {
             report_error(err);
         }
@@ -138,6 +150,7 @@ fn run_lock_observer_process<F>(
     bus: &mut impl SessionBusClient,
     publish: &mut F,
     stop: &AtomicBool,
+    lifecycle_changed: &mut impl FnMut() -> bool,
 ) -> Result<(), LogindSessionError>
 where
     F: FnMut(SessionObservation) -> bool,
@@ -150,6 +163,7 @@ where
         stop,
         explicit_session_id.as_deref(),
         current_uid,
+        lifecycle_changed,
     )
 }
 
@@ -159,11 +173,13 @@ fn run_lock_observer_for_session<F>(
     stop: &AtomicBool,
     explicit_session_id: Option<&str>,
     current_uid: u32,
+    lifecycle_changed: &mut impl FnMut() -> bool,
 ) -> Result<(), LogindSessionError>
 where
     F: FnMut(SessionObservation) -> bool,
 {
     add_logind_owner_signal_match(bus)?;
+    add_logind_signal_match(bus)?;
     let (mut session, owner, initial_locked) =
         bind_lock_target(bus, explicit_session_id, current_uid)?;
     let mut logind_owner = Some(owner);
@@ -179,6 +195,9 @@ where
         };
 
         if let Some(new_owner) = logind_owner_changed(&signal) {
+            if !lifecycle_changed() {
+                return Ok(());
+            }
             if new_owner.is_none() {
                 logind_owner = None;
                 continue;
@@ -197,6 +216,14 @@ where
         let Some(logind_owner) = logind_owner.as_deref() else {
             continue;
         };
+        // Sleep/resume invalidates pending idle decisions, but is not activity
+        // and must not dispatch the lifecycle service's TV actions a second time.
+        if signal.sender.as_deref() == Some(logind_owner)
+            && map_prepare_for_sleep_signal(&signal).is_some()
+            && !lifecycle_changed()
+        {
+            return Ok(());
+        }
         let Some(change) = map_locked_hint_change(&signal, &session, logind_owner) else {
             continue;
         };
@@ -1155,6 +1182,7 @@ mod tests {
             &stop,
             Some("34"),
             1000,
+            &mut || true,
         )
         .expect("initial LockedHint should be reconciled before the signal loop");
 
@@ -1166,7 +1194,7 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(bus.matches.len(), 2);
+        assert_eq!(bus.matches.len(), 3);
         assert_eq!(
             bus.calls
                 .iter()
@@ -1174,6 +1202,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["GetSession", "GetAll", "GetNameOwner", "Get"]
         );
+    }
+
+    #[test]
+    fn sleep_transitions_invalidate_checks_without_publishing_activity_or_lifecycle_actions() {
+        let target = session("34");
+        let mut bus = FakeBus::default();
+        bus.replies.extend([
+            BusReply::new(vec![BusValue::ObjectPath(target.path.clone())]),
+            session_properties_reply(1000, false, "wayland", "user", true),
+            BusReply::new(vec![BusValue::String(LOGIND_OWNER.to_string())]),
+            BusReply::new(vec![variant(BusValue::Bool(false))]),
+        ]);
+        for (sender, sleeping) in [(":1.99", true), (LOGIND_OWNER, true), (LOGIND_OWNER, false)] {
+            bus.process_results.push_back(Ok(Some(
+                prepare_for_sleep_signal(sleeping).with_sender(sender),
+            )));
+        }
+        bus.process_results
+            .push_back(Err(SessionBusError::Transport("end".into())));
+        let mut changes = 0;
+        let result = run_lock_observer_for_session(
+            &mut bus,
+            &mut |_| panic!("sleep is not activity or a TV action here"),
+            &AtomicBool::new(false),
+            Some("34"),
+            1000,
+            &mut || {
+                changes += 1;
+                true
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(changes, 2);
     }
 
     #[test]
@@ -1219,6 +1280,7 @@ mod tests {
                 &stop,
                 Some("34"),
                 1000,
+                &mut || true,
             ),
             Err(LogindSessionError::Bus(SessionBusError::Transport(
                 "stop test loop".to_string()
@@ -1233,7 +1295,7 @@ mod tests {
                 ..
             }]
         ));
-        assert_eq!(bus.matches.len(), 3);
+        assert_eq!(bus.matches.len(), 4);
         assert_eq!(
             bus.calls
                 .iter()

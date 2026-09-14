@@ -21,12 +21,10 @@ Compiling and testing the GTK frontend additionally requires:
 - AT-SPI 2 and its Python bindings (`python3-pyatspi` on Debian/Fedora,
   `python-atspi` on Arch) for observable GUI behavior tests
 
-Running the interactive installer, exercising the legacy TV fallback, and
-testing release bundles also requires:
-
-- `python3-venv`
-- `python3-pip`
-- `zenity`
+Python is a development/test dependency for release tooling, GUI observers,
+and legacy fixtures. The pinned historical installer smoke also needs `venv`
+and `pip` support. Fresh and native installations use the bundled Rust binaries
+and do not provision a Python environment.
 
 Backend-specific tools used in development and local testing:
 
@@ -39,7 +37,15 @@ For GNOME end-to-end work, the running session also needs the full GNOME contrac
 - GNOME Shell
 - `org.gnome.ScreenSaver`
 - `org.gnome.Mutter.IdleMonitor`
-- `org.gnome.SessionManager` when testing **Allow apps to prevent idle blanking**
+
+Native monitoring honors the opt-in **Allow apps to prevent idle blanking**
+setting through independent GNOME SessionManager, PowerDevil and optional KWin inhibition
+capabilities. Activity tests require Mutter user-active watches; SessionManager
+availability must not determine whether activity monitoring works. Private-bus
+fixtures cover the integrated gate. The [desktop validation record](desktop-session-validation.md)
+documents live GNOME/Plasma coverage. Plasma uses both PowerDevil and native KWin
+inhibition. See [KWin integration](kwin-integration.md) for plugin delivery and
+the supported prebuilt, local-build and absent-source modes.
 
 The C toolchain is required because `cargo build` now compiles vendored
 `libdbus` as part of the dependency graph. On common Linux distributions that
@@ -80,11 +86,13 @@ exercised with `cargo run -p lg-buddy`; it resolves `lg-buddy-gui` beside the
 running CLI executable and launches its normal Overview entrypoint.
 `cargo run -p lg-buddy -- brightness` remains the brightness-focused deep link.
 `LG_BUDDY_GUI` overrides that companion path for relocation and subprocess
-tests. Only the brightness path selects the temporary Zenity compatibility flow
-when the GUI path is missing; the no-argument launcher requires the GUI.
+tests. Both graphical launch paths use this GTK executable. Headless brightness
+get/set commands operate directly through the runtime.
 
 The local installer accepts the GUI and runtime as separate build artifacts.
-Official release bundles ship and verify both.
+Official release bundles ship and verify both. Fresh installs and upgrades
+check GTK/libadwaita versions and offer to install missing packages through the
+distribution's package manager before validating and installing the binary pair.
 
 The fresh release-bundle installer installs the payload and launches the installed
 GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &
@@ -193,6 +201,19 @@ artifacts to exist under:
 ./target/<gui-target>/release/lg-buddy-gui
 ```
 
+Release CI puts the complete pinned KWin matrix in `target/kwin-bridges/` and
+passes `--require-kwin-matrix` to the bundler. For the same check locally, download
+the matrix artifacts built from the exact current inputs or generate them with
+`python3 scripts/kwin_matrix.py build --directory target/kwin-bridges` using Nix.
+See [KWin integration](kwin-integration.md#building-and-checking-coverage) for the
+pins, loader tests and commands for individual targets.
+
+An ad hoc local bundle may omit `--require-kwin-matrix`. A matching Plasma
+development host can provide a local artifact with
+`bash data/kwin/build.sh data/kwin/source target/kwin-bridges`; the bundle smoke
+requires at least one prebuilt and verifies its metadata/source identity. A local
+bundle without prebuilts still supports compilation/ordinary source absence.
+
 Smoke test a generated release bundle with:
 
 ```bash
@@ -202,12 +223,15 @@ dbus-run-session -- xvfb-run -a ./scripts/test-release-bundle.sh \
 
 The smoke test validates `release-manifest.json` against the archive name and
 bundled runtime and GUI before running installer code. It then installs into a temporary
-root and exercises upgrade refusal, preservation, Python repair, owned-file
+root and exercises upgrade refusal, native environment cleanup, healthy legacy
+preservation, unhealthy legacy refusal, owned-file
 replacement, service ordering, GTK/libadwaita dependency confirmation and
 refusal, installed identity, mocked GUI read/apply/failure/cancel behavior,
 lifecycle topology, and uninstall cleanup without mutating the host installation.
 The supported Fedora and Arch lanes repeat the dependency flow with their native
 package-manager mappings.
+The native installer runs use `test-without-python.sh` to restrict command
+lookup to native host tools. Python remains available to the outer test harness.
 
 For the complete installed GUI journey, build the local TV fixture and pass it
 to the existing smoke:
@@ -298,11 +322,16 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/runtime_phase.rs` | Runtime sleep-phase provider abstraction |
 | `crates/lg-buddy/src/session/runner.rs` | Session monitor loop |
 | `crates/lg-buddy/src/session/inactivity.rs` | Session inactivity deadline and phase synthesis |
+| `crates/lg-buddy/src/inhibition.rs` | Push/pull inhibition, preference override, release timing and cancellable Boolean blanking gate |
 | `crates/lg-buddy/src/session/gamepad/` | Gamepad activity discovery, device-event refresh, adapters, capture, registry, and policy |
 | `crates/lg-buddy/src/session_bus.rs` | Generic D-Bus transport used by session and system event sources |
 | `crates/lg-buddy/src/sources/linux/logind.rs` | Linux logind lifecycle and current-session lock-state adapter |
 | `crates/lg-buddy/src/sources/linux/network_manager.rs` | NetworkManager pre-down lifecycle source adapter |
 | `crates/lg-buddy/src/sources/desktop/gnome.rs` | GNOME backend integration |
+| `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs` | Independent SessionManager inhibition capability |
+| `crates/lg-buddy/src/sources/desktop/kwin.rs` | Optional pull inhibition through the native KWin plugin |
+| `data/kwin/` | Plugin source, compatible artifact selection and optional setup |
+| `crates/lg-buddy/src/sources/desktop/powerdevil.rs` | Independent pull inhibition through PowerDevil's effective screen policy |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
 | `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |

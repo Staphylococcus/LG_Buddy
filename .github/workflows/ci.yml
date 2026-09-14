@@ -8,10 +8,14 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   checks: read
   contents: read
 
 jobs:
+  kwin-bridges:
+    uses: ./.github/workflows/kwin-bridge.yml
+
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -44,12 +48,13 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb zenity
+          sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
 
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
           cargo build --locked -p lg-buddy --example gui_journey_tv
+          python3 scripts/test-tv-fixture.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
           dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh \
@@ -63,14 +68,21 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-distro.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
 
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
 
+      - name: Verify KWin provisioning fallbacks
+        run: |
+          bash scripts/test-kwin-setup.sh
+          python3 scripts/test_kwin_matrix.py
+
       - name: Run first-run installer smoke
-        run: bash ./scripts/test-installer-first-run.sh
+        run: |
+          bash ./scripts/test-installer-first-run.sh
+          bash ./scripts/test-automatic-configuration.sh
 
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py
@@ -87,7 +99,7 @@ jobs:
   bundle-smoke-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: verify
+    needs: [verify, kwin-bridges]
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
 
@@ -110,7 +122,9 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools pkexec python3-pyatspi strace xdotool xvfb zenity
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools pkexec python3-pyatspi strace xdotool xvfb
+          # Prove current installation and GUI behavior without the retired dialog tool or external idle command.
+          sudo apt-get purge -y zenity swayidle
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -122,10 +136,17 @@ jobs:
           cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
           cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
 
+      - name: Download verified KWin plugins
+        uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
+
       - name: Create release bundle
         run: |
           umask 0002
-          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
+          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist --require-kwin-matrix
 
       - name: Build GUI journey fixtures
         env:
@@ -150,10 +171,13 @@ jobs:
 
       - name: Smoke test release bundle
         run: |
+          if command -v zenity; then
+            echo "Release-bundle smoke requires a host without Zenity." >&2
+            exit 1
+          fi
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
               LG_BUDDY_GUI_TV_FIXTURE="$PWD/target/gui-journey-fixtures/gui_journey_tv" \
               ./scripts/test-release-bundle.sh \
-              --skip-pip-install \
               --work-dir "$RUNNER_TEMP/release-bundle-smoke" \
               --archive "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
               --expected-tag "v${SMOKE_VERSION}" \
@@ -239,11 +263,11 @@ jobs:
           - name: Fedora 43
             image: fedora:43
             package_manager: dnf
-            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit procps-ng python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
+            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit procps-ng python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd
           - name: Arch current
             image: archlinux:latest
             package_manager: pacman
-            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit procps-ng python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
+            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit procps-ng python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd
     container:
       image: ${{ matrix.image }}
       options: --security-opt seccomp=unconfined

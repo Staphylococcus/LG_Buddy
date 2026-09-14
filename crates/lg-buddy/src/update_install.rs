@@ -846,9 +846,7 @@ fn gui_installer_command(candidate_root: &Path) -> Command {
     // environment. Outside it, inherited test/debug switches must not allow a
     // graphical upgrade to publish without system integration actions.
     if std::env::var_os("LG_BUDDY_INSTALL_ROOT").is_none() {
-        command
-            .env("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "0")
-            .env("LG_BUDDY_SKIP_PIP_INSTALL", "0");
+        command.env("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "0");
     }
     command
 }

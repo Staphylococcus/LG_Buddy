@@ -289,7 +289,7 @@ else
 
     echo "Choose the TV control platform:"
     echo "  1) lg_webos   (native LG Buddy platform; recommended)"
-    echo "  2) bscpylgtv  (Python compatibility fallback)"
+    echo "  2) bscpylgtv  (deprecated; existing working installations only, until v2.0.0)"
 
     case "$current_tv_platform" in
         lg_webos) default_platform_choice="1" ;;
@@ -321,42 +321,23 @@ else
         esac
     done
 
-    if [ "$screen_idle_blank" = "enabled" ]; then
-        echo "Choose the screen idle backend:"
-        echo "  1) auto"
-        echo "  2) gnome"
-        echo "  3) wayland"
-        backend_choice_range="1-3"
-        if [ "$existing_config_loaded" -eq 1 ] && [ "$current_screen_backend" = "swayidle" ]; then
-            echo "  4) swayidle (deprecated compatibility backend; preserve existing selection)"
-            backend_choice_range="1-4"
-        fi
-
-        case "$current_screen_backend" in
-            auto) default_backend_choice="1" ;;
-            gnome) default_backend_choice="2" ;;
-            wayland) default_backend_choice="3" ;;
-            swayidle) default_backend_choice="4" ;;
-            *) default_backend_choice="1" ;;
-        esac
-
+    screen_backend="$current_screen_backend"
+    if [ "$current_screen_backend" != "auto" ]; then
+        echo "Saved legacy desktop integration: $current_screen_backend"
+        echo "Automatic integration discovers available interfaces on each login and keeps your behavior settings."
         while true; do
-            BACKEND_CHOICE="$(prompt_with_default "Enter number ($backend_choice_range)" "$default_backend_choice")"
-            case "$BACKEND_CHOICE" in
-                1) screen_backend="auto"; break ;;
-                2) screen_backend="gnome"; break ;;
-                3) screen_backend="wayland"; break ;;
-                4)
-                    if [ "$backend_choice_range" = "1-4" ]; then
-                        screen_backend="swayidle"
-                        break
-                    fi
-                    echo "  Please enter a number between 1 and 3."
-                    ;;
-                *) echo "  Please enter a number in $backend_choice_range." ;;
+            AUTOMATIC_CHOICE="$(prompt_with_default "Use automatic desktop integration? (y/N)" "n")"
+            case "$AUTOMATIC_CHOICE" in
+                [Yy]*|1|true|TRUE|True) screen_backend="auto"; break ;;
+                [Nn]*|0|false|FALSE|False) break ;;
+                *) echo "  Please answer yes or no." ;;
             esac
         done
+    else
+        echo "Desktop integration: automatic discovery of available interfaces."
+    fi
 
+    if [ "$screen_idle_blank" = "enabled" ]; then
         while true; do
             screen_idle_timeout="$(prompt_with_default "Enter idle timeout in seconds" "$current_screen_idle_timeout")"
             if validate_idle_timeout "$screen_idle_timeout"; then
@@ -404,7 +385,6 @@ else
             screen_honor_idle_inhibitors="$current_screen_honor_idle_inhibitors"
         fi
     else
-        screen_backend="$current_screen_backend"
         screen_honor_idle_inhibitors="$current_screen_honor_idle_inhibitors"
         screen_idle_timeout="$current_screen_idle_timeout"
         screen_restore_policy="$current_screen_restore_policy"
@@ -431,7 +411,7 @@ echo "  Update Checks:       $update_auto_check"
 echo "  Update Channel:      $update_channel"
 echo "  Config File:         $CONFIG_FILE"
 if [ "$screen_backend" = "swayidle" ]; then
-    echo "  Warning: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland."
+    echo "  Warning: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0."
 fi
 echo ""
 
@@ -448,7 +428,8 @@ fi
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 CONFIG_CANDIDATE="${CONFIG_FILE}.tmp.$$"
-trap 'rm -f -- "$CONFIG_CANDIDATE"' EXIT
+CONFIG_PREVIOUS="${CONFIG_FILE}.previous.$$"
+trap 'rm -f -- "$CONFIG_CANDIDATE" "$CONFIG_PREVIOUS"' EXIT
 
 cat >"$CONFIG_CANDIDATE" <<EOF
 # LG Buddy configuration
@@ -485,17 +466,39 @@ if [ "$tv_platform" = "lg_webos" ]; then
     fi
 fi
 
+automatic_transition=0
+if [ "$current_screen_backend" != "auto" ] && [ "$screen_backend" = "auto" ]; then
+    automatic_transition=1
+    if [ "$screen_idle_blank" = "enabled" ]; then
+        RUNTIME_BINARY="${LG_BUDDY_RUNTIME_BINARY:-$SCRIPT_DIR/lg-buddy}"
+        if ! LG_BUDDY_CONFIG="$CONFIG_CANDIDATE" LG_BUDDY_SCREEN_BACKEND=auto \
+            "$RUNTIME_BINARY" detect-backend; then
+            echo "Automatic integration is unavailable. Your previous configuration is unchanged."
+            exit 1
+        fi
+    fi
+    cp -p -- "$CONFIG_FILE" "$CONFIG_PREVIOUS"
+fi
+
 mv -f -- "$CONFIG_CANDIDATE" "$CONFIG_FILE"
-trap - EXIT
 echo "Configuration written to $CONFIG_FILE"
+
+restore_previous_configuration() {
+    if [ "$automatic_transition" -eq 1 ]; then
+        mv -f -- "$CONFIG_PREVIOUS" "$CONFIG_FILE"
+        systemctl --user restart LG_Buddy_screen.service || true
+        echo "Automatic integration could not be applied. Your previous configuration was restored."
+    fi
+    exit 1
+}
 
 if [ -f "$HOME/.config/systemd/user/LG_Buddy_screen.service" ]; then
     if [ "${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}" = "1" ]; then
         echo "Skipping LG_Buddy_screen.service reload because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
     else
-        systemctl --user daemon-reload
+        systemctl --user daemon-reload || restore_previous_configuration
         if systemctl --user is-active --quiet LG_Buddy_screen.service || systemctl --user is-enabled --quiet LG_Buddy_screen.service; then
-            systemctl --user restart LG_Buddy_screen.service
+            systemctl --user restart LG_Buddy_screen.service || restore_previous_configuration
             echo "Restarted LG_Buddy_screen.service to pick up the new configuration."
         fi
     fi

@@ -27,7 +27,7 @@ Screenshots use sample TV data.
 
 ## Desktop Compatibility
 
-| What you can do | GNOME | Compatible native Wayland | Wayland with `swayidle` | Other Linux sessions |
+| What you can do | GNOME | Compatible native Wayland | Explicit legacy `swayidle` | Other Linux sessions |
 | --- | --- | --- | --- | --- |
 | Turn the TV on and off with your PC | ✅ | ✅ | ✅ | ✅ |
 | Blank the panel while away and restore it on return | ✅ | ✅ | ✅ | ❌ |
@@ -35,8 +35,8 @@ Screenshots use sample TV data.
 | Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ | ✅ |
 | Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ | ✅ |
 
-Most modern Linux desktop environments are supported. Automatic desktop detection is the default; most users
-can leave it selected. If the TV does not blank or restore as expected, follow
+Automatic monitoring uses the available native GNOME and Wayland sources.
+The normal path does not probe or require swayidle. If the TV does not blank or restore as expected, follow
 the [screen behavior and troubleshooting guide](docs/user-guide.md#automatic-screen-blanking).
 
 ## Before You Install
@@ -46,11 +46,14 @@ LG Buddy manages one TV. Connect it to the same network as your PC and enable
 are strongly recommended so the saved address stays valid and the TV remains
 ready to respond.
 
-Official bundles contain prebuilt binaries. They require GTK 4.14,
-libadwaita 1.5, and glibc 2.39 or newer—the Ubuntu 24.04 runtime baseline.
-The release installer also needs Python 3 with `venv`/`pip` support and Zenity
-for its compatibility tools. TV Sleep & Wake activation requires `pkexec` and
-a desktop authorization agent. Install the prerequisites for your distribution:
+Official bundles include the GTK desktop app and CLI together. The installer
+checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
+packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
+the requirements before proceeding. The prebuilt binaries require glibc 2.39
+or newer—the Ubuntu 24.04 runtime baseline.
+Fresh and native installations do not require Python, pip, or bscpylgtv.
+TV Sleep & Wake activation requires `pkexec` and
+a desktop authorization agent. You can also install the prerequisites manually:
 
 <details>
 <summary>Dependency commands for Debian/Ubuntu, Fedora, and Arch</summary>
@@ -58,26 +61,27 @@ a desktop authorization agent. Install the prerequisites for your distribution:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install python3-venv python3-pip zenity libgtk-4-1 libadwaita-1-0 pkexec
+sudo apt install libgtk-4-1 libadwaita-1-0 pkexec
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install python3 python3-pip python3-virtualenv zenity gtk4 libadwaita polkit
+sudo dnf install gtk4 libadwaita polkit
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S python python-pip python-virtualenv zenity gtk4 libadwaita polkit
+sudo pacman -S gtk4 libadwaita polkit
 ```
 
 </details>
 
-The installer can also offer to install missing GTK/libadwaita packages on
-these distributions, with your confirmation. Older desktops that need the
-deprecated `swayidle` integration must install `swayidle` separately.
+Existing explicit `swayidle` configurations remain supported until 2.0.0 and
+require a separately installed command. Automatic monitoring never selects it.
+Without native idle support, disable **Idle blanking** to keep other LG Buddy
+features available, or use [external idle automation](docs/user-guide.md#external-idle-automation).
 
 The shell installer supports conventional Linux installations with writable
 system locations. Official NixOS support is planned for 3.0.0; see

@@ -3,8 +3,14 @@
 set -euo pipefail
 umask 0022
 
+# Normal installed operation must not acquire an external idle dependency.
+if command -v swayidle >/dev/null 2>&1; then
+    echo "Release-bundle smoke requires a host without swayidle." >&2
+    exit 1
+fi
+
 usage() {
-    echo "Usage: $0 --archive <path-to-release.tar.gz> [--work-dir <dir>] [--skip-pip-install] [--expected-tag <tag> --expected-version <version> --expected-channel <channel> --expected-target <target> --expected-commit <sha>]"
+    echo "Usage: $0 --archive <path-to-release.tar.gz> [--work-dir <dir>] [--expected-tag <tag> --expected-version <version> --expected-channel <channel> --expected-target <target> --expected-commit <sha>]"
     exit 1
 }
 
@@ -209,7 +215,6 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 GUI_TARGET="x86_64-unknown-linux-gnu"
 ARCHIVE=""
 WORK_DIR=""
-SKIP_PIP_INSTALL=0
 EXPECTED_TAG=""
 EXPECTED_VERSION=""
 EXPECTED_CHANNEL=""
@@ -225,10 +230,6 @@ while [ "$#" -gt 0 ]; do
         --work-dir)
             WORK_DIR="${2:-}"
             shift 2
-            ;;
-        --skip-pip-install)
-            SKIP_PIP_INSTALL=1
-            shift
             ;;
         --expected-tag)
             EXPECTED_TAG="${2:-}"
@@ -374,6 +375,24 @@ for name in ("README.md", "docs/user-guide.md"):
 print("Bundled documentation image links verified.")
 PY
 assert_file "$BUNDLE_DIR/docs/development.md"
+assert_file "$BUNDLE_DIR/docs/kwin-integration.md"
+assert_executable "$BUNDLE_DIR/docs/kwin/setup.sh"
+assert_executable "$BUNDLE_DIR/docs/kwin/build.sh"
+assert_file "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service"
+assert_file "$BUNDLE_DIR/docs/kwin/source/CMakeLists.txt"
+assert_file "$BUNDLE_DIR/docs/kwin/source/main.cpp"
+assert_file "$BUNDLE_DIR/docs/kwin/source/metadata.json"
+KWIN_SOURCE_ID="$(cd "$BUNDLE_DIR/docs/kwin/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum | cut -d ' ' -f1)"
+KWIN_PREBUILT_COUNT=0
+while IFS= read -r -d '' metadata; do
+    IFS=$'\t' read -r kwin qt arch source_id digest extra < "$metadata"
+    [[ "$kwin" =~ ^6\.[0-9]+\.[0-9]+$ && "$qt" =~ ^6\.[0-9]+\.[0-9]+$ ]]
+    [ "$arch" = x86_64 ] && [ "$source_id" = "$KWIN_SOURCE_ID" ] && [ -z "$extra" ]
+    [ "$(sha256sum "${metadata%/*}/plugin.so" | cut -d ' ' -f1)" = "$digest" ]
+    assert_mode "${metadata%/*}/plugin.so" 644
+    KWIN_PREBUILT_COUNT=$((KWIN_PREBUILT_COUNT + 1))
+done < <(find "$BUNDLE_DIR/docs/kwin/prebuilt" -name metadata.tsv -type f -print0)
+[ "$KWIN_PREBUILT_COUNT" -gt 0 ] || fail "Release bundle contains no verified KWin prebuilts."
 assert_file "$BUNDLE_DIR/docs/release-process.md"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
@@ -505,7 +524,7 @@ mkdir -p "$FRESH_CONFIG_HOME"
     export LG_BUDDY_NATIVE_PAIRING_MARKER="$FRESH_NATIVE_PAIRING_MARKER"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
     printf '%s\n' \
-        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '1' '300' '1' 'n' 'Y' \
+        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '300' '1' 'n' 'Y' \
         | bash "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
 )
 grep -F -q 'TV Platform:         lg_webos' "$FRESH_CONFIG_OUTPUT"
@@ -515,7 +534,12 @@ assert_file "$FRESH_NATIVE_PAIRING_MARKER"
 assert_file "$FRESH_NATIVE_TOKEN"
 assert_mode "$FRESH_NATIVE_TOKEN" 600
 python3 -c 'import json, sys; assert json.load(open(sys.argv[1], encoding="utf-8")) == {"access_token": "release-smoke-native-token"}' "$FRESH_NATIVE_TOKEN"
-grep -F -q '  3) wayland' "$FRESH_CONFIG_OUTPUT"
+grep -F -q 'Desktop integration: automatic discovery' "$FRESH_CONFIG_OUTPUT"
+grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+if grep -F -q 'Choose the screen idle backend' "$FRESH_CONFIG_OUTPUT"; then
+    echo "Fresh interactive configuration asked for a backend."
+    exit 1
+fi
 if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
     echo "Fresh interactive configuration presented swayidle."
     exit 1
@@ -532,11 +556,9 @@ export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
 export LG_BUDDY_TV_IP="192.168.1.10"
 export LG_BUDDY_TV_MAC="aa:bb:cc:dd:ee:ff"
 export LG_BUDDY_INPUT="HDMI_2"
-export LG_BUDDY_TV_PLATFORM="bscpylgtv"
+export LG_BUDDY_TV_PLATFORM="lg_webos"
 export LG_BUDDY_SCREEN_BACKEND="auto"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
-export PIP_DISABLE_PIP_VERSION_CHECK="1"
-export PIP_NO_PYTHON_VERSION_WARNING="1"
 
 # Keep this release-installation smoke focused on payload wiring. The dedicated
 # first-run installer smoke covers the GUI handoff; a configured fixture here
@@ -547,7 +569,7 @@ cat >"$XDG_CONFIG_HOME/lg-buddy/config.env" <<'EOF'
 tvs_primary_ip=192.168.1.10
 tvs_primary_mac=aa:bb:cc:dd:ee:ff
 tvs_primary_input=HDMI_2
-tvs_primary_platform=bscpylgtv
+tvs_primary_platform=lg_webos
 screen_idle_blank=enabled
 screen_honor_idle_inhibitors=disabled
 screen_backend=auto
@@ -558,13 +580,9 @@ updates_auto_check=enabled
 updates_channel=stable
 EOF
 
-if [ "$SKIP_PIP_INSTALL" -eq 1 ]; then
-    export LG_BUDDY_SKIP_PIP_INSTALL="1"
-fi
-
 (
     cd "$BUNDLE_DIR"
-    bash ./install.sh
+    bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh
 )
 
 CONFIG_FILE="$XDG_CONFIG_HOME/lg-buddy/config.env"
@@ -572,7 +590,6 @@ INSTALLED_BINARY="$INSTALL_ROOT/usr/bin/lg-buddy"
 INSTALLED_GUI="$INSTALL_ROOT/usr/bin/lg-buddy-gui"
 INSTALLED_VENV_PIP="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/pip"
 INSTALLED_BSCPYLGTV="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/bscpylgtvcommand"
-STALE_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/lib/python-old/site-packages/stale-marker"
 INSTALLED_POINTER="$INSTALL_ROOT/usr/lib/lg-buddy/config-path"
 SYSTEM_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy.service"
 LIFECYCLE_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_lifecycle.service"
@@ -606,8 +623,12 @@ cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
     echo "Installed GUI identity did not match the runtime candidate."
     exit 1
 }
-assert_executable "$INSTALLED_VENV_PIP"
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Fresh native install provisioned a Python environment."
 assert_file "$INSTALLED_POINTER"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/setup.sh"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/build.sh"
+diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
+cmp -s "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service" "$HOME/.config/systemd/user/LG_Buddy_kwin.service"
 assert_lifecycle_topology_installed
 assert_file "$DESKTOP_ENTRY"
 [ ! -e "$LEGACY_DESKTOP_ENTRY" ] || fail "Fresh install left the legacy desktop entry behind."
@@ -622,16 +643,12 @@ fi
 grep -q '^tvs_primary_ip=192.168.1.10$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=aa:bb:cc:dd:ee:ff$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_2$' "$CONFIG_FILE"
-grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=enabled$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=disabled$' "$CONFIG_FILE"
 grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q "$CONFIG_FILE" "$INSTALLED_POINTER"
-
-if [ "$SKIP_PIP_INSTALL" -eq 0 ]; then
-    assert_executable "$INSTALLED_BSCPYLGTV"
-fi
 
 assert_cli_surface "$INSTALLED_BINARY"
 
@@ -774,12 +791,16 @@ CONFIG_SNAPSHOT="$WORK_DIR/config.snapshot"
 CONFIG_POINTER_SNAPSHOT="$WORK_DIR/config-pointer.snapshot"
 NATIVE_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/native-upgrade-marker"
 NATIVE_ACCESS_TOKEN_CONTENT='{"access_token":"release-smoke-native-token"}'
+LEGACY_CREDENTIAL_FILE="$(dirname "$CONFIG_FILE")/.aiopylgtv.sqlite"
+printf '%s\n' 'retained legacy credential fixture' >"$LEGACY_CREDENTIAL_FILE"
+cp "$LEGACY_CREDENTIAL_FILE" "$WORK_DIR/legacy-credential.snapshot"
 mkdir -p "$NATIVE_PROFILE_DIR"
 printf '%s\n' "$NATIVE_ACCESS_TOKEN_CONTENT" >"$NATIVE_ACCESS_TOKEN_FILE"
 chmod 600 "$NATIVE_ACCESS_TOKEN_FILE"
 cp "$NATIVE_ACCESS_TOKEN_FILE" "$NATIVE_ACCESS_TOKEN_SNAPSHOT"
 cp "$CONFIG_FILE" "$CONFIG_SNAPSHOT"
 cp "$INSTALLED_POINTER" "$CONFIG_POINTER_SNAPSHOT"
+mkdir -p "$(dirname "$NATIVE_VENV_MARKER")"
 touch "$NATIVE_VENV_MARKER"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
 
@@ -816,6 +837,7 @@ GUI_CANDIDATE_SNAPSHOT="$WORK_DIR/lg-buddy-gui.candidate"
 cp -p "$BUNDLE_GUI" "$GUI_CANDIDATE_SNAPSHOT"
 cat >"$BUNDLE_GUI" <<'EOF'
 #!/bin/sh
+[ "${1:-}" != "--check-runtime" ] || exit 0
 [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ] || exit 2
 printf 'lg-buddy 0.0.0\nversion: 0.0.0\nchannel: dev\ncommit: mismatched\n'
 EOF
@@ -839,6 +861,23 @@ grep -F -q 'stale installed runtime' "$INSTALLED_BINARY"
 grep -F -q 'stale installed integration' "$INSTALLED_GUI"
 cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
 cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+
+# Native cleanup must not follow an environment symlink into user data.
+mv "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" "$WORK_DIR/obsolete-environment"
+ln -s "$(dirname "$CONFIG_FILE")" "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+if (
+    export LG_BUDDY_SUDO_CMD="$SUDO_SPY"
+    export LG_BUDDY_SUDO_MARKER="$SUDO_MARKER"
+    cd "$BUNDLE_DIR"
+    bash ./install.sh --upgrade >"$WORK_DIR/unsafe-cleanup.output" 2>&1
+); then
+    fail "Native upgrade accepted an unsafe environment cleanup path."
+fi
+grep -F -q 'legacy-environment-removal' "$WORK_DIR/unsafe-cleanup.output"
+[ ! -e "$SUDO_MARKER" ] || fail "Unsafe environment cleanup requested privilege."
+cmp -s "$WORK_DIR/legacy-credential.snapshot" "$LEGACY_CREDENTIAL_FILE"
+rm "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+mv "$WORK_DIR/obsolete-environment" "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
 
 mv "$SYSTEM_SERVICE" "$SYSTEM_SERVICE.preflight-refusal"
 if (
@@ -907,7 +946,7 @@ if (
     export LG_BUDDY_FAIL_SYSTEM_RELOAD="1"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="0"
     cd "$BUNDLE_DIR"
-    bash ./install.sh --upgrade >"$PARTIAL_UPGRADE_OUTPUT" 2>&1
+    bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh --upgrade >"$PARTIAL_UPGRADE_OUTPUT" 2>&1
 ); then
     echo "Upgrade unexpectedly succeeded after a simulated post-mutation failure."
     exit 1
@@ -926,8 +965,8 @@ grep -F -q 'rerun this verified bundle with --upgrade' "$PARTIAL_UPGRADE_OUTPUT"
     echo "Partial upgrade invoked configure.sh."
     exit 1
 }
-[ -e "$NATIVE_VENV_MARKER" ] || {
-    echo "Partial native upgrade recreated the Python virtual environment."
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || {
+    echo "Partial native upgrade left the obsolete Python environment."
     exit 1
 }
 cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
@@ -963,7 +1002,7 @@ if (
     export LG_BUDDY_UPGRADE_DEPENDENCIES_INSTALLED="$UPGRADE_DEPENDENCIES_INSTALLED"
     export LG_BUDDY_UPGRADE_PACKAGE_LOG="$UPGRADE_PACKAGE_LOG"
     cd "$BUNDLE_DIR"
-    bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
+    bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh --upgrade >"$UPGRADE_OUTPUT" 2>&1
 ); then
     :
 else
@@ -985,12 +1024,17 @@ grep -F -q 'Upgrade complete!' "$UPGRADE_OUTPUT"
 cat >"$EXPECTED_SERVICE_ACTION_LOG" <<EOF
 systemctl is-system-running
 systemctl --user is-system-running
+systemctl is-system-running
+systemctl --user is-system-running
+systemctl --user stop LG_Buddy_kwin.service
 tmpfiles --create $TMPFILES_CONFIG
 systemctl daemon-reload
 systemctl enable LG_Buddy.service
 systemctl enable LG_Buddy_lifecycle.service
 systemctl restart LG_Buddy_lifecycle.service
 systemctl --user daemon-reload
+systemctl --user enable LG_Buddy_kwin.service
+systemctl --user restart --no-block LG_Buddy_kwin.service
 systemctl --user enable LG_Buddy_screen.service
 systemctl --user restart LG_Buddy_screen.service
 systemctl --user disable --now LG_Buddy_update_check.timer
@@ -1015,10 +1059,11 @@ cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || {
     echo "Upgrade changed the stored native access token."
     exit 1
 }
-[ -e "$NATIVE_VENV_MARKER" ] || {
-    echo "Native upgrade recreated the Python virtual environment."
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || {
+    echo "Native upgrade left the obsolete Python environment."
     exit 1
 }
+cmp -s "$WORK_DIR/legacy-credential.snapshot" "$LEGACY_CREDENTIAL_FILE"
 cmp -s "$BUNDLE_DIR/lg-buddy" "$INSTALLED_BINARY"
 cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 [ "$("$INSTALLED_GUI" --version)" = "$INSTALLED_VERSION_OUTPUT" ] || {
@@ -1033,66 +1078,69 @@ cmp -s "$BUNDLE_DIR/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
 [ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Upgrade left the legacy user desktop entry behind."
 cmp -s "$BUNDLE_ICON" "$INSTALLED_ICON"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
+diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
+cmp -s "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service" "$HOME/.config/systemd/user/LG_Buddy_kwin.service"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE"
 cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER"
 assert_lifecycle_topology_installed
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
 
-# Healthy compatibility-platform environments are preserved; an unhealthy one
-# takes the separately preflighted repair path.
+# Only an existing, importable legacy environment is retained. The fixture
+# supplies a module without downloading packages; production never creates it.
 "$INSTALLED_BINARY" settings set tv.platform bscpylgtv
+python3 -m venv --without-pip "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
 VENV_PYTHON="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/python"
 VENV_SITE_PACKAGES="$("$VENV_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
-if ! "$VENV_PYTHON" -c 'import bscpylgtv' >/dev/null 2>&1; then
-    mkdir -p "$VENV_SITE_PACKAGES/bscpylgtv"
-    printf '__version__ = "smoke"\n' >"$VENV_SITE_PACKAGES/bscpylgtv/__init__.py"
-fi
-if [ ! -x "$INSTALLED_BSCPYLGTV" ]; then
-    printf '#!/bin/sh\nexit 0\n' >"$INSTALLED_BSCPYLGTV"
-    chmod 755 "$INSTALLED_BSCPYLGTV"
-fi
+mkdir -p "$VENV_SITE_PACKAGES/bscpylgtv"
+printf '__version__ = "smoke"\n' >"$VENV_SITE_PACKAGES/bscpylgtv/__init__.py"
+cat >"$INSTALLED_BSCPYLGTV" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"backlight":72}'
+EOF
+chmod 755 "$INSTALLED_BSCPYLGTV"
 rm -f "$USER_DESKTOP_ENTRY"
-HEALTHY_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/healthy-upgrade-marker"
-touch "$HEALTHY_VENV_MARKER"
-(
-    export LG_BUDDY_SKIP_PIP_INSTALL="1"
-    cd "$BUNDLE_DIR"
-    bash ./install.sh --upgrade
-)
-[ -e "$HEALTHY_VENV_MARKER" ] || {
-    echo "Healthy compatibility environment was recreated during upgrade."
-    exit 1
-}
-[ ! -e "$USER_DESKTOP_ENTRY" ] || {
-    echo "Upgrade recreated a user-removed Desktop launcher."
-    exit 1
-}
-[ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || {
-    echo "Upgrade recreated the legacy user Desktop launcher."
-    exit 1
-}
+HEALTHY_VENV_SNAPSHOT="$WORK_DIR/healthy-venv.snapshot"
+find "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" -type f -exec sha256sum {} + | sort >"$HEALTHY_VENV_SNAPSHOT"
+for platform in explicit missing; do
+    if [ "$platform" = missing ]; then sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"; fi
+    cp "$CONFIG_FILE" "$CONFIG_SNAPSHOT"
+    (
+        cd "$BUNDLE_DIR"
+        bash ./install.sh --upgrade >"$WORK_DIR/healthy-$platform.output" 2>&1
+    )
+    grep -F -q 'will be removed in v2.0.0' "$WORK_DIR/healthy-$platform.output"
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+    find "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" -type f -exec sha256sum {} + | sort | cmp -s "$HEALTHY_VENV_SNAPSHOT" -
+done
+[ ! -e "$USER_DESKTOP_ENTRY" ] || fail "Upgrade recreated a user-removed Desktop launcher."
+[ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Upgrade recreated the legacy user Desktop launcher."
 
-rm -f "$INSTALLED_BSCPYLGTV"
-REPAIR_VENV_MARKER="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/repair-upgrade-marker"
-touch "$REPAIR_VENV_MARKER"
-(
-    export LG_BUDDY_SKIP_PIP_INSTALL="1"
-    cd "$BUNDLE_DIR"
-    bash ./install.sh --upgrade
-)
-[ ! -e "$REPAIR_VENV_MARKER" ] || {
-    echo "Unhealthy compatibility environment was not repaired."
-    exit 1
-}
-assert_executable "$INSTALLED_VENV_PIP"
-
-rm -rf "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
-(
-    export LG_BUDDY_SKIP_PIP_INSTALL="1"
-    cd "$BUNDLE_DIR"
-    bash ./install.sh --upgrade
-)
-assert_executable "$INSTALLED_VENV_PIP"
+for broken in missing-command broken-import missing-environment; do
+    case "$broken" in
+        missing-command) chmod -x "$INSTALLED_BSCPYLGTV" ;;
+        broken-import)
+            chmod +x "$INSTALLED_BSCPYLGTV"
+            printf 'raise ImportError("broken legacy dependency")\n' >"$VENV_SITE_PACKAGES/bscpylgtv/__init__.py"
+            ;;
+        missing-environment) rm -rf "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ;;
+    esac
+    rm -f "$SUDO_MARKER"
+    if (
+        export LG_BUDDY_SUDO_CMD="$SUDO_SPY"
+        export LG_BUDDY_SUDO_MARKER="$SUDO_MARKER"
+        cd "$BUNDLE_DIR"
+        bash ./install.sh --upgrade >"$WORK_DIR/unhealthy-$broken.output" 2>&1
+    ); then
+        fail "Upgrade unexpectedly repaired an unhealthy legacy environment: $broken"
+    fi
+    grep -F -q 'no longer installs or repairs it' "$WORK_DIR/unhealthy-$broken.output"
+    grep -F -q 'settings set tv.platform lg_webos' "$WORK_DIR/unhealthy-$broken.output"
+    [ ! -e "$SUDO_MARKER" ] || fail "Unhealthy legacy upgrade requested privilege."
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+    cmp -s "$BUNDLE_DIR/lg-buddy" "$INSTALLED_BINARY"
+done
 
 assert_file "$CONFIG_FILE"
 assert_file "$NATIVE_ACCESS_TOKEN_FILE"
@@ -1108,6 +1156,8 @@ export LG_BUDDY_REMOVE_CONFIG="1"
     echo "Installed binary still present after uninstall: $INSTALLED_BINARY"
     exit 1
 }
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/kwin" ] || fail "KWin payload remains after uninstall."
+[ ! -e "$HOME/.config/systemd/user/LG_Buddy_kwin.service" ] || fail "KWin setup unit remains after uninstall."
 [ ! -e "$INSTALLED_GUI" ] || {
     echo "Installed GUI still present after uninstall: $INSTALLED_GUI"
     exit 1
@@ -1182,22 +1232,21 @@ export LG_BUDDY_REMOVE_CONFIG="1"
 }
 
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="disabled"
-export LG_BUDDY_SKIP_PIP_INSTALL="1"
-mkdir -p "$(dirname "$STALE_VENV_MARKER")"
-touch "$STALE_VENV_MARKER"
 (
     cd "$BUNDLE_DIR"
     # This fixture tests headless reinstall with a disabled policy. Fresh
     # installs otherwise hand off to the GUI and wait for TV pairing.
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    cp "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env" "$CONFIG_FILE"
     bash ./configure.sh
-    bash ./install.sh
+    bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh
 )
 
 assert_file "$CONFIG_FILE"
 assert_executable "$INSTALLED_BINARY"
 assert_executable "$INSTALLED_GUI"
-[ ! -e "$STALE_VENV_MARKER" ] || {
-    echo "Installer left stale virtualenv contents in place: $STALE_VENV_MARKER"
+[ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || {
+    echo "Native reinstall created a Python environment."
     exit 1
 }
 assert_lifecycle_topology_installed

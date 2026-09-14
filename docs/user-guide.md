@@ -130,19 +130,57 @@ restored. If it was saved but could not take effect, the value stays saved and
 means its setup needs attention before the saved behavior can take effect;
 see [troubleshooting](#troubleshooting).
 
-Leave **Desktop integration** at **Automatic** unless you need to select a
-particular compatible desktop. See the [session backend model](session-backend-model.md)
-for compatibility details, including the deprecated `swayidle` option.
+Desktop integration is automatic. Configure behavior once; moving between
+GNOME Wayland and Plasma Wayland needs no LG Buddy setting change or repeated
+setup. The available native interfaces determine which sources contribute.
+
+If an older configuration explicitly selects `gnome`, `wayland` or `swayidle`,
+**Legacy desktop integration → Use automatic** offers a one-time switch.
+The confirmation keeps your behavior settings; cancellation or a failed switch
+preserves the previous configuration. If native idle support is unavailable,
+disable **Idle blanking** first to use automatic integration with the other
+application features. The legacy override remains visible even with idle
+blanking disabled. Existing explicit configurations keep their behavior until
+you choose to switch.
 
 This preference applies to the native GNOME and Wayland integrations. The
-deprecated `swayidle` integration always honors app inhibition, including when
-**Automatic** falls back to it. Selecting `swayidle` hides this preference.
+deprecated, explicitly selected `swayidle` integration always honors app
+inhibition. An existing `swayidle` override hides this preference. Automatic integration uses native
+sources only and never falls back to swayidle.
 
-Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**,
-**Desktop integration**, and **Idle timeout**
+Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**
+and **Idle timeout**
 while keeping their saved values for when you turn it back on. **Restore policy**
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.
+
+The compatibility CLI still accepts `screen.backend` and `detect-backend`.
+`detect-backend` returns one native capability for older callers; it does not
+describe the automatic monitor's complete source set. CLI setting writes keep
+their existing save-then-apply behavior. Use the Settings action above when you
+want the recoverable transition. See the [session backend model](session-backend-model.md).
+
+<a id="external-idle-automation"></a>
+## External idle automation
+
+When native idle monitoring is unavailable, disable **Idle blanking** to keep
+TV controls, GUI/CLI operation, session notifications and separately configured
+TV Sleep & Wake available. Missing optional inhibition sources do not require
+this: LG Buddy continues checking the sources that are available.
+
+You can manage an external swayidle process through the public screen commands:
+
+```bash
+lg-buddy settings set screen.idle_blank disabled
+swayidle -w timeout 300 'lg-buddy screen off' resume 'lg-buddy screen on'
+```
+
+You own swayidle installation, startup and timing. Leave LG Buddy's session
+service enabled. The public commands retain TV input checks, ownership and
+restore policy. This basic recipe does not provide integrated gamepad activity,
+lock-triggered blanking or delayed power-off. It is separate from the deprecated
+built-in `screen.backend=swayidle` integration, which remains available for
+existing explicit configurations until 2.0.0.
 
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad
@@ -163,7 +201,13 @@ guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
 For first-time setup without the GUI, run `./configure.sh` from the extracted
 release archive before `./install.sh`. To select native control for an existing
 profile and verify it before saving, use `lg-buddy settings set tv.platform
-lg_webos`. The explicit `bscpylgtv` value remains a compatibility fallback.
+lg_webos`, accepting the pairing prompt on the TV. Existing `bscpylgtv`
+profiles, including older profiles without a platform key, remain supported
+through the final 1.x compatibility window when their installed environment
+works. Support ends in v2.0.0. The installer no longer creates or repairs that
+environment; if it is unhealthy, pair and select `lg_webos` before retrying.
+Upgrading a native profile removes the obsolete LG Buddy environment at
+`/usr/bin/LG_Buddy_PIP` while retaining configuration and credentials.
 
 These commands work without opening the GUI:
 

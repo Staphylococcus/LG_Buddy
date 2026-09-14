@@ -1,0 +1,144 @@
+name: KWin bridge prebuilts
+
+on:
+  workflow_call:
+  push:
+    branches: [dev]
+    paths:
+      - data/kwin/source/**
+      - scripts/kwin-matrix/**
+      - scripts/kwin_matrix.py
+      - scripts/test-kwin-plugin.sh
+      - .github/workflows/kwin-bridge.yml
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      builds: ${{ steps.matrix.outputs.builds }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 scripts/test_kwin_matrix.py
+      - id: matrix
+        run: echo "builds=$(python3 scripts/kwin_matrix.py matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: KWin ${{ matrix.series }} / Qt ${{ matrix.qt_minor }}
+    needs: matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.matrix.outputs.builds) }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore verified plugins for these exact inputs
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dist/kwin
+          key: kwin-bridge-${{ matrix.series }}-${{ matrix.qt_minor }}-${{ matrix.inputs_sha256 }}
+      - name: Reuse verified dev artifacts across release branches
+        id: reuse
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KWIN_SERIES: ${{ matrix.series }}
+          QT_MINOR: ${{ matrix.qt_minor }}
+        run: |
+          # Actions caches are branch-scoped. Promotion and release builds can
+          # reuse a successful dev push's artifacts after checking exact inputs.
+          run_id="$(gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/kwin-bridge.yml/runs" \
+              -f branch=dev -f event=push -f status=success -f per_page=1 \
+              --jq '.workflow_runs[0].id // empty' 2>/dev/null || true)"
+          if [[ ! "$run_id" =~ ^[0-9]+$ ]]; then
+              echo "No completed dev prebuilt run; building from source."
+              exit 0
+          fi
+          candidate="$(mktemp -d "$RUNNER_TEMP/kwin-reuse.XXXXXX")"
+          if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name "kwin-bridge-$KWIN_SERIES-qt$QT_MINOR" --dir "$candidate" && \
+              python3 scripts/kwin_matrix.py verify --directory "$candidate" \
+                  --series "$KWIN_SERIES" --qt-minor "$QT_MINOR"; then
+              mkdir -p dist
+              mv -T "$candidate" dist/kwin
+              echo "reused=true" >> "$GITHUB_OUTPUT"
+              echo "Reused verified KWin artifacts from dev run $run_id."
+          else
+              echo "Dev artifacts unavailable or inputs differ; building from source."
+          fi
+      - name: Install the CI-only Nix builder
+        if: steps.cache.outputs.cache-hit != 'true' && steps.reuse.outputs.reused != 'true'
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.8/install
+      - name: Build and load every exact KWin/Qt target
+        if: steps.cache.outputs.cache-hit != 'true' && steps.reuse.outputs.reused != 'true'
+        env:
+          KWIN_SERIES: ${{ matrix.series }}
+          QT_MINOR: ${{ matrix.qt_minor }}
+        run: >-
+          python3 scripts/kwin_matrix.py build --directory dist/kwin
+          --series "$KWIN_SERIES" --qt-minor "$QT_MINOR" --cores "$(nproc)"
+      - name: Verify complete group, identities and checksums
+        env:
+          KWIN_SERIES: ${{ matrix.series }}
+          QT_MINOR: ${{ matrix.qt_minor }}
+        run: >-
+          python3 scripts/kwin_matrix.py verify --directory dist/kwin
+          --series "$KWIN_SERIES" --qt-minor "$QT_MINOR"
+      - name: Cache successfully validated plugins
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: dist/kwin
+          key: kwin-bridge-${{ matrix.series }}-${{ matrix.qt_minor }}-${{ matrix.inputs_sha256 }}
+      - name: Upload verified plugins
+        uses: actions/upload-artifact@v6
+        with:
+          name: kwin-bridge-${{ matrix.series }}-qt${{ matrix.qt_minor }}
+          path: dist/kwin/
+          if-no-files-found: error
+
+  coverage:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
+      - name: Require the complete pinned matrix
+        run: python3 scripts/kwin_matrix.py verify --directory target/kwin-bridges
+
+  distro-loader:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora: [43, 44]
+    container:
+      image: fedora:${{ matrix.fedora }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install KWin runtime without a build toolchain
+        run: >-
+          dnf --setopt=install_weak_deps=False install -y
+          kwin binutils findutils dbus-daemon systemd mesa-dri-drivers xkeyboard-config
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
+      - name: Verify portable plugins against the distribution's KWin and Qt
+        run: bash scripts/test-kwin-distro.sh target/kwin-bridges

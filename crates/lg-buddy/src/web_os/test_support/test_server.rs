@@ -11,7 +11,7 @@ use rustls::crypto::ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::error::ProtocolError;
 use tungstenite::protocol::frame::coding::CloseCode;
 use tungstenite::protocol::CloseFrame;
@@ -134,6 +134,10 @@ pub(crate) struct WebOsTestTvSnapshot {
     pub(crate) volume: i16,
     pub(crate) muted: bool,
     pub(crate) connection_count: u64,
+    pub(crate) active_connection_count: usize,
+    pub(crate) ready: bool,
+    pub(crate) wake_count: u64,
+    pub(crate) power_off_count: u64,
     pub(crate) pairing_prompt_count: u64,
     pub(crate) registration_tokens: Vec<Option<String>>,
     pub(crate) request_uris: Vec<String>,
@@ -570,13 +574,46 @@ struct WebOsTestRuntime {
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
     restore_session_interruption_injected: bool,
+    ready_at: Option<Instant>,
+    wake_count: u64,
+    power_off_count: u64,
+}
+
+impl WebOsTestRuntime {
+    fn ready(&self) -> bool {
+        self.tv.power_state != WebOsPowerState::PowerOff
+            && self
+                .ready_at
+                .is_none_or(|deadline| Instant::now() >= deadline)
+    }
+}
+
+type Connections = Arc<Mutex<HashMap<u64, TcpStream>>>;
+
+struct ActiveConnection {
+    id: u64,
+    connections: Connections,
+}
+
+impl Drop for ActiveConnection {
+    fn drop(&mut self) {
+        self.connections.lock().unwrap().remove(&self.id);
+    }
+}
+
+fn shutdown_connections(connections: &Connections, except: Option<u64>) {
+    for (id, stream) in connections.lock().unwrap().iter() {
+        if Some(*id) != except {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
 }
 
 pub(crate) struct WebOsTestServer {
     endpoint: WebOsEndpoint,
     address: std::net::SocketAddr,
     runtime: Arc<Mutex<WebOsTestRuntime>>,
-    active_connection: Arc<Mutex<Option<TcpStream>>>,
+    active_connections: Connections,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -686,30 +723,59 @@ impl WebOsTestServer {
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
             restore_session_interruption_injected: false,
+            ready_at: None,
+            wake_count: 0,
+            power_off_count: 0,
         }));
-        let active_connection = Arc::new(Mutex::new(None));
+        let active_connections = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let server_runtime = Arc::clone(&runtime);
-        let server_active_connection = Arc::clone(&active_connection);
+        let server_connections = Arc::clone(&active_connections);
         let server_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
+            let mut workers: Vec<JoinHandle<()>> = Vec::new();
+            let mut next_id = 0;
+            let mut failed = false;
             while !server_stop.load(Ordering::Acquire) {
+                let mut index = 0;
+                while index < workers.len() {
+                    if workers[index].is_finished() {
+                        failed |= workers.swap_remove(index).join().is_err();
+                    } else {
+                        index += 1;
+                    }
+                }
+                if failed {
+                    break;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         if server_stop.load(Ordering::Acquire) {
                             break;
                         }
-                        *server_active_connection
-                            .lock()
-                            .expect("webOS test active connection") = Some(
+                        let id = next_id;
+                        next_id += 1;
+                        server_connections.lock().unwrap().insert(
+                            id,
                             stream
                                 .try_clone()
-                                .expect("clone webOS test connection for shutdown"),
+                                .expect("clone webOS connection for shutdown"),
                         );
-                        serve_accepted_connection(stream, transport, &server_runtime, &server_stop);
-                        *server_active_connection
-                            .lock()
-                            .expect("webOS test active connection") = None;
+                        let connection = ActiveConnection {
+                            id,
+                            connections: Arc::clone(&server_connections),
+                        };
+                        let runtime = Arc::clone(&server_runtime);
+                        let stop = Arc::clone(&server_stop);
+                        workers.push(thread::spawn(move || {
+                            serve_accepted_connection(
+                                stream,
+                                transport,
+                                &runtime,
+                                &stop,
+                                &connection,
+                            );
+                        }));
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
@@ -717,13 +783,19 @@ impl WebOsTestServer {
                     Err(error) => panic!("accept webOS test connection: {error}"),
                 }
             }
+            server_stop.store(true, Ordering::Release);
+            shutdown_connections(&server_connections, None);
+            for worker in workers {
+                failed |= worker.join().is_err();
+            }
+            assert!(!failed, "webOS test connection worker panicked");
         });
 
         Self {
             endpoint,
             address,
             runtime,
-            active_connection,
+            active_connections,
             stop,
             handle: Some(handle),
         }
@@ -767,28 +839,34 @@ impl WebOsTestServer {
             .input = input;
     }
 
-    /// Close an established connection between operations, leaving the TV
-    /// available for the next connection.
+    /// Simulate an external wake without resetting settings or observations.
+    /// The delay is deterministic fault injection, not a firmware timing claim.
     #[allow(dead_code)]
-    pub(crate) fn close_active_connection(&self) {
-        self.active_connection
+    pub(crate) fn simulate_wake(&self, ready_after: Duration) {
+        let mut runtime = self.runtime.lock().expect("webOS test server state");
+        if runtime.tv.power_state == WebOsPowerState::PowerOff {
+            runtime.tv.power_state = WebOsPowerState::Active;
+            runtime.ready_at = Some(Instant::now() + ready_after);
+            runtime.wake_count += 1;
+        }
+    }
+
+    /// Release an injected startup delay; this does not power on an off TV.
+    #[allow(dead_code)]
+    pub(crate) fn finish_wake(&self) {
+        self.runtime
             .lock()
-            .expect("webOS test active connection")
-            .as_ref()
-            .expect("an established webOS connection")
-            .shutdown(Shutdown::Both)
-            .expect("close webOS test connection");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while self
-            .active_connection
-            .lock()
-            .expect("webOS test active connection")
-            .is_some()
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "connection did not close"
-            );
+            .expect("webOS test server state")
+            .ready_at = None;
+    }
+
+    /// Close existing connections between operations, leaving the TV available.
+    #[allow(dead_code)]
+    pub(crate) fn close_active_connections(&self) {
+        shutdown_connections(&self.active_connections, None);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !self.active_connections.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "connections did not close");
             thread::sleep(Duration::from_millis(5));
         }
     }
@@ -829,6 +907,10 @@ impl WebOsTestServer {
             volume: runtime.tv.volume,
             muted: runtime.tv.muted,
             connection_count: runtime.connection_count,
+            active_connection_count: self.active_connections.lock().unwrap().len(),
+            ready: runtime.ready(),
+            wake_count: runtime.wake_count,
+            power_off_count: runtime.power_off_count,
             pairing_prompt_count: runtime.pairing_prompt_count,
             registration_tokens: runtime.registration_tokens.clone(),
             request_uris: runtime.request_uris.clone(),
@@ -844,14 +926,7 @@ impl WebOsTestServer {
             return Ok(());
         };
         self.stop.store(true, Ordering::Release);
-        if let Some(connection) = self
-            .active_connection
-            .lock()
-            .expect("webOS test active connection")
-            .as_ref()
-        {
-            let _ = connection.shutdown(Shutdown::Both);
-        }
+        shutdown_connections(&self.active_connections, None);
         let _ = TcpStream::connect(self.address);
         handle.join()
     }
@@ -868,18 +943,21 @@ fn serve_accepted_connection(
     transport: WebOsTestTransport,
     runtime: &Arc<Mutex<WebOsTestRuntime>>,
     stop: &AtomicBool,
+    connection: &ActiveConnection,
 ) {
     match transport {
         WebOsTestTransport::Plain => {
-            let socket = accept(stream).expect("accept webOS test websocket");
-            serve_connection(socket, runtime, stop);
+            if let Ok(socket) = accept(stream) {
+                serve_connection(socket, runtime, stop, connection);
+            }
         }
         WebOsTestTransport::Tls => {
-            let connection =
+            let tls_connection =
                 ServerConnection::new(test_tls_config()).expect("create webOS test TLS connection");
-            let stream = StreamOwned::new(connection, stream);
-            let socket = accept(stream).expect("accept secure webOS test websocket");
-            serve_connection(socket, runtime, stop);
+            let stream = StreamOwned::new(tls_connection, stream);
+            if let Ok(socket) = accept(stream) {
+                serve_connection(socket, runtime, stop, connection);
+            }
         }
     }
 }
@@ -888,6 +966,7 @@ fn serve_connection<S>(
     mut socket: WebSocket<S>,
     runtime: &Arc<Mutex<WebOsTestRuntime>>,
     stop: &AtomicBool,
+    connection: &ActiveConnection,
 ) where
     S: Read + Write,
 {
@@ -967,7 +1046,10 @@ fn serve_connection<S>(
             | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff => {
                 let response = {
                     let mut runtime = runtime.lock().expect("webOS test server state");
-                    if scenario == WebOsTestScenario::PowerStatePermissionDenied
+                    if !runtime.ready() {
+                        return;
+                    }
+                    let response = if scenario == WebOsTestScenario::PowerStatePermissionDenied
                         && request["uri"] == GET_POWER_STATE_URI
                     {
                         Some(webos_error_without_payload(
@@ -1013,11 +1095,23 @@ fn serve_connection<S>(
                                         | WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff
                                 ),
                             ))
+                    };
+                    if request["uri"] == POWER_OFF_URI
+                        && runtime.tv.power_state == WebOsPowerState::PowerOff
+                    {
+                        runtime.power_off_count += 1;
+                        // Finish disconnecting old peers before exposing the
+                        // power-off acknowledgement to a controller that can wake us.
+                        shutdown_connections(&connection.connections, Some(connection.id));
                     }
+                    response
                 };
                 match response {
                     Some(response) => {
                         send_json(&mut socket, response);
+                        if request["uri"] == POWER_OFF_URI {
+                            return;
+                        }
                         true
                     }
                     None => false,
@@ -1040,21 +1134,18 @@ fn handle_registration<S>(
 where
     S: Read + Write,
 {
-    let (scenario, power_state, version) = {
+    let (scenario, ready, version) = {
         let runtime = runtime.lock().expect("webOS test server state");
-        (
-            runtime.scenario,
-            runtime.tv.power_state.clone(),
-            runtime.tv.version,
-        )
+        (runtime.scenario, runtime.ready(), runtime.tv.version)
     };
-    if power_state == WebOsPowerState::PowerOff {
-        socket
-            .send(Message::Close(Some(CloseFrame {
+    if !ready {
+        send_message(
+            socket,
+            Message::Close(Some(CloseFrame {
                 code: CloseCode::Policy,
                 reason: "Try Again Later (EWS)".into(),
-            })))
-            .expect("send post-power-off close");
+            })),
+        );
         return false;
     }
 
@@ -1286,9 +1377,21 @@ fn send_json<S>(socket: &mut WebSocket<S>, value: Value)
 where
     S: Read + Write,
 {
-    socket
-        .send(Message::text(value.to_string()))
-        .expect("send webOS test response");
+    send_message(socket, Message::text(value.to_string()));
+}
+
+fn send_message<S: Read + Write>(socket: &mut WebSocket<S>, message: Message) {
+    if let Err(error) = socket.send(message) {
+        assert!(
+            matches!(
+                error,
+                WebSocketError::Io(_)
+                    | WebSocketError::ConnectionClosed
+                    | WebSocketError::AlreadyClosed
+            ),
+            "send webOS test response: {error}"
+        );
+    }
 }
 
 fn test_tls_config() -> Arc<ServerConfig> {
@@ -1462,6 +1565,117 @@ mod tests {
     use std::net::TcpStream;
     use tungstenite::stream::MaybeTlsStream;
     use tungstenite::{connect, Message, WebSocket};
+
+    // Synthetic transport scheduling: an idle/incomplete handshake must not
+    // monopolize the accept loop, and shutdown must close every worker.
+    #[test]
+    fn concurrent_clients_and_pending_handshake_shut_down_in_both_transports() {
+        for transport in [
+            super::WebOsTestTransport::Plain,
+            super::WebOsTestTransport::Tls,
+        ] {
+            let mut server = WebOsTestServer::spawn(
+                WebOsTestVersion::WebOs24Version92261,
+                super::WebOsPowerState::Active,
+                WebOsTestInput::Hdmi3,
+                WebOsTestScenario::StatefulTv,
+                transport,
+            );
+            let _unfinished_handshake = TcpStream::connect(server.address).unwrap();
+            let mut first = server.connect_authenticated().unwrap();
+            let mut second = server.connect_authenticated().unwrap();
+            first.turn_screen_off().unwrap();
+            assert_eq!(
+                second.power_state().unwrap(),
+                super::WebOsPowerState::ScreenOff
+            );
+            assert_eq!(server.snapshot().active_connection_count, 3);
+            let (finished, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || finished.send(server.stop_and_join()).unwrap());
+            result
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    // Peer invalidation and wake latency are controlled fault injection. Hardware
+    // establishes retries before restoration, not exact close timing or failures:
+    // https://github.com/Staphylococcus/LG_Buddy/issues/217#issuecomment-5647209853
+    #[test]
+    fn power_cycle_disconnects_peers_and_wake_preserves_state_and_history() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi2);
+        server.set_volume(37);
+        let mut monitor = server.connect_authenticated().unwrap();
+        let lifecycle = server.connect_authenticated().unwrap();
+        lifecycle.power_off().unwrap();
+        assert_eq!(
+            server.snapshot().power_state,
+            super::WebOsPowerState::PowerOff
+        );
+        assert!(!server.snapshot().ready);
+        assert!(
+            monitor.power_state().is_err(),
+            "old peer must be disconnected"
+        );
+        assert!(
+            server.connect_authenticated().is_err(),
+            "off TV cannot register"
+        );
+        server.simulate_wake(std::time::Duration::from_secs(60));
+        assert!(!server.snapshot().ready);
+        assert!(
+            server.connect_authenticated().is_err(),
+            "wake can precede readiness"
+        );
+        // A later packet does not replace the pending startup transition.
+        server.simulate_wake(std::time::Duration::ZERO);
+        assert!(!server.snapshot().ready);
+        server.finish_wake();
+        assert!(server.snapshot().ready);
+        let mut restored = server.connect_authenticated().unwrap();
+        assert_eq!(
+            restored.power_state().unwrap(),
+            super::WebOsPowerState::Active
+        );
+        let snapshot = server.snapshot();
+        assert_eq!(snapshot.input, WebOsTestInput::Hdmi2);
+        assert_eq!(snapshot.volume, 37);
+        assert_eq!(snapshot.power_off_count, 1);
+        assert_eq!(snapshot.wake_count, 1);
+        assert_eq!(snapshot.connection_count, 5);
+        assert_eq!(snapshot.pairing_prompt_count, 0);
+        assert!(snapshot
+            .registration_tokens
+            .iter()
+            .all(|token| token.as_deref() == Some(super::TEST_ACCESS_TOKEN)));
+        assert!(snapshot
+            .request_uris
+            .iter()
+            .any(|uri| uri == super::POWER_OFF_URI));
+        server.finish();
+    }
+
+    #[test]
+    fn connection_worker_failure_is_reported_and_other_clients_are_stopped() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        let _idle = server.connect_authenticated().unwrap();
+        let mut invalid = connect_registered(&server, &[], None);
+        invalid
+            .send(Message::text(
+                json!({
+                    "type": "request", "id": "invalid", "uri": "ssap://unmodeled", "payload": {}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert!(invalid.read().is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.finish())).is_err()
+        );
+    }
 
     type TestClient = WebSocket<MaybeTlsStream<TcpStream>>;
 

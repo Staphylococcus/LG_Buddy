@@ -1,7 +1,7 @@
 use std::env;
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use super::SettingsError;
@@ -213,12 +213,18 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn start_system_lifecycle(&self) -> Result<(), SettingsError> {
+        // pkexec resolves relative commands through the caller's PATH before
+        // sanitizing the environment. Keep privileged selection independent of
+        // both PATH and the test/diagnostic systemctl override.
+        let systemctl = ["/usr/bin/systemctl", "/run/current-system/sw/bin/systemctl"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .ok_or_else(|| SettingsError::Activation {
+                message: "systemctl was not found in a trusted system location".to_string(),
+            })?;
         let output = ProcessCommand::new("pkexec")
             .arg("--disable-internal-agent")
-            // Keep the test/diagnostic command override out of the privileged
-            // executable selection. pkexec resolves this fixed command name
-            // through its sanitized system PATH.
-            .arg("systemctl")
+            .arg(systemctl)
             .arg("start")
             .arg("LG_Buddy_lifecycle.service")
             .output()

@@ -108,11 +108,10 @@ Examples:
 
 - the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
 - GNOME monitor/runtime tests should use the private session-bus harness for
-  ScreenSaver signals, Mutter idletime, and SessionManager idle-inhibition
-  snapshots and signals
+  ScreenSaver signals and Mutter user-active watches
 - native Wayland provider tests should model registry discovery, protocol-version
-  rejection, every advertised seat, input-notification resumed activity, separate
-  inhibitor-aware permission notifications, and fatal provider loss without
+  rejection, every advertised seat, input-notification resumed activity during
+  setup, rejection of obsolete protocol objects, and provider loss without
   requiring a compositor
 - logind lifecycle/runtime tests should use the private system-bus harness for
   `PreparingForSleep` and `PrepareForSleep` behavior
@@ -128,6 +127,10 @@ This layer asks:
 - do key user scenarios still work end to end?
 
 This is the thinnest layer, but it is the one that keeps the other two honest.
+
+The [GNOME/Plasma VM validation record](desktop-session-validation.md) documents
+desktop switching with a retained user manager, tested inhibition routes, a
+startup race, lifecycle recovery, and the boundary of native Wayland inhibition coverage.
 
 ### What belongs here
 
@@ -256,15 +259,16 @@ Secondary concern:
 Examples:
 
 - GNOME signal mapping
-- GNOME monitor setup, sender ownership, idletime polling, and one-shot
-  user-active watches over the session-bus seam
-- delayed inhibitor replies crossing the blanking deadline, and inhibitor
-  release resetting Mutter's idle counter without reporting user input
+- GNOME monitor setup, sender ownership and one-shot user-active watches over
+  the session-bus seam, independent of SessionManager availability
+- overlapping source observations, adapter recovery, stale input and original
+  observation times surviving delayed delivery
 - native Wayland protocol-version and seat discovery
 - native Wayland resumed-notification and registry-removal mapping
 - gamepad activity integration with the LG Buddy inactivity deadline
-- opt-in idle inhibition at startup, overlapping inhibitors, a fresh timeout
-  after the last release, and release never acting as restore activity
+- the Boolean inhibition gate, including overlapping sources, playback
+  before/after startup, a full timeout after the last observed release, and
+  cancelled input/configuration/lifecycle attempts without stale actions
 - screen runtime-phase eligibility over the private logind system-bus seam
 - logind lock state entering the shared blanked state without making unlock a
   restore trigger, while observation-time tests cover pre-lock, post-lock grace,
@@ -277,14 +281,76 @@ Source-specific tests live with their source modules. Runner tests should use
 normalized observations and focus on multiplexing or policy behavior rather
 than reconstructing provider buses and process protocols.
 
+Push inhibition is tested independently of activity. Colocated tests in
+`inhibition.rs` cover Boolean aggregation and diagnostics; GNOME's inhibition
+module covers startup synchronization, queued changes, owner validation,
+cancellation, release history and periodic reconciliation of missed additions
+and removals. `tests/inhibition.rs` runs the production
+worker on the shared private D-Bus fixture with only SessionManager present. It
+checks existing and later playback inhibitors, overlap, quiet subscriptions,
+loss/recovery and prompt permission reads during a slow query. Only observed
+inhibition denies permission; tests verify that pending reads retain the last
+value and source loss removes its contribution. These are
+component checks. `idle_inhibition.feature` exercises the real monitor and TV
+policy with private GNOME/PowerDevil services: playback, release delay, neutral
+query failure, delayed replies cancelled by gamepad input, restore and lock.
+
+Pull inhibition has colocated contract and adapter tests for fresh queries,
+Boolean aggregation, neutral absence/failure, bounded diagnostics, cancellation,
+owner replacement and release history. The same private-bus integration test
+also runs PowerDevil's production capability against `MockPowerDevil`, which
+exposes only `HasInhibition(4)` and emits no signals. It covers initial and later
+inhibition, effective clear answers, failure recovery, transport timeout, worker
+cancellation during delayed replies, and replacement by a new unique owner.
+The mock supplies effective policy; it does not prove Plasma's filtering,
+overlap handling or application route coverage.
+
+Preference-section tests in `inhibition.rs` cover the runtime configuration's
+default and explicit values, its existing invalid-value fallback, and independence
+from desktop selection and activity policy. `tests/settings_operations.rs`
+exercises set, disable, re-enable and reset through the real settings writer and
+a mocked systemctl restart. It verifies that the restart sees the saved file and
+that the inhibition evaluator agrees with the effective setting after reload.
+Preference evaluation has no source or release-timing dependency. Facade tests
+cover the override, release timing, cancellation on policy changes, and bounded
+retries. Engine tests use only Boolean gates and verify that denial changes
+neither the activity deadline nor the phase. Private-bus composition tests check
+GNOME and PowerDevil together through the production facade.
+
+For live Plasma validation of #223, record Plasma/PowerDevil and application
+versions and the application's inhibition route, then inspect effective state:
+
+```sh
+busctl --user call org.kde.Solid.PowerManagement \
+  /org/kde/Solid/PowerManagement/PolicyAgent \
+  org.kde.Solid.PowerManagement.PolicyAgent HasInhibition u 4
+```
+
+Check playback that starts before the first query and after a clear query, two
+overlapping inhibitors with only one ending, and Plasma's per-application
+suppression/reenabling. Allow PowerDevil's own activation delay to pass. Record
+the effective answer after each change and repeat after PowerDevil restarts.
+Test at least the KDE portal idle route and ScreenSaver D-Bus route where used
+by the reporter's applications. Test native Wayland-only inhibition separately;
+do not infer its coverage from portal success. The source-traced route table in
+[Session backend model](session-backend-model.md#powerdevil-route-coverage) is
+not itself live validation. The [desktop validation record](desktop-session-validation.md)
+contains the subsequent Plasma checks. [KWin integration](kwin-integration.md)
+describes the native-source tests and provisioning matrix added under #233.
+KWin absence is a supported coverage mode; its progression through prebuilt,
+local compilation and ordinary absence is part of the #216 MVP validation.
+
 Native Wayland changes also require manual checks on Plasma/KWin and at least
 one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection
-cases report a precise fallback reason, and `auto` retains the
-GNOME-then-native-Wayland-then-`swayidle` order. Release-facing changes must
-keep the static x86_64 musl build and release-bundle smoke test green, including
+cases report a precise reason, and automatic native monitoring composes available
+sources. Verify automatic monitoring never probes or starts swayidle, even when
+it is installed, and retain explicit legacy swayidle coverage. Release-facing
+changes must keep the static x86_64 musl build and release-bundle smoke test green
+on a host without swayidle, including
 preservation and deprecation reporting for an existing `swayidle` config.
-For inhibitor changes, start real video playback before the monitor: disabled
+For the completed inhibition integration (#225), start real video playback
+before and after the monitor: disabled
 must still blank, enabled must remain visible past the timeout, and stopping
 playback must leave the screen visible for a fresh full timeout before blanking.
 
@@ -339,15 +405,26 @@ The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
 remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
 proves refusal before sudo, skips configuration, preserves config and native
-credentials byte-for-byte, conditionally preserves or repairs the Python
-environment, replaces the owned bundle assets, checks service action order, and
+credentials byte-for-byte, removes obsolete native-profile environments,
+preserves healthy legacy environments, refuses unhealthy ones before privilege,
+replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
-The installed GUI smoke also verifies the desktop entry's no-argument
-`lg-buddy` launch opens the existing pairing prompt without navigation for an
-unconfigured installation, and normal Overview for a saved TV. `lg-buddy brightness` selects the
-brightness control even when another view is already open. A missing GUI fails
-the plain launcher; only the brightness path retains the Zenity fallback.
+The installer dependency smoke uses package-manager fixtures to verify that
+missing GTK/libadwaita packages are installed and the runtime probe succeeds
+before candidate identity validation. The real probe also runs without a display.
+Fresh native installs and native upgrades run with Python, pip, and bscpylgtv
+absent from command lookup; the outer harness retains its Python tools. The
+pinned cross-version smoke repeats healthy preservation and unhealthy refusal
+for explicit and missing-key legacy profiles, then native cleanup.
+The installed GUI smoke verifies the desktop
+entry's no-argument `lg-buddy` launch opens the existing pairing prompt without
+navigation for an unconfigured installation, and normal Overview for a saved TV.
+`lg-buddy brightness` selects the brightness control even when another view is
+already open. The application presentation/intent tests cover brightness read,
+apply, cancellation, and failures; GTK tests cover rendering and intent routing.
+Launcher tests separately cover a damaged installation with a missing GUI
+executable and direct headless brightness get/set operations.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
 covered by their current tests. First-run application tests cover saved-profile
@@ -406,6 +483,11 @@ dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
 those still require supported-host verification. NixOS development runs are
 not evidence of official NixOS support.
 
+Lifecycle activation selects `systemctl` only from `/usr/bin/systemctl` or
+`/run/current-system/sw/bin/systemctl`. The settings integration test shadows
+`systemctl` on PATH and overrides `LG_BUDDY_SYSTEMCTL` to verify that neither
+controls the executable passed to privileged authorization.
+
 The Ubuntu bundle smoke and the Fedora and Arch installation lanes also exercise
 GUI runtime dependency handling. They prove that an unconfirmed install does not
 invoke the package manager or GUI, an accepted install requests the correct
@@ -436,7 +518,7 @@ unavailable-service-manager refusals. Table-driven cases exercise every path
 policy's permission contract and every declared candidate input. Candidate
 containment cases reject untrusted and non-sticky shared-writable ancestors
 while preserving root-owned sticky temporary directories. Virtualenv mutation
-checks are conditional on an actual compatibility-environment repair and refuse
+checks are conditional on native-profile environment removal and refuse
 unsafe roots or nested mount points before clearing. Run it with:
 
 ```bash
@@ -465,8 +547,10 @@ upload, retry, and already-published paths are covered without GitHub access.
 
 After a prerelease is public, `production-prerelease-canary` installs the same
 baseline and drives its real `updates install` command through a PTY against
-GitHub. It then clears the update cache and proves that the newly installed
-candidate sees itself as GitHub's newest published release. The canary records
+GitHub. It checks removal of the obsolete Python environment and preservation
+of configuration and native credentials. It then clears the update cache and
+proves that the newly installed candidate sees itself as GitHub's newest
+published release. The canary records
 that sanitized newest-release response, the release-by-tag response, tag ref,
 and asset redirects as a workflow artifact. Signed redirect queries and URL
 userinfo are never retained. The observed beta.2 newest-release fields also

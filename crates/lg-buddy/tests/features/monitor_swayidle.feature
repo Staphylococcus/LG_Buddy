@@ -1,21 +1,20 @@
 Feature: swayidle monitor
   LG Buddy should consume swayidle idle and activity facts through the shared monitor policy.
 
-  Scenario: Automatic starts a fallback when GNOME cannot honor keep-awake requests
+  Scenario: automatic monitoring never delegates to installed swayidle
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And a mock TV client
     And the TV is on input HDMI_2
     And the executable PATH is isolated
-    And GNOME Shell is available
-    And honoring app keep-awake requests is "enabled"
     And swayidle is installed
     And swayidle will emit an idle timeout
+    And GNOME monitor stays open for 0.2 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And stdout contains "auto resolved to swayidle"
-    And stdout contains "GNOME SessionManager is required"
-    And the TV screen is blanked
+    And stdout contains "no native activity source available"
+    And stdout does not contain "Using swayidle backend"
+    And the TV client did not receive "turn_screen_off"
 
   Scenario: swayidle timeout blanks the configured TV input
     Given a temporary LG Buddy config using input HDMI_2

@@ -126,18 +126,131 @@ impl EnvironmentDiagnosticsCollector {
     /// calling an unbounded compositor/DBus probe.
     pub fn collect(&self) -> DiagnosticsReport {
         let collected_at = current_unix_seconds();
-        DiagnosticsReport::new(
-            collected_at,
-            vec![
-                application_section(),
-                settings_section(),
-                backend_section(),
-                services_section(),
-                tv_section(),
-                journal_section(),
-                recovery_section(),
-            ],
-        )
+        let mut sections = vec![application_section(), settings_section(), backend_section()];
+        sections.extend(monitor_sections());
+        sections.push(kwin_provisioning_section());
+        sections.extend([
+            services_section(),
+            tv_section(),
+            journal_section(),
+            recovery_section(),
+        ]);
+        DiagnosticsReport::new(collected_at, sections)
+    }
+}
+
+fn kwin_provisioning_section() -> DiagnosticSection {
+    let journalctl = command_path("LG_BUDDY_JOURNALCTL", "journalctl");
+    let result = run_bounded(
+        &journalctl,
+        &[
+            "--user",
+            "-u",
+            "LG_Buddy_kwin.service",
+            "--no-pager",
+            "--quiet",
+            "--lines=20",
+            "--output=json",
+        ],
+        COMMAND_TIMEOUT,
+    );
+    let record = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+            let outcome = provisioning_outcome(entry.get("MESSAGE")?.as_str()?)?;
+            let timestamp = entry
+                .get("__REALTIME_TIMESTAMP")?
+                .as_str()?
+                .parse::<u64>()
+                .ok()?
+                / 1_000_000;
+            Some(format!(
+                "Last recorded setup outcome: {outcome}\nRecorded at: {}\n",
+                format_utc_timestamp(timestamp)
+            ))
+        });
+    let mut body = record.unwrap_or_else(|| {
+        "No provisioning outcome was found in the accessible recent setup journal.\n".into()
+    });
+    body.push_str("This is setup history. The running monitor's inhibition evaluation reports the current KWin contribution independently. Prebuilt, local compilation and ordinary absence all retain the same portable configuration.\n");
+    DiagnosticSection::new("KWin provisioning", body)
+}
+
+fn provisioning_outcome(message: &str) -> Option<&'static str> {
+    [
+        (
+            "LG Buddy: KWin source available (prebuilt,",
+            "compatible prebuilt loaded and verified",
+        ),
+        (
+            "LG Buddy: KWin source available (cached,",
+            "cached artifact loaded and verified",
+        ),
+        (
+            "LG Buddy: KWin source available (locally-compiled,",
+            "local compilation loaded and verified",
+        ),
+        (
+            "LG Buddy: KWin source available (already loaded).",
+            "existing bridge verified",
+        ),
+        (
+            "LG Buddy: KWin source absent;",
+            "KWin source absent; other available sources retained",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(prefix, outcome)| message.starts_with(prefix).then_some(outcome))
+}
+
+fn monitor_sections() -> Vec<DiagnosticSection> {
+    use crate::session_bus::{
+        new_session_bus_client, BusMethodCall, BusValue, DBUS_INTERFACE, DBUS_OBJECT_PATH,
+        DBUS_SERVICE_NAME,
+    };
+    use crate::session_notifications::{
+        GET_MONITOR_DIAGNOSTICS_METHOD, SESSION_BUS_NAME, SESSION_INTERFACE, SESSION_OBJECT_PATH,
+    };
+    let report = (|| {
+        let mut bus = new_session_bus_client().ok()?;
+        // Address the existing unique owner: diagnostics must never activate a
+        // monitor, or silently move to a replacement process during this read.
+        let owner = bus
+            .call_method(
+                BusMethodCall::new(
+                    DBUS_SERVICE_NAME,
+                    DBUS_OBJECT_PATH,
+                    DBUS_INTERFACE,
+                    "GetNameOwner",
+                )
+                .with_body(vec![BusValue::String(SESSION_BUS_NAME.into())]),
+            )
+            .ok()?;
+        let owner = owner.single_string().ok()?;
+        let reply = bus
+            .call_method(BusMethodCall::new(
+                owner,
+                SESSION_OBJECT_PATH,
+                SESSION_INTERFACE,
+                GET_MONITOR_DIAGNOSTICS_METHOD,
+            ))
+            .ok()?;
+        let [BusValue::String(activity), BusValue::String(inhibition), BusValue::String(context)] =
+            reply.body.as_slice()
+        else {
+            return None;
+        };
+        Some((activity.clone(), inhibition.clone(), context.clone()))
+    })();
+    match report {
+        Some((activity, inhibition, context)) => vec![
+            DiagnosticSection::new("Running desktop monitor", context),
+            DiagnosticSection::new("Activity sources", activity),
+            DiagnosticSection::new("Inhibition evaluation", inhibition),
+        ],
+        None => vec![DiagnosticSection::new("Running desktop monitor", "No runtime report is available on this session bus. Check the screen service and collect again from the graphical session. This does not determine which desktop sources are available.")],
     }
 }
 
@@ -244,10 +357,12 @@ fn backend_section() -> DiagnosticSection {
             body.push_str("configuration finding: ");
             body.push_str(error);
             body.push('\n');
-            body.push_str("Action: choose auto, gnome, wayland, or swayidle in Settings.\n");
+            body.push_str("Action: use automatic integration in Settings, or repair the legacy override through the compatibility CLI.\n");
         }
     }
-    DiagnosticSection::new("Desktop capability and fallback", body)
+    body.push_str("Expected interfaces: GNOME activity uses Mutter IdleMonitor; native Wayland activity uses ext-idle-notify. GNOME inhibition uses SessionManager; Plasma inhibition uses PowerDevil and the optional KWin bridge independently. Availability is discovered from interfaces, not the desktop name or concurrent console/SSH logins.\n");
+    body.push_str("KWin provisioning: installation/update tries a compatible prebuilt, then conditional local compilation, then ordinary source absence. Its setup outcome is recorded separately in the LG_Buddy_kwin.service journal; it does not select an activity provider.\n");
+    DiagnosticSection::new("Desktop configuration and expected interfaces", body)
 }
 
 fn diagnostic_configured_backend(
@@ -267,12 +382,14 @@ fn diagnostic_configured_backend(
 
 fn conservative_backend_observation(configured: ScreenBackend, session: &str) -> String {
     let mut body = String::new();
-    body.push_str("swayidle fallback command: ");
-    body.push_str(if command_available("swayidle") {
-        "available in PATH\n"
-    } else {
-        "not found in PATH\n"
-    });
+    if configured == ScreenBackend::Swayidle {
+        body.push_str("explicit legacy swayidle command: ");
+        body.push_str(if command_available("swayidle") {
+            "available in PATH\n"
+        } else {
+            "not found in PATH\n"
+        });
+    }
 
     body.push_str("GNOME session interfaces: ");
     let gnome = gnome_interface_observation();
@@ -291,11 +408,11 @@ fn conservative_backend_observation(configured: ScreenBackend, session: &str) ->
         }
         ScreenBackend::Swayidle => {
             if !command_available("swayidle") {
-                body.push_str("capability finding: swayidle command was not found in PATH.\nAction: install swayidle or choose auto, gnome, or wayland in Settings, then use Retry apply.\n");
+                body.push_str("capability finding: swayidle command was not found in PATH.\nAction: use the Legacy desktop integration row in Settings to switch to automatic integration, or disable idle blanking. Installing swayidle retains the explicit compatibility path.\n");
             }
         }
         ScreenBackend::Auto => {
-            body.push_str("capability observation: automatic selection is configured; GNOME names and swayidle availability above are bounded observations. Native Wayland registry probing was omitted because its roundtrip is not bounded and may consume an inherited socket.\n");
+            body.push_str("capability observation: automatic native source composition is configured; the GNOME names above are bounded observations. Native Wayland registry probing was omitted because its roundtrip is not bounded and may consume an inherited socket.\n");
         }
     }
     body.push_str("These are current capability observations, not proof that a running service is using the backend.\n");

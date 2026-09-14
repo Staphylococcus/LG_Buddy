@@ -112,7 +112,8 @@ impl RuntimeEventKind {
             | Command::Dev(_)
             | Command::Settings(_)
             | Command::Updates(_)
-            | Command::UpgradePreflight { .. } => None,
+            | Command::UpgradePreflight { .. }
+            | Command::KWinBridge(_) => None,
         }
     }
 }

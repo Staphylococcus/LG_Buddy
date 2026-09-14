@@ -53,6 +53,7 @@ APP_ICON_PATH="$(prefix_path "/usr/share/icons/hicolor/scalable/apps/io.github.s
 RUN_STATE_DIR="$(prefix_path "/run/lg_buddy")"
 USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
 USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
+USER_KWIN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_kwin.service"
 USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
 USER_UPDATE_CHECK_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service"
 USER_UPDATE_CHECK_TIMER_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.timer"
@@ -86,6 +87,7 @@ else
     run_privileged systemctl disable LG_Buddy_sleep.service 2>/dev/null || true
     systemctl --user disable LG_Buddy_update_check.timer 2>/dev/null || true
     systemctl --user disable LG_Buddy_screen.service 2>/dev/null || true
+    systemctl --user disable --now LG_Buddy_kwin.service 2>/dev/null || true
     run_privileged systemctl stop LG_Buddy.service 2>/dev/null || true
     run_privileged systemctl stop LG_Buddy_lifecycle.service 2>/dev/null || true
     run_privileged systemctl stop LG_Buddy_wake.service 2>/dev/null || true
@@ -105,6 +107,7 @@ run_privileged rmdir "$SYSTEMD_SERVICE_OVERRIDE_DIR" 2>/dev/null || true
 run_privileged rmdir "$SYSTEMD_LIFECYCLE_OVERRIDE_DIR" 2>/dev/null || true
 run_privileged rmdir "$SYSTEMD_WAKE_OVERRIDE_DIR" 2>/dev/null || true
 run_privileged rmdir "$SYSTEMD_SLEEP_OVERRIDE_DIR" 2>/dev/null || true
+rm -f "$USER_KWIN_SERVICE_PATH"
 rm -f "$USER_SCREEN_SERVICE_PATH"
 rm -rf "$USER_SCREEN_OVERRIDE_DIR"
 rm -f "$USER_UPDATE_CHECK_SERVICE_PATH"
@@ -115,6 +118,11 @@ if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
     systemctl --user daemon-reload
 fi
 echo "Done."
+
+if [ -z "$INSTALL_ROOT" ] && [ -f "$SYSTEM_LIB_DIR/kwin/setup.sh" ]; then
+    /bin/bash "$SYSTEM_LIB_DIR/kwin/setup.sh" --remove || true
+fi
+run_privileged rm -rf -- "$SYSTEM_LIB_DIR/kwin"
 
 echo "Removing scripts"
 run_privileged rm -f "$RUNTIME_INSTALL_PATH"

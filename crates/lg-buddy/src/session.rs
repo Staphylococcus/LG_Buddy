@@ -1,6 +1,8 @@
 pub(crate) mod actions;
+mod activity;
 pub mod gamepad;
 pub mod inactivity;
+pub(crate) mod monitor_diagnostics;
 pub mod runner;
 
 #[cfg(test)]
@@ -53,14 +55,4 @@ pub(crate) enum SessionObservation {
         source: EventSource,
         observed_at: Instant,
     },
-    /// Desktop permission for automatic blanking; never user activity or a
-    /// request to restore the screen.
-    IdleBlankingPermission {
-        allowed: bool,
-        source: EventSource,
-        observed_at: Instant,
-    },
-    /// Suspend automatic blanking while the source refreshes permission.
-    /// This is not an inhibitor transition and must not renew the deadline.
-    IdleBlankingPermissionPending { source: EventSource },
 }

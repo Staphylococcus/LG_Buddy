@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ impl std::error::Error for SwayidleSourceError {}
 pub(crate) fn run(
     idle_timeout_secs: u64,
     event_path: &Path,
+    stop: &AtomicBool,
     mut on_observation: impl FnMut(SessionObservation) -> bool,
 ) -> Result<(), SwayidleSourceError> {
     let event_file = create_event_file(event_path).map_err(SwayidleSourceError::Io)?;
@@ -46,6 +48,9 @@ pub(crate) fn run(
     let mut child = ChildGuard(child);
 
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         if !drain_events(&mut reader, &mut on_observation).map_err(SwayidleSourceError::Io)? {
             let _ = child.0.kill();
             let _ = child.0.wait();

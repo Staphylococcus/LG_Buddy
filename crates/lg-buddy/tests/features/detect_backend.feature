@@ -10,13 +10,14 @@ Feature: Detect backend
     Then the command succeeds
     And stdout is "gnome"
 
-  Scenario: swayidle is selected when GNOME and native Wayland are unavailable
+  Scenario: automatic detection ignores installed swayidle without native sources
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And swayidle is installed
     When I run the command "detect-backend"
-    Then the command succeeds
-    And stdout is "swayidle"
+    Then the command fails
+    And stderr contains "no native activity source available"
+    And stderr contains "screen.idle_blank to disabled"
 
   Scenario: Backend override wins
     Given a temporary LG Buddy config using input HDMI_2
@@ -27,7 +28,7 @@ Feature: Detect backend
     Then the command succeeds
     And stdout is "gnome"
 
-  Scenario: Automatic falls back when GNOME cannot honor keep-awake requests
+  Scenario: Automatic activity detection does not require inhibition services
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
@@ -35,17 +36,17 @@ Feature: Detect backend
     And swayidle is installed
     When I run the command "detect-backend"
     Then the command succeeds
-    And stdout is "swayidle"
+    And stdout is "gnome"
 
-  Scenario: Explicit GNOME reports a missing keep-awake dependency
+  Scenario: Explicit GNOME activity does not require inhibition services
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And GNOME Shell is available
     And honoring app keep-awake requests is "enabled"
     And the backend override is "gnome"
     When I run the command "detect-backend"
-    Then the command fails
-    And stderr contains "GNOME SessionManager is required"
+    Then the command succeeds
+    And stdout is "gnome"
 
   Scenario: Missing GNOME idle monitor is reported explicitly when no fallback exists
     Given a temporary LG Buddy config using input HDMI_2

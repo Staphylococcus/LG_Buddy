@@ -216,11 +216,11 @@ Feature: Native webOS TV platform
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
-    And GNOME idle monitor will report idletimes "1000, 1000, 1000, 1000, 1000, 1000, 0"
+    And genuine desktop input occurs after 1.5 seconds
     And GNOME monitor stays open for 1.8 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And stdout contains "Using GNOME backend."
+    And stdout contains "activity source=gnome"
     And the session marker is absent
     And the TV screen is visible
     And the native TV connection count is 1

@@ -62,6 +62,8 @@ pub enum GuiCommand {
     Overview,
     Brightness,
     Version,
+    /// Installer probe; reads library versions without opening a display.
+    CheckRuntime,
     /// Internal entry point used only by the post-install process handoff.
     Relaunch,
 }
@@ -93,6 +95,7 @@ where
         Some(command) if command.as_ref() == "--gapplication-replace" => GuiCommand::Relaunch,
         Some(command) if command.as_ref() == "brightness" => GuiCommand::Brightness,
         Some(command) if matches!(command.as_ref(), "--version" | "-V") => GuiCommand::Version,
+        Some(command) if command.as_ref() == "--check-runtime" => GuiCommand::CheckRuntime,
         Some(command) => return Err(GuiParseError::UnknownCommand(command.as_ref().to_string())),
         None => GuiCommand::Overview,
     };
@@ -114,6 +117,23 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
         GuiCommand::Version => {
             print!("{}", lg_buddy::version::version_text());
             glib::ExitCode::SUCCESS
+        }
+        GuiCommand::CheckRuntime => {
+            // These C getters return library constants and need no initialization.
+            // The generated adw wrappers unnecessarily require GTK initialization.
+            let adwaita_version = unsafe {
+                (
+                    adw::ffi::adw_get_major_version(),
+                    adw::ffi::adw_get_minor_version(),
+                )
+            };
+            if (gtk::major_version(), gtk::minor_version()) >= (4, 14) && adwaita_version >= (1, 5)
+            {
+                glib::ExitCode::SUCCESS
+            } else {
+                eprintln!("LG Buddy requires GTK 4.14 and libadwaita 1.5 or newer.");
+                glib::ExitCode::FAILURE
+            }
         }
     }
 }
@@ -1046,6 +1066,10 @@ mod tests {
         assert_eq!(parse_args(["brightness"]), Ok(GuiCommand::Brightness));
         assert_eq!(parse_args(["--version"]), Ok(GuiCommand::Version));
         assert_eq!(parse_args(["-V"]), Ok(GuiCommand::Version));
+        assert_eq!(
+            parse_args(["--check-runtime"]),
+            Ok(GuiCommand::CheckRuntime)
+        );
         assert_eq!(
             parse_args(["--gapplication-replace"]),
             Ok(GuiCommand::Relaunch)
