@@ -439,7 +439,8 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux
+          # The pinned v1.4 baseline still requires Zenity during installation.
+          sudo apt-get install -y libadwaita-1-0 libgtk-4-1 python3-venv util-linux zenity
 
       - name: Download pinned updater-capable baseline
         run: |
