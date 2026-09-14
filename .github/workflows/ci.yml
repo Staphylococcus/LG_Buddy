@@ -34,14 +34,32 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Run Rust test suite
-        run: cargo test -p lg-buddy
+        run: cargo test --locked -p lg-buddy
 
       - name: Verify root-scoped ownership behavior
         run: |
-          sudo_target_dir="$(mktemp -d)"
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root -- --exact
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root -- --exact
+          # Ask Cargo for the exact executable from the preceding build;
+          # globbing target/debug/deps can select a stale test binary.
+          test_binary="$(cargo test --locked -p lg-buddy --lib --no-run --message-format=json | python3 -c '
+          import json, sys
+          artifacts = [json.loads(line) for line in sys.stdin]
+          executables = [item["executable"] for item in artifacts
+                         if item.get("reason") == "compiler-artifact"
+                         and item["target"]["name"] == "lg_buddy"
+                         and item["target"]["kind"] == ["lib"]
+                         and item["profile"]["test"] and item.get("executable")]
+          assert len(executables) == 1, executables
+          print(executables[0])')"
+          for test in \
+            tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root \
+            platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root; do
+            "$test_binary" --list --format=terse | grep -Fx "$test: test"
+            sudo "$test_binary" "$test" --exact
+          done
 
       - name: Install GTK test prerequisites
         run: |
@@ -96,7 +114,7 @@ jobs:
       - name: Validate GitHub response recorder
         run: python3 scripts/test_record_github_release_responses.py
 
-  bundle-smoke-test:
+  bundle-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [verify, kwin-bridges]
@@ -117,14 +135,15 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install smoke-test prerequisites
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install build prerequisites
         run: |
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools pkexec python3-pyatspi strace xdotool xvfb
-          # Prove current installation and GUI behavior without the retired dialog tool or external idle command.
-          sudo apt-get purge -y zenity swayidle
+          sudo apt-get install -y binutils libadwaita-1-dev libgtk-4-dev musl-tools
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -153,10 +172,75 @@ jobs:
           LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
           LG_BUDDY_RELEASE_VERSION: "0.0.0"
         run: |
-          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures
-          cargo build --locked -p lg-buddy --example gui_journey_tv --target x86_64-unknown-linux-musl
+          # The fixture shares the GNU debug dependency graph and glibc floor
+          # of the GUI pair tested on Ubuntu, Fedora and Arch.
+          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures --bins --example gui_journey_tv
           mkdir -p target/gui-journey-fixtures
-          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/x86_64-unknown-linux-musl/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+
+      - name: Upload bundle for supported-distro checks
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-release-bundle
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload GUI journey fixtures for supported-distro checks
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-gui-journey-fixtures
+          path: target/gui-journey-fixtures/*
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: bundle-build
+    # This required check must fail, rather than be skipped, if production fails.
+    if: ${{ !cancelled() }}
+    env:
+      SMOKE_VERSION: 1.4.0-beta.2.ci
+
+    steps:
+      - name: Require successfully built artifacts
+        if: needs.bundle-build.result != 'success'
+        run: |
+          echo "Bundle production did not succeed." >&2
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install smoke-test prerequisites
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev pkexec python3-pyatspi strace xdotool xvfb
+          # Prove current installation and GUI behavior without the retired dialog tool or external idle command.
+          sudo apt-get purge -y zenity swayidle
+
+      - name: Download release bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-release-bundle
+          path: dist
+
+      - name: Download GUI journey fixtures
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-gui-journey-fixtures
+          path: target/gui-journey-fixtures
+
+      - name: Restore executable permissions on downloaded fixtures
+        run: chmod 755 target/gui-journey-fixtures/*
 
       - name: Enable graphical authorization smoke namespaces
         # Ubuntu 24.04 may restrict unprivileged user namespaces through
@@ -234,24 +318,8 @@ jobs:
           GH_RELEASE_DRY_RUN: "1"
         run: ./scripts/publish-release-assets.sh stage-draft --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
 
-      - name: Upload bundle for supported-distro checks
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-release-bundle
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload GUI journey fixtures for supported-distro checks
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-gui-journey-fixtures
-          path: target/gui-journey-fixtures/*
-          if-no-files-found: error
-          retention-days: 7
-
   bundle-supported-distros:
-    needs: bundle-smoke-test
+    needs: bundle-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
