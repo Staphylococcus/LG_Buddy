@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt;
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -198,10 +199,7 @@ impl ServiceController for SystemdUserServiceController {
         // Read typed systemd properties so paths containing spaces, quotes or
         // shell metacharacters do not need to be parsed from systemctl output.
         let inspect = || -> Result<PathBuf, Box<dyn std::error::Error>> {
-            let connection = match env::var("DBUS_SESSION_BUS_ADDRESS") {
-                Ok(address) => dbus::blocking::Connection::new_address(&address)?,
-                Err(_) => dbus::blocking::Connection::new_session()?,
-            };
+            let connection = user_manager_connection()?;
             let manager = connection.with_proxy(
                 "org.freedesktop.systemd1",
                 "/org/freedesktop/systemd1",
@@ -301,6 +299,28 @@ impl ServiceController for SystemdUserServiceController {
                 ),
             })
         }
+    }
+}
+
+fn user_manager_connection() -> Result<dbus::blocking::Connection, dbus::Error> {
+    if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR") {
+        // Like systemctl --user, address the user manager independently of the
+        // desktop's session bus (which may belong to dbus-run-session).
+        let socket = PathBuf::from(runtime_dir).join("systemd/private");
+        let mut address = String::from("unix:path=");
+        for byte in socket.as_os_str().as_encoded_bytes() {
+            // D-Bus addresses use percent escapes, including for delimiters
+            // such as commas and semicolons that can occur in a pathname.
+            write!(address, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+        // This is a peer connection, not a bus: do not send the bus-only Hello
+        // request that Connection::new_address uses to register a client.
+        return dbus::channel::Channel::open_private(&address).map(Into::into);
+    }
+
+    match env::var("DBUS_SESSION_BUS_ADDRESS") {
+        Ok(address) => dbus::blocking::Connection::new_address(&address),
+        Err(_) => dbus::blocking::Connection::new_session(),
     }
 }
 

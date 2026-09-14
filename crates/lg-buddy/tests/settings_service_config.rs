@@ -3,7 +3,9 @@ mod support;
 use dbus::blocking::Connection;
 use dbus::channel::MatchingReceiver;
 use dbus_crossroads::{Crossroads, MethodErr};
-use lg_buddy::settings::{SettingsMutationFailure, SettingsMutationStage};
+use lg_buddy::settings::{
+    ServiceController, SettingsMutationFailure, SettingsMutationStage, SystemdUserServiceController,
+};
 use lg_buddy::settings_view::{
     BehaviorSetting, EnvironmentSettingsBackend, SettingsApplication, SettingsBackend,
     SettingsIntent,
@@ -133,6 +135,8 @@ esac
     let active = config.path().with_extension("active");
     env.set("LG_BUDDY_TEST_ACTIVE", &active);
     env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+    // Exercise systemctl's session-bus fallback without a user-manager socket.
+    env.remove("XDG_RUNTIME_DIR");
     let original = "# preserve settings\nscreen_idle_blank=disabled\nscreen_idle_timeout=731\n";
 
     for (label, declaration, files, unset, has_pointer, succeeds) in [
@@ -241,4 +245,21 @@ esac
             assert!(!calls.exists(), "{label}: rejected before service mutation");
         }
     }
+}
+
+#[test]
+fn config_probe_does_not_substitute_a_session_bus_for_an_unreachable_user_manager() {
+    let config = TestConfigFile::new("unreachable-user-manager");
+    let systemd = SystemdEnvironment::new(
+        vec![format!("LG_BUDDY_CONFIG={}", config.path().display())],
+        vec![],
+        vec![],
+    );
+    let mut env = TestEnv::new();
+    env.set("DBUS_SESSION_BUS_ADDRESS", &systemd.address);
+    env.set("XDG_RUNTIME_DIR", config.path().parent().unwrap());
+
+    assert!(SystemdUserServiceController::from_env()
+        .user_service_config_path("LG_Buddy_screen.service")
+        .is_err());
 }

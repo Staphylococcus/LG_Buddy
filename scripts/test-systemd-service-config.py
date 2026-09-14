@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expose the installed-GUI fixture's screen-service environment on its private bus."""
+"""Expose the GUI fixture's service environment on a systemd-style peer socket."""
 
 import argparse
 from pathlib import Path
@@ -10,15 +10,14 @@ from gi.repository import Gio, GLib
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--config", required=True)
 parser.add_argument("--ready-file", required=True, type=Path)
+parser.add_argument("--runtime-dir", required=True, type=Path)
 args = parser.parse_args()
-bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-result = bus.call_sync(
-    "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-    "RequestName", GLib.Variant("(su)", ("org.freedesktop.systemd1", 4)),
-    GLib.VariantType.new("(u)"), Gio.DBusCallFlags.NONE, 2000, None,
+socket_path = args.runtime_dir / "systemd" / "private"
+socket_path.parent.mkdir(parents=True, exist_ok=True)
+server = Gio.DBusServer.new_sync(
+    "unix:path=" + Gio.dbus_address_escape_value(str(socket_path)),
+    Gio.DBusServerFlags.NONE, Gio.dbus_generate_guid(), None, None,
 )
-if result.unpack() != (1,):
-    raise SystemExit("Refusing to replace an existing systemd manager")
 
 manager = Gio.DBusNodeInfo.new_for_xml("""
 <node><interface name="org.freedesktop.systemd1.Manager">
@@ -50,7 +49,18 @@ def property_value(connection, sender, path, interface, name):
     }[name]
 
 
-bus.register_object("/org/freedesktop/systemd1", manager.interfaces[0], load_unit, None, None)
-bus.register_object(unit_path, service.interfaces[0], None, property_value, None)
+connections = set()
+
+
+def new_connection(server, connection):
+    connection.register_object("/org/freedesktop/systemd1", manager.interfaces[0], load_unit, None, None)
+    connection.register_object(unit_path, service.interfaces[0], None, property_value, None)
+    connections.add(connection)
+    connection.connect("closed", lambda connection, *unused: connections.discard(connection))
+    return True
+
+
+server.connect("new-connection", new_connection)
+server.start()
 args.ready_file.touch()
 GLib.MainLoop().run()

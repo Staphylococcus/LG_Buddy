@@ -141,8 +141,14 @@ SH
     export LG_BUDDY_SYSTEMCTL="$WORK_DIR/journey-bin/systemctl"
     export LG_BUDDY_JOURNALCTL="$WORK_DIR/journey-bin/journalctl"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS=0
+    # Keep the GUI's session bus separate from the user manager, as with
+    # dbus-run-session. Include D-Bus address delimiters in the socket path.
+    local XDG_RUNTIME_DIR="$WORK_DIR/runtime with spaces,percent%and;separator"
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    export XDG_RUNTIME_DIR
     "$ACCESSIBILITY_PYTHON" "$REPOSITORY_ROOT/scripts/test-systemd-service-config.py" \
         --config "$CONFIG_FILE" --ready-file "$WORK_DIR/services/config-ready" \
+        --runtime-dir "$XDG_RUNTIME_DIR" \
         > "$WORK_DIR/services/config-fixture.output" 2>&1 &
     SYSTEMD_CONFIG_FIXTURE_PID=$!
     for ((attempt = 0; attempt < 100; attempt++)); do
