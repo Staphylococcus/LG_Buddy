@@ -612,9 +612,14 @@ fn dispatch_once<State: 'static>(
                 return Err(WaylandProviderError::Dispatch(err.to_string()));
             }
         } else if ready > 0 {
-            guard
-                .read()
-                .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+            match guard.read() {
+                Ok(_) => (),
+                // Readable bytes may contain only part of an event. The backend
+                // retains them until a later read can complete the message.
+                Err(wayland_client::backend::WaylandError::Io(err))
+                    if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => return Err(WaylandProviderError::Dispatch(err.to_string())),
+            }
         }
     }
     Ok(())
@@ -753,6 +758,43 @@ mod tests {
             &ext_idle_notification_v1::Event::Resumed
         ));
     }
+
+    #[test]
+    fn partial_event_waits_for_remaining_bytes_and_disconnect_is_still_an_error() {
+        use std::io::Write;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use wayland_client::Proxy;
+
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = wayland_client::Connection::from_socket(socket).unwrap();
+        let mut queue = connection.new_event_queue();
+        let mut state = super::WaylandCapabilityProbeState::default();
+        let done = Arc::new(AtomicBool::new(false));
+        let callback = connection
+            .display()
+            .sync(&queue.handle(), Arc::clone(&done));
+        let message: Vec<u8> = [callback.id().protocol_id(), 12 << 16, 0]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect();
+
+        // poll() sees bytes, but the backend cannot decode a complete event yet.
+        peer.write_all(&message[..4]).unwrap();
+        super::dispatch_once(&mut queue, &mut state).unwrap();
+        assert!(!done.load(Ordering::SeqCst));
+
+        peer.write_all(&message[4..]).unwrap();
+        super::dispatch_once(&mut queue, &mut state).unwrap();
+        queue.dispatch_pending(&mut state).unwrap();
+        assert!(done.load(Ordering::SeqCst));
+
+        drop(peer);
+        assert!(super::dispatch_once(&mut queue, &mut state).is_err());
+    }
+
     // Model only the registry, sync and input-notification messages consumed by
     // this adapter. Hold the final sync reply so input definitely precedes setup.
     fn serve_input_during_setup(
