@@ -24,6 +24,7 @@ ACCESSIBILITY_REGISTRY_PID=""
 ACCESSIBILITY_PYTHON=""
 TV_FIXTURE_PID=""
 GITHUB_FIXTURE_PID=""
+SYSTEMD_CONFIG_FIXTURE_PID=""
 
 fail() {
     echo "$1" >&2
@@ -39,7 +40,7 @@ cleanup() {
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
     fi
-    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID"; do
+    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID" "$SYSTEMD_CONFIG_FIXTURE_PID"; do
         if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
             kill "$fixture_pid" 2>/dev/null || true
             wait "$fixture_pid" 2>/dev/null || true

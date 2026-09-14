@@ -141,6 +141,22 @@ SH
     export LG_BUDDY_SYSTEMCTL="$WORK_DIR/journey-bin/systemctl"
     export LG_BUDDY_JOURNALCTL="$WORK_DIR/journey-bin/journalctl"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS=0
+    # Keep the GUI's session bus separate from the user manager, as with
+    # dbus-run-session. Include D-Bus address delimiters in the socket path.
+    local XDG_RUNTIME_DIR="$WORK_DIR/runtime with spaces,percent%and;separator"
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    export XDG_RUNTIME_DIR
+    "$ACCESSIBILITY_PYTHON" "$REPOSITORY_ROOT/scripts/test-systemd-service-config.py" \
+        --config "$CONFIG_FILE" --ready-file "$WORK_DIR/services/config-ready" \
+        --runtime-dir "$XDG_RUNTIME_DIR" \
+        > "$WORK_DIR/services/config-fixture.output" 2>&1 &
+    SYSTEMD_CONFIG_FIXTURE_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -e "$WORK_DIR/services/config-ready" ] || break
+        kill -0 "$SYSTEMD_CONFIG_FIXTURE_PID" 2>/dev/null || fail "Service configuration fixture failed."
+        sleep 0.05
+    done
+    [ -e "$WORK_DIR/services/config-ready" ] || fail "Service configuration fixture did not become ready."
     "$TV_FIXTURE" "$WORK_DIR/native-tv" > "$WORK_DIR/native-tv.output" 2>&1 &
     TV_FIXTURE_PID=$!
     journey_tv_scenario stateful
@@ -226,8 +242,11 @@ SH
     cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Relaunch unexpectedly requested activation again."
     rm "$WORK_DIR/services/screen-fails"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
+    # Package-managed screen services do not need the shell installer's pointer.
+    mv "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path" "$WORK_DIR/config-path.saved"
     observe_gui_state --activate-control 'Idle blanking'
     journey_setting screen.idle_blank enabled
+    mv "$WORK_DIR/config-path.saved" "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path"
     observe_gui_state --activate-control 'TV sleep & wake'
     journey_setting system.sleep_wake_policy enabled
     journey_setting screen.idle_timeout 720
