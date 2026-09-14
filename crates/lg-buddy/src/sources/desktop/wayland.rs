@@ -786,7 +786,7 @@ mod tests {
             body.extend_from_slice(&version.to_ne_bytes());
             event(peer, registry, 0, &body);
         }
-        peer.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .unwrap();
         let mut registry = 0;
         let mut notifier = 0;
@@ -848,32 +848,37 @@ mod tests {
         let (input, observed) = mpsc::channel();
         let (finished, completion) = mpsc::channel();
         let adapter = Arc::clone(&source);
+        let published_source = Arc::clone(&source);
         let worker_stop = Arc::clone(&stop);
         let worker = std::thread::spawn(move || {
             adapter.run(
                 Arc::new(move |observation| {
-                    input.send(observation).unwrap();
+                    // Capture availability before allowing setup to finish.
+                    // The test thread need not run within the adapter's setup deadline.
+                    input
+                        .send((observation, published_source.status()))
+                        .unwrap();
+                    finish_setup.send(()).unwrap();
                 }),
                 &worker_stop,
             );
             finished.send(()).unwrap();
         });
-        let observation = observed.recv_timeout(Duration::from_secs(1));
-        let status_during_setup = source.status();
-        finish_setup.send(()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let observation = observed.recv_timeout(Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
         while !source.status().is_available() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
         let status_after_setup = source.status();
         stop.store(true, Ordering::SeqCst);
         completion
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(5))
             .expect("quiet adapter stops");
         worker.join().unwrap();
         server.join().unwrap();
+        let (observation, status_during_setup) = observation.unwrap();
         assert!(matches!(
-            observation.unwrap(),
+            observation,
             SessionObservation::Inactivity {
                 observation: InactivityObservation::DesktopActivityObserved,
                 ..

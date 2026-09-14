@@ -187,7 +187,11 @@ python3 scripts/kwin_matrix.py build --directory target/kwin-probe \
 
 The reusable `kwin-bridge.yml` workflow groups builds by KWin series and Qt minor.
 It caches only artifacts that passed the loader test, keyed by their exact build
-and test inputs. Each artifact includes `metadata.tsv` and `build.json`, recording
+and test inputs. On a cache miss, it can reuse the latest successful `dev` push's
+prebuilt artifacts after verifying the complete group against the current source,
+build inputs and checksums. This lets promotion and release branches reuse builds
+despite Actions cache isolation. Missing, expired or mismatched artifacts fall
+back to the pinned source build. Each artifact includes `metadata.tsv` and `build.json`, recording
 the source revision, toolchain pins, plugin checksum and successful loader check.
 A final coverage job rejects missing, duplicate, stale or corrupt artifacts.
 
