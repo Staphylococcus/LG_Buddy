@@ -49,7 +49,8 @@ fn activate_before_persist_with_root<C: ServiceController>(
 
     match mutation.key_name() {
         "screen.idle_blank" => {
-            validate_config_pointer(config_path, install_root.as_deref())?;
+            let service_config = service_controller.user_service_config_path(SCREEN_SERVICE)?;
+            validate_matching_config(config_path, &service_config)?;
             activate_screen(service_controller)
         }
         "system.sleep_wake_policy" => {
@@ -59,6 +60,26 @@ fn activate_before_persist_with_root<C: ServiceController>(
         }
         _ => Ok(()),
     }
+}
+
+fn validate_matching_config(
+    config_path: &Path,
+    service_config: &Path,
+) -> Result<(), SettingsError> {
+    let service_config =
+        fs::canonicalize(service_config).map_err(|error| SettingsError::Activation {
+            message: format!("the screen service's configuration could not be resolved: {error}"),
+        })?;
+    let config_path = fs::canonicalize(config_path).map_err(|error| SettingsError::Activation {
+        message: format!("the active configuration could not be resolved: {error}"),
+    })?;
+    if service_config != config_path {
+        return Err(SettingsError::Activation {
+            message: "the screen service's configuration does not match the active configuration."
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn activate_screen<C: ServiceController>(service_controller: &C) -> Result<(), SettingsError> {
@@ -186,6 +207,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FakeServices {
+        screen_config: PathBuf,
         screen_state: UserServiceState,
         screen_active: Rc<Cell<bool>>,
         lifecycle_active: bool,
@@ -197,6 +219,7 @@ mod tests {
     impl FakeServices {
         fn active() -> Self {
             Self {
+                screen_config: PathBuf::new(),
                 screen_state: UserServiceState::ActiveOrEnabled,
                 screen_active: Rc::new(Cell::new(true)),
                 lifecycle_active: false,
@@ -208,6 +231,10 @@ mod tests {
     }
 
     impl ServiceController for FakeServices {
+        fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
+            assert_eq!(service, SCREEN_SERVICE);
+            Ok(self.screen_config.clone())
+        }
         fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError> {
             assert_eq!(service, SCREEN_SERVICE);
             Ok(self.screen_state)
@@ -290,6 +317,7 @@ mod tests {
         let path = crate::settings::tests::unique_test_path("activation-screen");
         let root = installed_root(&path);
         let services = FakeServices {
+            screen_config: path.clone(),
             screen_active: Rc::new(Cell::new(false)),
             ..FakeServices::active()
         };

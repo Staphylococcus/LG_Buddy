@@ -3,6 +3,9 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Duration;
+
+use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 
 use super::SettingsError;
 
@@ -60,6 +63,12 @@ pub trait ServiceController {
     }
 
     fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError>;
+
+    fn user_service_config_path(&self, _service: &str) -> Result<PathBuf, SettingsError> {
+        Err(SettingsError::Activation {
+            message: "the screen service's configuration could not be inspected".to_string(),
+        })
+    }
 
     /// The coarse state above intentionally preserves the CLI's historical
     /// behavior. GUI onboarding also needs to distinguish an enabled but
@@ -183,6 +192,53 @@ impl ServiceController for SystemdUserServiceController {
         Ok(self
             .user_systemctl_status(&["is-active", "--quiet", service])
             .unwrap_or(false))
+    }
+
+    fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
+        // Read typed systemd properties so paths containing spaces, quotes or
+        // shell metacharacters do not need to be parsed from systemctl output.
+        let inspect = || -> Result<PathBuf, Box<dyn std::error::Error>> {
+            let connection = match env::var("DBUS_SESSION_BUS_ADDRESS") {
+                Ok(address) => dbus::blocking::Connection::new_address(&address)?,
+                Err(_) => dbus::blocking::Connection::new_session()?,
+            };
+            let manager = connection.with_proxy(
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                Duration::from_secs(2),
+            );
+            let (path,): (dbus::Path<'static>,) =
+                manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))?;
+            let unit =
+                connection.with_proxy("org.freedesktop.systemd1", path, Duration::from_secs(2));
+            let environment: Vec<String> =
+                unit.get("org.freedesktop.systemd1.Service", "Environment")?;
+            let files: Vec<(String, bool)> =
+                unit.get("org.freedesktop.systemd1.Service", "EnvironmentFiles")?;
+            let unset: Vec<String> =
+                unit.get("org.freedesktop.systemd1.Service", "UnsetEnvironment")?;
+            if !files.is_empty() {
+                return Err("the screen service uses environment files; its configuration override could not be verified".into());
+            }
+            let assignment = environment
+                .iter()
+                .rev()
+                .find(|value| value.starts_with("LG_BUDDY_CONFIG="))
+                .filter(|value| {
+                    !unset
+                        .iter()
+                        .any(|removed| removed == "LG_BUDDY_CONFIG" || removed == *value)
+                })
+                .ok_or("the screen service does not declare LG_BUDDY_CONFIG")?;
+            let path = PathBuf::from(assignment.strip_prefix("LG_BUDDY_CONFIG=").unwrap());
+            if !path.is_absolute() {
+                return Err("the screen service's LG_BUDDY_CONFIG is not an absolute path".into());
+            }
+            Ok(path)
+        };
+        inspect().map_err(|error| SettingsError::Activation {
+            message: format!("could not verify {service}'s configuration: {error}"),
+        })
     }
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
