@@ -2,6 +2,7 @@ pub(crate) mod actions;
 mod activity;
 pub mod gamepad;
 pub mod inactivity;
+pub(crate) mod monitor_diagnostics;
 pub mod runner;
 
 #[cfg(test)]

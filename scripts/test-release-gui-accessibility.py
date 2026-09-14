@@ -113,6 +113,7 @@ def parse_args() -> argparse.Namespace:
         help="also verify the compact update row or its installation dialog",
     )
     parser.add_argument("--expected-settings-timeout")
+    parser.add_argument("--expected-integration", choices=("automatic", "legacy"))
     parser.add_argument("--edit-settings-timeout", help="type a timeout draft through native keyboard input")
     parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
@@ -514,6 +515,16 @@ def settings_contract(args: argparse.Namespace):
         value.startswith("Invalid value") or value.startswith("Invalid configured value")
         for value in visible_names
     )
+    if args.expected_integration == "automatic" and (
+        "Desktop integration" in visible_names
+        or "Legacy desktop integration" in visible_names
+        or "Use automatic" in visible_names
+    ):
+        return None
+    if args.expected_integration == "legacy" and not {
+        "Legacy desktop integration", "Use automatic"
+    } <= visible_names:
+        return None
     if args.expected_settings_state == "invalid" and not invalid_values:
         return None
     if args.expected_settings_state == "ready" and invalid_values:

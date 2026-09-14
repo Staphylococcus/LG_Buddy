@@ -125,6 +125,7 @@ pub fn evaluate_pull_inhibition(
 /// section was not evaluated on this call (bypass, pending work or retry delay).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlankingEvaluation {
+    pub evaluated_at: Instant,
     pub can_blank: bool,
     pub preference: InhibitionPreferenceEvaluation,
     pub push: Option<InhibitionSectionEvaluation>,
@@ -155,6 +156,7 @@ fn reconcile(
             && pull.as_ref().is_some_and(|section| section.allowed)
             && release_not_before.is_none_or(|deadline| now >= deadline));
     BlankingEvaluation {
+        evaluated_at: now,
         can_blank,
         preference,
         push,
@@ -186,6 +188,7 @@ pub struct Inhibition {
     pending: Option<PendingCheck>,
     retry_at: Option<Instant>,
     diagnostics: Option<BlankingEvaluation>,
+    completed_diagnostics: Option<BlankingEvaluation>,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
 }
@@ -234,6 +237,7 @@ impl Inhibition {
             pending: None,
             retry_at: None,
             diagnostics: None,
+            completed_diagnostics: None,
             stop,
             workers,
         }
@@ -256,10 +260,24 @@ impl Inhibition {
         }
         self.retry_at = None;
         self.diagnostics = None;
+        self.completed_diagnostics = None;
     }
 
     pub fn diagnostics(&self) -> Option<&BlankingEvaluation> {
         self.diagnostics.as_ref()
+    }
+
+    pub fn preference_diagnostics(&self) -> InhibitionPreferenceEvaluation {
+        self.preference
+    }
+
+    /// Historical evidence for this idle attempt, never an input to the gate.
+    pub(crate) fn completed_diagnostics(&self) -> Option<&BlankingEvaluation> {
+        self.completed_diagnostics.as_ref()
+    }
+
+    pub(crate) fn pull_retry_at(&self) -> Option<Instant> {
+        self.retry_at
     }
 
     pub fn can_blank(&mut self, now: Instant) -> bool {
@@ -336,6 +354,9 @@ impl Inhibition {
             checking,
         );
         let allowed = evaluation.can_blank;
+        if evaluation.pull.is_some() || evaluation.preference.bypass_inhibition {
+            self.completed_diagnostics = Some(evaluation.clone());
+        }
         self.diagnostics = Some(evaluation);
         allowed
     }
@@ -609,9 +630,12 @@ mod tests {
         source.observe(true, now);
         reply.send(source.evaluate()).unwrap();
         assert!(!finish_check(&mut gate, now));
+        let completed = gate.completed_diagnostics().unwrap().clone();
         for _ in 0..100 {
             assert!(!gate.can_blank(now + Duration::from_millis(999)));
         }
+        assert!(gate.diagnostics().unwrap().pull.is_none());
+        assert_eq!(gate.completed_diagnostics(), Some(&completed));
         assert!(called.try_recv().is_err(), "no busy query retry");
         let next = now + Duration::from_secs(1);
         assert!(!gate.can_blank(next));
@@ -624,6 +648,11 @@ mod tests {
             !gate.can_blank(next),
             "permission was consumed by its attempt"
         );
+        assert!(gate.completed_diagnostics().unwrap().can_blank);
+        assert!(!gate.diagnostics().unwrap().can_blank);
+        gate.cancel();
+        assert!(gate.completed_diagnostics().is_none());
+        assert!(gate.diagnostics().is_none());
     }
 
     #[test]

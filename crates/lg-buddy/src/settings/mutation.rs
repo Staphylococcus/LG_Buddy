@@ -50,6 +50,15 @@ pub(crate) fn execute_gui_settings_mutation<C: ServiceController>(
     progress: &mut dyn FnMut(SettingsMutationStage),
 ) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
     progress(SettingsMutationStage::Validating);
+    if mutation.key_name() == "screen.backend"
+        && mutation
+            .new_value()
+            .ok()
+            .and_then(super::SettingValue::as_enum)
+            == Some("auto")
+    {
+        return super::automatic::transition_to_automatic(path, mutation, applier, progress);
+    }
     activate_before_persist(path, mutation, applier.service_controller())
         .map_err(SettingsMutationFailure::Activation)?;
     execute_settings_mutation(path, mutation, applier, progress)
@@ -169,9 +178,9 @@ mod tests {
             );
             let done = app.complete_mutation(operation, result).unwrap();
             let presentation = done.presentation();
-            assert_eq!(
+            assert!(
                 presentation.row_visible(BehaviorSetting::ScreenBackend),
-                enabled
+                "the saved legacy override remains visible with idle blanking disabled"
             );
             assert_eq!(
                 presentation.row_visible(BehaviorSetting::ScreenIdleTimeout),

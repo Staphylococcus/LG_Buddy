@@ -144,6 +144,39 @@ including the preference, evaluated source contributions, pending work and
 release deadline. A missing section means it was not evaluated on that call.
 Diagnostics are separate from the inactivity engine's decision.
 
+The running monitor publishes these observations through its existing session
+D-Bus endpoint (`Session1.GetMonitorDiagnostics`). The graphical diagnostic
+report reads one snapshot from the current unique bus owner, without starting
+a service or querying inhibitors. Activity availability and contribution ages
+are separate from the inhibition preference, push/pull check results, pending
+work, release delay and aggregate. The report distinguishes the current gate,
+pending work and pull retry timing from the last completed evaluation for
+the current idle attempt. That completed evaluation retains its own age,
+sections and aggregate between retries; it is explicitly historical and never
+grants permission for another call. Activity/lifecycle cancellation clears both
+the current and completed observations.
+
+Expected interfaces and KWin provisioning history have separate report sections.
+A successful setup record is historical; the running monitor reports the KWin
+source's actual contribution. Missing optional sources mean reduced coverage.
+
+### Portable configuration and legacy overrides
+
+Fresh GUI setup and `configure.sh` use automatic discovery without a backend
+question. Existing `auto` configurations remain unchanged. Saved `gnome`,
+`wayland` and `swayidle` overrides retain their behavior and are reported as
+legacy overrides. Settings offers an explicit, confirmed switch to automatic
+integration; `configure.sh` offers the same choice when an override exists.
+Native activity is validated before switching when built-in idle blanking is
+enabled. Failed service application restores the previous settings. Disabling
+idle blanking permits the transition without native idle capability; optional
+KWin inhibition never blocks it.
+
+Legacy CLI mutation and `detect-backend` output remain compatible during the
+MVP. CLI writes still persist before applying; the dedicated graphical and
+configuration transitions supply rollback. Final retirement belongs to #219
+and #87. No resolved desktop choice is written on login or source recovery.
+
 `inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
 state, and `evaluate()` returns a Boolean permission with matching diagnostics
 without protocol I/O. `evaluate_push_inhibition()` combines these permissions:

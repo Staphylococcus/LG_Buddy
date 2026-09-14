@@ -15,6 +15,154 @@ use support::{
 };
 
 #[test]
+fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_new_checks() {
+    let mut env = TestEnv::new();
+    let bus = MockSessionBusIdleMonitor::new("monitor-diagnostics-bus");
+    bus.set_shell_available(true);
+    bus.set_screen_saver_available(true);
+    bus.set_idle_monitor_available(true);
+    bus.set_idle_inhibitor_count(0);
+    let powerdevil = MockPowerDevil::new(bus.address());
+    powerdevil.set_inhibited(true);
+    powerdevil.delay_next_query(Duration::from_millis(600));
+    let logind = MockSystemLogind::new("monitor-diagnostics-logind");
+    logind.reset();
+    let config = TestConfigFile::new("monitor-diagnostics-config");
+    config.write_sample("HDMI_2");
+    let original = format!(
+        "{}\nscreen_honor_idle_inhibitors=enabled\n",
+        fs::read_to_string(config.path()).unwrap()
+    );
+    fs::write(config.path(), &original).unwrap();
+    let runtime = RuntimeStateLayout::new("monitor-diagnostics-runtime");
+    env.set("DBUS_SESSION_BUS_ADDRESS", bus.address());
+    env.set("LG_BUDDY_CONFIG", config.path());
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .arg("monitor")
+        .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
+        .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
+        .env("XDG_SESSION_TYPE", "tty")
+        .env("LG_BUDDY_SCREEN_BACKEND", "auto")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("WAYLAND_SOCKET")
+        .env("LG_BUDDY_IDLE_TIMEOUT", "1")
+        .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
+        // Full diagnostics include several separately bounded host probes.
+        // Keep the monitor alive through those probes, then stop it explicitly.
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
+    let read = || -> Option<(String, String, String)> {
+        connection
+            .with_proxy(
+                "io.github.Staphylococcus.LGBuddy",
+                "/io/github/Staphylococcus/LGBuddy/Session",
+                Duration::from_millis(150),
+            )
+            .method_call(
+                "io.github.Staphylococcus.LGBuddy.Session1",
+                "GetMonitorDiagnostics",
+                (),
+            )
+            .ok()
+    };
+    wait_until(Duration::from_secs(3), || {
+        read().is_some_and(|(_, inhibition, _)| inhibition.contains("pull work pending: true"))
+    });
+    wait_until(Duration::from_secs(2), || {
+        read().is_some_and(|(_, inhibition, _)| {
+            inhibition.contains("source: powerdevil; result: inhibited")
+        })
+    });
+    let checks = powerdevil.query_count();
+    for _ in 0..3 {
+        let (activity, inhibition, context) = read().unwrap();
+        assert!(
+            activity.contains("source: gnome; available: true"),
+            "{activity}"
+        );
+        assert!(activity.contains("source: wayland; available: false"));
+        assert!(context.contains("configured integration: auto"));
+        assert!(!context.contains("legacy override:"));
+        assert!(
+            inhibition.contains("source: kwin; result: absent"),
+            "{inhibition}"
+        );
+        assert!(inhibition.contains("aggregate can_blank: false"));
+        assert!(inhibition.contains("evaluation age:"));
+    }
+    // Between bounded retries, completed source evidence remains readable as
+    // history, separately from the current gate's lack of fresh permission.
+    thread::sleep(Duration::from_millis(150));
+    let (_, history, _) = read().unwrap();
+    assert!(history.contains("Latest completed evaluation"), "{history}");
+    assert!(
+        history.contains("source: powerdevil; result: inhibited"),
+        "{history}"
+    );
+    assert!(
+        history.contains("current gate can_blank: false"),
+        "{history}"
+    );
+    assert_eq!(
+        powerdevil.query_count(),
+        checks,
+        "reading diagnostics must not query or authorize inhibition"
+    );
+    bus.schedule_user_activity(Duration::ZERO);
+    wait_until(Duration::from_secs(2), || {
+        read()
+            .is_some_and(|(_, inhibition, _)| inhibition.contains("No active blanking evaluation"))
+    });
+    // libdbus caches its session address process-wide; earlier integration
+    // tests use different private buses. Collect in a fresh application process.
+    let report = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "monitor_diagnostics_collector_child",
+            "--nocapture",
+        ])
+        .env("LG_BUDDY_TEST_MONITOR_DIAGNOSTICS_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(report.status.success(), "{report:?}");
+    assert!(child.try_wait().unwrap().is_none());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(fs::read_to_string(config.path()).unwrap(), original);
+}
+
+#[test]
+fn monitor_diagnostics_collector_child() {
+    if std::env::var_os("LG_BUDDY_TEST_MONITOR_DIAGNOSTICS_CHILD").is_none() {
+        return;
+    }
+    let report = lg_buddy::diagnostics::EnvironmentDiagnosticsCollector.collect();
+    for expected in [
+        "Activity sources",
+        "Inhibition evaluation",
+        "KWin provisioning",
+    ] {
+        assert!(
+            report
+                .sections()
+                .iter()
+                .any(|section| section.title() == expected),
+            "{}",
+            report.text()
+        );
+    }
+    assert!(
+        report.text().contains("source: gnome; available: true"),
+        "{}",
+        report.text()
+    );
+}
+
+#[test]
 fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
     let _env = TestEnv::new();
     let bus = MockSessionBusIdleMonitor::new("monitor-inhibition-resume-bus");

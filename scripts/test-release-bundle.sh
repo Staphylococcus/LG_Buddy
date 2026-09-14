@@ -524,7 +524,7 @@ mkdir -p "$FRESH_CONFIG_HOME"
     export LG_BUDDY_NATIVE_PAIRING_MARKER="$FRESH_NATIVE_PAIRING_MARKER"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
     printf '%s\n' \
-        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '1' '300' '1' 'n' 'Y' \
+        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '300' '1' 'n' 'Y' \
         | bash "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
 )
 grep -F -q 'TV Platform:         lg_webos' "$FRESH_CONFIG_OUTPUT"
@@ -534,7 +534,12 @@ assert_file "$FRESH_NATIVE_PAIRING_MARKER"
 assert_file "$FRESH_NATIVE_TOKEN"
 assert_mode "$FRESH_NATIVE_TOKEN" 600
 python3 -c 'import json, sys; assert json.load(open(sys.argv[1], encoding="utf-8")) == {"access_token": "release-smoke-native-token"}' "$FRESH_NATIVE_TOKEN"
-grep -F -q '  3) wayland' "$FRESH_CONFIG_OUTPUT"
+grep -F -q 'Desktop integration: automatic discovery' "$FRESH_CONFIG_OUTPUT"
+grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+if grep -F -q 'Choose the screen idle backend' "$FRESH_CONFIG_OUTPUT"; then
+    echo "Fresh interactive configuration asked for a backend."
+    exit 1
+fi
 if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
     echo "Fresh interactive configuration presented swayidle."
     exit 1

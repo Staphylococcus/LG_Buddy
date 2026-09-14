@@ -6,6 +6,9 @@ source "$repo/data/kwin/setup.sh"
 set -e
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
+export LG_BUDDY_CONFIG="$fixture/config.env"
+printf '%s\n' screen_backend=auto screen_idle_timeout=731 screen_honor_idle_inhibitors=enabled > "$LG_BUDDY_CONFIG"
+cp "$LG_BUDDY_CONFIG" "$fixture/original-config.env"
 uid=1000
 kwin_version=6.7.5
 qt_version=6.11.2
@@ -47,6 +50,7 @@ artifact() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$version" "$qt_version" "$arch" "$source_id" "$digest" > "$directory/metadata.tsv"
 }
 reset_case() {
+    cmp "$LG_BUDDY_CONFIG" "$fixture/original-config.env"
     rm -rf "$fixture/payload" "$fixture/state" "$fixture/cache" "$fixture/plugins"
     rm -f "$fixture/actions" "$fixture/deny-install" "$fixture/deny-remove" "$fixture/reject-all" "$fixture/build-fails"
     payload_dir="$fixture/payload"
@@ -116,7 +120,8 @@ rm "$fixture/deny-remove"
 remove_previous
 test -z "$(find "$state_dir/plugins" -name '*.tsv')"
 test -z "$(find "$plugin_root" -name '*.so')"
-echo 'PASS: prebuilt without compilation, rejection/incompatibility fallback, cache, ordinary absence and cleanup.'
+cmp "$LG_BUDDY_CONFIG" "$fixture/original-config.env"
+echo 'PASS: prebuilt without compilation, rejection/incompatibility fallback, cache, ordinary absence and cleanup retain the portable configuration.'
 
 # CI's disposable Fedora container also exercises the real privileged helper.
 if [ "$(id -u)" -eq 0 ] && [ -d /usr/lib64/qt6/plugins/kwin/plugins ]; then

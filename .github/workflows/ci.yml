@@ -79,7 +79,9 @@ jobs:
           python3 scripts/test_kwin_matrix.py
 
       - name: Run first-run installer smoke
-        run: bash ./scripts/test-installer-first-run.sh
+        run: |
+          bash ./scripts/test-installer-first-run.sh
+          bash ./scripts/test-automatic-configuration.sh
 
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py

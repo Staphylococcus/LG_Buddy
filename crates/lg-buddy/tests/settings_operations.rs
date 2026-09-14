@@ -274,7 +274,7 @@ fn environment_backend_edits_all_behavior_settings_without_a_tv_and_matches_cli(
 #[test]
 fn reset_removes_a_setting_override_without_a_tv() {
     let config = TestConfigFile::new("settings-reset");
-    config.write_contents("screen_backend=wayland\n");
+    config.write_contents("screen_idle_timeout=731\n");
     let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
     env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
@@ -285,14 +285,17 @@ fn reset_removes_a_setting_override_without_a_tv() {
     let transition = run_mutation(
         &mut app,
         &backend,
-        SettingsIntent::Reset(BehaviorSetting::ScreenBackend),
+        SettingsIntent::Reset(BehaviorSetting::ScreenIdleTimeout),
     );
 
     assert!(!fs::read_to_string(config.path())
         .unwrap()
-        .contains("screen_backend="));
-    let setting = row(transition.presentation(), BehaviorSetting::ScreenBackend);
-    assert_eq!(setting.value_label(), "Automatic");
+        .contains("screen_idle_timeout="));
+    let setting = row(
+        transition.presentation(),
+        BehaviorSetting::ScreenIdleTimeout,
+    );
+    assert_eq!(setting.value_label(), "300 seconds");
     assert_eq!(setting.source_label(), "Default");
 }
 

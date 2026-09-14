@@ -1,6 +1,7 @@
 use std::io;
 
 mod activation;
+mod automatic;
 mod command;
 mod formatter;
 mod model;

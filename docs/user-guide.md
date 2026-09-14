@@ -130,20 +130,35 @@ restored. If it was saved but could not take effect, the value stays saved and
 means its setup needs attention before the saved behavior can take effect;
 see [troubleshooting](#troubleshooting).
 
-Leave **Desktop integration** at **Automatic** unless you need to select a
-particular compatible desktop. See the [session backend model](session-backend-model.md)
-for compatibility details, including the deprecated `swayidle` option.
+Desktop integration is automatic. Configure behavior once; moving between
+GNOME Wayland and Plasma Wayland needs no LG Buddy setting change or repeated
+setup. The available native interfaces determine which sources contribute.
+
+If an older configuration explicitly selects `gnome`, `wayland` or `swayidle`,
+**Legacy desktop integration → Use automatic** offers a one-time switch.
+The confirmation keeps your behavior settings; cancellation or a failed switch
+preserves the previous configuration. If native idle support is unavailable,
+disable **Idle blanking** first to use automatic integration with the other
+application features. The legacy override remains visible even with idle
+blanking disabled. Existing explicit configurations keep their behavior until
+you choose to switch.
 
 This preference applies to the native GNOME and Wayland integrations. The
 deprecated, explicitly selected `swayidle` integration always honors app
-inhibition. Selecting `swayidle` hides this preference. **Automatic** uses native
+inhibition. An existing `swayidle` override hides this preference. Automatic integration uses native
 sources only and never falls back to swayidle.
 
-Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**,
-**Desktop integration**, and **Idle timeout**
+Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**
+and **Idle timeout**
 while keeping their saved values for when you turn it back on. **Restore policy**
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.
+
+The compatibility CLI still accepts `screen.backend` and `detect-backend`.
+`detect-backend` returns one native capability for older callers; it does not
+describe the automatic monitor's complete source set. CLI setting writes keep
+their existing save-then-apply behavior. Use the Settings action above when you
+want the recoverable transition. See the [session backend model](session-backend-model.md).
 
 <a id="external-idle-automation"></a>
 ## External idle automation
