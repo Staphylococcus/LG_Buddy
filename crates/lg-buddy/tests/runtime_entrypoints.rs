@@ -141,20 +141,39 @@ fn monitor_diagnostics_collector_child() {
         return;
     }
     let report = lg_buddy::diagnostics::EnvironmentDiagnosticsCollector.collect();
-    for expected in [
-        "Activity sources",
-        "Inhibition evaluation",
-        "KWin provisioning",
-    ] {
-        assert!(
-            report
-                .sections()
-                .iter()
-                .any(|section| section.title() == expected),
-            "{}",
-            report.text()
-        );
-    }
+    assert!(
+        report.text().contains("PowerDevil: available; inhibiting"),
+        "{}",
+        report.text()
+    );
+    assert!(report.text().contains("KWin: absent"), "{}", report.text());
+    assert!(!report.text().contains("No active blanking evaluation"));
+    assert!(!report.text().contains("This is setup history"));
+
+    assert_eq!(
+        report
+            .sections()
+            .iter()
+            .map(|section| section.title())
+            .collect::<Vec<_>>(),
+        [
+            "Desktop",
+            "Desktop monitor",
+            "Activity sources",
+            "Inhibition sources",
+            "Effective settings",
+            "Services",
+            "TV observation",
+            "Application and build",
+            "User services (current boot, latest 40 entries)",
+            "System services (current boot, latest 40 entries)",
+        ]
+    );
+    let (snapshot, logs) = report.text().split_once("Recent logs").unwrap();
+    assert!(snapshot.contains("Current snapshot"));
+    assert!(snapshot.contains("PowerDevil: available; inhibiting"));
+    assert!(!snapshot.contains("current boot, latest 40 entries"));
+    assert!(logs.contains("User services (current boot, latest 40 entries)"));
     assert!(
         report.text().contains("source: gnome; available: true"),
         "{}",

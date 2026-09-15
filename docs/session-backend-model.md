@@ -145,20 +145,21 @@ release deadline. A missing section means it was not evaluated on that call.
 Diagnostics are separate from the inactivity engine's decision.
 
 The running monitor publishes these observations through its existing session
-D-Bus endpoint (`Session1.GetMonitorDiagnostics`). The graphical diagnostic
-report reads one snapshot from the current unique bus owner, without starting
-a service or querying inhibitors. Activity availability and contribution ages
-are separate from the inhibition preference, push/pull check results, pending
-work, release delay and aggregate. The report distinguishes the current gate,
-pending work and pull retry timing from the last completed evaluation for
-the current idle attempt. That completed evaluation retains its own age,
-sections and aggregate between retries; it is explicitly historical and never
-grants permission for another call. Activity/lifecycle cancellation clears both
-the current and completed observations.
+D-Bus endpoint (`Session1.GetMonitorDiagnostics`). The endpoint retains policy
+details for debugging the current idle attempt; activity/lifecycle cancellation
+clears those evaluations.
 
-Expected interfaces and KWin provisioning history have separate report sections.
-A successful setup record is historical; the running monitor reports the KWin
-source's actual contribution. Missing optional sources mean reduced coverage.
+The graphical report starts with a current snapshot. It reads activity and
+scheduling fields from the running monitor, and separately queries GNOME,
+PowerDevil and KWin for their current inhibition state. These bounded reads use
+existing unique bus owners and do not activate services or feed results into
+the monitor's policy. They run even when no idle evaluation is pending or the
+honoring preference is disabled. Missing optional sources mean reduced coverage.
+
+A separate Recent logs section contains timestamped service messages from the
+current boot, newest first, including KWin setup. Each scope is limited to 40
+entries and 16 KiB of captured output; report sections are capped at 8 KiB and
+the whole report at 32 KiB. Credential-bearing lines and URLs are redacted.
 
 ### Portable configuration and legacy overrides
 
