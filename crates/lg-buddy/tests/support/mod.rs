@@ -890,7 +890,7 @@ impl Drop for MockKWinInhibition {
     }
 }
 
-fn start_private_session_bus() -> (String, i32) {
+pub fn start_private_session_bus() -> (String, i32) {
     let output = ProcessCommand::new(dbus_daemon_path())
         .args([
             "--session",

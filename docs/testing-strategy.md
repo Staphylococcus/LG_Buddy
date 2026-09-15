@@ -483,6 +483,21 @@ dialog, live service lifecycle, TV authorization, or sleep/wake on hardware;
 those still require supported-host verification. NixOS development runs are
 not evidence of official NixOS support.
 
+Idle-blanking activation checks the loaded screen service's `LG_BUDDY_CONFIG`
+over systemd's D-Bus interface and compares canonical configuration paths before
+starting the service or saving the setting. It does not require the shell
+installer's configuration pointer. `settings_service_config` covers native and
+declarative layouts, paths with spaces and quotes, symlink aliases, mismatched
+or missing declarations, and environment overrides that prevent verification.
+The probe uses `$XDG_RUNTIME_DIR/systemd/private`, independently of the GUI's
+session bus, and only uses the session bus when `XDG_RUNTIME_DIR` is unset.
+The installed GUI journey serves a systemd-style peer socket separately from
+the GUI's session bus, including address delimiters in its runtime path, and
+also enables idle blanking with the pointer removed. An unreachable user
+manager must not be replaced by a manager on the session bus.
+Units using `EnvironmentFile=` need a separate effective-environment resolver;
+until then activation reports that their configuration cannot be verified.
+
 Lifecycle activation selects `systemctl` only from `/usr/bin/systemctl` or
 `/run/current-system/sw/bin/systemctl`. The settings integration test shadows
 `systemctl` on PATH and overrides `LG_BUDDY_SYSTEMCTL` to verify that neither

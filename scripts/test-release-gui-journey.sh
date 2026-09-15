@@ -58,7 +58,20 @@ journey_diagnostics() {
     if grep -E 'webos-test-access-token|diagnostics-secret-canary' "$WORK_DIR/$label-report.txt"; then
         fail "Diagnostics exported a credential or raw failure payload."
     fi
-    grep -q 'no accessible entries' "$WORK_DIR/$label-report.txt" || fail "Diagnostics did not explain unavailable observations."
+    python3 - "$WORK_DIR/$label-report.txt" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+snapshot, logs = text.split("\nRecent logs\n", 1)
+assert "\nCurrent snapshot\n" in snapshot, "Diagnostics did not identify the current snapshot."
+for section in ("Desktop", "Inhibition sources", "Effective settings", "Services", "TV observation", "Application and build"):
+    assert f"\n{section}:\n" in snapshot, f"Missing snapshot section: {section}"
+for scope in ("User", "System"):
+    heading = f"{scope} services (current boot, latest 40 entries):\n"
+    assert heading not in snapshot, "Service logs appeared in the current snapshot."
+    assert heading + "Logs unavailable\n" in logs, f"Missing {scope.lower()} journal failure."
+PY
     observe_gui_state --activate-control Refresh
     observe_gui_state --expected-diagnostics-state report
     observe_gui_state --activate-control Close
@@ -80,7 +93,7 @@ run_installed_gui_journey() {
     export LG_BUDDY_GUI_SERVICE_FIXTURE="$WORK_DIR/services"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
     cat > "$WORK_DIR/journey-bin/systemctl" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 scope=system
@@ -117,7 +130,7 @@ case "$action" in
 esac
 SH
     cat > "$WORK_DIR/journey-bin/pkexec" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 [ "${1:-}" = --disable-internal-agent ] || exit 2
@@ -141,6 +154,22 @@ SH
     export LG_BUDDY_SYSTEMCTL="$WORK_DIR/journey-bin/systemctl"
     export LG_BUDDY_JOURNALCTL="$WORK_DIR/journey-bin/journalctl"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS=0
+    # Keep the GUI's session bus separate from the user manager, as with
+    # dbus-run-session. Include D-Bus address delimiters in the socket path.
+    local XDG_RUNTIME_DIR="$WORK_DIR/runtime with spaces,percent%and;separator"
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    export XDG_RUNTIME_DIR
+    "$ACCESSIBILITY_PYTHON" "$REPOSITORY_ROOT/scripts/test-systemd-service-config.py" \
+        --config "$CONFIG_FILE" --ready-file "$WORK_DIR/services/config-ready" \
+        --runtime-dir "$XDG_RUNTIME_DIR" \
+        > "$WORK_DIR/services/config-fixture.output" 2>&1 &
+    SYSTEMD_CONFIG_FIXTURE_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -e "$WORK_DIR/services/config-ready" ] || break
+        kill -0 "$SYSTEMD_CONFIG_FIXTURE_PID" 2>/dev/null || fail "Service configuration fixture failed."
+        sleep 0.05
+    done
+    [ -e "$WORK_DIR/services/config-ready" ] || fail "Service configuration fixture did not become ready."
     "$TV_FIXTURE" "$WORK_DIR/native-tv" > "$WORK_DIR/native-tv.output" 2>&1 &
     TV_FIXTURE_PID=$!
     journey_tv_scenario stateful
@@ -226,8 +255,11 @@ SH
     cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Relaunch unexpectedly requested activation again."
     rm "$WORK_DIR/services/screen-fails"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
+    # Package-managed screen services do not need the shell installer's pointer.
+    mv "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path" "$WORK_DIR/config-path.saved"
     observe_gui_state --activate-control 'Idle blanking'
     journey_setting screen.idle_blank enabled
+    mv "$WORK_DIR/config-path.saved" "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path"
     observe_gui_state --activate-control 'TV sleep & wake'
     journey_setting system.sleep_wake_policy enabled
     journey_setting screen.idle_timeout 720

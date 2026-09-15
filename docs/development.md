@@ -100,6 +100,15 @@ Wake behaviors; unavailable or declined behaviors stay off and can be retried in
 Settings. `configure.sh` remains an explicit headless setup path: run it before
 `install.sh`. Configured installations and upgrades retain their saved settings.
 The application menu offers on-demand diagnostics with Refresh, Copy, and Save.
+The report starts with current settings, service and activity state, and fresh
+inhibition-source readings. Bounded, timestamped service logs follow in a
+separate section; refreshing the report does not change the monitor's decisions.
+`diagnostics.rs` orchestrates domain collectors in `diagnostics/`: desktop,
+monitor, inhibition, settings, services, TV, application identity, and journals.
+Each collector has isolated tests with explicit inputs or injected transports;
+subprocess bounds and report rendering are tested separately. Run them with
+`cargo test -p lg-buddy --lib diagnostics::`; `runtime_entrypoints` tests the
+integrated report against a running monitor on a private session bus.
 Complete journey verification remains tracked in
 [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 
@@ -157,6 +166,21 @@ python3 scripts/test_record_github_release_responses.py
 The GUI launch checks cover both no-argument normal Overview launch and the
 brightness deep link, including focus handoff from another view. Installed
 smoke keeps the desktop entry, runtime, and GUI together.
+
+PR CI runs verification and the KWin checks first, then builds the candidate
+bundle and GUI journey fixtures once. Ubuntu bundle checks and Fedora/Arch
+checks consume those artifacts in parallel. The required `bundle-smoke-test`
+check also fails if artifact production fails or is skipped. No installed or
+cross-version checks are omitted.
+
+The root ownership checks execute the library test binary that Cargo already
+built for the ordinary suite. The TV fixture shares the GNU debug build and
+glibc baseline of the `0.0.0` update-journey app pair, avoiding another musl
+dependency build. Fedora and Arch exercise the same downloaded fixture.
+Rust dependency caches are keyed by job, compiler, Cargo inputs and build
+environment. GitHub scopes PR caches to that PR, so they accelerate subsequent
+revisions and reruns; a new PR may still start cold. Workspace binaries retain
+their normal builds and embedded candidate identity checks.
 
 Optional hardware smoke for gamepad activity:
 

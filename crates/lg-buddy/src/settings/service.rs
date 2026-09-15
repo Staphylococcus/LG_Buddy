@@ -1,8 +1,12 @@
 use std::env;
 use std::fmt;
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
+use std::time::Duration;
+
+use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 
 use super::SettingsError;
 
@@ -60,6 +64,12 @@ pub trait ServiceController {
     }
 
     fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError>;
+
+    fn user_service_config_path(&self, _service: &str) -> Result<PathBuf, SettingsError> {
+        Err(SettingsError::Activation {
+            message: "the screen service's configuration could not be inspected".to_string(),
+        })
+    }
 
     /// The coarse state above intentionally preserves the CLI's historical
     /// behavior. GUI onboarding also needs to distinguish an enabled but
@@ -185,6 +195,50 @@ impl ServiceController for SystemdUserServiceController {
             .unwrap_or(false))
     }
 
+    fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
+        // Read typed systemd properties so paths containing spaces, quotes or
+        // shell metacharacters do not need to be parsed from systemctl output.
+        let inspect = || -> Result<PathBuf, Box<dyn std::error::Error>> {
+            let connection = user_manager_connection()?;
+            let manager = connection.with_proxy(
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                Duration::from_secs(2),
+            );
+            let (path,): (dbus::Path<'static>,) =
+                manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))?;
+            let unit =
+                connection.with_proxy("org.freedesktop.systemd1", path, Duration::from_secs(2));
+            let environment: Vec<String> =
+                unit.get("org.freedesktop.systemd1.Service", "Environment")?;
+            let files: Vec<(String, bool)> =
+                unit.get("org.freedesktop.systemd1.Service", "EnvironmentFiles")?;
+            let unset: Vec<String> =
+                unit.get("org.freedesktop.systemd1.Service", "UnsetEnvironment")?;
+            if !files.is_empty() {
+                return Err("the screen service uses environment files; its configuration override could not be verified".into());
+            }
+            let assignment = environment
+                .iter()
+                .rev()
+                .find(|value| value.starts_with("LG_BUDDY_CONFIG="))
+                .filter(|value| {
+                    !unset
+                        .iter()
+                        .any(|removed| removed == "LG_BUDDY_CONFIG" || removed == *value)
+                })
+                .ok_or("the screen service does not declare LG_BUDDY_CONFIG")?;
+            let path = PathBuf::from(assignment.strip_prefix("LG_BUDDY_CONFIG=").unwrap());
+            if !path.is_absolute() {
+                return Err("the screen service's LG_BUDDY_CONFIG is not an absolute path".into());
+            }
+            Ok(path)
+        };
+        inspect().map_err(|error| SettingsError::Activation {
+            message: format!("could not verify {service}'s configuration: {error}"),
+        })
+    }
+
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["restart", service])
     }
@@ -245,6 +299,28 @@ impl ServiceController for SystemdUserServiceController {
                 ),
             })
         }
+    }
+}
+
+fn user_manager_connection() -> Result<dbus::blocking::Connection, dbus::Error> {
+    if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR") {
+        // Like systemctl --user, address the user manager independently of the
+        // desktop's session bus (which may belong to dbus-run-session).
+        let socket = PathBuf::from(runtime_dir).join("systemd/private");
+        let mut address = String::from("unix:path=");
+        for byte in socket.as_os_str().as_encoded_bytes() {
+            // D-Bus addresses use percent escapes, including for delimiters
+            // such as commas and semicolons that can occur in a pathname.
+            write!(address, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+        // This is a peer connection, not a bus: do not send the bus-only Hello
+        // request that Connection::new_address uses to register a client.
+        return dbus::channel::Channel::open_private(&address).map(Into::into);
+    }
+
+    match env::var("DBUS_SESSION_BUS_ADDRESS") {
+        Ok(address) => dbus::blocking::Connection::new_address(&address),
+        Err(_) => dbus::blocking::Connection::new_session(),
     }
 }
 
