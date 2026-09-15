@@ -100,6 +100,15 @@ Wake behaviors; unavailable or declined behaviors stay off and can be retried in
 Settings. `configure.sh` remains an explicit headless setup path: run it before
 `install.sh`. Configured installations and upgrades retain their saved settings.
 The application menu offers on-demand diagnostics with Refresh, Copy, and Save.
+The report starts with current settings, service and activity state, and fresh
+inhibition-source readings. Bounded, timestamped service logs follow in a
+separate section; refreshing the report does not change the monitor's decisions.
+`diagnostics.rs` orchestrates domain collectors in `diagnostics/`: desktop,
+monitor, inhibition, settings, services, TV, application identity, and journals.
+Each collector has isolated tests with explicit inputs or injected transports;
+subprocess bounds and report rendering are tested separately. Run them with
+`cargo test -p lg-buddy --lib diagnostics::`; `runtime_entrypoints` tests the
+integrated report against a running monitor on a private session bus.
 Complete journey verification remains tracked in
 [issue #129](https://github.com/Staphylococcus/LG_Buddy/issues/129).
 

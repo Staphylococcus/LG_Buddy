@@ -58,7 +58,20 @@ journey_diagnostics() {
     if grep -E 'webos-test-access-token|diagnostics-secret-canary' "$WORK_DIR/$label-report.txt"; then
         fail "Diagnostics exported a credential or raw failure payload."
     fi
-    grep -q 'no accessible entries' "$WORK_DIR/$label-report.txt" || fail "Diagnostics did not explain unavailable observations."
+    python3 - "$WORK_DIR/$label-report.txt" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+snapshot, logs = text.split("\nRecent logs\n", 1)
+assert "\nCurrent snapshot\n" in snapshot, "Diagnostics did not identify the current snapshot."
+for section in ("Desktop", "Inhibition sources", "Effective settings", "Services", "TV observation", "Application and build"):
+    assert f"\n{section}:\n" in snapshot, f"Missing snapshot section: {section}"
+for scope in ("User", "System"):
+    heading = f"{scope} services (current boot, latest 40 entries):\n"
+    assert heading not in snapshot, "Service logs appeared in the current snapshot."
+    assert heading + "Logs unavailable\n" in logs, f"Missing {scope.lower()} journal failure."
+PY
     observe_gui_state --activate-control Refresh
     observe_gui_state --expected-diagnostics-state report
     observe_gui_state --activate-control Close
@@ -80,7 +93,7 @@ run_installed_gui_journey() {
     export LG_BUDDY_GUI_SERVICE_FIXTURE="$WORK_DIR/services"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
     cat > "$WORK_DIR/journey-bin/systemctl" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 scope=system
@@ -117,7 +130,7 @@ case "$action" in
 esac
 SH
     cat > "$WORK_DIR/journey-bin/pkexec" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 [ "${1:-}" = --disable-internal-agent ] || exit 2
