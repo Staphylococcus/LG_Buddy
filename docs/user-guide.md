@@ -49,16 +49,17 @@ In the dialog:
    remote.
 
 Cancel is available until saving starts; once saving starts, the dialog stays
-open until the operation finishes. When verification and saving finish, the
-dialog closes and normal navigation becomes available. A fresh setup attempts
-the default Idle Blanking and TV Sleep & Wake behaviors. There is no separate
-confirmation for each service; approve the desktop authorization prompt when a
-system operation needs it. Pairing again reactivates previously enabled
-behaviors and keeps disabled choices off. If authorization is declined or a
-behavior cannot be activated, the paired TV remains saved while that behavior
-stays off. Enable it in **Settings** later to retry and activate the service. A
-failed pairing shows an error you can correct and submit again; a cancelled
-attempt does not save a TV.
+open until the operation finishes. When verification and saving finish,
+the same dialog continues with background services and any required Plasma
+integration. Each step explains its changes before you continue or authorize
+it. A local plugin build may ask separately to install development packages.
+Only **Setup complete** confirms that all applicable requirements are ready.
+
+Cancelling retains your paired TV and saved behavior choices. **Settings →
+Complete setup** resumes the remaining work, without pairing again when valid
+credentials are already saved. The row appears after setup has detected remaining work.
+Noncancelable service changes must finish before the dialog can close. Pairing
+errors remain in the dialog with a retry action.
 
 ![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 
@@ -198,8 +199,33 @@ guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
 <a id="configuration"></a>
 ## Use commands for shortcuts, scripts, or a headless setup
 
-For first-time setup without the GUI, run `./configure.sh` from the extracted
-release archive before `./install.sh`. To select native control for an existing
+For first-time terminal setup, run `./install.sh --headless` from the extracted
+release archive. The installer deploys the application, then `lg-buddy setup`
+pairs the TV and completes required services and desktop integration. Rerun
+`lg-buddy setup` to resume or repair; completed steps are skipped and saved
+behavior settings are preserved. `configure.sh` now forwards to this command.
+Use `lg-buddy settings` to edit existing TV details and behavior preferences.
+
+For unattended input, pass setup arguments after `--`, for example:
+
+```bash
+./install.sh --headless -- --non-interactive --yes \
+  --tv-ip 192.168.1.100 --tv-mac 02:11:22:33:44:55 --input HDMI_1
+```
+
+The TV still needs to approve first-time pairing. `--non-interactive` prevents
+terminal and graphical password prompts in setup; required sudo permission must
+already be available. Use `LG_BUDDY_NONINTERACTIVE=1` to also prevent installer
+bootstrap prompts. `--yes` approves the described setup work but does not approve
+compiler/development packages: those require `--allow-build-dependencies`.
+Interactive setup uses sudo in the terminal. Ctrl+C cancels a cancelable step;
+service and integration changes finish before returning control.
+
+Exit codes are 0 for verified completion, 1 for failed or blocked setup, 2 for
+invalid arguments, 3 for missing input/consent, and 130 for cancellation. A TV
+may remain paired when a later step is incomplete; rerunning resumes the work.
+
+To select native control for an existing
 profile and verify it before saving, use `lg-buddy settings set tv.platform
 lg_webos`, accepting the pairing prompt on the TV. Existing `bscpylgtv`
 profiles, including older profiles without a platform key, remain supported

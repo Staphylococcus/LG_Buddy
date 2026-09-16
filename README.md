@@ -104,18 +104,18 @@ system locations. Official NixOS support is planned for 3.0.0; see
    the only page and the other tabs are hidden. Enter the TV's IP address, MAC
    address, and HDMI input. Keep the TV on and approve its pairing request
    with the remote.
-4. After pairing, LG Buddy attempts its default Idle Blanking and TV Sleep &
-   Wake behaviors. There is no separate confirmation for each service; LG Buddy
-   asks for desktop authorization only when a system operation needs it. The TV
-   remains saved if authorization is declined or activation is unavailable, and
-   the affected behavior stays off. Enable it later in **Settings** to retry.
+4. Continue in the same dialog to set up background services and any required
+   Plasma integration. Each step explains its changes before requesting
+   authorization. Cancelling preserves the paired TV and saved preferences;
+   **Settings → Complete setup** resumes work detected by the setup flow.
 
 After installation, use **TVs** to change the HDMI input and **Settings** to
 change blanking, sleep and wake, desktop integration, or update preferences.
 Installing with an existing TV configuration preserves its saved preferences.
 
-For a headless setup, run `./configure.sh` before `./install.sh`; the user guide
-keeps the command-line alternatives for scripts and machines without the GUI.
+For terminal setup, run `./install.sh --headless`. Later, use `lg-buddy setup`
+to complete or repair setup. See the [terminal setup guide](docs/user-guide.md#common-commands)
+for noninteractive inputs.
 
 <a id="quick-start"></a>
 
@@ -131,9 +131,9 @@ keeps the command-line alternatives for scripts and machines without the GUI.
 - [Use terminal commands](docs/user-guide.md#common-commands) for shortcuts,
   scripts, or a desktop without the GUI.
 
-For installed GUI reconfiguration, use **TVs** and **Settings**. The headless
-`configure.sh` path is for setup before installation; command-line alternatives
-are listed in the [user guide](docs/user-guide.md#common-commands).
+For installed GUI reconfiguration, use **TVs** and **Settings**. `lg-buddy setup`
+resumes incomplete setup; `configure.sh` forwards to the same command.
+Command-line alternatives are listed in the [user guide](docs/user-guide.md#common-commands).
 
 ## Update from the installed app
 

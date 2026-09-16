@@ -14,19 +14,34 @@ and release delay remain inside the shared inhibition gate.
 
 ## Delivery and compatibility
 
+The shared flow, startup assessment and **Complete setup** entry in Settings implement the
+[onboarding contract](onboarding.md). Runtime absence remains
+supported reduced coverage; an applicable unmet setup requirement remains pending.
+
 The native installer installs an optional `LG_Buddy_kwin.service` user unit and
-the bridge payload under `/usr/lib/lg-buddy/kwin`. At installation, upgrade and
-fresh graphical login, setup tries:
+the bridge payload under `/usr/lib/lg-buddy/kwin`. Session activation can load an
+already installed plugin; it never provisions or requests authorization.
+Explicit foreground setup tries:
 
 1. A compatible bundled prebuilt.
 2. A cached local build, or compilation against matching installed development
-   files. Only this fallback may request build dependencies using the installer's
-   existing sudo/graphical authorization route.
+   files. Installing missing development tools is a separate input request before
+   package changes. Both plugin installation and package changes may require
+   administrator authorization.
 3. Ordinary operation with no KWin source if no working bridge is obtained.
 
 Setup runs separately from the activity monitor. A runtime query or reconnection
 never starts a compiler or package manager. The application remains usable while
 setup runs and when setup cannot provide the source.
+
+The backend consumes a read-only `--status` exit-code protocol from the helper:
+0 complete, 2 inapplicable, 3 setup needed, 4 unsupported installation, and 1
+inspection failure. `--foreground` performs provisioning; `--allow-dependencies`
+supplies explicit dependency consent, and `--noninteractive` forbids interactive
+authorization. Exit 77 requests dependency consent, 126 reports explicit
+cancellation, and 127 reports that authorization was not granted. An exhausted foreground attempt fails verification rather
+than reporting setup complete. These are internal step operations, not separate
+CLI onboarding entry points. Named polkit actions describe LG Buddy's purpose.
 
 Native plugin compatibility requires the running KWin's full major/minor/patch
 version. Metadata also checks CPU architecture, plugin-source identity, the

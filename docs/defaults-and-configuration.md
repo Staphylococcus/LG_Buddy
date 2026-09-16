@@ -18,6 +18,12 @@ matrix, increases regression risk, complicates documentation, and makes support
 harder. A config key should exist only when the non-default behavior is a real
 user need and the project is willing to preserve and test that behavior.
 
+Required infrastructure is derived from the environment and real behavior
+settings. Missing basic services are incomplete setup, not an implicit off
+choice; cancelling authorization must not create such a preference. The
+[onboarding contract](onboarding.md) records how desired behavior and observed
+readiness are reconciled across initial, headless and resumed setup.
+
 Installer prompts are appropriate for required facts that cannot be inferred,
 such as the TV IP address, TV MAC address, configured HDMI input, or an explicit
 path to a locally built runtime binary.
