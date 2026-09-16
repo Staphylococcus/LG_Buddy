@@ -60,7 +60,7 @@ impl Fixture {
             user_units: &self.units,
             system_root: &self.root,
             controller: self,
-            interactive_authorization: false,
+            authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
         }
     }
     fn run(&self) -> StepResponse {
@@ -155,15 +155,25 @@ impl ServiceController for Fixture {
     fn repair_system_services(
         &self,
         config: &Path,
-        interactive: bool,
+        authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
         assert_eq!(config, self.config);
-        assert!(!interactive);
+        assert_eq!(
+            authorization,
+            crate::setup::flow::AuthorizationMode::Noninteractive
+        );
         self.calls.borrow_mut().push("repair-system".into());
         if let Some(error) = self.error.borrow_mut().take() {
             return Err(error);
         }
         if !self.broken_repair.get() {
+            for path in LEGACY_HANDLERS {
+                match fs::remove_file(self.root.join(path)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io_error(error)),
+                }
+            }
             for spec in self.plan().system_files()? {
                 write_file(&spec)?;
             }
@@ -220,6 +230,43 @@ fn fresh_setup_and_partial_repair_are_verified_and_idempotent() {
     ));
     assert_eq!(fixture.run(), StepResponse::Complete);
     assert!(fixture.calls.borrow().contains(&"repair-system".into()));
+}
+#[test]
+fn legacy_handlers_require_verified_cleanup_even_when_current_services_are_ready() {
+    let fixture = Fixture::new();
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    let original = fs::read(&fixture.config).unwrap();
+    for relative in LEGACY_HANDLERS {
+        // A dangling link must be detected just like a regular legacy file.
+        for symlink in [false, true] {
+            let path = fixture.root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            if symlink {
+                std::os::unix::fs::symlink(fixture.root.join("removed-handler"), &path).unwrap();
+            } else {
+                fs::write(&path, "legacy handler").unwrap();
+            }
+            fixture.calls.borrow_mut().clear();
+            assert!(matches!(
+                fixture.plan().inspect(),
+                StepResponse::ActionRequired {
+                    requires_authorization: true,
+                    ..
+                }
+            ));
+            assert!(fixture.calls.borrow().is_empty());
+            fixture.broken_repair.set(true);
+            assert!(matches!(fixture.run(), StepResponse::Failed(_)));
+            assert!(fs::symlink_metadata(&path).is_ok());
+            fixture.broken_repair.set(false);
+            assert_eq!(fixture.run(), StepResponse::Complete);
+            assert!(fs::symlink_metadata(&path).is_err());
+            fixture.calls.borrow_mut().clear();
+            assert_eq!(fixture.run(), StepResponse::Complete);
+            assert!(fixture.calls.borrow().is_empty());
+        }
+    }
+    assert_eq!(fs::read(&fixture.config).unwrap(), original);
 }
 #[test]
 fn timer_follows_desired_setting_without_authorization_or_triggered_service_activity() {
@@ -584,5 +631,77 @@ fn native_pairing_adapter_uses_the_flows_live_cancellation_gate() {
         },
     );
     assert_eq!(snapshot.outcome, FlowOutcome::Cancelled);
+    assert_eq!(fs::read(config).unwrap(), original);
+}
+
+#[test]
+fn terminal_renderer_repairs_native_steps_and_repeat_preserves_files() {
+    use crate::{parse_args, setup::cli, Command, ParseOutcome};
+    let fixture = Fixture::new();
+    let config = fixture.config.clone();
+    let units = fixture.units.clone();
+    let root = fixture.root.clone();
+    // Existing TV, with valid local credentials: terminal setup must skip pairing.
+    fs::write(&config, "tvs_primary_ip=192.0.2.1\ntvs_primary_mac=02:11:22:33:44:55\ntvs_primary_input=HDMI_1\ntvs_primary_platform=lg_webos\nupdates_auto_check=disabled\nscreen_idle_blank=disabled\n").unwrap();
+    let token = config
+        .parent()
+        .unwrap()
+        .join("tvs/primary/access-token.json");
+    fs::create_dir_all(token.parent().unwrap()).unwrap();
+    fs::write(&token, "{\"access_token\":\"stored-token\"}").unwrap();
+    for relative in LEGACY_HANDLERS {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "legacy handler").unwrap();
+    }
+    let original = fs::read(&config).unwrap();
+    let mut flow = native_flow(fixture, true);
+    let ParseOutcome::Command(Command::Setup(options)) = parse_args([
+        "setup",
+        "--non-interactive",
+        "--yes",
+        "--allow-build-dependencies",
+    ])
+    .unwrap() else {
+        panic!()
+    };
+    let mut output = Vec::new();
+    cli::render(
+        &mut flow,
+        &options,
+        false,
+        &mut std::io::empty(),
+        &mut output,
+    )
+    .unwrap();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .ends_with("Setup complete.\n"));
+    assert_eq!(fs::read(&config).unwrap(), original);
+    assert!(units.join(SCREEN).exists());
+    for relative in LEGACY_HANDLERS {
+        assert!(!root.join(relative).exists());
+    }
+    let unit_time = fs::metadata(units.join(SCREEN))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let actions = fs::read(root.join("kwin-actions")).unwrap();
+    cli::render(
+        &mut flow,
+        &options,
+        false,
+        &mut std::io::empty(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::metadata(units.join(SCREEN))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        unit_time
+    );
+    assert_eq!(fs::read(root.join("kwin-actions")).unwrap(), actions);
     assert_eq!(fs::read(config).unwrap(), original);
 }

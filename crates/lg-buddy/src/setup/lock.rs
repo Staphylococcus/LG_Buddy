@@ -97,6 +97,11 @@ pub(crate) fn command_with_lock(program: impl AsRef<OsStr>, lock: Option<&Arc<Fi
     // descriptor >= 3; unrelated processes spawned by other threads do not.
     unsafe {
         command.pre_exec(move || {
+            // Mutating steps reject terminal cancellation; the owner handles
+            // Ctrl+C through the flow gate while helpers finish their work.
+            if libc::signal(libc::SIGINT, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(io::Error::last_os_error());
+            }
             if libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 3) == -1 {
                 return Err(io::Error::last_os_error());
             }

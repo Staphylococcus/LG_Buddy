@@ -13,6 +13,14 @@ const SCREEN: &str = "LG_Buddy_screen.service";
 const TIMER: &str = "LG_Buddy_update_check.timer";
 const LIFECYCLE: &str = "LG_Buddy_lifecycle.service";
 const STARTUP: &str = "LG_Buddy.service";
+const LEGACY_HANDLERS: &[&str] = &[
+    "etc/systemd/system/LG_Buddy_wake.service",
+    "etc/systemd/system/LG_Buddy_sleep.service",
+    "etc/systemd/system/LG_Buddy_wake.service.d/config.conf",
+    "etc/systemd/system/LG_Buddy_sleep.service.d/config.conf",
+    "etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep",
+    "usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook",
+];
 const NM_HOOK: &str =
     "#!/bin/sh\nset -eu\n[ \"${2:-}\" = pre-down ] || exit 0\nexec /usr/bin/lg-buddy nm-pre-down\n";
 
@@ -20,7 +28,7 @@ pub(crate) struct ServiceInstallation<'a, C> {
     pub config: &'a Path,
     pub user_units: &'a Path,
     pub system_root: &'a Path,
-    pub interactive_authorization: bool,
+    pub authorization: crate::setup::flow::AuthorizationMode,
     pub controller: &'a C,
 }
 
@@ -233,6 +241,15 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
         Ok(files)
     }
     fn system_ready(&self) -> Result<bool, SettingsError> {
+        // Migration is required even when the current services already match.
+        // Inspect links themselves so dangling legacy hooks also need cleanup.
+        for path in LEGACY_HANDLERS {
+            match fs::symlink_metadata(self.system_root.join(path)) {
+                Ok(_) => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
         Ok(files_match(&self.system_files()?)?
             && self.controller.system_unit_is_enabled(STARTUP)?
             && self.controller.system_unit_is_enabled(LIFECYCLE)?
@@ -275,7 +292,7 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
         if !self.system_ready()? {
             self.controller.repair_system_services(
                 &fs::canonicalize(self.config).map_err(io_error)?,
-                self.interactive_authorization,
+                self.authorization,
             )?;
         }
         let stale_binding =

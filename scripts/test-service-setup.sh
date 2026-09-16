@@ -17,13 +17,25 @@ systemctl() {
     printf '%s\n' "$*" >> "$fixture/actions"
     case "$1" in
         show)
-            if [ -f "$fixture/lifecycle-loaded" ]; then printf 'loaded\n'; else printf 'not-found\n'; fi
+            if [ "${@: -1}" = LG_Buddy_lifecycle.service ]; then
+                if [ -f "$fixture/lifecycle-loaded" ]; then printf 'loaded\n'; else printf 'not-found\n'; fi
+            elif [ -f "$setup_root/etc/systemd/system/${@: -1}" ]; then
+                printf 'loaded\n'
+            else
+                printf 'not-found\n'
+            fi
             ;;
         is-enabled) [ -f "$fixture/enabled/$3" ] ;;
         enable) touch "$fixture/enabled/$2" ;;
+        disable) rm -f "$fixture/enabled/${@: -1}" ;;
         stop)
             [ ! -f "$fixture/fail-stop" ] || return 1
-            rm -f "$fixture/lifecycle-active"
+            if [ "$2" = LG_Buddy_lifecycle.service ]; then
+                rm -f "$fixture/lifecycle-active"
+            else
+                [ ! -f "$fixture/fail-legacy-stop" ] || return 1
+                rm -f "$fixture/active-$2"
+            fi
             ;;
         daemon-reload)
             [ ! -f "$fixture/fail-reload" ] || return 1
@@ -42,7 +54,33 @@ systemd-tmpfiles() {
     [ ! -f "$fixture/fail-after-reload" ]
 }
 package_owned() { [ -f "$fixture/package-owned" ]; }
+# Migrate the retired suspend/wake rails before starting the shared lifecycle.
+legacy_paths=(
+    etc/systemd/system/LG_Buddy_wake.service
+    etc/systemd/system/LG_Buddy_sleep.service
+    etc/systemd/system/LG_Buddy_wake.service.d/config.conf
+    etc/systemd/system/LG_Buddy_sleep.service.d/config.conf
+    etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep
+    usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook
+)
+seed_legacy() {
+    for relative in "${legacy_paths[@]}"; do
+        mkdir -p "$(dirname "$setup_root/$relative")"
+        printf 'legacy\n' > "$setup_root/$relative"
+    done
+    for unit in LG_Buddy_wake.service LG_Buddy_sleep.service; do
+        touch "$fixture/enabled/$unit" "$fixture/active-$unit"
+    done
+}
+seed_legacy
 repair_services "$config"
+for relative in "${legacy_paths[@]}"; do
+    [ ! -e "$setup_root/$relative" ] || { echo "Legacy handler retained: $relative" >&2; exit 1; }
+done
+for unit in LG_Buddy_wake.service LG_Buddy_sleep.service; do
+    test ! -e "$fixture/enabled/$unit"
+    test ! -e "$fixture/active-$unit"
+done
 for unit in LG_Buddy.service LG_Buddy_lifecycle.service; do
     cmp "$payload/$unit" "$setup_root/etc/systemd/system/$unit"
     test -f "$fixture/enabled/$unit"
@@ -64,6 +102,21 @@ before="$(find "$setup_root" -type f -printf '%p %i\n' | sort)"
 repair_services "$config"
 test "$before" = "$(find "$setup_root" -type f -printf '%p %i\n' | sort)"
 ! grep -q '^enable ' "$fixture/actions"
+! grep -Eq '^(stop|disable) .*LG_Buddy_(wake|sleep)\.service' "$fixture/actions"
+# Failed migration must retain the old files for retry and never report success.
+seed_legacy
+touch "$fixture/fail-legacy-stop"
+if repair_services "$config"; then echo 'failed legacy stop reported success' >&2; exit 1; fi
+for relative in "${legacy_paths[@]}"; do test -f "$setup_root/$relative"; done
+test ! -f "$fixture/lifecycle-active"
+rm "$fixture/fail-legacy-stop"
+# Do not delete files that belong to a package, including legacy handlers.
+touch "$fixture/package-owned"
+if repair_services "$config"; then echo 'removed package-owned legacy files' >&2; exit 1; fi
+for relative in "${legacy_paths[@]}"; do test -f "$setup_root/$relative"; done
+rm "$fixture/package-owned"
+repair_services "$config"
+for relative in "${legacy_paths[@]}"; do test ! -e "$setup_root/$relative"; done
 # Partial installation and interrupted manager reload recover on retry.
 rm "$setup_root/etc/tmpfiles.d/lg_buddy.conf"
 touch "$fixture/fail-reload"

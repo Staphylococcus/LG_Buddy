@@ -81,6 +81,14 @@ case "${1:-}" in
             *) exit 1 ;;
         esac
         ;;
+    setup)
+        installed_dir="$(dirname "$0")"
+        [ -x "$installed_dir/../lib/lg-buddy/setup-services" ]
+        [ ! -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
+        [ ! -f "$HOME/.config/systemd/user/LG_Buddy_screen.service" ]
+        printf '%s\n' "$@" >"${LG_BUDDY_HANDOFF_MARKER:?}"
+        exit "${LG_BUDDY_HANDOFF_STATUS:-0}"
+        ;;
     "")
         if [ "${LG_BUDDY_HANDOFF_STATUS:-0}" -ne 0 ]; then
             exit "$LG_BUDDY_HANDOFF_STATUS"
@@ -136,6 +144,7 @@ chmod 755 "$STUB_DIR/python3" "$STUB_DIR/gui-runtime-probe" \
 
 run_install() {
     local scenario="$1"
+    shift
     local status=0
     local root="$WORK_DIR/$scenario/root"
     local home="$WORK_DIR/$scenario/home"
@@ -183,7 +192,7 @@ run_install() {
     LG_BUDDY_SYSTEMCTL_LOG="$systemctl_log" \
     LG_BUDDY_HANDOFF_MARKER="$handoff" \
     LG_BUDDY_HANDOFF_STATUS="${LG_BUDDY_HANDOFF_STATUS:-0}" \
-        bash "$BUNDLE/install.sh" >"$output" 2>&1
+        bash "$BUNDLE/install.sh" "$@" >"$output" 2>&1
     status=$?
     set -e
     [ ! -e "$LG_BUDDY_UNEXPECTED_PYTHON" ] || { echo "Installer invoked Python."; exit 1; }
@@ -313,5 +322,18 @@ grep -F -q 'Preserving existing TV profile and policy settings.' "$RUN_OUTPUT"
 grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
+
+# Headless handoff occurs after bootstrap, before common service setup.
+run_install headless --headless -- --non-interactive --yes --tv-ip 192.0.2.1 --tv-mac 02:11:22:33:44:55
+[ "$RUN_STATUS" -eq 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
+printf '%s\n' setup --non-interactive --yes --tv-ip 192.0.2.1 --tv-mac 02:11:22:33:44:55 > "$WORK_DIR/headless.expected"
+cmp "$RUN_HANDOFF" "$WORK_DIR/headless.expected"
+! grep -q 'Opening LG Buddy\|--user enable LG_Buddy_screen\|enable LG_Buddy_lifecycle' "$RUN_OUTPUT" "$RUN_SYSTEMCTL_LOG"
+for result in 1 3 130; do
+    export LG_BUDDY_HANDOFF_STATUS="$result"
+    run_install "headless-result-$result" --headless
+    [ "$RUN_STATUS" -eq "$result" ] || { cat "$RUN_OUTPUT"; exit 1; }
+done
+unset LG_BUDDY_HANDOFF_STATUS
 
 echo "First-run installer smoke passed: fresh handoff, failure preservation, configured preservation."

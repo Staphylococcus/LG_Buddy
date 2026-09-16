@@ -14,6 +14,7 @@ runtime=/usr/bin/lg-buddy
 foreground=0
 allow_dependencies=0
 noninteractive=0
+terminal=0
 
 plugin_root_supported() {
     case "$1" in
@@ -112,6 +113,8 @@ privileged() {
         /usr/bin/sudo -n /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ "$noninteractive" -eq 1 ]; then
         return 127
+    elif [ "$terminal" -eq 1 ]; then
+        /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/pkexec ]; then
         /usr/bin/pkexec --disable-internal-agent "$payload_dir/setup.sh" "$@"
     elif [ -t 0 ] && [ -x /usr/bin/sudo ]; then
@@ -310,6 +313,7 @@ main() {
         case "$option" in
             --allow-dependencies) allow_dependencies=1 ;;
             --noninteractive) noninteractive=1 ;;
+            --terminal) terminal=1 ;;
             *) return 1 ;;
         esac
     done

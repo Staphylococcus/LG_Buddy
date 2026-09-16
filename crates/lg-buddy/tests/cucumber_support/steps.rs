@@ -431,11 +431,6 @@ fn run_command(world: &mut LgBuddyWorld, command: String) {
     world.run_named_command(&command);
 }
 
-#[when("I accept the default TV platform during initial configuration")]
-fn run_default_initial_configuration(world: &mut LgBuddyWorld) {
-    world.run_default_initial_configuration();
-}
-
 #[then("the command succeeds")]
 fn command_succeeds(world: &mut LgBuddyWorld) {
     assert!(

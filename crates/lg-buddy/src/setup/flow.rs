@@ -33,6 +33,7 @@ pub enum StepAnswer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorizationMode {
     Interactive,
+    Terminal,
     Noninteractive,
 }
 

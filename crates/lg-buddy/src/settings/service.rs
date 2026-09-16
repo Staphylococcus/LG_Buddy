@@ -127,7 +127,7 @@ pub trait ServiceController {
     fn repair_system_services(
         &self,
         _config: &Path,
-        _interactive: bool,
+        _authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
         Err(SettingsError::Activation {
             message: "system service repair is unavailable".into(),
@@ -302,9 +302,9 @@ impl ServiceController for SystemdUserServiceController {
     fn repair_system_services(
         &self,
         config: &Path,
-        interactive: bool,
+        authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
-        let mut command = if interactive {
+        let mut command = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
             let mut command = crate::setup::lock::command_with_lock(
                 "/usr/bin/pkexec",
                 self.command_lock.as_ref(),
@@ -314,7 +314,9 @@ impl ServiceController for SystemdUserServiceController {
         } else {
             let mut command =
                 crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
-            command.arg("-n");
+            if authorization == crate::setup::flow::AuthorizationMode::Noninteractive {
+                command.arg("-n");
+            }
             command
         };
         let output = command

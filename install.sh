@@ -23,6 +23,8 @@ GUI_BINARY="$DEFAULT_GUI_BINARY"
 APP_ICON="$DEFAULT_APP_ICON"
 RUNTIME_BINARY_OVERRIDDEN=0
 GUI_BINARY_OVERRIDDEN=0
+HEADLESS=0
+SETUP_ARGS=()
 UPGRADE_MODE=0
 SYSTEM_UPGRADE_MODE=0
 MUTATION_STARTED=0
@@ -44,6 +46,8 @@ Usage: $0 [--upgrade] [--runtime-binary /path/to/lg-buddy] [--gui-binary /path/t
 Install LG Buddy from existing runtime and GUI binaries.
 
 Options:
+  --headless        Run shared setup in the terminal after deploying the application
+                    Pass setup options after -- (see lg-buddy setup --help)
   --upgrade         Upgrade an existing compatible release-bundle installation
 
 Defaults:
@@ -67,6 +71,16 @@ while [ "$#" -gt 0 ]; do
             [ -n "$GUI_BINARY" ] || usage
             GUI_BINARY_OVERRIDDEN=1
             shift 2
+            ;;
+        --headless)
+            HEADLESS=1
+            shift
+            ;;
+        --)
+            [ "$HEADLESS" -eq 1 ] || usage
+            shift
+            SETUP_ARGS=("$@")
+            break
             ;;
         --upgrade)
             [ "$UPGRADE_MODE" -eq 0 ] || usage
@@ -95,6 +109,17 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+[ "$HEADLESS" -eq 0 ] || [ "$UPGRADE_MODE" -eq 0 ] || usage
+if [ "$HEADLESS" -eq 1 ]; then
+    for option in "${SETUP_ARGS[@]}"; do
+        [ "$option" != --non-interactive ] || NONINTERACTIVE=1
+    done
+fi
+if [ "$HEADLESS" -eq 1 ] && [ "${SUDO_CMD##*/}" = pkexec ]; then
+    echo "Headless installation uses terminal authorization; use sudo instead of pkexec." >&2
+    exit 2
+fi
 
 if [ "$UPGRADE_MODE" -eq 1 ] && { [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ] || [ "$GUI_BINARY_OVERRIDDEN" -eq 1 ]; }; then
     echo "Error: --upgrade uses the verified lg-buddy and lg-buddy-gui binaries from this release bundle."
@@ -151,6 +176,8 @@ run_privileged() {
         "$@"
     elif [ "$SUDO_CMD" = "pkexec" ]; then
         pkexec --disable-internal-agent "$@"
+    elif [ "$HEADLESS" -eq 1 ] && [ "$NONINTERACTIVE" = 1 ]; then
+        "$SUDO_CMD" -n "$@"
     else
         "$SUDO_CMD" "$@"
     fi
@@ -207,7 +234,10 @@ initialize_install_paths() {
     APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
     USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
     LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
-    USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+    case "${XDG_CONFIG_HOME:-}" in
+        /*) USER_SYSTEMD_DIR="$XDG_CONFIG_HOME/systemd/user" ;;
+        *) USER_SYSTEMD_DIR="${HOME}/.config/systemd/user" ;;
+    esac
     USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
     USER_KWIN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_kwin.service"
     USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
@@ -327,6 +357,7 @@ pkexec_available() {
 }
 
 require_sleep_wake_pkexec() {
+    [ "$HEADLESS" -eq 0 ] || return 0
     [ "$FRESH_SETUP_MODE" -eq 1 ] || return 0
     if pkexec_available; then
         return 0
@@ -747,7 +778,7 @@ check_install_prerequisites() {
     MISSING_PKGS=()
     detect_package_manager
     check_gui_runtime_prerequisites
-    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+    if [ "$FRESH_SETUP_MODE" -eq 1 ] && [ "$HEADLESS" -eq 0 ]; then
         check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
     fi
     install_missing_prerequisites
@@ -895,8 +926,10 @@ else
     if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
         create_empty_config_if_absent
         echo "Prepared an empty user configuration for first-run TV pairing."
-        echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
-        echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
+        if [ "$HEADLESS" -eq 0 ]; then
+            echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
+            echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
+        fi
     fi
 fi
 
@@ -960,69 +993,77 @@ elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."
 
-if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
-    perform_privileged_services_installation
-fi
-
-# 8. INSTALL USER SERVICES
-echo "Installing background update check user timer..."
+# The login unit only loads already-installed plugins; it never provisions them.
 mkdir -p "$USER_SYSTEMD_DIR"
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
-mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
-install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
-echo "Done."
-
 if [ -f "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" ]; then
     install -m 644 "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" "$USER_KWIN_SERVICE_PATH"
-fi
-
-echo "Installing screen monitor user service..."
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
-mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
-install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_SCREEN_OVERRIDE_DIR}/config.conf"
-if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
-    systemctl --user daemon-reload
-fi
-
-if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
-    echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
-else
-    if [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+    if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ]; then
+        systemctl --user daemon-reload
         systemctl --user enable LG_Buddy_kwin.service
-        # Optional setup must not hold up activity monitoring or the GUI.
         systemctl --user restart --no-block LG_Buddy_kwin.service || true
     fi
-    systemctl --user enable LG_Buddy_screen.service
-    systemctl --user restart LG_Buddy_screen.service
-    if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
-        echo "LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config."
-    else
-        echo "LG_Buddy_screen.service enabled and started for session notifications."
-        echo "It will retry idle blanking until a compatible screen backend is available."
-    fi
-
-    if [ "$UPDATE_AUTO_CHECK" = "enabled" ]; then
-        systemctl --user enable LG_Buddy_update_check.timer
-        if systemctl --user is-active --quiet graphical-session.target; then
-            systemctl --user start LG_Buddy_update_check.timer
-            echo "LG_Buddy_update_check.timer enabled and started."
-        else
-            echo "LG_Buddy_update_check.timer enabled; it will start with the graphical session."
-        fi
-    else
-        systemctl --user disable --now LG_Buddy_update_check.timer 2>/dev/null || true
-        echo "LG_Buddy_update_check.timer installed but disabled by config."
-    fi
 fi
 
-if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    echo "System sleep/wake integration installed; pairing will attempt TV Sleep & Wake."
-    echo "If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings."
-elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
-    echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
-else
-    echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
+# Terminal setup owns service installation, activation and verification.
+# The existing graphical handoff is replaced in the GUI slice.
+if [ "$HEADLESS" -eq 0 ]; then
+    if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
+        perform_privileged_services_installation
+    fi
+
+    # 8. INSTALL USER SERVICES
+    echo "Installing background update check user timer..."
+    mkdir -p "$USER_SYSTEMD_DIR"
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
+    mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
+    install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
+    echo "Done."
+
+
+    echo "Installing screen monitor user service..."
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
+    mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
+    install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_SCREEN_OVERRIDE_DIR}/config.conf"
+    if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
+        systemctl --user daemon-reload
+    fi
+
+    if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+        echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+    else
+        systemctl --user enable LG_Buddy_screen.service
+        systemctl --user restart LG_Buddy_screen.service
+        if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
+            echo "LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config."
+        else
+            echo "LG_Buddy_screen.service enabled and started for session notifications."
+            echo "It will retry idle blanking until a compatible screen backend is available."
+        fi
+
+        if [ "$UPDATE_AUTO_CHECK" = "enabled" ]; then
+            systemctl --user enable LG_Buddy_update_check.timer
+            if systemctl --user is-active --quiet graphical-session.target; then
+                systemctl --user start LG_Buddy_update_check.timer
+                echo "LG_Buddy_update_check.timer enabled and started."
+            else
+                echo "LG_Buddy_update_check.timer enabled; it will start with the graphical session."
+            fi
+        else
+            systemctl --user disable --now LG_Buddy_update_check.timer 2>/dev/null || true
+            echo "LG_Buddy_update_check.timer installed but disabled by config."
+        fi
+    fi
+
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        echo "System sleep/wake integration installed; pairing will attempt TV Sleep & Wake."
+        echo "If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings."
+    elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
+        echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
+    else
+        echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
+    fi
+
 fi
 
 INSTALLED_GUI_VERSION_OUTPUT="$("$GUI_INSTALL_PATH" --version)"
@@ -1047,6 +1088,12 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     if [ "$SUDO_CMD" = "pkexec" ]; then
         system_upgrade_status complete
     fi
+elif [ "$HEADLESS" -eq 1 ]; then
+    echo "Application files installed. Starting terminal setup..."
+    if [ "$NONINTERACTIVE" = 1 ] && [[ " ${SETUP_ARGS[*]} " != *" --non-interactive "* ]]; then
+        SETUP_ARGS=(--non-interactive "${SETUP_ARGS[@]}")
+    fi
+    LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_INSTALL_PATH" setup "${SETUP_ARGS[@]}"
 else
     if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
         require_sleep_wake_pkexec

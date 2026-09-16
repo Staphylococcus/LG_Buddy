@@ -46,10 +46,6 @@ impl SetupContext {
             authorization,
         })
     }
-
-    fn interactive(&self) -> bool {
-        self.authorization == AuthorizationMode::Interactive
-    }
 }
 
 fn user_units_directory(home: &Path, xdg_config_home: Option<OsString>) -> PathBuf {
@@ -81,13 +77,13 @@ impl<C: ServiceController> NativeSteps<C> {
             user_units: &self.context.user_units,
             system_root: &self.context.system_root,
             controller: &self.controller,
-            interactive_authorization: self.context.interactive(),
+            authorization: self.context.authorization,
         }
     }
     fn plasma(&self) -> super::kwin::KWinSetup<'_> {
         super::kwin::KWinSetup {
             helper: &self.context.kwin_helper,
-            interactive_authorization: self.context.interactive(),
+            authorization: self.context.authorization,
             command_lock: None,
         }
     }
@@ -121,7 +117,7 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                             user_units: &self.context.user_units,
                             system_root: &self.context.system_root,
                             controller,
-                            interactive_authorization: self.context.interactive(),
+                            authorization: self.context.authorization,
                         }
                         .execute(cancellation, progress)
                     })

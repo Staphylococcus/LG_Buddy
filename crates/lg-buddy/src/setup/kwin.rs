@@ -12,7 +12,7 @@ const BUILD_DEPENDENCIES: StepResponse = StepResponse::InputRequired(StepInput::
 
 pub(crate) struct KWinSetup<'a> {
     pub helper: &'a Path,
-    pub interactive_authorization: bool,
+    pub authorization: crate::setup::flow::AuthorizationMode,
     pub command_lock: Option<Arc<File>>,
 }
 impl KWinSetup<'_> {
@@ -61,8 +61,10 @@ impl KWinSetup<'_> {
             if allow_dependencies {
                 args.push("--allow-dependencies");
             }
-            if !self.interactive_authorization {
-                args.push("--noninteractive");
+            match self.authorization {
+                super::flow::AuthorizationMode::Noninteractive => args.push("--noninteractive"),
+                super::flow::AuthorizationMode::Terminal => args.push("--terminal"),
+                super::flow::AuthorizationMode::Interactive => {}
             }
             match self.invoke(&args) {
                 Ok(output) => match output.status.code() {
@@ -158,7 +160,7 @@ exit "$result"
         fn run(&self, allow: bool) -> StepResponse {
             KWinSetup {
                 helper: &self.helper(),
-                interactive_authorization: false,
+                authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: None,
             }
             .execute(allow, &StepCancellation::default(), &mut |_| {})
@@ -175,7 +177,7 @@ exit "$result"
         let helper = f.helper();
         let step = KWinSetup {
             helper: &helper,
-            interactive_authorization: true,
+            authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
         };
         assert!(matches!(
@@ -236,7 +238,7 @@ exit "$result"
         let helper = f.helper();
         let step = KWinSetup {
             helper: &helper,
-            interactive_authorization: true,
+            authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
         };
         let cancellation = StepCancellation::default();

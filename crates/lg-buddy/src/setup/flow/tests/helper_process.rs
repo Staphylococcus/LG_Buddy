@@ -43,7 +43,7 @@ impl SetupSteps for HelperSteps {
         if self.plasma {
             KWinSetup {
                 helper: &self.helper,
-                interactive_authorization: false,
+                authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: Some(lease.file()),
             }
             .execute(false, cancellation, progress)

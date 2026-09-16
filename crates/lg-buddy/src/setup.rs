@@ -7,6 +7,7 @@ use std::sync::{
 
 use crate::presentation::brightness::UserFacingError;
 
+pub mod cli;
 mod environment;
 pub mod flow;
 pub(crate) mod kwin;
@@ -14,6 +15,7 @@ pub(crate) mod lock;
 pub(crate) mod pairing;
 pub(crate) mod provision;
 pub(crate) mod services;
+mod terminal_signals;
 
 /// Domain errors are normalized by the step, never interpreted by its caller.
 #[derive(Debug, Clone, PartialEq, Eq)]

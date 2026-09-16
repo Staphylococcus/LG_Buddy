@@ -36,6 +36,38 @@ write_if_changed() {
     fi
 }
 
+cleanup_legacy_sleep_wake_handlers() {
+    local path unit load_state
+    local paths=(
+        "$setup_root/etc/systemd/system/LG_Buddy_wake.service"
+        "$setup_root/etc/systemd/system/LG_Buddy_sleep.service"
+        "$setup_root/etc/systemd/system/LG_Buddy_wake.service.d/config.conf"
+        "$setup_root/etc/systemd/system/LG_Buddy_sleep.service.d/config.conf"
+        "$setup_root/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep"
+        "$setup_root/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook"
+    )
+    # Check ownership before disabling or removing any legacy handler.
+    for path in "${paths[@]}"; do
+        if { [ -e "$path" ] || [ -L "$path" ]; } && package_owned "$path"; then
+            echo "Refusing to remove a package-owned file: $path" >&2
+            return 1
+        fi
+    done
+    for unit in LG_Buddy_wake.service LG_Buddy_sleep.service; do
+        load_state="$(systemctl show --property=LoadState --value "$unit")" || return 1
+        if [ "$load_state" != not-found ]; then
+            systemctl stop "$unit" || return 1
+            systemctl disable "$unit" || return 1
+        fi
+    done
+    # Stop and disable first: interruption must never leave an active handler
+    # whose files have already been removed. Keep unrelated custom drop-ins.
+    rm -f -- "${paths[@]}" || return 1
+    for unit in LG_Buddy_wake.service LG_Buddy_sleep.service; do
+        rmdir "$setup_root/etc/systemd/system/$unit.d" 2>/dev/null || true
+    done
+}
+
 repair_services() {
     local config="$1" escaped unit load_state
     # Loaded Environment properties do not describe an already-running process.
@@ -45,6 +77,7 @@ repair_services() {
     if [ "$load_state" != not-found ]; then
         systemctl stop LG_Buddy_lifecycle.service || return 1
     fi
+    cleanup_legacy_sleep_wake_handlers || return 1
     # Values are literal systemd Environment content, never shell source.
     escaped="${config//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
