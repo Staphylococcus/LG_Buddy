@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Duration;
+use std::{fs::File, sync::Arc};
 
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 
@@ -59,6 +60,15 @@ pub enum UserUnitEnableOutcome {
 }
 
 pub trait ServiceController {
+    /// Scope subprocess supervision to an onboarding operation. Controllers
+    /// without subprocesses can use the default implementation.
+    fn with_command_lock<T>(&self, _lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T
+    where
+        Self: Sized,
+    {
+        operation(self)
+    }
+
     fn systemd_actions_disabled(&self) -> bool {
         false
     }
@@ -139,6 +149,7 @@ pub trait ServiceController {
 pub struct SystemdUserServiceController {
     command_path: PathBuf,
     skip_systemd_actions: bool,
+    command_lock: Option<Arc<File>>,
 }
 
 impl Default for SystemdUserServiceController {
@@ -154,6 +165,7 @@ impl SystemdUserServiceController {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("systemctl")),
             skip_systemd_actions: env_truthy("LG_BUDDY_SKIP_SYSTEMD_ACTIONS"),
+            command_lock: None,
         }
     }
 
@@ -177,13 +189,14 @@ impl SystemdUserServiceController {
     }
 
     fn run_user_systemctl(&self, args: &[&str]) -> Result<(), SettingsError> {
-        let output = ProcessCommand::new(&self.command_path)
-            .arg("--user")
-            .args(args)
-            .output()
-            .map_err(|err| SettingsError::Apply {
-                message: format!("could not run systemctl: {err}"),
-            })?;
+        let output =
+            crate::setup::lock::command_with_lock(&self.command_path, self.command_lock.as_ref())
+                .arg("--user")
+                .args(args)
+                .output()
+                .map_err(|err| SettingsError::Apply {
+                    message: format!("could not run systemctl: {err}"),
+                })?;
 
         if output.status.success() {
             Ok(())
@@ -200,6 +213,12 @@ impl SystemdUserServiceController {
 }
 
 impl ServiceController for SystemdUserServiceController {
+    fn with_command_lock<T>(&self, lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T {
+        let mut controller = self.clone();
+        controller.command_lock = Some(lock);
+        operation(&controller)
+    }
+
     fn systemd_actions_disabled(&self) -> bool {
         self.skip_systemd_actions
     }
@@ -286,11 +305,15 @@ impl ServiceController for SystemdUserServiceController {
         interactive: bool,
     ) -> Result<(), SettingsError> {
         let mut command = if interactive {
-            let mut command = ProcessCommand::new("/usr/bin/pkexec");
+            let mut command = crate::setup::lock::command_with_lock(
+                "/usr/bin/pkexec",
+                self.command_lock.as_ref(),
+            );
             command.arg("--disable-internal-agent");
             command
         } else {
-            let mut command = ProcessCommand::new("/usr/bin/sudo");
+            let mut command =
+                crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
             command.arg("-n");
             command
         };
@@ -332,7 +355,7 @@ impl ServiceController for SystemdUserServiceController {
             .ok_or_else(|| SettingsError::Activation {
                 message: "systemctl was not found in a trusted system location".to_string(),
             })?;
-        let output = ProcessCommand::new("pkexec")
+        let output = crate::setup::lock::command_with_lock("pkexec", self.command_lock.as_ref())
             .arg("--disable-internal-agent")
             .arg(systemctl)
             .arg("start")

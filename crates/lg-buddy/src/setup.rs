@@ -1,5 +1,4 @@
-//! Shared responses for backend-owned setup steps. Execution stays internal;
-//! the onboarding flow will own context, sequencing and cross-process exclusion.
+//! Backend-owned setup steps and their shared onboarding flow.
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -8,11 +7,11 @@ use std::sync::{
 
 use crate::presentation::brightness::UserFacingError;
 
-#[allow(dead_code)] // Consumed by the shared flow; no standalone user entry point.
+mod environment;
+pub mod flow;
 pub(crate) mod kwin;
-#[allow(dead_code)] // Execution is wired by the next, separately scoped flow slice.
+pub(crate) mod lock;
 pub(crate) mod pairing;
-#[allow(dead_code)] // Same internal step boundary as pairing.
 pub(crate) mod provision;
 pub(crate) mod services;
 

@@ -451,3 +451,138 @@ fn failed_stop_does_not_rewrite_or_reload_an_active_service() {
     assert_eq!(fs::read_to_string(binding).unwrap(), "old binding");
     assert!(fixture.user_service_is_active(SCREEN).unwrap());
 }
+
+fn native_flow(fixture: Fixture, plasma: bool) -> crate::setup::flow::OnboardingFlow {
+    use crate::setup::{
+        environment::{NativeSteps, SetupContext},
+        flow::{AuthorizationMode, OnboardingFlow},
+    };
+    let helper = fixture.root.join("kwin.sh");
+    fs::write(
+        fixture.root.join("kwin-status"),
+        if plasma { "3" } else { "2" },
+    )
+    .unwrap();
+    fs::write(
+        &helper,
+        r#"#!/bin/bash
+cd -- "$(dirname -- "$0")"
+[ "$1" != --status ] || exit "$(cat kwin-status)"
+printf '%s\n' "$*" >> kwin-actions
+[[ "$*" == *--noninteractive* ]] || exit 1
+[[ "$*" == *--allow-dependencies* ]] || exit 77
+echo 0 > kwin-status
+"#,
+    )
+    .unwrap();
+    let lock_path = fixture.root.join("flow.lock");
+    let context = SetupContext {
+        config: fixture.config.clone(),
+        user_units: fixture.units.clone(),
+        system_root: fixture.root.clone(),
+        kwin_helper: helper,
+        lock_path: lock_path.clone(),
+        authorization: AuthorizationMode::Noninteractive,
+    };
+    OnboardingFlow::with_backend(
+        Box::new(NativeSteps {
+            context,
+            controller: fixture,
+        }),
+        &lock_path,
+    )
+    .unwrap()
+}
+
+#[test]
+fn native_flow_composes_pairing_service_repair_and_plasma_dependency_consent() {
+    use crate::{
+        config::HdmiInput,
+        pairing::{PairingOperation, PairingRequest},
+        platform_access_token::PlatformAccessToken,
+        setup::flow::{FlowOutcome, SetupStep, StepAnswer},
+    };
+    for plasma in [false, true] {
+        let fixture = Fixture::new();
+        let config = fixture.config.clone();
+        let root = fixture.root.clone();
+        let user_files = fixture.plan().user_files().unwrap();
+        let system_files = fixture.plan().system_files().unwrap();
+        let mut flow = native_flow(fixture, plasma);
+        assert_eq!(flow.snapshot().current().unwrap().0, SetupStep::Pairing);
+        // A missing TV cannot be bypassed by a generic Continue answer.
+        let snapshot = flow.advance(flow.snapshot().token, StepAnswer::Continue, &mut |_| {});
+        assert!(matches!(
+            snapshot.current().unwrap().1,
+            StepResponse::Failed(_)
+        ));
+        assert!(!root.join("etc/systemd").exists());
+        let request =
+            PairingRequest::parse("192.0.2.42", "02:11:22:33:44:55", HdmiInput::Hdmi1).unwrap();
+        crate::pairing::pair_and_save(
+            &PairingOperation::for_setup(request, StepCancellation::default()),
+            &config,
+            &mut |_| {},
+            |_| Ok(PlatformAccessToken::new("fixture-token").unwrap()),
+        )
+        .unwrap();
+        let saved = fs::read(&config).unwrap();
+        // A changed prerequisite replans first instead of applying a stale answer.
+        let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
+        assert_eq!(snapshot.current().unwrap().0, SetupStep::Services);
+        assert!(!root.join("etc/systemd").exists());
+        let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
+        assert!(files_match(&user_files).unwrap());
+        assert!(files_match(&system_files).unwrap());
+        if plasma {
+            assert_eq!(snapshot.current().unwrap().0, SetupStep::Plasma);
+            let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
+            assert!(matches!(
+                snapshot.current().unwrap().1,
+                StepResponse::InputRequired(crate::setup::StepInput::BuildDependencies { .. })
+            ));
+            let snapshot = flow.advance(
+                snapshot.token,
+                StepAnswer::InstallBuildDependencies,
+                &mut |_| {},
+            );
+            assert_eq!(snapshot.outcome, FlowOutcome::Complete);
+            assert_eq!(
+                fs::read_to_string(root.join("kwin-actions"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+        } else {
+            assert_eq!(snapshot.outcome, FlowOutcome::Complete);
+            assert!(!root.join("kwin-actions").exists());
+        }
+        assert_eq!(fs::read(&config).unwrap(), saved);
+    }
+}
+
+#[test]
+fn native_pairing_adapter_uses_the_flows_live_cancellation_gate() {
+    use crate::{
+        config::HdmiInput,
+        pairing::PairingRequest,
+        setup::flow::{FlowOutcome, StepAnswer},
+    };
+    let fixture = Fixture::new();
+    let config = fixture.config.clone();
+    let original = fs::read(&config).unwrap();
+    let mut flow = native_flow(fixture, false);
+    let cancellation = flow.cancellation();
+    let request =
+        PairingRequest::parse("192.0.2.42", "02:11:22:33:44:55", HdmiInput::Hdmi1).unwrap();
+    let snapshot = flow.advance(
+        flow.snapshot().token,
+        StepAnswer::Pairing(request),
+        &mut |_| {
+            assert!(cancellation.cancel());
+        },
+    );
+    assert_eq!(snapshot.outcome, FlowOutcome::Cancelled);
+    assert_eq!(fs::read(config).unwrap(), original);
+}

@@ -3,7 +3,8 @@
 use super::{StepCancellation, StepFailure, StepInput, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
+use std::{fs::File, sync::Arc};
 
 const BUILD_DEPENDENCIES: StepResponse = StepResponse::InputRequired(StepInput::BuildDependencies {
     explanation: "A compatible Plasma plugin could not be built with the installed tools. Install the compiler and development packages needed to build it? This requires administrator permission.",
@@ -12,6 +13,7 @@ const BUILD_DEPENDENCIES: StepResponse = StepResponse::InputRequired(StepInput::
 pub(crate) struct KWinSetup<'a> {
     pub helper: &'a Path,
     pub interactive_authorization: bool,
+    pub command_lock: Option<Arc<File>>,
 }
 impl KWinSetup<'_> {
     pub(crate) fn inspect(&self) -> StepResponse {
@@ -83,7 +85,12 @@ impl KWinSetup<'_> {
     }
     fn invoke(&self, args: &[&str]) -> std::io::Result<Output> {
         // Never inherit interactive terminal input into background workers.
-        Command::new("bash")
+        let lock = if args == ["--status"] {
+            None
+        } else {
+            self.command_lock.as_ref()
+        };
+        super::lock::command_with_lock("bash", lock)
             .arg(self.helper)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -152,6 +159,7 @@ exit "$result"
             KWinSetup {
                 helper: &self.helper(),
                 interactive_authorization: false,
+                command_lock: None,
             }
             .execute(allow, &StepCancellation::default(), &mut |_| {})
         }
@@ -168,6 +176,7 @@ exit "$result"
         let step = KWinSetup {
             helper: &helper,
             interactive_authorization: true,
+            command_lock: None,
         };
         assert!(matches!(
             step.inspect(),
@@ -228,6 +237,7 @@ exit "$result"
         let step = KWinSetup {
             helper: &helper,
             interactive_authorization: true,
+            command_lock: None,
         };
         let cancellation = StepCancellation::default();
         assert!(cancellation.cancel());
