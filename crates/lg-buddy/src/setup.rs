@@ -10,6 +10,7 @@ use crate::presentation::brightness::UserFacingError;
 pub mod cli;
 mod environment;
 pub mod flow;
+pub mod gui;
 pub(crate) mod kwin;
 pub(crate) mod lock;
 pub(crate) mod pairing;

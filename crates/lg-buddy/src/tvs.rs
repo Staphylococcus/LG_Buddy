@@ -764,6 +764,17 @@ impl TvsApplication {
             })
     }
 
+    pub(crate) fn can_pair(&self) -> bool {
+        !self.closed
+            && self.controls_available
+            && matches!(self.state, TvsState::Empty)
+            && self.pairing.is_none()
+    }
+    pub(crate) fn refresh_after_setup(&mut self) -> TvsTransition {
+        let operation = self.new_read();
+        self.transition(Some(operation), None)
+    }
+
     pub fn is_managing(&self) -> bool {
         self.management.is_some()
     }

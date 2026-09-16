@@ -927,8 +927,7 @@ else
         create_empty_config_if_absent
         echo "Prepared an empty user configuration for first-run TV pairing."
         if [ "$HEADLESS" -eq 0 ]; then
-            echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
-            echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
+            echo "Pair your TV, then complete background service setup in LG Buddy."
         fi
     fi
 fi
@@ -1004,9 +1003,9 @@ if [ -f "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" ]; then
     fi
 fi
 
-# Terminal setup owns service installation, activation and verification.
-# The existing graphical handoff is replaced in the GUI slice.
-if [ "$HEADLESS" -eq 0 ]; then
+# First-run GUI and terminal onboarding own service setup after TV pairing.
+# Existing installation refreshes and release upgrades retain their deployment path.
+if [ "$HEADLESS" -eq 0 ] && [ "$FRESH_SETUP_MODE" -eq 0 ]; then
     if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
         perform_privileged_services_installation
     fi

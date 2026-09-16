@@ -20,11 +20,32 @@ pub(crate) struct SettingsView {
     retry: gtk::Button,
     retry_intent: Rc<RefCell<Option<SettingsIntent>>>,
     updater: UpdaterView,
+    setup_group: adw::PreferencesGroup,
+    setup_row: adw::ActionRow,
 }
 
 impl SettingsView {
     pub(crate) fn new(on_intent: Rc<dyn Fn(SettingsIntent)>) -> Self {
         let page = adw::PreferencesPage::new();
+        let setup_group = adw::PreferencesGroup::builder().visible(false).build();
+        let setup_row = adw::ActionRow::builder()
+            .title("Complete setup")
+            .subtitle("Some required components still need to be set up.")
+            .activatable(true)
+            .build();
+        let setup_button = gtk::Button::builder()
+            .label("Continue")
+            .valign(gtk::Align::Center)
+            .build();
+        setup_button.update_property(&[gtk::accessible::Property::Label("Complete setup")]);
+        setup_button.connect_clicked({
+            let on_intent = on_intent.clone();
+            move |_| on_intent(SettingsIntent::CompleteSetup)
+        });
+        setup_row.add_suffix(&setup_button);
+        setup_row.set_activatable_widget(Some(&setup_button));
+        setup_group.add(&setup_row);
+        page.add(&setup_group);
         let status = adw::StatusPage::builder()
             .icon_name("preferences-system-symbolic")
             .vexpand(true)
@@ -63,9 +84,20 @@ impl SettingsView {
             retry,
             retry_intent,
             updater,
+            setup_group,
+            setup_row,
         }
     }
 
+    pub(crate) fn render_setup_status(
+        &self,
+        status: lg_buddy::setup::gui::SetupStatus,
+        available: bool,
+    ) {
+        self.setup_group
+            .set_visible(status == lg_buddy::setup::gui::SetupStatus::Incomplete);
+        self.setup_row.set_sensitive(available);
+    }
     pub(crate) fn widget(&self) -> &gtk::Stack {
         &self.root
     }
@@ -847,6 +879,32 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         let intents = Rc::clone(&intents);
         move |intent| intents.borrow_mut().push(intent)
     }));
+    use lg_buddy::setup::gui::SetupStatus;
+    for status in [
+        SetupStatus::Unchecked,
+        SetupStatus::Incomplete,
+        SetupStatus::Complete,
+    ] {
+        view.render_setup_status(status, true);
+        assert_eq!(
+            view.setup_group.is_visible(),
+            status == SetupStatus::Incomplete
+        );
+    }
+    view.render_setup_status(SetupStatus::Incomplete, false);
+    assert!(!view.setup_row.is_sensitive());
+    view.render_setup_status(SetupStatus::Incomplete, true);
+    view.setup_row
+        .activatable_widget()
+        .unwrap()
+        .downcast::<gtk::Button>()
+        .unwrap()
+        .emit_clicked();
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::CompleteSetup)
+    );
+    view.render_setup_status(SetupStatus::Complete, true);
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .default_width(1100)

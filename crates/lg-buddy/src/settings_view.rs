@@ -64,6 +64,7 @@ impl BehaviorSetting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsIntent {
+    CompleteSetup,
     Retry,
     Refresh,
     CheckForUpdates,

@@ -96,7 +96,7 @@ case "${1:-}" in
         installed_dir="$(dirname "$0")"
         [ -x "$installed_dir/lg-buddy-gui" ]
         [ -f "$installed_dir/../lib/lg-buddy/config-path" ]
-        [ -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
+        [ ! -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
         printf '%s\n' "$0:${LG_BUDDY_CONFIG:?}" >"${LG_BUDDY_HANDOFF_MARKER:?}"
         ;;
     *)
@@ -219,25 +219,13 @@ cmp "$BUNDLE/docs/setup-services.sh" "$RUN_ROOT/usr/lib/lg-buddy/setup-services"
 cmp "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.setup.policy" "$RUN_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy"
 cmp "$BUNDLE/systemd/LG_Buddy_lifecycle.service" "$RUN_ROOT/usr/lib/lg-buddy/setup/systemd/LG_Buddy_lifecycle.service"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy-gui" ]
-[ -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
+[ ! -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
+[ ! -f "$RUN_HOME/.config/systemd/user/LG_Buddy_screen.service" ]
 grep -F -q 'Prepared an empty user configuration for first-run TV pairing.' "$RUN_OUTPUT"
 grep -F -q 'Opening LG Buddy to pair your first TV...' "$RUN_OUTPUT"
-grep -F -q 'Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors.' "$RUN_OUTPUT"
-grep -F -q 'If a behavior is declined or unavailable, it stays off until retried in Settings.' "$RUN_OUTPUT"
-grep -F -q 'System sleep/wake integration installed; pairing will attempt TV Sleep & Wake.' "$RUN_OUTPUT"
-grep -F -q 'If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings.' "$RUN_OUTPUT"
-grep -F -q 'LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config.' "$RUN_OUTPUT"
-grep -F -q 'LG_Buddy_update_check.timer enabled and started.' "$RUN_OUTPUT"
-! grep -F -q 'System sleep/wake TV control enabled via' "$RUN_OUTPUT"
+grep -F -q 'Pair your TV, then complete background service setup in LG Buddy.' "$RUN_OUTPUT"
 ! grep -F -q 'Running configuration script' "$RUN_OUTPUT"
-grep -F -q 'enable LG_Buddy.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q 'enable LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q 'start LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user enable LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user start LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
+! grep -Eq '(enable|start|restart) LG_Buddy(_lifecycle|_screen|_update_check)?\.(service|timer)' "$RUN_SYSTEMCTL_LOG"
 
 export LG_BUDDY_HANDOFF_STATUS=77
 run_install failed-handoff
