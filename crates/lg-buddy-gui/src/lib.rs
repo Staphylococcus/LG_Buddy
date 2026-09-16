@@ -35,6 +35,7 @@ use lg_buddy::settings_view::{
     SettingsReadError, SettingsReadOperation, SettingsTransition, UpdateCheckError,
     UpdateCheckOperation,
 };
+use lg_buddy::setup::assessment::AssessmentOperation;
 use lg_buddy::setup::gui::{EnvironmentOnboardingBackend, OnboardingBackend};
 use lg_buddy::tvs::{
     EnvironmentTvsBackend, TvsBackend, TvsIntent, TvsModelReadOperation, TvsReadError,
@@ -342,6 +343,16 @@ impl ApplicationController {
                 closed: Cell::new(false),
             }
         });
+        controller.window.window().connect_is_active_notify({
+            let controller = Rc::downgrade(&controller);
+            move |window| {
+                if window.is_active() {
+                    if let Some(controller) = controller.upgrade() {
+                        Self::refresh_setup(&controller);
+                    }
+                }
+            }
+        });
         (controller, opening)
     }
 
@@ -362,6 +373,9 @@ impl ApplicationController {
     }
 
     fn apply_transition(controller: &Rc<Self>, transition: ApplicationTransition) {
+        if let Some(operation) = transition.assessment_operation() {
+            Self::start_assessment(controller, operation);
+        }
         controller
             .window
             .render_setup_status(transition.setup_status(), transition.setup_available());
@@ -394,6 +408,43 @@ impl ApplicationController {
         if let Some(diagnostics) = transition.diagnostics() {
             Self::render_diagnostics_transition(controller, diagnostics);
         }
+    }
+
+    fn refresh_setup(controller: &Rc<Self>) {
+        let update = controller.application.borrow_mut().refresh_setup();
+        if let Some(update) = update {
+            Self::apply_transition(controller, update);
+        }
+    }
+
+    fn start_assessment(controller: &Rc<Self>, operation: AssessmentOperation) {
+        let (sender, receiver) = mpsc::channel();
+        let backend = controller.onboarding_backend.clone();
+        thread::spawn(move || {
+            let _ = sender.send(operation.execute(backend.as_ref()));
+        });
+        // Read-only work must not keep a closed window or application alive.
+        let controller = Rc::downgrade(controller);
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let Some(controller) = controller.upgrade().filter(|c| !c.closed.get()) else {
+                return glib::ControlFlow::Break;
+            };
+            let result = match receiver.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(lg_buddy::setup::assessment::worker_stopped())
+                }
+            };
+            let update = controller
+                .application
+                .borrow_mut()
+                .complete_setup_assessment(operation, result);
+            if let Some(update) = update {
+                Self::apply_transition(&controller, update);
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn handle_onboarding_intent(
@@ -1048,6 +1099,7 @@ fn connect_application(
         let settings_backend = Arc::clone(&settings_backend);
         move |application| {
             if let Some(controller) = controller.borrow().as_ref() {
+                ApplicationController::refresh_setup(controller);
                 ApplicationController::navigate(controller, ApplicationPage::Overview);
                 controller.present();
                 return;
@@ -2462,7 +2514,7 @@ pub(crate) mod controller_test_support {
         use adw::prelude::*;
         use lg_buddy::setup::{
             flow::SetupStep,
-            gui::{fixtures::Fixture, OnboardingIntent, SetupStatus},
+            gui::{fixtures::Fixture, OnboardingIntent},
         };
         use lg_buddy::{navigation::ApplicationPage, settings_view::SettingsIntent};
         struct SetupTvs(Arc<Fixture>);
@@ -2521,13 +2573,28 @@ pub(crate) mod controller_test_support {
             }
             false
         }
-        for existing in [false, true] {
-            let fixture = Arc::new(Fixture::new(existing, true));
-            let gtk_app = test_application(if existing {
-                "RepairSetup"
-            } else {
-                "InitialSetup"
-            });
+        fn setup_visible(widget: &gtk::Widget) -> bool {
+            if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
+                if row.title() == "Complete setup" {
+                    return row.is_mapped();
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if setup_visible(&current) {
+                    return true;
+                }
+                child = current.next_sibling();
+            }
+            false
+        }
+        for (existing, plasma, name) in [
+            (false, true, "InitialSetup"),
+            (true, true, "RepairPlasma"),
+            (true, false, "RepairGnome"),
+        ] {
+            let fixture = Arc::new(Fixture::new(existing, plasma));
+            let gtk_app = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             for _ in 0..4 {
                 controls
@@ -2575,18 +2642,9 @@ pub(crate) mod controller_test_support {
                 .downcast::<adw::ApplicationWindow>()
                 .unwrap();
             if existing {
-                let update = controller
-                    .application
-                    .borrow_mut()
-                    .set_setup_status(SetupStatus::Incomplete)
-                    .unwrap();
-                ApplicationController::apply_transition(&controller, update);
                 ApplicationController::navigate(&controller, ApplicationPage::Settings);
                 assert_eq!(controller.window.visible_page(), ApplicationPage::Settings);
-                assert!(activate(
-                    controller.window.window().upcast_ref(),
-                    "Complete setup"
-                ));
+                pump_until(|| activate(controller.window.window().upcast_ref(), "Complete setup"));
             } else {
                 assert!(activate(
                     controller.window.window().upcast_ref(),
@@ -2632,18 +2690,26 @@ pub(crate) mod controller_test_support {
                     .is_some_and(|d| d.title() == "Background services")
             });
             ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Submit);
-            pump_until(|| {
-                dialog_window
-                    .visible_dialog()
-                    .is_some_and(|d| d.title() == "Plasma integration")
-            });
-            ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Submit);
-            pump_until(|| {
-                dialog_window.visible_dialog().is_some_and(|d| {
-                    widget_contains_text(d.upcast_ref(), "Install compiler packages?")
-                })
-            });
-            ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Submit);
+            if plasma {
+                pump_until(|| {
+                    dialog_window
+                        .visible_dialog()
+                        .is_some_and(|d| d.title() == "Plasma integration")
+                });
+                ApplicationController::handle_onboarding_intent(
+                    &controller,
+                    OnboardingIntent::Submit,
+                );
+                pump_until(|| {
+                    dialog_window.visible_dialog().is_some_and(|d| {
+                        widget_contains_text(d.upcast_ref(), "Install compiler packages?")
+                    })
+                });
+                ApplicationController::handle_onboarding_intent(
+                    &controller,
+                    OnboardingIntent::Submit,
+                );
+            }
             pump_until(|| {
                 dialog_window
                     .visible_dialog()
@@ -2656,6 +2722,22 @@ pub(crate) mod controller_test_support {
                 .borrow_mut()
                 .handle_settings_intent(SettingsIntent::CompleteSetup)
                 .is_none());
+            ApplicationController::navigate(&controller, ApplicationPage::Settings);
+            pump_until(|| !setup_visible(controller.window.window().upcast_ref()));
+            // A later external stop makes the row reappear without opening a modal.
+            let calls = fixture.calls.lock().unwrap().len();
+            fixture.responses.lock().unwrap()[1] = lg_buddy::setup::StepResponse::ActionRequired {
+                explanation: "Service stopped",
+                requires_authorization: false,
+            };
+            ApplicationController::refresh_setup(&controller);
+            pump_until(|| setup_visible(controller.window.window().upcast_ref()));
+            assert!(dialog_window.visible_dialog().is_none());
+            assert_eq!(fixture.calls.lock().unwrap().len(), calls);
+            fixture.responses.lock().unwrap()[1] = lg_buddy::setup::StepResponse::Complete;
+            ApplicationController::refresh_setup(&controller);
+            pump_until(|| !setup_visible(controller.window.window().upcast_ref()));
+            assert_eq!(fixture.calls.lock().unwrap().len(), calls);
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
             pump_for(Duration::from_millis(30));
         }

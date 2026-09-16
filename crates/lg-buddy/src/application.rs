@@ -32,6 +32,7 @@ use crate::tvs::{
 };
 
 use crate::setup::{
+    assessment::{AssessmentOperation, SetupAssessment, SetupHealth},
     flow::FlowProgress,
     gui::{
         OnboardingApplication, OnboardingIntent, OnboardingOperation, OnboardingResult,
@@ -73,9 +74,13 @@ pub struct ApplicationTransition {
     onboarding: Option<OnboardingTransition>,
     setup_status: SetupStatus,
     setup_available: bool,
+    assessment: Option<AssessmentOperation>,
 }
 
 impl ApplicationTransition {
+    pub fn assessment_operation(&self) -> Option<AssessmentOperation> {
+        self.assessment
+    }
     pub fn onboarding(&self) -> Option<&OnboardingTransition> {
         self.onboarding.as_ref()
     }
@@ -114,6 +119,7 @@ pub struct Application {
     diagnostics: DiagnosticsApplication,
     navigation: Navigation,
     onboarding: OnboardingApplication,
+    setup_health: SetupHealth,
     close_after_setup: bool,
     closed: bool,
 }
@@ -123,6 +129,8 @@ impl Application {
         let (overview, overview_opening) = OverviewApplication::open();
         let (tvs, tvs_opening) = TvsApplication::open();
         let (settings, settings_opening) = SettingsApplication::open();
+        let mut setup_health = SetupHealth::default();
+        let assessment = setup_health.request();
         (
             Self {
                 overview,
@@ -131,6 +139,7 @@ impl Application {
                 diagnostics: DiagnosticsApplication::default(),
                 navigation: Navigation::default(),
                 onboarding: OnboardingApplication::default(),
+                setup_health,
                 close_after_setup: false,
                 closed: false,
             },
@@ -143,6 +152,7 @@ impl Application {
                 onboarding: None,
                 setup_status: SetupStatus::Unchecked,
                 setup_available: true,
+                assessment,
             },
         )
     }
@@ -200,7 +210,7 @@ impl Application {
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
         if intent == SettingsIntent::CompleteSetup {
-            if self.onboarding.status() != SetupStatus::Incomplete {
+            if self.setup_health.status() != SetupStatus::Incomplete {
                 return None;
             }
             return self.handle_onboarding_intent(OnboardingIntent::Open);
@@ -253,16 +263,32 @@ impl Application {
         let update = self.onboarding.worker_stopped(operation)?;
         Some(self.onboarding_transition(update))
     }
-    /// Startup assessment supplies this status in the next slice. The GUI does
-    /// not infer readiness from settings or a saved pairing receipt.
-    pub fn set_setup_status(&mut self, status: SetupStatus) -> Option<ApplicationTransition> {
-        if self.closed || self.onboarding.is_open() {
+    pub fn refresh_setup(&mut self) -> Option<ApplicationTransition> {
+        if self.closed {
             return None;
         }
-        self.onboarding.set_status(status);
-        Some(self.transition(None, None, None))
+        let operation = self.setup_health.request()?;
+        let mut transition = self.transition(None, None, None);
+        transition.assessment = Some(operation);
+        Some(transition)
+    }
+    pub fn complete_setup_assessment(
+        &mut self,
+        operation: AssessmentOperation,
+        result: Result<SetupAssessment, StepFailure>,
+    ) -> Option<ApplicationTransition> {
+        if self.closed {
+            return None;
+        }
+        let next = self.setup_health.complete(operation, result)?;
+        let mut transition = self.transition(None, None, None);
+        transition.assessment = next;
+        Some(transition)
     }
     fn onboarding_transition(&mut self, update: OnboardingTransition) -> ApplicationTransition {
+        if update.presentation.is_some() && !self.onboarding.is_busy() {
+            self.setup_health.observe_flow(self.onboarding.status());
+        }
         if let Some(error) = update
             .presentation
             .as_ref()
@@ -297,12 +323,16 @@ impl Application {
         if self.closed || !self.navigation.select(page) {
             return None;
         }
-        match page {
+        let mut transition = match page {
             crate::navigation::ApplicationPage::Settings => self
                 .handle_settings_intent(SettingsIntent::Refresh)
                 .or_else(|| Some(self.transition(None, None, None))),
             _ => Some(self.transition(None, None, None)),
+        }?;
+        if page == crate::navigation::ApplicationPage::Settings {
+            transition.assessment = self.setup_health.request();
         }
+        Some(transition)
     }
 
     pub fn handle_diagnostics_intent(
@@ -513,7 +543,9 @@ impl Application {
         let mut update = self.tvs_transition(transition);
         if paired {
             let settings = self.settings.profile_changed();
+            let assessment = update.assessment;
             update = self.transition(update.overview, update.tvs, Some(settings));
+            update.assessment = assessment.or(update.assessment);
         }
         Some(update)
     }
@@ -531,6 +563,7 @@ impl Application {
 
     pub fn shutdown(&mut self) {
         let _ = self.onboarding.handle(OnboardingIntent::Cancel);
+        self.setup_health.shutdown();
         self.closed = true;
         self.overview.shutdown();
         self.tvs.shutdown();
@@ -625,6 +658,13 @@ impl Application {
         mut tvs: Option<TvsTransition>,
         mut settings: Option<SettingsTransition>,
     ) -> ApplicationTransition {
+        let assessment = self.setup_health.set_paused(
+            self.closed
+                || self.onboarding.is_open()
+                || self.settings.is_mutating()
+                || self.tvs.is_managing()
+                || self.tvs.is_pairing(),
+        );
         if let Some(update) = self.tvs.set_controls_available(
             !self.overview.has_pending_write()
                 && !self.settings.is_mutating()
@@ -652,7 +692,8 @@ impl Application {
             diagnostics: None,
             navigation: self.navigation.clone(),
             onboarding: None,
-            setup_status: self.onboarding.status(),
+            setup_status: self.setup_health.status(),
+            assessment,
             setup_available: !self.onboarding.is_open()
                 && !self.settings.is_mutating()
                 && !self.tvs.is_managing()
@@ -841,6 +882,48 @@ mod tests {
     }
 
     #[test]
+    fn startup_is_read_only_and_closing_onboarding_rechecks_after_stale_completion() {
+        use crate::setup::gui::fixtures::Fixture;
+        let fixture = Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let old = opening.assessment_operation().unwrap();
+        assert!(opening.onboarding().is_none());
+        let old_result = old.execute(&fixture);
+        let opening = app
+            .handle_onboarding_intent(OnboardingIntent::Open)
+            .unwrap();
+        assert!(opening.assessment_operation().is_none());
+        let operation = opening.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {});
+        app.complete_onboarding(&operation, result).unwrap();
+        let apply = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        let operation = apply.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {});
+        let complete = app.complete_onboarding(&operation, result).unwrap();
+        assert_eq!(complete.setup_status(), SetupStatus::Complete);
+        let stale = app.complete_setup_assessment(old, old_result).unwrap();
+        assert_eq!(stale.setup_status(), SetupStatus::Complete);
+        assert!(stale.assessment_operation().is_none());
+        let close = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        let fresh = close.assessment_operation().unwrap();
+        let verified = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(verified.setup_status(), SetupStatus::Complete);
+        assert!(verified.onboarding().is_none());
+        assert!(app.refresh_setup().is_some());
+        app.shutdown();
+        assert!(app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .is_none());
+        assert!(app.refresh_setup().is_none());
+    }
+
+    #[test]
     fn onboarding_owns_mutations_and_rejected_quit_is_not_queued() {
         use crate::setup::gui::fixtures::Fixture;
         let fixture = Fixture::new(true, false);
@@ -872,6 +955,21 @@ mod tests {
         assert!(!app.close_after_setup);
         app.handle_overview_intent(OverviewIntent::Cancel).unwrap();
         assert!(app.closed);
+    }
+
+    #[test]
+    fn standalone_pairing_retains_assessment_when_refreshing_settings() {
+        let (mut app, opening, operation) = pairing();
+        app.complete_setup_assessment(
+            opening.assessment_operation().unwrap(),
+            Err(crate::setup::assessment::worker_stopped()),
+        )
+        .unwrap();
+        let done = app
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
+            .unwrap();
+        assert!(done.settings().is_some());
+        assert!(done.assessment_operation().is_some());
     }
 
     #[test]
@@ -1046,6 +1144,35 @@ mod management_tests {
     }
 
     #[test]
+    fn entering_settings_rechecks_external_service_changes() {
+        use crate::{
+            navigation::ApplicationPage,
+            setup::{gui::fixtures::Fixture, StepResponse},
+        };
+        let fixture = Fixture::new(true, false);
+        fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
+        let (mut app, opening) = configured();
+        let first = opening.assessment_operation().unwrap();
+        let complete = app
+            .complete_setup_assessment(first, first.execute(&fixture))
+            .unwrap();
+        assert_eq!(complete.setup_status(), SetupStatus::Complete);
+        fixture.responses.lock().unwrap()[1] =
+            StepResponse::Failed(crate::setup::assessment::worker_stopped());
+        let refresh = app
+            .select_page(ApplicationPage::Settings)
+            .unwrap()
+            .assessment_operation()
+            .unwrap();
+        let incomplete = app
+            .complete_setup_assessment(refresh, refresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(incomplete.setup_status(), SetupStatus::Incomplete);
+        assert!(incomplete.onboarding().is_none());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn profile_change_invalidates_overview_reads_and_blocks_new_writes_until_reload() {
         let (mut app, opening) = configured();
         let change = app
@@ -1147,6 +1274,44 @@ mod settings_tests {
             .iter()
             .flat_map(|group| group.rows())
             .all(|row| row.editor_enabled())
+    }
+
+    #[test]
+    fn settings_mutations_discard_older_health_and_schedule_fresh_inspection() {
+        use crate::setup::gui::fixtures::Fixture;
+        let fixture = Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let old = opening.assessment_operation().unwrap();
+        app.complete_settings_read(
+            opening.settings().unwrap().read_operation().unwrap(),
+            Ok(settings()),
+        )
+        .unwrap();
+        let change = app
+            .handle_settings_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                enabled: false,
+            })
+            .unwrap();
+        let stale = app
+            .complete_setup_assessment(old, old.execute(&fixture))
+            .unwrap();
+        assert_eq!(stale.setup_status(), SetupStatus::Unchecked);
+        assert!(stale.assessment_operation().is_none());
+        let done = app
+            .complete_settings_mutation(
+                change.settings().unwrap().mutation_operation().unwrap(),
+                Err(SettingsMutationFailure::Persistence(SettingsError::Apply {
+                    message: "test failure".into(),
+                })),
+            )
+            .unwrap();
+        let fresh = done.assessment_operation().unwrap();
+        assert_ne!(fresh, old);
+        let inspected = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(inspected.setup_status(), SetupStatus::Incomplete);
     }
 
     #[test]

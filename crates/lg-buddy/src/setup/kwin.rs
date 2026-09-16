@@ -86,13 +86,28 @@ impl KWinSetup<'_> {
         response
     }
     fn invoke(&self, args: &[&str]) -> std::io::Result<Output> {
+        if args == ["--status"] {
+            let mut command = std::process::Command::new("bash");
+            command.arg(self.helper).args(args);
+            let result =
+                crate::command::run_bounded_command(command, std::time::Duration::from_secs(5));
+            if result.timed_out {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Plasma inspection timed out",
+                ));
+            }
+            return result
+                .status
+                .map(|status| Output {
+                    status,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                })
+                .ok_or_else(|| std::io::Error::other("Plasma inspection could not run"));
+        }
         // Never inherit interactive terminal input into background workers.
-        let lock = if args == ["--status"] {
-            None
-        } else {
-            self.command_lock.as_ref()
-        };
-        super::lock::command_with_lock("bash", lock)
+        super::lock::command_with_lock("bash", self.command_lock.as_ref())
             .arg(self.helper)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -171,6 +186,31 @@ exit "$result"
             fs::remove_dir_all(&self.0).unwrap();
         }
     }
+    #[test]
+    fn failed_status_preserves_the_helpers_diagnostic() {
+        let f = Fixture::new();
+        fs::write(
+            f.helper(),
+            "printf 'kwin-bridge info failed: session bus connection refused\\n' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let response = KWinSetup {
+            helper: &f.helper(),
+            authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
+            command_lock: None,
+        }
+        .inspect();
+        let StepResponse::Failed(error) = response else {
+            panic!("expected failed status, got {response:?}");
+        };
+        assert_eq!(
+            error.diagnostic,
+            "KWin setup exited Some(1): kwin-bridge info failed: session bus connection refused\n"
+        );
+        assert!(error.retryable);
+        assert!(!error.presentation.detail().contains("session bus"));
+    }
+
     #[test]
     fn status_and_inapplicable_desktop_do_not_execute_provisioning() {
         let f = Fixture::new();

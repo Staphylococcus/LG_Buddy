@@ -10,6 +10,7 @@ pub mod audio;
 pub mod auth;
 pub mod backend;
 pub mod brightness;
+mod command;
 pub mod commands;
 pub mod config;
 pub mod diagnostics;

@@ -165,7 +165,7 @@ impl OnboardingFlow {
     ) -> Result<Self, StepFailure> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let lease = FlowLock::acquire(lock_path)?;
-        let observed = SetupStep::ORDER.map(|step| (step, backend.inspect(step)));
+        let observed = inspect_steps(backend.as_ref());
         let mut flow = Self {
             backend,
             control: Arc::new(Mutex::new(Control {
@@ -274,7 +274,7 @@ impl OnboardingFlow {
     }
 
     fn inspect(&self) -> [(SetupStep, StepResponse); 3] {
-        SetupStep::ORDER.map(|step| (step, self.backend.inspect(step)))
+        inspect_steps(self.backend.as_ref())
     }
 
     fn publish(&mut self, result: Option<(SetupStep, StepResponse)>) {
@@ -312,7 +312,11 @@ impl Drop for OnboardingFlow {
     }
 }
 
-fn satisfied(response: &StepResponse) -> bool {
+pub(super) fn inspect_steps(backend: &dyn SetupSteps) -> [(SetupStep, StepResponse); 3] {
+    SetupStep::ORDER.map(|step| (step, backend.inspect(step)))
+}
+
+pub(super) fn satisfied(response: &StepResponse) -> bool {
     matches!(
         response,
         StepResponse::Complete | StepResponse::NotApplicable

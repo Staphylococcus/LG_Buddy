@@ -14,13 +14,7 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum SetupStatus {
-    #[default]
-    Unchecked,
-    Incomplete,
-    Complete,
-}
+pub use super::assessment::SetupStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnboardingIntent {
@@ -151,10 +145,15 @@ pub struct OnboardingResult {
 }
 
 /// Environment selection is injected for isolated frontend integration tests.
-pub trait OnboardingBackend: Send + Sync {
+pub trait OnboardingBackend: super::assessment::AssessmentBackend {
     fn open(&self) -> Result<OnboardingFlow, StepFailure>;
 }
 pub struct EnvironmentOnboardingBackend;
+impl super::assessment::AssessmentBackend for EnvironmentOnboardingBackend {
+    fn assess(&self) -> Result<super::assessment::SetupAssessment, StepFailure> {
+        super::assessment::EnvironmentAssessmentBackend.assess()
+    }
+}
 impl OnboardingBackend for EnvironmentOnboardingBackend {
     fn open(&self) -> Result<OnboardingFlow, StepFailure> {
         OnboardingFlow::open(AuthorizationMode::Interactive)
@@ -221,9 +220,6 @@ impl OnboardingApplication {
     }
     pub fn status(&self) -> SetupStatus {
         self.status
-    }
-    pub fn set_status(&mut self, status: SetupStatus) {
-        self.status = status;
     }
     pub fn handle(&mut self, intent: OnboardingIntent) -> Option<OnboardingTransition> {
         if intent == OnboardingIntent::Open {

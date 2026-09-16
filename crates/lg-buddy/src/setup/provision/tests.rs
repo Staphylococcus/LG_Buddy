@@ -19,6 +19,7 @@ struct Fixture {
     system_binding: Cell<bool>,
     fail_after_reload: Cell<bool>,
     fail_stop: Cell<bool>,
+    fail_state: Cell<bool>,
     fail_start: Cell<bool>,
 }
 impl Fixture {
@@ -51,6 +52,7 @@ impl Fixture {
             system_binding: Cell::new(true),
             fail_after_reload: Cell::new(false),
             fail_stop: Cell::new(false),
+            fail_state: Cell::new(false),
             fail_start: Cell::new(false),
         }
     }
@@ -75,6 +77,9 @@ impl Drop for Fixture {
 }
 impl ServiceController for Fixture {
     fn user_service_state(&self, unit: &str) -> Result<UserServiceState, SettingsError> {
+        if self.fail_state.get() {
+            return Err(io_error("service inspection timed out"));
+        }
         if !self.user.borrow().contains_key(unit) {
             return Ok(UserServiceState::Missing);
         }
@@ -486,6 +491,28 @@ fn interrupted_reconfiguration_remains_incomplete_until_new_process_starts() {
 }
 
 #[test]
+fn failed_state_query_does_not_rewrite_or_reload_an_active_service() {
+    let fixture = Fixture::new();
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    let binding = fixture.units.join("LG_Buddy_screen.service.d/config.conf");
+    fs::write(&binding, "old binding").unwrap();
+    fixture.calls.borrow_mut().clear();
+    fixture.fail_state.set(true);
+
+    let StepResponse::Failed(error) = fixture.run() else {
+        panic!("expected a failed inspection");
+    };
+    assert!(error.diagnostic.contains("service inspection timed out"));
+    assert!(fixture.calls.borrow().is_empty());
+    assert_eq!(fs::read_to_string(&binding).unwrap(), "old binding");
+    assert!(fixture.user_service_is_active(SCREEN).unwrap());
+
+    fixture.fail_state.set(false);
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    assert_eq!(fixture.calls.borrow()[0], format!("stop {SCREEN}"));
+}
+
+#[test]
 fn failed_stop_does_not_rewrite_or_reload_an_active_service() {
     let fixture = Fixture::new();
     assert_eq!(fixture.run(), StepResponse::Complete);
@@ -499,10 +526,10 @@ fn failed_stop_does_not_rewrite_or_reload_an_active_service() {
     assert!(fixture.user_service_is_active(SCREEN).unwrap());
 }
 
-fn native_flow(fixture: Fixture, plasma: bool) -> crate::setup::flow::OnboardingFlow {
+fn native_steps(fixture: Fixture, plasma: bool) -> crate::setup::environment::NativeSteps<Fixture> {
     use crate::setup::{
         environment::{NativeSteps, SetupContext},
-        flow::{AuthorizationMode, OnboardingFlow},
+        flow::AuthorizationMode,
     };
     let helper = fixture.root.join("kwin.sh");
     fs::write(
@@ -531,14 +558,16 @@ echo 0 > kwin-status
         lock_path: lock_path.clone(),
         authorization: AuthorizationMode::Noninteractive,
     };
-    OnboardingFlow::with_backend(
-        Box::new(NativeSteps {
-            context,
-            controller: fixture,
-        }),
-        &lock_path,
-    )
-    .unwrap()
+    NativeSteps {
+        context,
+        controller: fixture,
+    }
+}
+
+fn native_flow(fixture: Fixture, plasma: bool) -> crate::setup::flow::OnboardingFlow {
+    let steps = native_steps(fixture, plasma);
+    let lock = steps.context.lock_path.clone();
+    crate::setup::flow::OnboardingFlow::with_backend(Box::new(steps), &lock).unwrap()
 }
 
 #[test]
@@ -704,4 +733,52 @@ fn terminal_renderer_repairs_native_steps_and_repeat_preserves_files() {
     );
     assert_eq!(fs::read(root.join("kwin-actions")).unwrap(), actions);
     assert_eq!(fs::read(config).unwrap(), original);
+}
+
+#[test]
+fn native_assessment_tracks_repairs_removals_and_desktop_changes_without_mutation() {
+    use crate::setup::{
+        assessment::{assess_steps, SetupStatus},
+        lock::FlowLock,
+    };
+    let fixture = Fixture::new();
+    fs::write(&fixture.config, "tvs_primary_ip=192.0.2.1\ntvs_primary_mac=02:11:22:33:44:55\ntvs_primary_input=HDMI_1\ntvs_primary_platform=lg_webos\nupdates_auto_check=disabled\nscreen_idle_blank=disabled\n").unwrap();
+    let token = fixture.root.join("tvs/primary/access-token.json");
+    fs::create_dir_all(token.parent().unwrap()).unwrap();
+    fs::write(&token, "{\"access_token\":\"stored-token\"}").unwrap();
+    let steps = native_steps(fixture, false);
+    let fixture = &steps.controller;
+    // Inspection is usable even with an open flow and never takes its lock.
+    let _flow = FlowLock::acquire(&steps.context.lock_path).unwrap();
+    let original = fs::read(&fixture.config).unwrap();
+    let check = |expected| {
+        fixture.calls.borrow_mut().clear();
+        assert_eq!(assess_steps(&steps).status(), expected);
+        assert!(fixture.calls.borrow().is_empty());
+        assert!(!fixture.root.join("kwin-actions").exists());
+        assert_eq!(fs::read(&fixture.config).unwrap(), original);
+    };
+    check(SetupStatus::Incomplete);
+    assert!(!fixture.units.exists());
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    let unit = fixture.units.join(SCREEN);
+    let modified = fs::metadata(&unit).unwrap().modified().unwrap();
+    check(SetupStatus::Complete);
+    assert_eq!(fs::metadata(&unit).unwrap().modified().unwrap(), modified);
+    // A later Plasma session requires its currently loaded bridge.
+    fs::write(fixture.root.join("kwin-status"), "3").unwrap();
+    check(SetupStatus::Incomplete);
+    fs::write(fixture.root.join("kwin-status"), "0").unwrap();
+    check(SetupStatus::Complete);
+    // Stopped common services and removed files are discovered afresh.
+    fixture.user.borrow_mut().get_mut(SCREEN).unwrap().0 = false;
+    check(SetupStatus::Incomplete);
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    check(SetupStatus::Complete);
+    fs::remove_file(&unit).unwrap();
+    check(SetupStatus::Incomplete);
+    assert_eq!(fixture.run(), StepResponse::Complete);
+    check(SetupStatus::Complete);
+    fs::remove_file(&token).unwrap();
+    check(SetupStatus::Incomplete);
 }

@@ -97,3 +97,11 @@ impl OnboardingBackend for Fixture {
         )
     }
 }
+impl super::super::assessment::AssessmentBackend for Fixture {
+    fn assess(&self) -> Result<super::super::assessment::SetupAssessment, StepFailure> {
+        Ok(super::super::assessment::assess_steps(&Steps {
+            responses: self.responses.clone(),
+            calls: self.calls.clone(),
+        }))
+    }
+}

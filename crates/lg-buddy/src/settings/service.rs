@@ -3,7 +3,7 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::Command as ProcessCommand;
 use std::time::Duration;
 use std::{fs::File, sync::Arc};
 
@@ -169,23 +169,26 @@ impl SystemdUserServiceController {
         }
     }
 
-    fn user_systemctl_status(&self, args: &[&str]) -> io::Result<bool> {
-        ProcessCommand::new(&self.command_path)
-            .arg("--user")
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
+    fn user_systemctl_status(&self, args: &[&str]) -> Result<bool, SettingsError> {
+        let mut command = ProcessCommand::new(&self.command_path);
+        command.arg("--user").args(args);
+        query_status(command).map_err(|error| SettingsError::Activation {
+            message: format!(
+                "could not inspect user service ({}): {error}",
+                args.join(" ")
+            ),
+        })
     }
 
-    fn systemctl_status(&self, args: &[&str]) -> io::Result<bool> {
-        ProcessCommand::new(&self.command_path)
-            .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
+    fn systemctl_status(&self, args: &[&str]) -> Result<bool, SettingsError> {
+        let mut command = ProcessCommand::new(&self.command_path);
+        command.args(args);
+        query_status(command).map_err(|error| SettingsError::Activation {
+            message: format!(
+                "could not inspect system service ({}): {error}",
+                args.join(" ")
+            ),
+        })
     }
 
     fn run_user_systemctl(&self, args: &[&str]) -> Result<(), SettingsError> {
@@ -224,19 +227,12 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError> {
-        if !self
-            .user_systemctl_status(&["cat", service])
-            .unwrap_or(false)
-        {
+        if !self.user_systemctl_status(&["cat", service])? {
             return Ok(UserServiceState::Missing);
         }
 
-        let active = self
-            .user_systemctl_status(&["is-active", "--quiet", service])
-            .unwrap_or(false);
-        let enabled = self
-            .user_systemctl_status(&["is-enabled", "--quiet", service])
-            .unwrap_or(false);
+        let active = self.user_systemctl_status(&["is-active", "--quiet", service])?;
+        let enabled = self.user_systemctl_status(&["is-enabled", "--quiet", service])?;
 
         if active || enabled {
             Ok(UserServiceState::ActiveOrEnabled)
@@ -246,9 +242,7 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn user_service_is_active(&self, service: &str) -> Result<bool, SettingsError> {
-        Ok(self
-            .user_systemctl_status(&["is-active", "--quiet", service])
-            .unwrap_or(false))
+        self.user_systemctl_status(&["is-active", "--quiet", service])
     }
 
     fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
@@ -268,11 +262,10 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError> {
+        let session_active =
+            self.user_systemctl_status(&["is-active", "--quiet", "graphical-session.target"])?;
         self.run_user_systemctl(&["enable", unit])?;
-        if self
-            .user_systemctl_status(&["is-active", "--quiet", "graphical-session.target"])
-            .unwrap_or(false)
-        {
+        if session_active {
             self.run_user_systemctl(&["start", unit])?;
             Ok(UserUnitEnableOutcome::EnabledStarted)
         } else {
@@ -286,15 +279,9 @@ impl ServiceController for SystemdUserServiceController {
 
     fn user_unit_is_enabled(&self, unit: &str) -> Result<bool, SettingsError> {
         self.user_systemctl_status(&["is-enabled", "--quiet", unit])
-            .map_err(|error| SettingsError::Activation {
-                message: error.to_string(),
-            })
     }
     fn system_unit_is_enabled(&self, unit: &str) -> Result<bool, SettingsError> {
         self.systemctl_status(&["is-enabled", "--quiet", unit])
-            .map_err(|error| SettingsError::Activation {
-                message: error.to_string(),
-            })
     }
     fn reload_user_units(&self) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["daemon-reload"])
@@ -342,9 +329,7 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
-        Ok(self
-            .systemctl_status(&["is-active", "--quiet", "LG_Buddy_lifecycle.service"])
-            .unwrap_or(false))
+        self.systemctl_status(&["is-active", "--quiet", "LG_Buddy_lifecycle.service"])
     }
 
     fn start_system_lifecycle(&self) -> Result<(), SettingsError> {
@@ -383,6 +368,20 @@ impl ServiceController for SystemdUserServiceController {
     }
 }
 
+fn query_status(command: ProcessCommand) -> io::Result<bool> {
+    let result = crate::command::run_status_bounded(command, Duration::from_secs(2));
+    if result.timed_out {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "service inspection timed out",
+        ));
+    }
+    result
+        .status
+        .map(|status| status.success())
+        .ok_or_else(|| io::Error::other("service inspection could not run"))
+}
+
 fn configured_service_path(
     connection: Result<dbus::blocking::Connection, dbus::Error>,
     service: &str,
@@ -396,15 +395,25 @@ fn configured_service_path(
             "/org/freedesktop/systemd1",
             Duration::from_secs(2),
         );
-        let (path,): (dbus::Path<'static>,) =
-            manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))?;
+        let (path,): (dbus::Path<'static>,) = manager
+            .method_call("org.freedesktop.systemd1.Manager", "GetUnit", (service,))
+            .or_else(|error: dbus::Error| {
+                if error.name() == Some("org.freedesktop.systemd1.NoSuchUnit") {
+                    manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))
+                } else {
+                    Err(error)
+                }
+            })?;
         let unit = connection.with_proxy("org.freedesktop.systemd1", path, Duration::from_secs(2));
-        let environment: Vec<String> =
-            unit.get("org.freedesktop.systemd1.Service", "Environment")?;
-        let files: Vec<(String, bool)> =
-            unit.get("org.freedesktop.systemd1.Service", "EnvironmentFiles")?;
-        let unset: Vec<String> =
-            unit.get("org.freedesktop.systemd1.Service", "UnsetEnvironment")?;
+        let environment: Vec<String> = unit
+            .get("org.freedesktop.systemd1.Service", "Environment")
+            .map_err(|error| format!("Environment: {error}"))?;
+        let files: Vec<(String, bool)> = unit
+            .get("org.freedesktop.systemd1.Service", "EnvironmentFiles")
+            .map_err(|error| format!("EnvironmentFiles: {error}"))?;
+        let unset: Vec<String> = unit
+            .get("org.freedesktop.systemd1.Service", "UnsetEnvironment")
+            .map_err(|error| format!("UnsetEnvironment: {error}"))?;
         if !files.is_empty() {
             return Err("the service uses environment files; its configuration override could not be verified".into());
         }
@@ -431,18 +440,17 @@ fn configured_service_path(
 
 fn user_manager_connection() -> Result<dbus::blocking::Connection, dbus::Error> {
     if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR") {
-        // Like systemctl --user, address the user manager independently of the
-        // desktop's session bus (which may belong to dbus-run-session).
-        let socket = PathBuf::from(runtime_dir).join("systemd/private");
+        // Address the user's standard bus independently of a desktop bus
+        // supplied by dbus-run-session. Property queries use systemd's public
+        // D-Bus API rather than its private control socket.
+        let socket = PathBuf::from(runtime_dir).join("bus");
         let mut address = String::from("unix:path=");
         for byte in socket.as_os_str().as_encoded_bytes() {
             // D-Bus addresses use percent escapes, including for delimiters
             // such as commas and semicolons that can occur in a pathname.
             write!(address, "%{byte:02X}").expect("writing to a String cannot fail");
         }
-        // This is a peer connection, not a bus: do not send the bus-only Hello
-        // request that Connection::new_address uses to register a client.
-        return dbus::channel::Channel::open_private(&address).map(Into::into);
+        return dbus::blocking::Connection::new_address(&address);
     }
 
     match env::var("DBUS_SESSION_BUS_ADDRESS") {

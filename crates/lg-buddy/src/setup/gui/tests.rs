@@ -118,6 +118,11 @@ fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() 
         }
     }
     struct Backend(Mutex<Option<OnboardingFlow>>);
+    impl crate::setup::assessment::AssessmentBackend for Backend {
+        fn assess(&self) -> Result<crate::setup::assessment::SetupAssessment, StepFailure> {
+            unreachable!("this test drives the flow directly")
+        }
+    }
     impl OnboardingBackend for Backend {
         fn open(&self) -> Result<OnboardingFlow, StepFailure> {
             Ok(self.0.lock().unwrap().take().unwrap())
