@@ -6,6 +6,14 @@ source "$repo/data/kwin/setup.sh"
 set -e
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
+# An already-authorized helper failure must not look like authorization denial.
+for code in 126 127; do
+    (
+        system_action() { return "$code"; }
+        if main --system-dependencies 6.7.5; then status=0; else status=$?; fi
+        test "$status" = 1
+    )
+done
 export LG_BUDDY_CONFIG="$fixture/config.env"
 printf '%s\n' screen_backend=auto screen_idle_timeout=731 screen_honor_idle_inhibitors=enabled > "$LG_BUDDY_CONFIG"
 cp "$LG_BUDDY_CONFIG" "$fixture/original-config.env"

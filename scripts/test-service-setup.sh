@@ -42,6 +42,7 @@ systemctl() {
             cp "$setup_root/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf" "$fixture/lifecycle-loaded"
             ;;
         restart)
+            [ ! -f "$fixture/start-exit" ] || return "$(cat "$fixture/start-exit")"
             [ ! -f "$fixture/fail-start" ] || return 1
             cp "$fixture/lifecycle-loaded" "$fixture/lifecycle-running"
             touch "$fixture/lifecycle-active"
@@ -139,6 +140,12 @@ touch "$fixture/fail-start"
 if repair_services "$next_config"; then echo 'failed start reported success' >&2; exit 1; fi
 test ! -f "$fixture/lifecycle-active"
 rm "$fixture/fail-start"
+for code in 126 127; do
+    printf '%s' "$code" > "$fixture/start-exit"
+    if repair_services "$next_config"; then status=0; else status=$?; fi
+    test "$status" = 1
+done
+rm "$fixture/start-exit"
 repair_services "$next_config"
 test -f "$fixture/lifecycle-active"
 cmp "$fixture/lifecycle-loaded" "$fixture/lifecycle-running"

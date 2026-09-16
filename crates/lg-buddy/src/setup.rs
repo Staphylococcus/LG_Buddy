@@ -27,6 +27,17 @@ pub struct StepFailure {
     pub retryable: bool,
 }
 
+fn authorization_failed(diagnostic: impl Into<String>) -> StepResponse {
+    StepResponse::Failed(StepFailure {
+        presentation: UserFacingError::new(
+            "Administrator permission wasn't granted",
+            "Retry to authorize setup, or cancel and complete setup later.",
+        ),
+        diagnostic: diagnostic.into(),
+        retryable: true,
+    })
+}
+
 /// The same outcomes are used for inspection and execution. A command exiting
 /// successfully is not Complete until the step has verified its resulting state.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -292,7 +292,8 @@ load_installed() {
 }
 
 main() {
-    case "${1:-}" in --system-*) system_action "$@"; return ;; esac
+    # Once authorized, operation failures must not resemble pkexec's 126/127.
+    case "${1:-}" in --system-*) system_action "$@" || return 1; return 0 ;; esac
     if [ "${1:-}" = --remove ]; then
         uid="$(id -u)"
         state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/lg-buddy/kwin"

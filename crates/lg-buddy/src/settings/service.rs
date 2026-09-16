@@ -206,6 +206,7 @@ impl SystemdUserServiceController {
         } else {
             Err(SettingsError::Apply {
                 message: format_command_failure(
+                    "systemctl",
                     output.status.code(),
                     &output.stdout,
                     &output.stderr,
@@ -291,6 +292,11 @@ impl ServiceController for SystemdUserServiceController {
         config: &Path,
         authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
+        let executable = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
+            "pkexec"
+        } else {
+            "sudo"
+        };
         let mut command = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
             let mut command = crate::setup::lock::command_with_lock(
                 "/usr/bin/pkexec",
@@ -313,19 +319,7 @@ impl ServiceController for SystemdUserServiceController {
             .map_err(|error| SettingsError::Activation {
                 message: error.to_string(),
             })?;
-        if output.status.success() {
-            Ok(())
-        } else if output.status.code() == Some(126) {
-            Err(SettingsError::ActivationCancelled)
-        } else {
-            Err(SettingsError::Activation {
-                message: format_command_failure(
-                    output.status.code(),
-                    &output.stdout,
-                    &output.stderr,
-                ),
-            })
-        }
+        activation_result(executable, &output)
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
@@ -352,19 +346,7 @@ impl ServiceController for SystemdUserServiceController {
                 message: format!("could not request system lifecycle activation: {error}"),
             })?;
 
-        if output.status.success() {
-            Ok(())
-        } else if output.status.code() == Some(126) {
-            Err(SettingsError::ActivationCancelled)
-        } else {
-            Err(SettingsError::Activation {
-                message: format_command_failure(
-                    output.status.code(),
-                    &output.stdout,
-                    &output.stderr,
-                ),
-            })
-        }
+        activation_result("pkexec", &output)
     }
 }
 
@@ -470,7 +452,31 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn format_command_failure(status_code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+fn activation_result(command: &str, output: &std::process::Output) -> Result<(), SettingsError> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let message = format_command_failure(
+        command,
+        output.status.code(),
+        &output.stdout,
+        &output.stderr,
+    );
+    match (command, output.status.code()) {
+        ("pkexec", Some(126)) => Err(SettingsError::ActivationCancelled),
+        // Some agents return denial even when the user dismisses the dialog.
+        // Keep this distinct from explicit cancellation and setup-command failure.
+        ("pkexec", Some(127)) => Err(SettingsError::AuthorizationFailed { message }),
+        _ => Err(SettingsError::Activation { message }),
+    }
+}
+
+fn format_command_failure(
+    command: &str,
+    status_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
     let status = status_code
         .map(|code| code.to_string())
         .unwrap_or_else(|| "signal".to_string());
@@ -478,9 +484,46 @@ fn format_command_failure(status_code: Option<i32>, stdout: &[u8], stderr: &[u8]
     let stderr = String::from_utf8_lossy(stderr).trim().to_string();
 
     match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => format!("systemctl exited with status {status}"),
-        (false, true) => format!("systemctl exited with status {status}: {stdout}"),
-        (true, false) => format!("systemctl exited with status {status}: {stderr}"),
-        (false, false) => format!("systemctl exited with status {status}: {stderr}; {stdout}"),
+        (true, true) => format!("{command} exited with status {status}"),
+        (false, true) => format!("{command} exited with status {status}: {stdout}"),
+        (true, false) => format!("{command} exited with status {status}: {stderr}"),
+        (false, false) => format!("{command} exited with status {status}: {stderr}; {stdout}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn authorization_denial_is_distinct_from_cancellation_and_command_failure() {
+        let output = |code| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: b"authorization diagnostic".to_vec(),
+        };
+        assert!(activation_result("pkexec", &output(0)).is_ok());
+        assert!(matches!(
+            activation_result("pkexec", &output(126)),
+            Err(SettingsError::ActivationCancelled)
+        ));
+        let Err(SettingsError::AuthorizationFailed { message }) =
+            activation_result("pkexec", &output(127))
+        else {
+            panic!("denial must remain distinguishable from explicit cancellation");
+        };
+        assert_eq!(
+            message,
+            "pkexec exited with status 127: authorization diagnostic"
+        );
+        for (command, code) in [("pkexec", 1), ("sudo", 126), ("sudo", 127)] {
+            let Err(SettingsError::Activation { message }) =
+                activation_result(command, &output(code))
+            else {
+                panic!("ordinary command failure must not be classified as authorization");
+            };
+            assert!(message.starts_with(command));
+        }
     }
 }

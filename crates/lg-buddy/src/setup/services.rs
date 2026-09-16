@@ -125,10 +125,12 @@ impl ServiceStep {
             Self::Lifecycle => services.start_system_lifecycle(),
         };
         if let Err(error) = result {
-            return if matches!(error, SettingsError::ActivationCancelled) {
-                StepResponse::Cancelled
-            } else {
-                self.failed("The service could not be started. Try again.", error)
+            return match error {
+                SettingsError::ActivationCancelled => StepResponse::Cancelled,
+                SettingsError::AuthorizationFailed { message } => {
+                    super::authorization_failed(message)
+                }
+                error => self.failed("The service could not be started. Try again.", error),
             };
         }
         match self.inspect(config_path, install_root, services) {

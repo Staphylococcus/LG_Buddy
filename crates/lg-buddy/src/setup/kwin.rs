@@ -75,6 +75,7 @@ impl KWinSetup<'_> {
                     Some(77) if !allow_dependencies => BUILD_DEPENDENCIES,
                     Some(2) => self.inspect(),
                     Some(126) => StepResponse::Cancelled,
+                    Some(127) => super::authorization_failed(diagnostic(&output)),
                     _ => StepResponse::Failed(failure("Plasma integration could not be set up. LG Buddy will continue using its available sources.", &output, true)),
                 },
                 Err(error) => io_failure(error),
@@ -117,13 +118,16 @@ impl KWinSetup<'_> {
 fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Plasma setup incomplete", message),
-        diagnostic: format!(
-            "KWin setup exited {:?}: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ),
+        diagnostic: diagnostic(output),
         retryable,
     }
+}
+fn diagnostic(output: &Output) -> String {
+    format!(
+        "KWin setup exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 fn io_failure(error: std::io::Error) -> StepResponse {
     StepResponse::Failed(StepFailure {
@@ -263,6 +267,31 @@ exit "$result"
         fs::write(f.0.join("result"), "0").unwrap();
         assert_eq!(f.run(true), StepResponse::Complete);
     }
+    #[test]
+    fn authorization_denial_keeps_setup_pending_and_can_be_retried() {
+        let f = Fixture::new();
+        fs::write(f.0.join("result"), "127").unwrap();
+        let StepResponse::Failed(error) = f.run(true) else {
+            panic!("denial must not be mistaken for explicit cancellation");
+        };
+        assert_eq!(
+            error.presentation.summary(),
+            "Administrator permission wasn't granted"
+        );
+        assert!(error.retryable);
+        assert!(error.diagnostic.contains("127"));
+        assert_eq!(fs::read_to_string(f.0.join("status")).unwrap(), "3");
+        assert_eq!(
+            fs::read_to_string(f.0.join("actions"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        fs::write(f.0.join("result"), "0").unwrap();
+        assert_eq!(f.run(true), StepResponse::Complete);
+    }
+
     #[test]
     fn exhausted_provisioning_and_failed_verification_remain_incomplete() {
         let f = Fixture::new();

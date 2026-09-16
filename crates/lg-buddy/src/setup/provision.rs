@@ -119,6 +119,9 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     )),
                 },
                 Err(SettingsError::ActivationCancelled) => StepResponse::Cancelled,
+                Err(SettingsError::AuthorizationFailed { message }) => {
+                    super::authorization_failed(message)
+                }
                 Err(error) => StepResponse::Failed(failure(
                     "Service setup could not be completed.",
                     error,

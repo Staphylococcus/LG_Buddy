@@ -368,6 +368,29 @@ fn cancellation_failure_and_failed_verification_do_not_report_completion() {
     assert_eq!(fixture.run(), StepResponse::Complete);
 }
 #[test]
+fn authorization_denial_explains_recovery_without_losing_completed_setup() {
+    let fixture = Fixture::new();
+    let original = fs::read(&fixture.config).unwrap();
+    *fixture.error.borrow_mut() = Some(SettingsError::AuthorizationFailed {
+        message: "pkexec exited with status 127: private diagnostic".into(),
+    });
+    let StepResponse::Failed(error) = fixture.run() else {
+        panic!("denial must remain retryable, not silently cancel the flow");
+    };
+    assert_eq!(
+        error.presentation.summary(),
+        "Administrator permission wasn't granted"
+    );
+    assert!(error.presentation.detail().contains("Retry"));
+    assert!(!error.presentation.detail().contains("private diagnostic"));
+    assert!(error.diagnostic.contains("pkexec exited with status 127"));
+    assert!(error.retryable);
+    assert_eq!(fs::read(&fixture.config).unwrap(), original);
+    assert!(!fixture.units.exists());
+    assert_eq!(fixture.run(), StepResponse::Complete);
+}
+
+#[test]
 fn repair_rejects_cancellation_after_execution_begins() {
     let fixture = Fixture::new();
     let cancellation = StepCancellation::default();

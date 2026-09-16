@@ -102,7 +102,8 @@ HOOK
     done
     # Called only for a verified incomplete setup. Start even when the files
     # already match: a previous attempt may have stopped between reload/start.
-    systemctl restart LG_Buddy_lifecycle.service
+    # Reserve 126/127 for the authorization process that launches this helper.
+    systemctl restart LG_Buddy_lifecycle.service || return 1
 }
 
 main() {

@@ -136,7 +136,7 @@ impl OnboardingView {
             &view
                 .error
                 .as_ref()
-                .map(|e| format!("{} {}", e.summary(), e.detail()))
+                .map(|e| format!("{}: {}", e.summary(), e.detail()))
                 .unwrap_or_default(),
         );
         self.progress.set_visible(view.busy);
