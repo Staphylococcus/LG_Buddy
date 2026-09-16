@@ -122,7 +122,8 @@ echo "Done."
 if [ -z "$INSTALL_ROOT" ] && [ -f "$SYSTEM_LIB_DIR/kwin/setup.sh" ]; then
     /bin/bash "$SYSTEM_LIB_DIR/kwin/setup.sh" --remove || true
 fi
-run_privileged rm -rf -- "$SYSTEM_LIB_DIR/kwin"
+run_privileged rm -rf -- "$SYSTEM_LIB_DIR/kwin" "$SYSTEM_LIB_DIR/setup"
+run_privileged rm -f -- "$SYSTEM_LIB_DIR/setup-services" "$(prefix_path /usr/share/polkit-1/actions)/io.github.staphylococcus.LGBuddy.setup.policy"
 
 echo "Removing scripts"
 run_privileged rm -f "$RUNTIME_INSTALL_PATH"

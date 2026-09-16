@@ -29,6 +29,8 @@ cp "$REPOSITORY_ROOT/systemd/LG_Buddy_screen.service" "$BUNDLE/systemd/LG_Buddy_
 cp "$REPOSITORY_ROOT/systemd/LG_Buddy_update_check.service" "$BUNDLE/systemd/LG_Buddy_update_check.service"
 cp "$REPOSITORY_ROOT/systemd/LG_Buddy_update_check.timer" "$BUNDLE/systemd/LG_Buddy_update_check.timer"
 cp "$REPOSITORY_ROOT/systemd/lg_buddy.conf" "$BUNDLE/systemd/lg_buddy.conf"
+cp "$REPOSITORY_ROOT/data/setup-services.sh" "$BUNDLE/docs/setup-services.sh"
+cp "$REPOSITORY_ROOT/data/io.github.staphylococcus.LGBuddy.setup.policy" "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 cp "$REPOSITORY_ROOT/data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" \
     "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.svg"
 
@@ -203,6 +205,10 @@ CONFIG_FILE="$RUN_HOME/.config/lg-buddy/config.env"
 [ -f "$RUN_HANDOFF" ]
 grep -F -q ":$CONFIG_FILE" "$RUN_HANDOFF"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy" ]
+[ -x "$RUN_ROOT/usr/lib/lg-buddy/setup-services" ]
+cmp "$BUNDLE/docs/setup-services.sh" "$RUN_ROOT/usr/lib/lg-buddy/setup-services"
+cmp "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.setup.policy" "$RUN_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy"
+cmp "$BUNDLE/systemd/LG_Buddy_lifecycle.service" "$RUN_ROOT/usr/lib/lg-buddy/setup/systemd/LG_Buddy_lifecycle.service"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy-gui" ]
 [ -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
 grep -F -q 'Prepared an empty user configuration for first-run TV pairing.' "$RUN_OUTPUT"

@@ -92,8 +92,10 @@ jobs:
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
 
-      - name: Verify KWin provisioning fallbacks
+      - name: Verify setup helpers and KWin fallbacks
         run: |
+          bash -n data/setup-services.sh scripts/test-service-setup.sh
+          bash scripts/test-service-setup.sh
           bash scripts/test-kwin-setup.sh
           python3 scripts/test_kwin_matrix.py
 

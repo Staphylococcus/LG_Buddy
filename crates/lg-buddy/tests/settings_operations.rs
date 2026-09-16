@@ -460,6 +460,9 @@ case "$(cat "$LG_BUDDY_CONFIG")" in
   *) exit 99 ;;
 esac
 printf '%s\n' "$@" >> "$LG_BUDDY_TEST_AUTH_LOG"
+if [ "$LG_BUDDY_TEST_AUTH_EXIT" = 0 ] && [ "$LG_BUDDY_TEST_ACTIVATE" = 1 ]; then
+    touch "$LG_BUDDY_TEST_ACTIVE_STATE"
+fi
 exit "$LG_BUDDY_TEST_AUTH_EXIT"
 "#,
     );
@@ -468,7 +471,7 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         "systemctl",
         r#"#!/bin/sh
 [ "$*" = 'is-active --quiet LG_Buddy_lifecycle.service' ] || exit 99
-[ "$LG_BUDDY_TEST_LIFECYCLE_ACTIVE" = 1 ]
+[ "$LG_BUDDY_TEST_LIFECYCLE_ACTIVE" = 1 ] || [ -f "$LG_BUDDY_TEST_ACTIVE_STATE" ]
 "#,
     );
     let log = install_root.join("authorization.log");
@@ -487,6 +490,8 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
     env.set("LG_BUDDY_INSTALL_ROOT", &install_root);
     env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
     env.set("LG_BUDDY_TEST_AUTH_LOG", &log);
+    env.set("LG_BUDDY_TEST_ACTIVE_STATE", install_root.join("active"));
+    env.set("LG_BUDDY_TEST_ACTIVATE", "0");
     env.set("LG_BUDDY_TEST_LIFECYCLE_ACTIVE", "0");
     env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
     let backend = EnvironmentSettingsBackend;
@@ -504,6 +509,13 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         (
             "127",
             SettingsIntent::Reset(BehaviorSetting::SystemSleepWakePolicy),
+        ),
+        (
+            "0",
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::SystemSleepWakePolicy,
+                enabled: true,
+            },
         ),
     ] {
         env.set("LG_BUDDY_TEST_AUTH_EXIT", code);
@@ -536,6 +548,7 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
     }
 
     env.set("LG_BUDDY_TEST_AUTH_EXIT", "0");
+    env.set("LG_BUDDY_TEST_ACTIVATE", "1");
     let enabled = run_mutation(
         &mut app,
         &backend,
@@ -557,7 +570,7 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         .contains("system_sleep_wake_policy=enabled"));
     let calls = fs::read_to_string(&log).unwrap();
     let arguments: Vec<_> = calls.lines().collect();
-    assert_eq!(arguments.len(), 12);
+    assert_eq!(arguments.len(), 16);
     for call in arguments.as_chunks::<4>().0 {
         assert_eq!(call[0], "--disable-internal-agent");
         assert!(

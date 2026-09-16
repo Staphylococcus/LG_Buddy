@@ -394,6 +394,8 @@ while IFS= read -r -d '' metadata; do
 done < <(find "$BUNDLE_DIR/docs/kwin/prebuilt" -name metadata.tsv -type f -print0)
 [ "$KWIN_PREBUILT_COUNT" -gt 0 ] || fail "Release bundle contains no verified KWin prebuilts."
 assert_file "$BUNDLE_DIR/docs/release-process.md"
+assert_file "$BUNDLE_DIR/docs/setup-services.sh"
+assert_file "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
@@ -625,6 +627,12 @@ cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 }
 [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Fresh native install provisioned a Python environment."
 assert_file "$INSTALLED_POINTER"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services"
+cmp -s "$BUNDLE_DIR/docs/setup-services.sh" "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services"
+cmp -s "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy" "$INSTALL_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy"
+for unit in LG_Buddy.service LG_Buddy_lifecycle.service lg_buddy.conf; do
+    cmp -s "$BUNDLE_DIR/systemd/$unit" "$INSTALL_ROOT/usr/lib/lg-buddy/setup/systemd/$unit"
+done
 assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/setup.sh"
 assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/build.sh"
 diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
@@ -1157,6 +1165,9 @@ export LG_BUDDY_REMOVE_CONFIG="1"
     exit 1
 }
 [ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/kwin" ] || fail "KWin payload remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/setup" ] || fail "Service repair payload remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services" ] || fail "Service repair helper remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy" ] || fail "Setup authorization policy remains after uninstall."
 [ ! -e "$HOME/.config/systemd/user/LG_Buddy_kwin.service" ] || fail "KWin setup unit remains after uninstall."
 [ ! -e "$INSTALLED_GUI" ] || {
     echo "Installed GUI still present after uninstall: $INSTALLED_GUI"

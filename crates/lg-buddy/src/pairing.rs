@@ -1,11 +1,8 @@
 //! Foreground first-TV pairing. The application validates the draft and owns
 //! cancellation; its worker pairs and verifies before publishing any profile.
 
+use crate::setup::StepCancellation;
 use std::net::Ipv4Addr;
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
 use std::time::Duration;
 
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
@@ -63,6 +60,14 @@ pub struct PairingRequest {
 }
 
 impl PairingRequest {
+    pub fn parse(address: &str, mac: &str, input: HdmiInput) -> Result<Self, UserFacingError> {
+        validate(&PairingDraft {
+            address: address.into(),
+            mac: mac.into(),
+            input,
+        })
+    }
+
     pub fn address(&self) -> Ipv4Addr {
         self.address
     }
@@ -76,20 +81,17 @@ impl PairingRequest {
 
 // Exactly one side wins the cancellation/commit boundary. The UI never waits
 // for a filesystem lock: cancellation is accepted until publication starts.
-const ACTIVE: u8 = 0;
-const CANCELLED: u8 = 1;
-const SAVING: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct PairingOperation {
     id: u64,
     request: PairingRequest,
-    gate: Arc<AtomicU8>,
+    gate: StepCancellation,
 }
 
 impl PartialEq for PairingOperation {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && Arc::ptr_eq(&self.gate, &other.gate)
+        self.id == other.id && self.gate.same_attempt(&other.gate)
     }
 }
 impl Eq for PairingOperation {}
@@ -99,18 +101,20 @@ impl PairingOperation {
         self.request
     }
     pub fn is_cancelled(&self) -> bool {
-        self.gate.load(Ordering::Acquire) == CANCELLED
+        self.gate.is_cancelled()
     }
     fn cancel(&self) -> bool {
-        self.gate
-            .compare_exchange(ACTIVE, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            || self.is_cancelled()
+        self.gate.cancel() || self.gate.is_cancelled()
     }
     fn begin_save(&self) -> bool {
-        self.gate
-            .compare_exchange(ACTIVE, SAVING, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.gate.begin()
+    }
+    pub(crate) fn for_setup(request: PairingRequest, gate: StepCancellation) -> Self {
+        Self {
+            id: 0,
+            request,
+            gate,
+        }
     }
 }
 
@@ -138,7 +142,7 @@ impl PairingError {
     pub fn failure(&self) -> PairingFailure {
         self.failure
     }
-    fn presentation(&self) -> UserFacingError {
+    pub(crate) fn presentation(&self) -> UserFacingError {
         let (title, detail) = match self.failure {
             PairingFailure::Cancelled => ("Pairing cancelled", "No TV was saved."),
             PairingFailure::Rejected => ("Connection declined on TV", "Start pairing again and use the TV remote to allow the connection request."),
@@ -213,7 +217,7 @@ impl PairingBackend for EnvironmentPairingBackend {
     }
 }
 
-fn pair_and_save_webos(
+pub(crate) fn pair_and_save_webos(
     operation: &PairingOperation,
     path: &std::path::Path,
     endpoint: WebOsEndpoint,
@@ -268,7 +272,7 @@ fn map_pairing_read_error(error: WebOsPairingReadError) -> PairingError {
     })
 }
 
-fn pair_and_save(
+pub(crate) fn pair_and_save(
     operation: &PairingOperation,
     path: &std::path::Path,
     progress: &mut dyn FnMut(PairingStage),
@@ -281,7 +285,25 @@ fn pair_and_save(
         return Err(PairingError::new(PairingFailure::Cancelled));
     }
     let persistence_error = || PairingError::new(PairingFailure::Persistence);
-    let store = PairingStore::prepare(path).map_err(|_| persistence_error())?;
+    let store = crate::settings::SettingsStore::load(path).map_err(|_| persistence_error())?;
+    let profiles =
+        crate::tvs::read_profiles_from_store(path, &store).map_err(|_| persistence_error())?;
+    if let Some(profile) = profiles.first() {
+        let request = operation.request;
+        if profile.address() != request.address
+            || profile.mac() != request.mac
+            || profile.input() != request.input
+            || profile.platform() != TvPlatform::LgWebOs
+        {
+            return Err(persistence_error());
+        }
+        if profile.credentials() == TvCredentialState::Stored {
+            return Ok(PairingOutcome::from(profile.clone()));
+        }
+    }
+
+    let store =
+        PairingStore::prepare_pairing(path, &operation.request).map_err(|_| persistence_error())?;
     let token = authenticate(progress)?;
     if !operation.begin_save() {
         return Err(PairingError::new(PairingFailure::Cancelled));
@@ -364,7 +386,7 @@ impl PairingApplication {
                 let operation = PairingOperation {
                     id: operation_id,
                     request,
-                    gate: Arc::new(AtomicU8::new(ACTIVE)),
+                    gate: StepCancellation::default(),
                 };
                 self.active = Some(operation.clone());
                 self.error = None;
@@ -538,7 +560,7 @@ mod tests {
             let store = ConfigEnvReader::load(&path).unwrap().into_store();
             assert_eq!(
                 store.raw_storage_value("system_sleep_wake_policy"),
-                Some("disabled")
+                Some("enabled")
             );
             let ready = app
                 .complete_settings_read(
@@ -549,7 +571,7 @@ mod tests {
             let activation = ready.settings().unwrap().mutation_operation().unwrap();
             assert_eq!(activation.setting(), BehaviorSetting::SystemSleepWakePolicy);
 
-            let enabled = failure.is_none();
+            let enabled = true;
             // Model the service-activation result at the worker boundary;
             // a successful activation uses the shared persistence executor.
             let result = match failure {
@@ -585,7 +607,7 @@ mod tests {
             let saved = ConfigEnvReader::load(&path).unwrap().into_store();
             assert_eq!(
                 saved.raw_storage_value("system_sleep_wake_policy"),
-                Some(if enabled { "enabled" } else { "disabled" })
+                Some("enabled")
             );
             assert_eq!(
                 saved.raw_storage_value("tvs_primary_ip"),
@@ -826,9 +848,12 @@ mod tests {
                     assert!(complete.profile_changed());
                     assert_eq!(stages.last(), Some(&PairingStage::Saving));
                     let retry = pair_and_save(&operation, &path, &mut |_| {}, |_| {
-                        panic!("existing profile must refuse before connecting")
+                        panic!("existing pairing must not connect again")
                     });
-                    assert_eq!(retry.unwrap_err().failure(), PairingFailure::Persistence);
+                    assert_eq!(
+                        retry.unwrap().profile().credentials(),
+                        TvCredentialState::Stored
+                    );
                 }
             }
         }

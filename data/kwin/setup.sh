@@ -11,6 +11,9 @@ fi
 
 payload_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 runtime=/usr/bin/lg-buddy
+foreground=0
+allow_dependencies=0
+noninteractive=0
 
 plugin_root_supported() {
     case "$1" in
@@ -107,8 +110,10 @@ privileged() {
         /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
         /usr/bin/sudo -n /bin/bash "$payload_dir/setup.sh" "$@"
+    elif [ "$noninteractive" -eq 1 ]; then
+        return 127
     elif [ -x /usr/bin/pkexec ]; then
-        /usr/bin/pkexec --disable-internal-agent /bin/bash "$payload_dir/setup.sh" "$@"
+        /usr/bin/pkexec --disable-internal-agent "$payload_dir/setup.sh" "$@"
     elif [ -t 0 ] && [ -x /usr/bin/sudo ]; then
         /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
     else
@@ -157,7 +162,11 @@ try_artifacts() {
         local installed="$plugin_root/kwin/plugins/$id.so"
         if [ ! -f "$installed" ] || [ -L "$installed" ] \
             || [ "$(sha256sum -- "$installed" | cut -d ' ' -f1)" != "$candidate_digest" ]; then
-            privileged --system-install "$uid" "$plugin_root" "$id" "${metadata%/*}/plugin.so" || continue
+            privileged --system-install "$uid" "$plugin_root" "$id" "${metadata%/*}/plugin.so" || {
+                local status=$?
+                case "$status" in 126|127) return "$status" ;; esac
+                continue
+            }
         fi
         # Keep receipts even for rejected candidates, so cleanup can be retried
         # if authorization to remove a file is temporarily unavailable.
@@ -165,15 +174,24 @@ try_artifacts() {
         # A unique filename per artifact avoids Qt caching a rejected candidate
         # under the same name as a subsequent locally compiled plugin.
         reply="$("$runtime" kwin-bridge load "$id" 2>>"$log_file")" || {
-            remove_plugin "$plugin_root" "$id"
+            remove_plugin "$plugin_root" "$id" || {
+                local status=$?
+                case "$status" in 126|127) return "$status" ;; esac
+            }
             continue
         }
         if [ "$reply" != "$kwin_version"$'\t'"$source_id" ]; then
-            remove_plugin "$plugin_root" "$id"
+            remove_plugin "$plugin_root" "$id" || {
+                local status=$?
+                case "$status" in 126|127) return "$status" ;; esac
+            }
             continue
         fi
         if ! configure_plugin "$id" true; then
-            remove_plugin "$plugin_root" "$id"
+            remove_plugin "$plugin_root" "$id" || {
+                local status=$?
+                case "$status" in 126|127) return "$status" ;; esac
+            }
             continue
         fi
         echo "LG Buddy: KWin source available ($provenance, KWin $kwin_version)."
@@ -189,7 +207,11 @@ remove_plugin() {
     configure_plugin "$id" false || true
     if plugin_root_supported "$root" && privileged --system-remove "$uid" "$root" "$id"; then
         rm -f -- "$state_dir/plugins/$id.tsv"
+    else
+        local status=$?
+        case "$status" in 126|127) return "$status" ;; esac
     fi
+    return 0
 }
 
 remove_previous() {
@@ -197,60 +219,116 @@ remove_previous() {
     for receipt in "$state_dir"/plugins/*.tsv; do
         [ -f "$receipt" ] && [ ! -L "$receipt" ] || continue
         IFS=$'\t' read -r root id < "$receipt" || continue
-        remove_plugin "$root" "$id"
+        remove_plugin "$root" "$id" || {
+            local status=$?
+            case "$status" in 126|127) return "$status" ;; esac
+        }
     done
     return 0
 }
 
 provision() {
-    remove_previous
+    local status
+    remove_previous || return $?
     try_artifacts "$payload_dir/prebuilt" prebuilt && return 0
+    status=$?; case "$status" in 126|127) return "$status" ;; esac
     try_artifacts "$cache_dir" cached && return 0
-    # Try installed development files before asking the package manager for any.
+    status=$?; case "$status" in 126|127) return "$status" ;; esac
     if ! /bin/bash "$payload_dir/build.sh" "$payload_dir/source" "$cache_dir" "$kwin_version" >>"$log_file" 2>&1; then
+        # 77 is a typed request for a separately explained dependency installation.
+        if [ "$foreground" -eq 1 ] && [ "$allow_dependencies" -ne 1 ]; then return 77; fi
         if privileged --system-dependencies "$kwin_version"; then
             /bin/bash "$payload_dir/build.sh" "$payload_dir/source" "$cache_dir" "$kwin_version" >>"$log_file" 2>&1 || true
+        else
+            status=$?; case "$status" in 126|127) return "$status" ;; esac
         fi
     fi
     try_artifacts "$cache_dir" locally-compiled && return 0
+    status=$?; case "$status" in 126|127) return "$status" ;; esac
     echo "LG Buddy: KWin source absent; continuing with available sources. Setup details: $log_file"
+    [ "$foreground" -ne 1 ]
+}
+
+# Structured status protocol: 0 ready, 2 inapplicable, 3 needs setup,
+# 4 unsupported installation, 1 inspection failure. This function never writes.
+inspect_session() {
+    uid="$(id -u)"
+    [ "$uid" -ne 0 ] || return 2
+    state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/lg-buddy/kwin"
+    cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/lg-buddy/kwin"
+    log_file="$state_dir/setup.log"
+    local info existing
+    info="$("$runtime" kwin-bridge info)" || return 1
+    [ -n "$info" ] || return 2
+    IFS=$'\t' read -r kwin_version qt_version plugin_root kwin_owner <<< "$info"
+    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 4
+    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 4
+    source_id="$(cd -- "$payload_dir/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum)" || return 1
+    source_id="${source_id%% *}"
+    arch="$(uname -m)"
+    existing="$("$runtime" kwin-bridge check 2>/dev/null)" || return 3
+    [ "$existing" = "$kwin_version"$'\t'"$source_id" ] || return 3
+}
+
+# Login may load an already installed artifact, but never installs or compiles.
+load_installed() {
+    local directory metadata id installed reply
+    for directory in "$payload_dir/prebuilt" "$cache_dir"; do
+        [ -d "$directory" ] || continue
+        while IFS= read -r -d '' metadata; do
+            compatible_metadata "$metadata" || continue
+            id="lg_buddy_inhibition_${uid}_${candidate_digest}"
+            installed="$plugin_root/kwin/plugins/$id.so"
+            [ -f "$installed" ] && [ ! -L "$installed" ] || continue
+            [ "$(sha256sum -- "$installed" | cut -d ' ' -f1)" = "$candidate_digest" ] || continue
+            reply="$("$runtime" kwin-bridge load "$id")" || continue
+            [ "$reply" = "$kwin_version"$'\t'"$source_id" ] && return 0
+        done < <(find "$directory" -mindepth 2 -maxdepth 2 -type f -name metadata.tsv -print0 | sort -z)
+    done
     return 0
 }
 
 main() {
     case "${1:-}" in --system-*) system_action "$@"; return ;; esac
-    uid="$(id -u)"
-    # Per-user setup always runs as that user, including builds and kwinrc changes.
-    [ "$uid" -ne 0 ] || return 0
-    state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/lg-buddy/kwin"
-    cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/lg-buddy/kwin"
-    mkdir -p -- "$state_dir/plugins" "$cache_dir" || return 0
-    chmod 700 "$state_dir" "$cache_dir" || return 0
-    log_file="$state_dir/setup.log"
-    # Serialize install/update/login attempts without coupling to the monitor.
-    exec 9>"$state_dir/setup.lock"
-    flock -n 9 || return 0
     if [ "${1:-}" = --remove ]; then
-        remove_previous
+        uid="$(id -u)"
+        state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/lg-buddy/kwin"
+        cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/lg-buddy/kwin"
+        if [ -d "$state_dir" ]; then
+            log_file="$state_dir/setup.log"
+            exec 9>"$state_dir/setup.lock"
+            flock -n 9 || return 1
+            remove_previous || return $?
+        fi
         rm -rf -- "$cache_dir"
         return 0
     fi
+    local mode="${1:-}" status
+    case "$mode" in ""|--status|--foreground) ;; *) return 1 ;; esac
+    [ "$mode" != --foreground ] || foreground=1
+    for option in "${@:2}"; do
+        case "$option" in
+            --allow-dependencies) allow_dependencies=1 ;;
+            --noninteractive) noninteractive=1 ;;
+            *) return 1 ;;
+        esac
+    done
+    if inspect_session; then status=0; else status=$?; fi
+    if [ "$mode" = --status ]; then return "$status"; fi
+    case "$status" in
+        0) return 0 ;;
+        3) ;;
+        *) [ "$foreground" -eq 0 ] && return 0; return "$status" ;;
+    esac
+    if [ "$foreground" -eq 0 ]; then load_installed; return; fi
+    mkdir -p -- "$state_dir/plugins" "$cache_dir" || return 1
+    chmod 700 "$state_dir" "$cache_dir" || return 1
+    exec 9>"$state_dir/setup.lock"
+    flock -n 9 || return 1
+    # Recheck after taking ownership; another setup may just have completed.
+    if inspect_session; then return 0; else status=$?; fi
+    [ "$status" -eq 3 ] || return "$status"
     : > "$log_file"
-    local info
-    info="$("$runtime" kwin-bridge info 2>>"$log_file")" || return 0
-    [ -n "$info" ] || return 0
-    IFS=$'\t' read -r kwin_version qt_version plugin_root kwin_owner <<< "$info"
-    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 0
-    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 0
-    source_id="$(cd -- "$payload_dir/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum)" || return 0
-    source_id="${source_id%% *}"
-    arch="$(uname -m)"
-    local existing
-    existing="$("$runtime" kwin-bridge check 2>>"$log_file")" || existing=""
-    if [ "$existing" = "$kwin_version"$'\t'"$source_id" ]; then
-        echo "LG Buddy: KWin source available (already loaded)."
-        return 0
-    fi
     provision
 }
 

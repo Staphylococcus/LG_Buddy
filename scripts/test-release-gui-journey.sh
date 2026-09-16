@@ -215,8 +215,8 @@ SH
     cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Diagnostics changed configuration."
     cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Diagnostics changed credentials."
 
-    # Re-pairing preserves preferences; failed activation leaves honest toggles
-    # and can be retried from Settings without repeating TV pairing.
+    # Re-pairing preserves desired preferences even when activation fails.
+    # The current Settings adapter can retry without repeating TV pairing.
     touch "$WORK_DIR/services/screen-fails"
     observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
     xdotool key --window "$WINDOW_ID" Return
@@ -244,22 +244,30 @@ SH
     journey_pair
     journey_setting tv.ip 127.0.0.1
     observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=off' --expected-toggle 'TV sleep & wake=off'
-    journey_setting screen.idle_blank disabled
-    journey_setting system.sleep_wake_policy disabled
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
+    journey_setting screen.idle_blank enabled
+    journey_setting system.sleep_wake_policy enabled
+    ! "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Failed activation reported the screen service active."
+    ! "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Declined activation reported the lifecycle service active."
     journey_close "paired TV with declined activation"
     cp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot"
     start_gui enabled "" "" normal
     observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=off' --expected-toggle 'TV sleep & wake=off'
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
     cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Relaunch unexpectedly requested activation again."
     rm "$WORK_DIR/services/screen-fails"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
     # Package-managed screen services do not need the shell installer's pointer.
     mv "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path" "$WORK_DIR/config-path.saved"
+    # Until the shared completion flow replaces this adapter, switching off/on
+    # explicitly exercises the existing activation path with retained settings.
+    observe_gui_state --activate-control 'Idle blanking'
+    journey_setting screen.idle_blank disabled
     observe_gui_state --activate-control 'Idle blanking'
     journey_setting screen.idle_blank enabled
     mv "$WORK_DIR/config-path.saved" "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path"
+    observe_gui_state --activate-control 'TV sleep & wake'
+    journey_setting system.sleep_wake_policy disabled
     observe_gui_state --activate-control 'TV sleep & wake'
     journey_setting system.sleep_wake_policy enabled
     journey_setting screen.idle_timeout 720

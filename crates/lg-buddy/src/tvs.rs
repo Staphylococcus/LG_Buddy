@@ -412,7 +412,7 @@ impl TvsBackend for EnvironmentTvsBackend {
     }
 }
 
-fn read_profiles_from_store(
+pub(crate) fn read_profiles_from_store(
     config_path: &std::path::Path,
     store: &SettingsStore,
 ) -> Result<Vec<TvProfile>, TvsReadError> {

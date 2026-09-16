@@ -83,9 +83,46 @@ pub trait ServiceController {
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError>;
 
+    fn stop_user_service(&self, _service: &str) -> Result<(), SettingsError> {
+        Err(SettingsError::Activation {
+            message: "user service stop is unavailable".into(),
+        })
+    }
+
     fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError>;
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError>;
+
+    fn user_unit_is_enabled(&self, unit: &str) -> Result<bool, SettingsError> {
+        Ok(matches!(
+            self.user_service_state(unit)?,
+            UserServiceState::ActiveOrEnabled
+        ))
+    }
+    fn system_unit_is_enabled(&self, _unit: &str) -> Result<bool, SettingsError> {
+        Err(SettingsError::Activation {
+            message: "system service enablement could not be checked".into(),
+        })
+    }
+    fn reload_user_units(&self) -> Result<(), SettingsError> {
+        Err(SettingsError::Activation {
+            message: "user service reload is unavailable".into(),
+        })
+    }
+    fn system_service_config_path(&self, _service: &str) -> Result<PathBuf, SettingsError> {
+        Err(SettingsError::Activation {
+            message: "system service configuration could not be checked".into(),
+        })
+    }
+    fn repair_system_services(
+        &self,
+        _config: &Path,
+        _interactive: bool,
+    ) -> Result<(), SettingsError> {
+        Err(SettingsError::Activation {
+            message: "system service repair is unavailable".into(),
+        })
+    }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
         Ok(false)
@@ -196,51 +233,19 @@ impl ServiceController for SystemdUserServiceController {
     }
 
     fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
-        // Read typed systemd properties so paths containing spaces, quotes or
-        // shell metacharacters do not need to be parsed from systemctl output.
-        let inspect = || -> Result<PathBuf, Box<dyn std::error::Error>> {
-            let connection = user_manager_connection()?;
-            let manager = connection.with_proxy(
-                "org.freedesktop.systemd1",
-                "/org/freedesktop/systemd1",
-                Duration::from_secs(2),
-            );
-            let (path,): (dbus::Path<'static>,) =
-                manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))?;
-            let unit =
-                connection.with_proxy("org.freedesktop.systemd1", path, Duration::from_secs(2));
-            let environment: Vec<String> =
-                unit.get("org.freedesktop.systemd1.Service", "Environment")?;
-            let files: Vec<(String, bool)> =
-                unit.get("org.freedesktop.systemd1.Service", "EnvironmentFiles")?;
-            let unset: Vec<String> =
-                unit.get("org.freedesktop.systemd1.Service", "UnsetEnvironment")?;
-            if !files.is_empty() {
-                return Err("the screen service uses environment files; its configuration override could not be verified".into());
-            }
-            let assignment = environment
-                .iter()
-                .rev()
-                .find(|value| value.starts_with("LG_BUDDY_CONFIG="))
-                .filter(|value| {
-                    !unset
-                        .iter()
-                        .any(|removed| removed == "LG_BUDDY_CONFIG" || removed == *value)
-                })
-                .ok_or("the screen service does not declare LG_BUDDY_CONFIG")?;
-            let path = PathBuf::from(assignment.strip_prefix("LG_BUDDY_CONFIG=").unwrap());
-            if !path.is_absolute() {
-                return Err("the screen service's LG_BUDDY_CONFIG is not an absolute path".into());
-            }
-            Ok(path)
-        };
-        inspect().map_err(|error| SettingsError::Activation {
-            message: format!("could not verify {service}'s configuration: {error}"),
-        })
+        configured_service_path(user_manager_connection(), service)
+    }
+
+    fn system_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
+        configured_service_path(dbus::blocking::Connection::new_system(), service)
     }
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["restart", service])
+    }
+
+    fn stop_user_service(&self, service: &str) -> Result<(), SettingsError> {
+        self.run_user_systemctl(&["stop", service])
     }
 
     fn enable_start_user_unit(&self, unit: &str) -> Result<UserUnitEnableOutcome, SettingsError> {
@@ -258,6 +263,57 @@ impl ServiceController for SystemdUserServiceController {
 
     fn disable_stop_user_unit(&self, unit: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["disable", "--now", unit])
+    }
+
+    fn user_unit_is_enabled(&self, unit: &str) -> Result<bool, SettingsError> {
+        self.user_systemctl_status(&["is-enabled", "--quiet", unit])
+            .map_err(|error| SettingsError::Activation {
+                message: error.to_string(),
+            })
+    }
+    fn system_unit_is_enabled(&self, unit: &str) -> Result<bool, SettingsError> {
+        self.systemctl_status(&["is-enabled", "--quiet", unit])
+            .map_err(|error| SettingsError::Activation {
+                message: error.to_string(),
+            })
+    }
+    fn reload_user_units(&self) -> Result<(), SettingsError> {
+        self.run_user_systemctl(&["daemon-reload"])
+    }
+    fn repair_system_services(
+        &self,
+        config: &Path,
+        interactive: bool,
+    ) -> Result<(), SettingsError> {
+        let mut command = if interactive {
+            let mut command = ProcessCommand::new("/usr/bin/pkexec");
+            command.arg("--disable-internal-agent");
+            command
+        } else {
+            let mut command = ProcessCommand::new("/usr/bin/sudo");
+            command.arg("-n");
+            command
+        };
+        let output = command
+            .arg("/usr/lib/lg-buddy/setup-services")
+            .arg(config)
+            .output()
+            .map_err(|error| SettingsError::Activation {
+                message: error.to_string(),
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else if output.status.code() == Some(126) {
+            Err(SettingsError::ActivationCancelled)
+        } else {
+            Err(SettingsError::Activation {
+                message: format_command_failure(
+                    output.status.code(),
+                    &output.stdout,
+                    &output.stderr,
+                ),
+            })
+        }
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
@@ -300,6 +356,52 @@ impl ServiceController for SystemdUserServiceController {
             })
         }
     }
+}
+
+fn configured_service_path(
+    connection: Result<dbus::blocking::Connection, dbus::Error>,
+    service: &str,
+) -> Result<PathBuf, SettingsError> {
+    // Read typed systemd properties so paths containing spaces, quotes or
+    // shell metacharacters do not need to be parsed from systemctl output.
+    let inspect = || -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let connection = connection?;
+        let manager = connection.with_proxy(
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            Duration::from_secs(2),
+        );
+        let (path,): (dbus::Path<'static>,) =
+            manager.method_call("org.freedesktop.systemd1.Manager", "LoadUnit", (service,))?;
+        let unit = connection.with_proxy("org.freedesktop.systemd1", path, Duration::from_secs(2));
+        let environment: Vec<String> =
+            unit.get("org.freedesktop.systemd1.Service", "Environment")?;
+        let files: Vec<(String, bool)> =
+            unit.get("org.freedesktop.systemd1.Service", "EnvironmentFiles")?;
+        let unset: Vec<String> =
+            unit.get("org.freedesktop.systemd1.Service", "UnsetEnvironment")?;
+        if !files.is_empty() {
+            return Err("the service uses environment files; its configuration override could not be verified".into());
+        }
+        let assignment = environment
+            .iter()
+            .rev()
+            .find(|value| value.starts_with("LG_BUDDY_CONFIG="))
+            .filter(|value| {
+                !unset
+                    .iter()
+                    .any(|removed| removed == "LG_BUDDY_CONFIG" || removed == *value)
+            })
+            .ok_or("the service does not declare LG_BUDDY_CONFIG")?;
+        let path = PathBuf::from(assignment.strip_prefix("LG_BUDDY_CONFIG=").unwrap());
+        if !path.is_absolute() {
+            return Err("the service's LG_BUDDY_CONFIG is not an absolute path".into());
+        }
+        Ok(path)
+    };
+    inspect().map_err(|error| SettingsError::Activation {
+        message: format!("could not verify {service}'s configuration: {error}"),
+    })
 }
 
 fn user_manager_connection() -> Result<dbus::blocking::Connection, dbus::Error> {

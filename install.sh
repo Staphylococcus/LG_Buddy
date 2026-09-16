@@ -493,6 +493,20 @@ perform_privileged_runtime_installation() {
         run_system_mutation_command install -d "$SYSTEM_LIB_DIR"
         run_system_mutation_command install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
     fi
+    local setup_source="$SCRIPT_DIR/data/setup-services.sh"
+    local setup_policy="$SCRIPT_DIR/data/io.github.staphylococcus.LGBuddy.setup.policy"
+    if [ ! -f "$setup_source" ]; then
+        setup_source="$SCRIPT_DIR/docs/setup-services.sh"
+        setup_policy="$SCRIPT_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
+    fi
+    if [ -f "$setup_source" ]; then
+        run_system_mutation_command install -d "$SYSTEM_LIB_DIR/setup/systemd" "$(prefix_path /usr/share/polkit-1/actions)"
+        run_system_mutation_command install -m 755 "$setup_source" "$SYSTEM_LIB_DIR/setup-services"
+        run_system_mutation_command install -m 644 "$setup_policy" "$(prefix_path /usr/share/polkit-1/actions)/io.github.staphylococcus.LGBuddy.setup.policy"
+        for unit in LG_Buddy.service LG_Buddy_lifecycle.service lg_buddy.conf; do
+            run_system_mutation_command install -m 644 "$SCRIPT_DIR/systemd/$unit" "$SYSTEM_LIB_DIR/setup/systemd/$unit"
+        done
+    fi
     if [ -d "$KWIN_PAYLOAD_DIR" ]; then
         run_system_mutation_command rm -rf -- "$KWIN_INSTALL_DIR"
         run_system_mutation_command install -d "$KWIN_INSTALL_DIR"
