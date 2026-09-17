@@ -155,11 +155,23 @@ while keeping their saved values for when you turn it back on. **Restore policy*
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.
 
-The compatibility CLI still accepts `screen.backend` and `detect-backend`.
-`detect-backend` returns one native capability for older callers; it does not
-describe the automatic monitor's complete source set. CLI setting writes keep
-their existing save-then-apply behavior. Use the Settings action above when you
-want the recoverable transition. See the [session backend model](session-backend-model.md).
+Backend selection is absent from `settings list` and `settings describe`
+without a key. Existing scripts can still explicitly use `settings get`,
+`describe`, `set` and `unset` with `screen.backend`. The accepted values remain
+`auto`, `gnome`, `wayland` and `swayidle`; `unset` restores the `auto` default.
+Reading or listing settings never migrates a saved override.
+
+These legacy writes keep their save-then-apply behavior: if service application
+fails, the command returns an error identifying the saved value, which remains
+in the configuration. Repeating the command retries application even when the
+value is unchanged. Use **Legacy desktop integration → Use automatic** for a
+validated transition that restores the previous configuration on apply failure.
+
+The hidden `detect-backend` compatibility command retains its output for older
+callers. Like the resolution field in `settings describe screen.backend`, it
+reports one native capability, not the automatic monitor's complete source set.
+Use the application's diagnostics for current activity and inhibition sources.
+See the [session backend model](session-backend-model.md).
 
 <a id="external-idle-automation"></a>
 ## External idle automation
@@ -247,8 +259,8 @@ These commands work without opening the GUI:
 | Set OLED brightness to 65% | `lg-buddy brightness set 65` |
 | Set volume to 20 and unmute | `lg-buddy volume 20` |
 | Toggle mute | `lg-buddy volume mute` |
-| Inspect all settings | `lg-buddy settings list` |
-| Explain the selected desktop integration | `lg-buddy settings describe screen.backend` |
+| Inspect public settings | `lg-buddy settings list` |
+| Explain idle blanking | `lg-buddy settings describe screen.idle_blank` |
 | Wait ten minutes before blanking | `lg-buddy settings set screen.idle_timeout 600` |
 | Restore the default idle timeout | `lg-buddy settings unset screen.idle_timeout` |
 
@@ -359,7 +371,7 @@ checks include command-line alternatives for headless use:
 | Problem | Check |
 | --- | --- |
 | The TV is disconnected | Check its power, network, saved address, and Wake-on-LAN setting. For rejected authorization, follow [Fix a pairing problem](#fix-pairing-problem). |
-| Idle blanking does not work | `lg-buddy settings describe screen.backend`<br>`systemctl --user status LG_Buddy_screen.service`<br>`journalctl --user -u LG_Buddy_screen.service --since today` |
+| Idle blanking does not work | Check **Complete setup** in Settings and the current activity/inhibition sources in diagnostics. For headless use: `systemctl --user status LG_Buddy_screen.service` and `journalctl --user -u LG_Buddy_screen.service --since today`. |
 | A setting shows an error | Follow its message, then use **Retry apply** when offered. If a behavior is off after a declined or unavailable activation, enable it again in **Settings** after fixing the reported service or authorization issue. |
 | System sleep/wake behavior is wrong | `systemctl status LG_Buddy_lifecycle.service`<br>`journalctl -u LG_Buddy_lifecycle.service --since today` |
 | An update cannot be installed | In the GUI, use the update toast's **Copy details** action. For a headless update, keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |

@@ -619,3 +619,17 @@ blocked in that process fixture; whole-flow completion is checked in Rust.
 `scripts/test-installer-first-run.sh` also checks the headless installer handoff
 and its exit-status propagation. `test-automatic-configuration.sh` verifies that
 the compatibility wrapper forwards inputs without rewriting configuration.
+
+### Public settings and legacy CLI compatibility
+
+Settings unit and Cucumber tests verify that ordinary discovery excludes the
+legacy backend selector while explicit access and diagnostic values remain
+available. They cover unchanged raw reads, accepted legacy values, unset to the
+automatic default, validation failures and save-before-apply failure semantics.
+The GUI automatic transition separately tests capability validation and rollback.
+
+`bash scripts/test-settings-compatibility.sh <lg-buddy-binary>` exercises the
+same contract through a real binary with an isolated configuration and service
+stub. Both release-bundle and cross-version-upgrade smoke invoke it against the
+installed candidate. Their existing checks additionally preserve the upgraded
+user's legacy configuration and credentials.

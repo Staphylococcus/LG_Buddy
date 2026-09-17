@@ -267,3 +267,26 @@ boot with the same LG Buddy installation, including the recorded unlock-helper
 corrections. Earlier investigation and hardware evidence remain under the
 parent directory and its `hearth/` subdirectory. This record supersedes earlier
 progress notes that left joint lifecycle or desktop recovery unvalidated.
+
+## Field findings and setup recovery
+
+The [#195 reporter's beta.1 results](https://github.com/Staphylococcus/LG_Buddy/issues/195#issuecomment-5661578856)
+confirmed correct idle blanking, inhibition during a Proton game, Vivaldi video
+and Haruna playback, including a lifecycle-service restart during playback.
+The remaining mpv case was not resolved. The reporter switched players and
+[asked to deprioritize it](https://github.com/Staphylococcus/LG_Buddy/issues/195#issuecomment-5677684486).
+This is a recorded limitation, not evidence that every application's inhibition
+works. Further application-specific investigation remains in #195.
+
+[PR #247](https://github.com/Staphylococcus/LG_Buddy/pull/247) subsequently delivered
+shared GUI/CLI onboarding and setup repair, including applicable missing KWin
+integration, explicit authorization and resumable failure/cancellation. It fixes
+the demonstrated setup lifecycle problem without claiming that problem caused
+the reporter's mpv behavior. Missing sources still mean reduced runtime coverage;
+an applicable unmet installation requirement appears as **Complete setup**.
+The [onboarding contract](onboarding.md) describes that distinction.
+
+All 14 jobs in [CI run 35170752897](https://github.com/Staphylococcus/LG_Buddy/actions/runs/35170752897)
+passed for the merged PR's source tree, including release-bundle, installed GUI,
+Fedora/Arch and cross-version upgrade checks. That result covers the onboarding
+changes; later public-CLI cleanup must pass its own candidate checks.
