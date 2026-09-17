@@ -40,7 +40,11 @@ cleanup() {
         kill "$FRESH_ACCESSIBILITY_BUS_PID" 2>/dev/null || true
         wait "$FRESH_ACCESSIBILITY_BUS_PID" 2>/dev/null || true
     fi
-    rm -rf "$WORK_DIR"
+    if [ "${LG_BUDDY_KEEP_GUI_SMOKE:-0}" = 1 ]; then
+        echo "Installed GUI smoke evidence: $WORK_DIR" >&2
+    else
+        rm -rf "$WORK_DIR"
+    fi
 }
 trap cleanup EXIT
 

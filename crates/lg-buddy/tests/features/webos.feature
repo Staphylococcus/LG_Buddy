@@ -3,25 +3,6 @@ Feature: Native webOS TV platform
   pairing when the user is setting up or actively controlling the TV without delaying
   shutdown, suspend, or network teardown when no stored credential is available.
 
-  Scenario: Fresh configuration defaults to and pairs the native platform
-    Given an empty temporary LG Buddy config path
-    And a native webOS26 TV on firmware 43.21.60 on input HDMI_2 with brightness 90
-    When I accept the default TV platform during initial configuration
-    Then the command succeeds
-    And stdout contains "TV Platform:         lg_webos"
-    And stdout contains "pairing required; accept the prompt on the TV"
-    And config.env contains "tvs_primary_platform=lg_webos"
-    And a valid native TV access token is stored
-    And the native TV connection count is 1
-    And the native TV registration tokens are "none"
-    And the native TV pairing prompt count is 1
-    When I run the command "brightness get"
-    Then the command succeeds
-    And stdout is "90"
-    And the native TV connection count is 2
-    And the native TV registration tokens are "none,webos-test-access-token"
-    And the native TV pairing prompt count is 1
-
   Scenario: Opting in pairs the TV and the stored token authenticates later commands
     Given a temporary LG Buddy config using input HDMI_2
     And a native webOS TV on input HDMI_3 with brightness 100

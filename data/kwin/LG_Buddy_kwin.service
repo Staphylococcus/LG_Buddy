@@ -1,5 +1,5 @@
 [Unit]
-Description=LG Buddy optional KWin integration setup
+Description=LG Buddy installed KWin integration loader
 After=graphical-session.target plasma-kwin_wayland.service
 PartOf=graphical-session.target
 

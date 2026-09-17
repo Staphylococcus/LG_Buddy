@@ -163,11 +163,12 @@ the whole report at 32 KiB. Credential-bearing lines and URLs are redacted.
 
 ### Portable configuration and legacy overrides
 
-Fresh GUI setup and `configure.sh` use automatic discovery without a backend
+Fresh GUI and terminal setup use automatic discovery without a backend
 question. Existing `auto` configurations remain unchanged. Saved `gnome`,
 `wayland` and `swayidle` overrides retain their behavior and are reported as
 legacy overrides. Settings offers an explicit, confirmed switch to automatic
-integration; `configure.sh` offers the same choice when an override exists.
+integration; terminal users can use `lg-buddy settings set screen.backend auto`.
+Setup itself preserves existing preferences.
 Native activity is validated before switching when built-in idle blanking is
 enabled. Failed service application restores the previous settings. Disabling
 idle blanking permits the transition without native idle capability; optional

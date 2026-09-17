@@ -95,10 +95,14 @@ check GTK/libadwaita versions and offer to install missing packages through the
 distribution's package manager before validating and installing the binary pair.
 
 The fresh release-bundle installer installs the payload and launches the installed
-GUI for pairing. Pairing then attempts the default Idle Blanking and TV Sleep &
-Wake behaviors; unavailable or declined behaviors stay off and can be retried in
-Settings. `configure.sh` remains an explicit headless setup path: run it before
-`install.sh`. Configured installations and upgrades retain their saved settings.
+GUI for pairing and service setup through the [shared completion flow](onboarding.md).
+Both GUI and CLI preserve desired settings when a later step fails or is cancelled.
+The GUI Settings row consumes backend setup status from the shared read-only
+assessment and onboarding observations. Run `cargo run -p lg-buddy --example
+setup_assessment` in the desktop session to inspect the same native checks.
+Use `install.sh --headless` for terminal installation and `lg-buddy setup` to
+resume. `configure.sh` forwards to setup. Configured installations and upgrades
+retain their saved settings.
 The application menu offers on-demand diagnostics with Refresh, Copy, and Save.
 The report starts with current settings, service and activity state, and fresh
 inhibition-source readings. Bounded, timestamped service logs follow in a

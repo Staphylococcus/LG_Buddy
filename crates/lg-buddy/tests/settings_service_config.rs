@@ -27,7 +27,12 @@ struct SystemdEnvironment {
 }
 
 impl SystemdEnvironment {
-    fn new(environment: Vec<String>, files: Vec<(String, bool)>, unset: Vec<String>) -> Self {
+    fn new(
+        environment: Vec<String>,
+        files: Vec<(String, bool)>,
+        unset: Vec<String>,
+        loaded: bool,
+    ) -> Self {
         let (address, daemon) = support::start_private_session_bus();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -38,10 +43,25 @@ impl SystemdEnvironment {
             let mut crossroads = Crossroads::new();
             let manager = crossroads.register("org.freedesktop.systemd1.Manager", |builder| {
                 builder.method(
+                    "GetUnit",
+                    ("name",),
+                    ("unit",),
+                    move |_, _: &mut (), (name,): (String,)| {
+                        if !loaded || name != "LG_Buddy_screen.service" {
+                            return Err(MethodErr::from((
+                                "org.freedesktop.systemd1.NoSuchUnit",
+                                "not loaded",
+                            )));
+                        }
+                        Ok((dbus::Path::new("/org/freedesktop/systemd1/unit/screen").unwrap(),))
+                    },
+                );
+                builder.method(
                     "LoadUnit",
                     ("name",),
                     ("unit",),
-                    |_, _: &mut (), (name,): (String,)| {
+                    move |_, _: &mut (), (name,): (String,)| {
+                        assert!(!loaded, "already loaded units must use GetUnit");
                         if name != "LG_Buddy_screen.service" {
                             return Err(MethodErr::failed("unit not found"));
                         }
@@ -200,7 +220,7 @@ esac
             .map(|path| format!("LG_BUDDY_CONFIG={}", path.display()))
             .into_iter()
             .collect();
-        let systemd = SystemdEnvironment::new(declaration, files, unset);
+        let systemd = SystemdEnvironment::new(declaration, files, unset, initially_active);
         env.set("DBUS_SESSION_BUS_ADDRESS", &systemd.address);
         let backend = EnvironmentSettingsBackend;
         let (mut app, opening) = SettingsApplication::open();
@@ -254,6 +274,7 @@ fn config_probe_does_not_substitute_a_session_bus_for_an_unreachable_user_manage
         vec![format!("LG_BUDDY_CONFIG={}", config.path().display())],
         vec![],
         vec![],
+        true,
     );
     let mut env = TestEnv::new();
     env.set("DBUS_SESSION_BUS_ADDRESS", &systemd.address);
@@ -262,4 +283,34 @@ fn config_probe_does_not_substitute_a_session_bus_for_an_unreachable_user_manage
     assert!(SystemdUserServiceController::from_env()
         .user_service_config_path("LG_Buddy_screen.service")
         .is_err());
+}
+
+#[test]
+fn config_probe_uses_the_runtime_bus_even_with_a_different_desktop_bus() {
+    let config = TestConfigFile::new("bus");
+    let systemd = SystemdEnvironment::new(
+        vec![format!("LG_BUDDY_CONFIG={}", config.path().display())],
+        vec![],
+        vec![],
+        true,
+    );
+    let runtime = config.path().parent().unwrap().join("bus ,%;");
+    fs::create_dir(&runtime).unwrap();
+    let socket = systemd
+        .address
+        .split(',')
+        .next()
+        .unwrap()
+        .strip_prefix("unix:path=")
+        .unwrap();
+    std::os::unix::fs::symlink(socket, runtime.join("bus")).unwrap();
+    let mut env = TestEnv::new();
+    env.set("XDG_RUNTIME_DIR", &runtime);
+    env.set("DBUS_SESSION_BUS_ADDRESS", "unix:path=/no/desktop/bus");
+    assert_eq!(
+        SystemdUserServiceController::from_env()
+            .user_service_config_path("LG_Buddy_screen.service")
+            .unwrap(),
+        config.path()
+    );
 }

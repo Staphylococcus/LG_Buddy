@@ -10,6 +10,7 @@ pub mod audio;
 pub mod auth;
 pub mod backend;
 pub mod brightness;
+mod command;
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
@@ -34,6 +35,7 @@ pub mod session_bus;
 pub mod session_notifications;
 pub mod settings;
 pub mod settings_view;
+pub mod setup;
 pub mod sources;
 pub mod state;
 pub mod tv;
@@ -92,6 +94,7 @@ pub enum Command {
     Monitor,
     Lifecycle,
     DetectBackend,
+    Setup(setup::cli::SetupOptions),
     KWinBridge(kwin_bridge::KWinBridgeCommand),
     Dev(DevCommand),
     Settings(SettingsCommand),
@@ -181,6 +184,7 @@ impl UpdatesHelpTopic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
+    Setup,
     Brightness,
     Volume,
     Power,
@@ -240,6 +244,7 @@ pub enum ParseError {
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
     MissingUpgradePreflightRoot,
+    Setup(String),
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -290,6 +295,7 @@ impl fmt::Display for ParseError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::Setup(error) => write!(f, "{error}"),
             Self::MissingUpgradePreflightRoot => {
                 write!(f, "missing candidate root for `upgrade-preflight`")
             }
@@ -307,6 +313,7 @@ impl fmt::Display for ParseError {
 
 #[derive(Debug)]
 pub enum RunError {
+    Setup(setup::cli::SetupError),
     Io(io::Error),
     Policy(String),
     TvClientBuild(TvClientBuildError),
@@ -329,6 +336,7 @@ pub enum RunError {
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Setup(err) => write!(f, "{err}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Policy(err) => write!(f, "{err}"),
             Self::TvClientBuild(err) => write!(f, "{err}"),
@@ -356,6 +364,7 @@ impl fmt::Display for RunError {
 impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Setup(err) => Some(err),
             Self::Io(err) => Some(err),
             Self::Policy(_) => None,
             Self::TvClientBuild(err) => Some(err),
@@ -377,6 +386,7 @@ impl std::error::Error for RunError {
 impl ParseError {
     pub fn help_topic(&self) -> HelpTopic {
         match self {
+            Self::Setup(_) => HelpTopic::Setup,
             Self::UnknownBrightnessCommand(_)
             | Self::MissingBrightnessValue
             | Self::InvalidBrightnessValue(_) => HelpTopic::Brightness,
@@ -455,6 +465,7 @@ impl Command {
             Self::Monitor => "monitor",
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
+            Self::Setup(_) => "setup",
             Self::KWinBridge(_) => "kwin-bridge",
             Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
@@ -480,6 +491,7 @@ impl Command {
             Self::Monitor => "TODO: implemented via command handler",
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
+            Self::Setup(_) => "TODO: implemented via command handler",
             Self::KWinBridge(_) => "TODO: implemented via command handler",
             Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
@@ -504,6 +516,7 @@ Usage:
 With no command, open Overview in the installed graphical application.
 
 Commands:
+  setup           Complete or repair TV, services and desktop integration setup
   brightness      Open Overview focused on brightness
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
@@ -715,6 +728,7 @@ explicit confirmation. Channel and version arguments are not accepted.
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
+        HelpTopic::Setup => setup::cli::usage(program),
         HelpTopic::Brightness => brightness_usage(program),
         HelpTopic::Volume => volume_usage(program),
         HelpTopic::Power => power_usage(program),
@@ -766,6 +780,7 @@ where
 
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
+        "setup" => return setup::cli::parse(args.map(|arg| arg.as_ref().to_string())),
         "settings" => return parse_settings_command(args),
         "updates" => return parse_updates_command(args),
         "kwin-bridge" => {
@@ -839,6 +854,7 @@ where
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
+        Command::Setup(options) => setup::cli::run(options, writer).map_err(RunError::Setup),
         Command::Overview => crate::commands::run_overview(),
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
@@ -910,6 +926,7 @@ where
         .map(|argument| argument.as_ref().to_string())
         .collect::<Vec<_>>();
     match topic.as_ref() {
+        "setup" if remaining.is_empty() => Ok(ParseOutcome::Help(HelpTopic::Setup)),
         "brightness" => {
             if remaining.is_empty()
                 || (remaining.len() == 1 && matches!(remaining[0].as_str(), "get" | "set"))

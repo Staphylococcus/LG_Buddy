@@ -29,6 +29,8 @@ cp "$REPOSITORY_ROOT/systemd/LG_Buddy_screen.service" "$BUNDLE/systemd/LG_Buddy_
 cp "$REPOSITORY_ROOT/systemd/LG_Buddy_update_check.service" "$BUNDLE/systemd/LG_Buddy_update_check.service"
 cp "$REPOSITORY_ROOT/systemd/LG_Buddy_update_check.timer" "$BUNDLE/systemd/LG_Buddy_update_check.timer"
 cp "$REPOSITORY_ROOT/systemd/lg_buddy.conf" "$BUNDLE/systemd/lg_buddy.conf"
+cp "$REPOSITORY_ROOT/data/setup-services.sh" "$BUNDLE/docs/setup-services.sh"
+cp "$REPOSITORY_ROOT/data/io.github.staphylococcus.LGBuddy.setup.policy" "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 cp "$REPOSITORY_ROOT/data/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg" \
     "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.svg"
 
@@ -79,6 +81,14 @@ case "${1:-}" in
             *) exit 1 ;;
         esac
         ;;
+    setup)
+        installed_dir="$(dirname "$0")"
+        [ -x "$installed_dir/../lib/lg-buddy/setup-services" ]
+        [ ! -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
+        [ ! -f "$HOME/.config/systemd/user/LG_Buddy_screen.service" ]
+        printf '%s\n' "$@" >"${LG_BUDDY_HANDOFF_MARKER:?}"
+        exit "${LG_BUDDY_HANDOFF_STATUS:-0}"
+        ;;
     "")
         if [ "${LG_BUDDY_HANDOFF_STATUS:-0}" -ne 0 ]; then
             exit "$LG_BUDDY_HANDOFF_STATUS"
@@ -86,7 +96,7 @@ case "${1:-}" in
         installed_dir="$(dirname "$0")"
         [ -x "$installed_dir/lg-buddy-gui" ]
         [ -f "$installed_dir/../lib/lg-buddy/config-path" ]
-        [ -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
+        [ ! -f "$installed_dir/../../etc/systemd/system/LG_Buddy.service" ]
         printf '%s\n' "$0:${LG_BUDDY_CONFIG:?}" >"${LG_BUDDY_HANDOFF_MARKER:?}"
         ;;
     *)
@@ -134,6 +144,7 @@ chmod 755 "$STUB_DIR/python3" "$STUB_DIR/gui-runtime-probe" \
 
 run_install() {
     local scenario="$1"
+    shift
     local status=0
     local root="$WORK_DIR/$scenario/root"
     local home="$WORK_DIR/$scenario/home"
@@ -181,7 +192,7 @@ run_install() {
     LG_BUDDY_SYSTEMCTL_LOG="$systemctl_log" \
     LG_BUDDY_HANDOFF_MARKER="$handoff" \
     LG_BUDDY_HANDOFF_STATUS="${LG_BUDDY_HANDOFF_STATUS:-0}" \
-        bash "$BUNDLE/install.sh" >"$output" 2>&1
+        bash "$BUNDLE/install.sh" "$@" >"$output" 2>&1
     status=$?
     set -e
     [ ! -e "$LG_BUDDY_UNEXPECTED_PYTHON" ] || { echo "Installer invoked Python."; exit 1; }
@@ -203,26 +214,18 @@ CONFIG_FILE="$RUN_HOME/.config/lg-buddy/config.env"
 [ -f "$RUN_HANDOFF" ]
 grep -F -q ":$CONFIG_FILE" "$RUN_HANDOFF"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy" ]
+[ -x "$RUN_ROOT/usr/lib/lg-buddy/setup-services" ]
+cmp "$BUNDLE/docs/setup-services.sh" "$RUN_ROOT/usr/lib/lg-buddy/setup-services"
+cmp "$BUNDLE/docs/io.github.staphylococcus.LGBuddy.setup.policy" "$RUN_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy"
+cmp "$BUNDLE/systemd/LG_Buddy_lifecycle.service" "$RUN_ROOT/usr/lib/lg-buddy/setup/systemd/LG_Buddy_lifecycle.service"
 [ -x "$RUN_ROOT/usr/bin/lg-buddy-gui" ]
-[ -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
+[ ! -f "$RUN_ROOT/etc/systemd/system/LG_Buddy.service" ]
+[ ! -f "$RUN_HOME/.config/systemd/user/LG_Buddy_screen.service" ]
 grep -F -q 'Prepared an empty user configuration for first-run TV pairing.' "$RUN_OUTPUT"
 grep -F -q 'Opening LG Buddy to pair your first TV...' "$RUN_OUTPUT"
-grep -F -q 'Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors.' "$RUN_OUTPUT"
-grep -F -q 'If a behavior is declined or unavailable, it stays off until retried in Settings.' "$RUN_OUTPUT"
-grep -F -q 'System sleep/wake integration installed; pairing will attempt TV Sleep & Wake.' "$RUN_OUTPUT"
-grep -F -q 'If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings.' "$RUN_OUTPUT"
-grep -F -q 'LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config.' "$RUN_OUTPUT"
-grep -F -q 'LG_Buddy_update_check.timer enabled and started.' "$RUN_OUTPUT"
-! grep -F -q 'System sleep/wake TV control enabled via' "$RUN_OUTPUT"
+grep -F -q 'Pair your TV, then complete background service setup in LG Buddy.' "$RUN_OUTPUT"
 ! grep -F -q 'Running configuration script' "$RUN_OUTPUT"
-grep -F -q 'enable LG_Buddy.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q 'enable LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-! grep -F -q 'start LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user enable LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
-grep -F -q -- '--user start LG_Buddy_update_check.timer' "$RUN_SYSTEMCTL_LOG"
+! grep -Eq '(enable|start|restart) LG_Buddy(_lifecycle|_screen|_update_check)?\.(service|timer)' "$RUN_SYSTEMCTL_LOG"
 
 export LG_BUDDY_HANDOFF_STATUS=77
 run_install failed-handoff
@@ -307,5 +310,18 @@ grep -F -q 'Preserving existing TV profile and policy settings.' "$RUN_OUTPUT"
 grep -F -q 'restart LG_Buddy_lifecycle.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user enable LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
 grep -F -q -- '--user restart LG_Buddy_screen.service' "$RUN_SYSTEMCTL_LOG"
+
+# Headless handoff occurs after bootstrap, before common service setup.
+run_install headless --headless -- --non-interactive --yes --tv-ip 192.0.2.1 --tv-mac 02:11:22:33:44:55
+[ "$RUN_STATUS" -eq 0 ] || { cat "$RUN_OUTPUT"; exit 1; }
+printf '%s\n' setup --non-interactive --yes --tv-ip 192.0.2.1 --tv-mac 02:11:22:33:44:55 > "$WORK_DIR/headless.expected"
+cmp "$RUN_HANDOFF" "$WORK_DIR/headless.expected"
+! grep -q 'Opening LG Buddy\|--user enable LG_Buddy_screen\|enable LG_Buddy_lifecycle' "$RUN_OUTPUT" "$RUN_SYSTEMCTL_LOG"
+for result in 1 3 130; do
+    export LG_BUDDY_HANDOFF_STATUS="$result"
+    run_install "headless-result-$result" --headless
+    [ "$RUN_STATUS" -eq "$result" ] || { cat "$RUN_OUTPUT"; exit 1; }
+done
+unset LG_BUDDY_HANDOFF_STATUS
 
 echo "First-run installer smoke passed: fresh handoff, failure preservation, configured preservation."
