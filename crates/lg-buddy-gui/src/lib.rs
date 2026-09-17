@@ -2676,6 +2676,14 @@ pub(crate) mod controller_test_support {
                 });
             }
             assert!(!fixture.calls.lock().unwrap().contains(&SetupStep::Services));
+            // libadwaita 1.5 sets visible_dialog before opening its sheet.
+            // Wait for the controls a user would see before cancelling.
+            pump_until(|| {
+                dialog_window
+                    .visible_dialog()
+                    .and_then(|dialog| dialog.child())
+                    .is_some_and(|child| child.is_mapped())
+            });
             ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Cancel);
             pump_until(|| dialog_window.visible_dialog().is_none());
             pump_until(|| controller.window.navigation_visible());
