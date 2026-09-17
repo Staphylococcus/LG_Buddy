@@ -375,6 +375,9 @@ jobs:
         shell: bash
         run: |
           useradd --create-home tester
+          # runuser in these containers has no logind session to create this.
+          # Onboarding uses the canonical per-user runtime directory for its lock.
+          install -d -m 700 -o tester -g "$(id -gn tester)" "/run/user/$(id -u tester)"
           archive="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
           extraction="$(mktemp -d)"
           tar --no-same-owner -C "$extraction" -xzf "$archive"
