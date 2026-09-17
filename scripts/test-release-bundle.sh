@@ -633,6 +633,7 @@ printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV creden
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 "$INSTALLED_BINARY" settings set screen.backend swayidle
+bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.idle_timeout 90000

@@ -645,7 +645,7 @@ Usage:
 
 Commands:
   list                    List settings and their effective values
-  describe [KEY]          Describe one setting or the complete registry
+  describe [KEY]          Describe one setting or all public settings
   get <KEY>               Print one raw effective value
   set <KEY> <VALUE>       Save a setting value
   unset <KEY>             Remove a saved override

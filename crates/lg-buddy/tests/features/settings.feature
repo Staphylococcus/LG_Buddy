@@ -9,7 +9,7 @@ Feature: Settings CLI
     And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)"
-    And stdout contains "screen.backend=auto (config.env, read-write, ops: get,describe,set,unset)"
+    And stdout does not contain "screen.backend"
     And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.restore_policy=conservative (default, read-write, ops: get,describe,set,unset)"
@@ -25,6 +25,36 @@ Feature: Settings CLI
     And stdout contains "settings get <KEY>"
     And stdout contains "settings set <KEY> <VALUE>"
     And stdout contains "settings unset <KEY>"
+
+  Scenario: Public settings discovery preserves a hidden legacy override
+    Given a temporary LG Buddy config using input HDMI_2
+    And systemd apply actions are skipped
+    When I run the command "settings set screen.backend wayland"
+    Then the command succeeds
+    Given the current config is remembered
+    When I run the command "settings list"
+    Then the command succeeds
+    And stdout does not contain "screen.backend"
+    When I run the command "settings describe"
+    Then the command succeeds
+    And stdout does not contain "screen.backend"
+    And stdout contains "screen.idle_blank"
+    And config.env is unchanged
+    When I run the command "settings get screen.backend"
+    Then the command succeeds
+    And stdout is "wayland"
+
+  Scenario: Legacy CLI unset still restores automatic discovery
+    Given a temporary LG Buddy config using input HDMI_2
+    And systemd apply actions are skipped
+    When I run the command "settings set screen.backend gnome"
+    Then the command succeeds
+    When I run the command "settings unset screen.backend"
+    Then the command succeeds
+    And config.env does not contain "screen_backend="
+    When I run the command "settings get screen.backend"
+    Then the command succeeds
+    And stdout is "auto"
 
   Scenario: settings set help is scoped to the subcommand
     When I run the command "settings set --help"
@@ -52,6 +82,7 @@ Feature: Settings CLI
     And the executable PATH is isolated
     When I run the command "settings describe screen.backend"
     Then the command succeeds
+    And stdout contains "compatibility: legacy CLI only"
     And stdout contains "current: auto"
     And stdout contains "resolved backend: gnome"
     And stdout contains "fallback reason: none; preferred backend is available"
@@ -66,6 +97,7 @@ Feature: Settings CLI
     And swayidle is installed
     When I run the command "settings describe screen.backend"
     Then the command succeeds
+    And stdout contains "compatibility: legacy CLI only"
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
@@ -76,6 +108,7 @@ Feature: Settings CLI
     And the executable PATH is isolated
     When I run the command "settings describe screen.backend"
     Then the command succeeds
+    And stdout contains "compatibility: legacy CLI only"
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"

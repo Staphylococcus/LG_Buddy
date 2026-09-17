@@ -142,6 +142,7 @@ impl SettingsFormatter {
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
         writeln!(writer, "  current: {}", format_described_value(setting)).map_err(output_error)?;
         if setting.key_name() == "screen.backend" {
+            writeln!(writer, "  compatibility: legacy CLI only; omitted from settings list and unqualified describe").map_err(output_error)?;
             let configured = format_effective_value(setting);
             if let Some((resolved, fallback_reason)) =
                 screen::resolution_details(&configured, screen_backend)

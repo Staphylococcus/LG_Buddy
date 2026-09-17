@@ -80,6 +80,7 @@ jobs:
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
+          bash scripts/test-settings-compatibility.sh ./target/debug/lg-buddy
           cargo build --locked -p lg-buddy --example gui_journey_tv
           python3 scripts/test-tv-fixture.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
           python3 scripts/test-setup-cli.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv

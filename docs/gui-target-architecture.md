@@ -275,8 +275,8 @@ URLs, and control characters are removed before retention. The error toast
 provides the details on demand, and the application presentation retains them
 for the diagnostics readout independently of launcher stderr handling.
 
-Resolved screen backend, service health, and runtime observations belong in
-Diagnostics. Normal successful setting changes
+Configured legacy overrides, service health, and current activity/inhibition
+source observations belong in Diagnostics. Normal successful setting changes
 are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
 an apply warning keeps the saved value and can offer **Retry apply**.
