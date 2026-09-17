@@ -68,6 +68,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
 
+      - name: Enable setup CLI test namespaces
+        # Match the disposable-runner preparation in the bundle smoke job.
+        # Probe bwrap itself, since this is the sandbox used by the CLI tests.
+        run: |
+          if ! bwrap --ro-bind / / --dev /dev true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev true
+
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
