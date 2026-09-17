@@ -996,7 +996,7 @@ echo "Done."
 mkdir -p "$USER_SYSTEMD_DIR"
 if [ -f "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" ]; then
     install -m 644 "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" "$USER_KWIN_SERVICE_PATH"
-    if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ]; then
+    if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ] && { [ "$FRESH_SETUP_MODE" -eq 1 ] || [ "$HEADLESS" -eq 1 ]; }; then
         systemctl --user daemon-reload
         systemctl --user enable LG_Buddy_kwin.service
         systemctl --user restart --no-block LG_Buddy_kwin.service || true
@@ -1031,6 +1031,10 @@ if [ "$HEADLESS" -eq 0 ] && [ "$FRESH_SETUP_MODE" -eq 0 ]; then
     if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
         echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
     else
+        if [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+            systemctl --user enable LG_Buddy_kwin.service
+            systemctl --user restart --no-block LG_Buddy_kwin.service || true
+        fi
         systemctl --user enable LG_Buddy_screen.service
         systemctl --user restart LG_Buddy_screen.service
         if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
