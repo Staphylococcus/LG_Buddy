@@ -167,14 +167,9 @@ mod tests {
                 assert!(cancellation.begin());
                 // Deliver the terminal signal to the entire foreground group:
                 // owner, supervisor and helper. Mutation must still finish.
-                let group = unsafe { libc::getpgrp() }.to_string();
+                // PID 0 targets the inherited group across supported shells.
                 let output = command_with_lock("/bin/sh", Some(&lease.file()))
-                    .args([
-                        "-c",
-                        "kill -s INT -- \"-$1\" && sleep 0.1",
-                        "helper",
-                        &group,
-                    ])
+                    .args(["-c", "kill -s INT 0 && sleep 0.1"])
                     .output()
                     .unwrap();
                 assert!(output.status.success(), "{output:?}");

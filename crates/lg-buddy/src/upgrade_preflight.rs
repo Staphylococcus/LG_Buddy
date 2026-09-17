@@ -1852,6 +1852,7 @@ mod tests {
 
     #[test]
     fn custom_user_units_pass_cli_gui_and_candidate_checks() {
+        let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
         for external in [false, true] {
             let mut fixture = InstalledFixture::new("xdg-config");
             let config_home = if external {
@@ -1871,16 +1872,16 @@ mod tests {
                 true,
             );
 
-            let initial = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+            let initial = evaluate_initial_preflight(&filesystem, &fixture.facts);
             assert!(initial.compatible(), "{}", initial.render());
             let mut gui_facts = fixture.facts.clone();
             gui_facts.running_executable = gui_facts.layout.system_path("/usr/bin/lg-buddy-gui");
-            let gui = evaluate_gui_initial_preflight(&OsFilesystemFacts, &gui_facts);
+            let gui = evaluate_gui_initial_preflight(&filesystem, &gui_facts);
             assert!(gui.compatible(), "{}", gui.render());
             let mut candidate_facts = fixture.facts.clone();
             candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
             let candidate = evaluate_candidate_host_preflight(
-                &OsFilesystemFacts,
+                &filesystem,
                 &candidate_facts,
                 &fixture.candidate_root,
                 false,
@@ -1896,7 +1897,7 @@ mod tests {
                 "[Service]\nEnvironment=\"LG_BUDDY_CONFIG=/wrong/config\"\n",
             )
             .unwrap();
-            let mismatch = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+            let mismatch = evaluate_initial_preflight(&filesystem, &fixture.facts);
             assert!(!mismatch.compatible());
             assert!(mismatch
                 .failures()
