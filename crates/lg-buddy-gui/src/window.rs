@@ -17,7 +17,7 @@ pub(crate) struct ApplicationWindow {
     tvs: crate::tvs::TvsView,
     settings: crate::settings::SettingsView,
     diagnostics: crate::diagnostics::DiagnosticsView,
-    pairing: crate::pairing::PairingView,
+    onboarding: crate::onboarding::OnboardingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
     switcher: adw::ViewSwitcher,
@@ -37,6 +37,7 @@ impl ApplicationWindow {
         on_settings: Rc<dyn Fn(SettingsIntent)>,
         on_navigation: Rc<dyn Fn(ApplicationPage)>,
         on_diagnostics: Rc<dyn Fn(DiagnosticsIntent)>,
+        on_onboarding: Rc<dyn Fn(lg_buddy::setup::gui::OnboardingIntent)>,
     ) -> Self {
         let window = adw::ApplicationWindow::builder()
             .application(application)
@@ -68,7 +69,7 @@ impl ApplicationWindow {
         window.add_action(&diagnostics_action);
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
-        let pairing = crate::pairing::PairingView::new(on_tvs);
+        let onboarding = crate::onboarding::OnboardingView::new(on_onboarding);
         let settings = crate::settings::SettingsView::new(on_settings);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
@@ -166,7 +167,7 @@ impl ApplicationWindow {
             tvs,
             settings,
             diagnostics,
-            pairing,
+            onboarding,
             toasts,
             stack,
             switcher,
@@ -185,7 +186,20 @@ impl ApplicationWindow {
 
     pub(crate) fn render_tvs(&self, presentation: &TvsPresentation) {
         self.tvs.render(&self.window, presentation);
-        self.pairing.render(&self.window, presentation.pairing());
+    }
+
+    pub(crate) fn render_onboarding(
+        &self,
+        presentation: Option<&lg_buddy::setup::gui::OnboardingPresentation>,
+    ) {
+        self.onboarding.render(&self.window, presentation);
+    }
+    pub(crate) fn render_setup_status(
+        &self,
+        status: lg_buddy::setup::gui::SetupStatus,
+        available: bool,
+    ) {
+        self.settings.render_setup_status(status, available);
     }
 
     pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
@@ -210,9 +224,7 @@ impl ApplicationWindow {
     }
 
     pub(crate) fn show_toast(&self, message: &str) {
-        if !self.pairing.show_toast(message) {
-            self.toasts.add_toast(adw::Toast::new(message));
-        }
+        self.toasts.add_toast(adw::Toast::new(message));
     }
 
     pub(crate) fn navigate(&self, page: ApplicationPage) {

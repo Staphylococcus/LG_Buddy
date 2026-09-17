@@ -1,22 +1,13 @@
-//! GUI-only preparation for settings that require a running service.
-//!
-//! The command-line settings path deliberately keeps its historical
-//! persist-then-apply behavior.  The graphical onboarding path calls this
-//! module first for the two settings whose enabled default would otherwise be
-//! written while their service is unavailable.
+//! Compatibility adapter for the current activation-before-persist settings
+//! path. Service semantics live in the internal setup steps; the future shared
+//! onboarding flow will consume their structured responses directly.
 
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{ServiceController, SettingValue, SettingsError, SettingsMutation};
+use crate::setup::{services::ServiceStep, StepCancellation, StepResponse};
 
-const SCREEN_SERVICE: &str = "LG_Buddy_screen.service";
-const INSTALL_CONFIG_POINTER: &str = "/usr/lib/lg-buddy/config-path";
-const LIFECYCLE_UNIT: &str = "/etc/systemd/system/LG_Buddy_lifecycle.service";
-const NETWORK_MANAGER_HOOK: &str = "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle";
-
-/// Prepare an enabled GUI setting before persisting it.
 pub(crate) fn activate_before_persist<C: ServiceController>(
     config_path: &Path,
     mutation: SettingsMutation,
@@ -32,152 +23,41 @@ fn activate_before_persist_with_root<C: ServiceController>(
     service_controller: &C,
     install_root: Option<PathBuf>,
 ) -> Result<(), SettingsError> {
-    let enabled = mutation.new_value().ok().and_then(SettingValue::as_enum) == Some("enabled");
-    let requires_activation = enabled
-        && matches!(
-            mutation.key_name(),
-            "screen.idle_blank" | "system.sleep_wake_policy"
-        );
-    if !requires_activation {
+    if mutation.new_value().ok().and_then(SettingValue::as_enum) != Some("enabled") {
         return Ok(());
     }
-    if service_controller.systemd_actions_disabled() {
-        return Err(SettingsError::Activation {
-            message: "systemd actions are disabled; the service was not activated".to_string(),
-        });
-    }
-
-    match mutation.key_name() {
-        "screen.idle_blank" => {
-            validate_config_pointer(config_path, install_root.as_deref())?;
-            activate_screen(service_controller)
+    let step = match mutation.key_name() {
+        "screen.idle_blank" => ServiceStep::Screen,
+        "system.sleep_wake_policy" => ServiceStep::Lifecycle,
+        _ => return Ok(()),
+    };
+    match step.execute(
+        config_path,
+        install_root.as_deref(),
+        service_controller,
+        &StepCancellation::default(),
+        &mut |_| {},
+    ) {
+        StepResponse::Complete => Ok(()),
+        StepResponse::Cancelled => Err(SettingsError::ActivationCancelled),
+        StepResponse::Blocked(failure) | StepResponse::Failed(failure) => {
+            Err(SettingsError::Activation {
+                message: failure.diagnostic,
+            })
         }
-        "system.sleep_wake_policy" => {
-            validate_config_pointer(config_path, install_root.as_deref())?;
-            validate_sleep_installation(install_root.as_deref())?;
-            activate_lifecycle(service_controller)
-        }
-        _ => Ok(()),
-    }
-}
-
-fn activate_screen<C: ServiceController>(service_controller: &C) -> Result<(), SettingsError> {
-    match service_controller.user_service_state(SCREEN_SERVICE)? {
-        super::UserServiceState::Missing => Err(SettingsError::Activation {
-            message: "LG Buddy's screen service is not installed.".to_string(),
+        StepResponse::ActionRequired { .. }
+        | StepResponse::Running { .. }
+        | StepResponse::NotApplicable
+        | StepResponse::InputRequired(_) => Err(SettingsError::Activation {
+            message: "Service setup did not complete.".into(),
         }),
-        super::UserServiceState::InactiveDisabled => start_screen_service(service_controller),
-        super::UserServiceState::ActiveOrEnabled => {
-            if service_controller.user_service_is_active(SCREEN_SERVICE)? {
-                Ok(())
-            } else {
-                start_screen_service(service_controller)
-            }
-        }
-    }
-}
-
-fn start_screen_service<C: ServiceController>(service_controller: &C) -> Result<(), SettingsError> {
-    service_controller.enable_start_user_unit(SCREEN_SERVICE)?;
-    if !service_controller.user_service_is_active(SCREEN_SERVICE)? {
-        // `enable_start_user_unit` may only enable a unit when no graphical
-        // session target is active. Restarting here starts it before the
-        // enabled setting becomes visible to the rest of the application.
-        service_controller.restart_user_service(SCREEN_SERVICE)?;
-    }
-    if service_controller.user_service_is_active(SCREEN_SERVICE)? {
-        Ok(())
-    } else {
-        Err(SettingsError::Activation {
-            message: "LG Buddy's screen service did not become active.".to_string(),
-        })
-    }
-}
-
-fn validate_sleep_installation(install_root: Option<&Path>) -> Result<(), SettingsError> {
-    for (path, label) in [
-        (
-            prefixed_path(install_root, LIFECYCLE_UNIT),
-            "the installed lifecycle service",
-        ),
-        (
-            prefixed_path(install_root, NETWORK_MANAGER_HOOK),
-            "the installed NetworkManager sleep hook",
-        ),
-    ] {
-        let metadata = fs::metadata(&path).map_err(|error| SettingsError::Activation {
-            message: format!("{label} could not be read: {error}"),
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(SettingsError::Activation {
-                message: format!("{label} is not a regular file."),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_config_pointer(
-    config_path: &Path,
-    install_root: Option<&Path>,
-) -> Result<(), SettingsError> {
-    let pointer_path = prefixed_path(install_root, INSTALL_CONFIG_POINTER);
-    let pointer_metadata =
-        fs::metadata(&pointer_path).map_err(|error| SettingsError::Activation {
-            message: format!("the installed configuration pointer could not be read: {error}"),
-        })?;
-    if !pointer_metadata.file_type().is_file() {
-        return Err(SettingsError::Activation {
-            message: "the installed configuration pointer is not a regular file.".to_string(),
-        });
-    }
-    let pointer_config =
-        fs::read_to_string(&pointer_path).map_err(|error| SettingsError::Activation {
-            message: format!("the installed configuration pointer could not be read: {error}"),
-        })?;
-    let pointer_config = pointer_config
-        .lines()
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| SettingsError::Activation {
-            message: "the installed configuration pointer is empty.".to_string(),
-        })?;
-    let pointer_config =
-        fs::canonicalize(pointer_config).map_err(|error| SettingsError::Activation {
-            message: format!("the installed configuration target could not be resolved: {error}"),
-        })?;
-    let config_path = fs::canonicalize(config_path).map_err(|error| SettingsError::Activation {
-        message: format!("the active configuration could not be resolved: {error}"),
-    })?;
-    if pointer_config != config_path {
-        return Err(SettingsError::Activation {
-            message: "the installed configuration pointer does not match the active configuration."
-                .to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-fn activate_lifecycle<C: ServiceController>(service_controller: &C) -> Result<(), SettingsError> {
-    if service_controller.system_lifecycle_is_active()? {
-        return Ok(());
-    }
-
-    service_controller.start_system_lifecycle()
-}
-
-fn prefixed_path(root: Option<&Path>, path: &str) -> PathBuf {
-    match root {
-        Some(root) => root.join(path.trim_start_matches('/')),
-        None => PathBuf::from(path),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const SCREEN_SERVICE: &str = "LG_Buddy_screen.service";
     use crate::settings::{ServiceController, UserServiceState, UserUnitEnableOutcome};
     use std::cell::Cell;
     use std::fs;
@@ -186,6 +66,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FakeServices {
+        screen_config: PathBuf,
         screen_state: UserServiceState,
         screen_active: Rc<Cell<bool>>,
         lifecycle_active: bool,
@@ -197,6 +78,7 @@ mod tests {
     impl FakeServices {
         fn active() -> Self {
             Self {
+                screen_config: PathBuf::new(),
                 screen_state: UserServiceState::ActiveOrEnabled,
                 screen_active: Rc::new(Cell::new(true)),
                 lifecycle_active: false,
@@ -208,6 +90,10 @@ mod tests {
     }
 
     impl ServiceController for FakeServices {
+        fn user_service_config_path(&self, service: &str) -> Result<PathBuf, SettingsError> {
+            assert_eq!(service, SCREEN_SERVICE);
+            Ok(self.screen_config.clone())
+        }
         fn user_service_state(&self, service: &str) -> Result<UserServiceState, SettingsError> {
             assert_eq!(service, SCREEN_SERVICE);
             Ok(self.screen_state)
@@ -290,6 +176,7 @@ mod tests {
         let path = crate::settings::tests::unique_test_path("activation-screen");
         let root = installed_root(&path);
         let services = FakeServices {
+            screen_config: path.clone(),
             screen_active: Rc::new(Cell::new(false)),
             ..FakeServices::active()
         };

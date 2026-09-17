@@ -8,10 +8,14 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   checks: read
   contents: read
 
 jobs:
+  kwin-bridges:
+    uses: ./.github/workflows/kwin-bridge.yml
+
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -30,26 +34,56 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Run Rust test suite
-        run: cargo test -p lg-buddy
+        run: cargo test --locked -p lg-buddy
 
       - name: Verify root-scoped ownership behavior
         run: |
-          sudo_target_dir="$(mktemp -d)"
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root -- --exact
-          sudo env "PATH=$PATH" "CARGO_HOME=$CARGO_HOME" "RUSTUP_HOME=$RUSTUP_HOME" "RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}" "CARGO_TARGET_DIR=$sudo_target_dir" cargo test -p lg-buddy --lib platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root -- --exact
+          # Ask Cargo for the exact executable from the preceding build;
+          # globbing target/debug/deps can select a stale test binary.
+          test_binary="$(cargo test --locked -p lg-buddy --lib --no-run --message-format=json | python3 -c '
+          import json, sys
+          artifacts = [json.loads(line) for line in sys.stdin]
+          executables = [item["executable"] for item in artifacts
+                         if item.get("reason") == "compiler-artifact"
+                         and item["target"]["name"] == "lg_buddy"
+                         and item["target"]["kind"] == ["lib"]
+                         and item["profile"]["test"] and item.get("executable")]
+          assert len(executables) == 1, executables
+          print(executables[0])')"
+          for test in \
+            tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root \
+            platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root; do
+            "$test_binary" --list --format=terse | grep -Fx "$test: test"
+            sudo "$test_binary" "$test" --exact
+          done
 
       - name: Install GTK test prerequisites
         run: |
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb zenity
+          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
+
+      - name: Enable setup CLI test namespaces
+        # Match the disposable-runner preparation in the bundle smoke job.
+        # Probe bwrap itself, since this is the sandbox used by the CLI tests.
+        run: |
+          if ! bwrap --ro-bind / / --dev /dev true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev true
 
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
+          bash scripts/test-settings-compatibility.sh ./target/debug/lg-buddy
           cargo build --locked -p lg-buddy --example gui_journey_tv
+          python3 scripts/test-tv-fixture.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
+          python3 scripts/test-setup-cli.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
           dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh \
@@ -63,14 +97,23 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-distro.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
 
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
 
+      - name: Verify setup helpers and KWin fallbacks
+        run: |
+          bash -n data/setup-services.sh scripts/test-service-setup.sh
+          bash scripts/test-service-setup.sh
+          bash scripts/test-kwin-setup.sh
+          python3 scripts/test_kwin_matrix.py
+
       - name: Run first-run installer smoke
-        run: bash ./scripts/test-installer-first-run.sh
+        run: |
+          bash ./scripts/test-installer-first-run.sh
+          bash ./scripts/test-automatic-configuration.sh
 
       - name: Validate release promotion contract
         run: python3 scripts/test_release_promotion.py
@@ -84,10 +127,10 @@ jobs:
       - name: Validate GitHub response recorder
         run: python3 scripts/test_record_github_release_responses.py
 
-  bundle-smoke-test:
+  bundle-build:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: verify
+    needs: [verify, kwin-bridges]
     env:
       SMOKE_VERSION: 1.4.0-beta.2.ci
 
@@ -105,12 +148,15 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install smoke-test prerequisites
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install build prerequisites
         run: |
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev musl-tools pkexec python3-pyatspi strace xdotool xvfb zenity
+          sudo apt-get install -y binutils libadwaita-1-dev libgtk-4-dev musl-tools
 
       - name: Build headless runtime and GTK GUI
         env:
@@ -122,20 +168,92 @@ jobs:
           cargo build --locked --release -p lg-buddy --target x86_64-unknown-linux-musl
           cargo build --locked --release -p lg-buddy-gui --target x86_64-unknown-linux-gnu
 
+      - name: Download verified KWin plugins
+        uses: actions/download-artifact@v7
+        with:
+          pattern: kwin-bridge-*
+          merge-multiple: true
+          path: target/kwin-bridges
+
       - name: Create release bundle
         run: |
           umask 0002
-          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist
+          ./scripts/build-release-bundle.sh --target x86_64-unknown-linux-musl --gui-target x86_64-unknown-linux-gnu --version "$SMOKE_VERSION" --output-dir dist --require-kwin-matrix
 
       - name: Build GUI journey fixtures
         env:
           LG_BUDDY_BUILD_COMMIT: ${{ github.sha }}
           LG_BUDDY_RELEASE_VERSION: "0.0.0"
         run: |
-          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures
-          cargo build --locked -p lg-buddy --example gui_journey_tv --target x86_64-unknown-linux-musl
+          # The fixture shares the GNU debug dependency graph and glibc floor
+          # of the GUI pair tested on Ubuntu, Fedora and Arch.
+          cargo build --locked -p lg-buddy -p lg-buddy-gui --features gui-test-fixtures --bins --example gui_journey_tv
           mkdir -p target/gui-journey-fixtures
-          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/x86_64-unknown-linux-musl/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+          cp target/debug/lg-buddy target/debug/lg-buddy-gui target/debug/examples/gui_journey_tv target/gui-journey-fixtures/
+
+      - name: Upload bundle for supported-distro checks
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-release-bundle
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload GUI journey fixtures for supported-distro checks
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-gui-journey-fixtures
+          path: target/gui-journey-fixtures/*
+          if-no-files-found: error
+          retention-days: 7
+
+  bundle-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: bundle-build
+    # This required check must fail, rather than be skipped, if production fails.
+    if: ${{ !cancelled() }}
+    env:
+      SMOKE_VERSION: 1.4.0-beta.2.ci
+
+    steps:
+      - name: Require successfully built artifacts
+        if: needs.bundle-build.result != 'success'
+        run: |
+          echo "Bundle production did not succeed." >&2
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install smoke-test prerequisites
+        run: |
+          # Chrome is unused; its third-party index must not block Ubuntu dependencies.
+          sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y at-spi2-core binutils dbus-x11 libadwaita-1-dev libgtk-4-dev pkexec python3-pyatspi strace xdotool xvfb
+          # Prove current installation and GUI behavior without the retired dialog tool or external idle command.
+          sudo apt-get purge -y zenity swayidle
+
+      - name: Download release bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-release-bundle
+          path: dist
+
+      - name: Download GUI journey fixtures
+        uses: actions/download-artifact@v7
+        with:
+          name: ci-gui-journey-fixtures
+          path: target/gui-journey-fixtures
+
+      - name: Restore executable permissions on downloaded fixtures
+        run: chmod 755 target/gui-journey-fixtures/*
 
       - name: Enable graphical authorization smoke namespaces
         # Ubuntu 24.04 may restrict unprivileged user namespaces through
@@ -150,10 +268,13 @@ jobs:
 
       - name: Smoke test release bundle
         run: |
+          if command -v zenity; then
+            echo "Release-bundle smoke requires a host without Zenity." >&2
+            exit 1
+          fi
           dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
               LG_BUDDY_GUI_TV_FIXTURE="$PWD/target/gui-journey-fixtures/gui_journey_tv" \
               ./scripts/test-release-bundle.sh \
-              --skip-pip-install \
               --work-dir "$RUNNER_TEMP/release-bundle-smoke" \
               --archive "dist/lg-buddy-${SMOKE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
               --expected-tag "v${SMOKE_VERSION}" \
@@ -210,24 +331,8 @@ jobs:
           GH_RELEASE_DRY_RUN: "1"
         run: ./scripts/publish-release-assets.sh stage-draft --dist-dir dist --tag "v${SMOKE_VERSION}" --commit "${{ github.sha }}"
 
-      - name: Upload bundle for supported-distro checks
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-release-bundle
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload GUI journey fixtures for supported-distro checks
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-gui-journey-fixtures
-          path: target/gui-journey-fixtures/*
-          if-no-files-found: error
-          retention-days: 7
-
   bundle-supported-distros:
-    needs: bundle-smoke-test
+    needs: bundle-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -239,11 +344,11 @@ jobs:
           - name: Fedora 43
             image: fedora:43
             package_manager: dnf
-            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit procps-ng python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd zenity
+            setup: dnf install -y at-spi2-core binutils curl dbus-x11 findutils glib2 gobject-introspection gsettings-desktop-schemas gtk4 gzip libadwaita libglvnd-gles polkit procps-ng python3 python3-pyatspi shadow-utils strace tar util-linux which xdotool xorg-x11-server-Xvfb xorg-x11-xauth xwd
           - name: Arch current
             image: archlinux:latest
             package_manager: pacman
-            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit procps-ng python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd zenity
+            setup: pacman -Syu --noconfirm at-spi2-core binutils curl dbus diffutils glib2 gtk4 gzip libadwaita polkit procps-ng python python-atspi shadow strace tar util-linux which xdotool xorg-server-xvfb xorg-xauth xorg-xwd
     container:
       image: ${{ matrix.image }}
       options: --security-opt seccomp=unconfined
@@ -271,6 +376,9 @@ jobs:
         shell: bash
         run: |
           useradd --create-home tester
+          # runuser in these containers has no logind session to create this.
+          # Onboarding uses the canonical per-user runtime directory for its lock.
+          install -d -m 700 -o tester -g "$(id -gn tester)" "/run/user/$(id -u tester)"
           archive="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
           extraction="$(mktemp -d)"
           tar --no-same-owner -C "$extraction" -xzf "$archive"

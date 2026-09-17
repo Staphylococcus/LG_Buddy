@@ -412,7 +412,7 @@ impl TvsBackend for EnvironmentTvsBackend {
     }
 }
 
-fn read_profiles_from_store(
+pub(crate) fn read_profiles_from_store(
     config_path: &std::path::Path,
     store: &SettingsStore,
 ) -> Result<Vec<TvProfile>, TvsReadError> {
@@ -762,6 +762,17 @@ impl TvsApplication {
             && self.management.as_ref().is_none_or(|operation| {
                 matches!(operation.action, TvsManagementAction::SetInput(_))
             })
+    }
+
+    pub(crate) fn can_pair(&self) -> bool {
+        !self.closed
+            && self.controls_available
+            && matches!(self.state, TvsState::Empty)
+            && self.pairing.is_none()
+    }
+    pub(crate) fn refresh_after_setup(&mut self) -> TvsTransition {
+        let operation = self.new_read();
+        self.transition(Some(operation), None)
     }
 
     pub fn is_managing(&self) -> bool {

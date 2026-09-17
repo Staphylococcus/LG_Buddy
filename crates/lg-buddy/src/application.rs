@@ -22,13 +22,23 @@ use crate::pairing::{
 use crate::presentation::settings::SettingsGroup;
 use crate::settings::{SettingsMutationFailure, SettingsMutationOutcome};
 use crate::settings_view::{
-    BehaviorSetting, SettingsApplication, SettingsIntent, SettingsMutationOperation,
-    SettingsReadError, SettingsReadOperation, SettingsTransition,
+    SettingsApplication, SettingsIntent, SettingsMutationOperation, SettingsReadError,
+    SettingsReadOperation, SettingsTransition,
 };
 use crate::tv::{AudioStatus, OledBrightness};
 use crate::tvs::{
     TvProfile, TvsApplication, TvsIntent, TvsManagementError, TvsManagementOperation,
     TvsManagementOutcome, TvsModelReadOperation, TvsReadError, TvsReadOperation, TvsTransition,
+};
+
+use crate::setup::{
+    assessment::{AssessmentOperation, SetupAssessment, SetupHealth},
+    flow::FlowProgress,
+    gui::{
+        OnboardingApplication, OnboardingIntent, OnboardingOperation, OnboardingResult,
+        OnboardingTransition, SetupStatus,
+    },
+    StepFailure,
 };
 
 pub enum OverviewCompletion {
@@ -61,9 +71,26 @@ pub struct ApplicationTransition {
     settings: Option<SettingsTransition>,
     diagnostics: Option<DiagnosticsTransition>,
     navigation: Navigation,
+    onboarding: Option<OnboardingTransition>,
+    setup_status: SetupStatus,
+    setup_available: bool,
+    assessment: Option<AssessmentOperation>,
 }
 
 impl ApplicationTransition {
+    pub fn assessment_operation(&self) -> Option<AssessmentOperation> {
+        self.assessment
+    }
+    pub fn onboarding(&self) -> Option<&OnboardingTransition> {
+        self.onboarding.as_ref()
+    }
+    pub fn setup_status(&self) -> SetupStatus {
+        self.setup_status
+    }
+    pub fn setup_available(&self) -> bool {
+        self.setup_available
+    }
+
     pub fn navigation(&self) -> &Navigation {
         &self.navigation
     }
@@ -91,8 +118,9 @@ pub struct Application {
     settings: SettingsApplication,
     diagnostics: DiagnosticsApplication,
     navigation: Navigation,
-    pairing_behaviors: Vec<BehaviorSetting>,
-    pairing_settings_read: Option<SettingsReadOperation>,
+    onboarding: OnboardingApplication,
+    setup_health: SetupHealth,
+    close_after_setup: bool,
     closed: bool,
 }
 
@@ -101,6 +129,8 @@ impl Application {
         let (overview, overview_opening) = OverviewApplication::open();
         let (tvs, tvs_opening) = TvsApplication::open();
         let (settings, settings_opening) = SettingsApplication::open();
+        let mut setup_health = SetupHealth::default();
+        let assessment = setup_health.request();
         (
             Self {
                 overview,
@@ -108,8 +138,9 @@ impl Application {
                 settings,
                 diagnostics: DiagnosticsApplication::default(),
                 navigation: Navigation::default(),
-                pairing_behaviors: Vec::new(),
-                pairing_settings_read: None,
+                onboarding: OnboardingApplication::default(),
+                setup_health,
+                close_after_setup: false,
                 closed: false,
             },
             ApplicationTransition {
@@ -118,6 +149,10 @@ impl Application {
                 settings: Some(settings_opening),
                 diagnostics: None,
                 navigation: Navigation::default(),
+                onboarding: None,
+                setup_status: SetupStatus::Unchecked,
+                setup_available: true,
+                assessment,
             },
         )
     }
@@ -126,6 +161,16 @@ impl Application {
         &mut self,
         intent: OverviewIntent,
     ) -> Option<ApplicationTransition> {
+        if self.onboarding.is_open() {
+            if intent != OverviewIntent::Cancel {
+                return None;
+            }
+            let update = self.onboarding.handle(OnboardingIntent::Cancel)?;
+            if self.onboarding.is_open() {
+                self.close_after_setup = true;
+                return Some(self.onboarding_transition(update));
+            }
+        }
         if intent == OverviewIntent::Cancel && !self.settings.can_close() {
             return None;
         }
@@ -137,7 +182,23 @@ impl Application {
     }
 
     pub fn handle_tvs_intent(&mut self, intent: TvsIntent) -> Option<ApplicationTransition> {
-        if self.pairing_settings_read.is_some() {
+        if intent == TvsIntent::PairTv {
+            if !self.tvs.can_pair() {
+                return None;
+            }
+            return self.handle_onboarding_intent(OnboardingIntent::Open);
+        }
+        if self.onboarding.is_open() {
+            if let TvsIntent::Pairing(intent) = intent {
+                use crate::pairing::PairingIntent;
+                return self.handle_onboarding_intent(match intent {
+                    PairingIntent::SetAddress(value) => OnboardingIntent::SetAddress(value),
+                    PairingIntent::SetMac(value) => OnboardingIntent::SetMac(value),
+                    PairingIntent::SetInput(value) => OnboardingIntent::SetInput(value),
+                    PairingIntent::Submit => OnboardingIntent::Submit,
+                    PairingIntent::Cancel => OnboardingIntent::Cancel,
+                });
+            }
             return None;
         }
         let transition = self.tvs.handle_intent(intent)?;
@@ -148,17 +209,111 @@ impl Application {
         &mut self,
         intent: SettingsIntent,
     ) -> Option<ApplicationTransition> {
-        if self.pairing_settings_read.is_some()
-            || (!self.pairing_behaviors.is_empty()
-                && (self.tvs.is_managing() || self.tvs.is_pairing()))
-        {
+        if intent == SettingsIntent::CompleteSetup {
+            if self.setup_health.status() != SetupStatus::Incomplete {
+                return None;
+            }
+            return self.handle_onboarding_intent(OnboardingIntent::Open);
+        }
+        if self.onboarding.is_open() {
             return None;
         }
         let transition = self.settings.handle_intent(intent)?;
-        if !self.pairing_behaviors.is_empty() && transition.read_operation().is_some() {
-            self.pairing_settings_read = transition.read_operation();
-        }
         Some(self.settings_transition(transition))
+    }
+
+    pub fn handle_onboarding_intent(
+        &mut self,
+        intent: OnboardingIntent,
+    ) -> Option<ApplicationTransition> {
+        if self.closed {
+            return None;
+        }
+        if intent == OnboardingIntent::Open
+            && (self.settings.is_mutating()
+                || self.tvs.is_managing()
+                || self.tvs.is_pairing()
+                || self.overview.has_pending_write())
+        {
+            return None;
+        }
+        let update = self.onboarding.handle(intent)?;
+        Some(self.onboarding_transition(update))
+    }
+    pub fn onboarding_progress(
+        &mut self,
+        operation: &OnboardingOperation,
+        progress: FlowProgress,
+    ) -> Option<ApplicationTransition> {
+        let update = self.onboarding.progress(operation, progress)?;
+        Some(self.onboarding_transition(update))
+    }
+    pub fn complete_onboarding(
+        &mut self,
+        operation: &OnboardingOperation,
+        result: Result<OnboardingResult, StepFailure>,
+    ) -> Option<ApplicationTransition> {
+        let update = self.onboarding.complete(operation, result)?;
+        Some(self.onboarding_transition(update))
+    }
+    pub fn onboarding_worker_stopped(
+        &mut self,
+        operation: &OnboardingOperation,
+    ) -> Option<ApplicationTransition> {
+        let update = self.onboarding.worker_stopped(operation)?;
+        Some(self.onboarding_transition(update))
+    }
+    pub fn refresh_setup(&mut self) -> Option<ApplicationTransition> {
+        if self.closed {
+            return None;
+        }
+        let operation = self.setup_health.request()?;
+        let mut transition = self.transition(None, None, None);
+        transition.assessment = Some(operation);
+        Some(transition)
+    }
+    pub fn complete_setup_assessment(
+        &mut self,
+        operation: AssessmentOperation,
+        result: Result<SetupAssessment, StepFailure>,
+    ) -> Option<ApplicationTransition> {
+        if self.closed {
+            return None;
+        }
+        let next = self.setup_health.complete(operation, result)?;
+        let mut transition = self.transition(None, None, None);
+        transition.assessment = next;
+        Some(transition)
+    }
+    fn onboarding_transition(&mut self, update: OnboardingTransition) -> ApplicationTransition {
+        if update.presentation.is_some() && !self.onboarding.is_busy() {
+            self.setup_health.observe_flow(self.onboarding.status());
+        }
+        if let Some(error) = update
+            .presentation
+            .as_ref()
+            .and_then(|view| view.error.as_ref())
+        {
+            self.diagnostics
+                .record_failure("Setup", &format!("{} {}", error.summary(), error.detail()));
+        }
+        let mut transition = if update.presentation.is_none() {
+            // Pairing may have completed before a later step was cancelled.
+            let tvs = self.tvs.refresh_after_setup();
+            let settings = self.settings.profile_changed();
+            let overview = self.overview.profile_changed();
+            self.transition(overview, Some(tvs), Some(settings))
+        } else {
+            self.transition(None, None, None)
+        };
+        if self.close_after_setup && !self.onboarding.is_open() {
+            self.close_after_setup = false;
+            if let Some(close) = self.handle_overview_intent(OverviewIntent::Cancel) {
+                transition = close;
+            }
+        }
+        transition.onboarding = Some(update);
+        transition
     }
 
     pub fn select_page(
@@ -168,12 +323,16 @@ impl Application {
         if self.closed || !self.navigation.select(page) {
             return None;
         }
-        match page {
+        let mut transition = match page {
             crate::navigation::ApplicationPage::Settings => self
                 .handle_settings_intent(SettingsIntent::Refresh)
                 .or_else(|| Some(self.transition(None, None, None))),
             _ => Some(self.transition(None, None, None)),
+        }?;
+        if page == crate::navigation::ApplicationPage::Settings {
+            transition.assessment = self.setup_health.request();
         }
+        Some(transition)
     }
 
     pub fn handle_diagnostics_intent(
@@ -230,29 +389,7 @@ impl Application {
         operation: SettingsReadOperation,
         result: Result<Vec<SettingsGroup>, SettingsReadError>,
     ) -> Option<ApplicationTransition> {
-        let succeeded = result.is_ok();
-        let mut transition = self.settings.complete_read(operation, result)?;
-        if self.pairing_settings_read == Some(operation) {
-            self.pairing_settings_read = None;
-            if let Some(update) = self.settings.set_controls_available(true) {
-                transition.update_presentation_from(update);
-            }
-            if succeeded && !self.closed {
-                let requested = std::mem::take(&mut self.pairing_behaviors);
-                for setting in requested {
-                    if let Some(update) = self.settings.handle_intent(SettingsIntent::SetEnabled {
-                        setting,
-                        enabled: true,
-                    }) {
-                        if transition.mutation_operation().is_none() {
-                            transition = update;
-                        } else {
-                            transition.update_presentation_from(update);
-                        }
-                    }
-                }
-            }
-        }
+        let transition = self.settings.complete_read(operation, result)?;
         Some(self.settings_transition(transition))
     }
 
@@ -396,10 +533,6 @@ impl Application {
         operation: &PairingOperation,
         result: Result<PairingOutcome, PairingError>,
     ) -> Option<ApplicationTransition> {
-        let requested = result
-            .as_ref()
-            .map(|outcome| outcome.requested_behaviors().to_vec())
-            .unwrap_or_default();
         let mut transition = self
             .tvs
             .complete_pairing(operation, result.map(PairingOutcome::into_profile))?;
@@ -409,12 +542,10 @@ impl Application {
         }
         let mut update = self.tvs_transition(transition);
         if paired {
-            self.pairing_behaviors = requested;
             let settings = self.settings.profile_changed();
-            self.pairing_settings_read = (!self.pairing_behaviors.is_empty())
-                .then(|| settings.read_operation())
-                .flatten();
+            let assessment = update.assessment;
             update = self.transition(update.overview, update.tvs, Some(settings));
+            update.assessment = assessment.or(update.assessment);
         }
         Some(update)
     }
@@ -427,10 +558,12 @@ impl Application {
     }
 
     pub fn is_pairing(&self) -> bool {
-        self.tvs.is_pairing()
+        self.tvs.is_pairing() || self.onboarding.is_open()
     }
 
     pub fn shutdown(&mut self) {
+        let _ = self.onboarding.handle(OnboardingIntent::Cancel);
+        self.setup_health.shutdown();
         self.closed = true;
         self.overview.shutdown();
         self.tvs.shutdown();
@@ -507,10 +640,6 @@ impl Application {
                 &format!("{} {}", error.summary(), error.detail()),
             );
         }
-        if transition.profile_changed() && transition.presentation().profiles().is_empty() {
-            self.pairing_behaviors.clear();
-            self.pairing_settings_read = None;
-        }
         self.navigation
             .update_profiles(transition.presentation().status());
         let overview = if transition.management_operation().is_some() {
@@ -529,10 +658,17 @@ impl Application {
         mut tvs: Option<TvsTransition>,
         mut settings: Option<SettingsTransition>,
     ) -> ApplicationTransition {
+        let assessment = self.setup_health.set_paused(
+            self.closed
+                || self.onboarding.is_open()
+                || self.settings.is_mutating()
+                || self.tvs.is_managing()
+                || self.tvs.is_pairing(),
+        );
         if let Some(update) = self.tvs.set_controls_available(
             !self.overview.has_pending_write()
                 && !self.settings.is_mutating()
-                && self.pairing_settings_read.is_none(),
+                && !self.onboarding.is_open(),
         ) {
             if let Some(tvs) = &mut tvs {
                 tvs.update_presentation_from(update);
@@ -541,9 +677,7 @@ impl Application {
             }
         }
         if let Some(update) = self.settings.set_controls_available(
-            !self.tvs.is_managing()
-                && !self.tvs.is_pairing()
-                && self.pairing_settings_read.is_none(),
+            !self.tvs.is_managing() && !self.tvs.is_pairing() && !self.onboarding.is_open(),
         ) {
             if let Some(settings) = &mut settings {
                 settings.update_presentation_from(update);
@@ -557,6 +691,13 @@ impl Application {
             settings,
             diagnostics: None,
             navigation: self.navigation.clone(),
+            onboarding: None,
+            setup_status: self.setup_health.status(),
+            assessment,
+            setup_available: !self.onboarding.is_open()
+                && !self.settings.is_mutating()
+                && !self.tvs.is_managing()
+                && !self.overview.has_pending_write(),
         }
     }
 }
@@ -641,7 +782,8 @@ mod tests {
             TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
             TvsIntent::Pairing(PairingIntent::SetMac("02:11:22:33:44:55".into())),
         ] {
-            application.handle_tvs_intent(intent).unwrap();
+            let update = application.tvs.handle_intent(intent).unwrap();
+            application.tvs_transition(update);
         }
         let start = application
             .handle_tvs_intent(TvsIntent::Pairing(PairingIntent::Submit))
@@ -740,139 +882,129 @@ mod tests {
     }
 
     #[test]
-    fn pairing_queues_independent_activation_after_reading_saved_off_policies() {
-        use crate::presentation::settings::{SettingsEditor, SettingsPresentation};
-        use crate::settings::{ConfigEnvReader, SettingsError};
-        let groups = || {
-            SettingsPresentation::from_store(
-                &ConfigEnvReader::parse(
-                    "/unused/config.env",
-                    "screen_idle_blank=disabled\nsystem_sleep_wake_policy=disabled\n",
-                )
-                .into_store(),
-            )
-            .groups()
-            .to_vec()
-        };
-        let requested = vec![
-            BehaviorSetting::ScreenIdleBlank,
-            BehaviorSetting::SystemSleepWakePolicy,
-        ];
-        let (mut app, opening, operation) = pairing();
-        let paired = app
-            .complete_pairing(
-                &operation,
-                Ok(PairingOutcome::new(profile(&operation), requested.clone())),
-            )
+    fn startup_is_read_only_and_closing_onboarding_rechecks_after_stale_completion() {
+        use crate::setup::gui::fixtures::Fixture;
+        let fixture = Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let old = opening.assessment_operation().unwrap();
+        assert!(opening.onboarding().is_none());
+        let old_result = old.execute(&fixture);
+        let opening = app
+            .handle_onboarding_intent(OnboardingIntent::Open)
             .unwrap();
-        assert!(paired.navigation().tabs_visible());
-        assert!(paired.tvs().unwrap().presentation().pairing().is_none());
-        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
+        assert!(opening.assessment_operation().is_none());
+        let operation = opening.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {});
+        app.complete_onboarding(&operation, result).unwrap();
+        let apply = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        let operation = apply.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {});
+        let complete = app.complete_onboarding(&operation, result).unwrap();
+        assert_eq!(complete.setup_status(), SetupStatus::Complete);
+        let stale = app.complete_setup_assessment(old, old_result).unwrap();
+        assert_eq!(stale.setup_status(), SetupStatus::Complete);
+        assert!(stale.assessment_operation().is_none());
+        let close = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        let fresh = close.assessment_operation().unwrap();
+        let verified = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(verified.setup_status(), SetupStatus::Complete);
+        assert!(verified.onboarding().is_none());
+        assert!(app.refresh_setup().is_some());
+        app.shutdown();
         assert!(app
-            .complete_settings_read(
-                opening.settings().unwrap().read_operation().unwrap(),
-                Ok(groups())
-            )
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
             .is_none());
-        let mut update = app
-            .complete_settings_read(
-                paired.settings().unwrap().read_operation().unwrap(),
-                Ok(groups()),
-            )
-            .unwrap();
-        for setting in requested {
-            let activation = update
-                .settings()
-                .unwrap()
-                .mutation_operation()
-                .unwrap()
-                .clone();
-            assert_eq!(activation.setting(), setting);
-            // Failure to activate one behavior must not prevent the other attempt.
-            update = app
-                .complete_settings_mutation(
-                    &activation,
-                    Err(SettingsMutationFailure::Activation(
-                        SettingsError::ActivationCancelled,
-                    )),
-                )
-                .unwrap();
-            let row = update
-                .settings()
-                .unwrap()
-                .presentation()
-                .groups()
-                .iter()
-                .flat_map(|group| group.rows())
-                .find(|row| row.setting() == setting)
-                .unwrap();
-            assert!(matches!(
-                row.editor(),
-                SettingsEditor::Toggle { value: Some(false) }
-            ));
-            assert!(row.retry_apply_action().is_none());
-            assert!(update.navigation().tabs_visible());
-        }
-        assert!(update.settings().unwrap().mutation_operation().is_none());
-        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_some());
+        assert!(app.refresh_setup().is_none());
     }
 
     #[test]
-    fn failed_post_pair_read_keeps_requests_for_retry_and_unpair_discards_them() {
+    fn onboarding_owns_mutations_and_rejected_quit_is_not_queued() {
+        use crate::setup::gui::fixtures::Fixture;
+        let fixture = Fixture::new(true, false);
+        let (mut app, _) = Application::open();
+        let opening = app
+            .handle_onboarding_intent(OnboardingIntent::Open)
+            .unwrap();
+        let operation = opening.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {});
+        let ready = app.complete_onboarding(&operation, result).unwrap();
+        assert_eq!(ready.setup_status(), SetupStatus::Incomplete);
+        assert!(!ready.setup_available());
+        assert!(app.handle_settings_intent(SettingsIntent::Retry).is_none());
+        assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
+
+        let action = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        let operation = action.onboarding().unwrap().operation.clone().unwrap();
+        let result = operation.execute_with(&fixture, &mut |_| {
+            // The live step is already noncancelable, even before GTK renders
+            // the progress event that disables the Cancel button.
+            assert!(app.handle_overview_intent(OverviewIntent::Cancel).is_none());
+            assert!(!app.closed);
+        });
+        let done = app.complete_onboarding(&operation, result).unwrap();
+        assert_eq!(done.setup_status(), SetupStatus::Complete);
+        assert!(!app.closed);
+        assert!(!app.close_after_setup);
+        app.handle_overview_intent(OverviewIntent::Cancel).unwrap();
+        assert!(app.closed);
+    }
+
+    #[test]
+    fn standalone_pairing_retains_assessment_when_refreshing_settings() {
+        let (mut app, opening, operation) = pairing();
+        app.complete_setup_assessment(
+            opening.assessment_operation().unwrap(),
+            Err(crate::setup::assessment::worker_stopped()),
+        )
+        .unwrap();
+        let done = app
+            .complete_pairing(&operation, Ok(profile(&operation).into()))
+            .unwrap();
+        assert!(done.settings().is_some());
+        assert!(done.assessment_operation().is_some());
+    }
+
+    #[test]
+    fn standalone_pairing_completion_does_not_queue_behavior_changes() {
         use crate::presentation::settings::SettingsPresentation;
-        use crate::settings::ConfigEnvReader;
-        for unpair in [false, true] {
-            let (mut app, _, operation) = pairing();
-            let paired = app
-                .complete_pairing(
-                    &operation,
-                    Ok(PairingOutcome::new(
-                        profile(&operation),
-                        vec![BehaviorSetting::ScreenIdleBlank],
-                    )),
-                )
-                .unwrap();
-            let failed = app
-                .complete_settings_read(
-                    paired.settings().unwrap().read_operation().unwrap(),
-                    Err(SettingsReadError::unreadable("temporarily unreadable")),
-                )
-                .unwrap();
-            assert!(failed.navigation().tabs_visible());
-            if unpair {
-                app.handle_tvs_intent(TvsIntent::UnpairTv).unwrap();
-                let confirm = app.handle_tvs_intent(TvsIntent::ConfirmUnpair).unwrap();
-                assert!(app.handle_settings_intent(SettingsIntent::Retry).is_none());
-                app.complete_tvs_management(
-                    confirm.tvs().unwrap().management_operation().unwrap(),
-                    Ok(TvsManagementOutcome::Unpaired),
-                )
-                .unwrap();
-            }
-            let retry = app.handle_settings_intent(SettingsIntent::Retry).unwrap();
-            let ready = app
-                .complete_settings_read(
-                    retry.settings().unwrap().read_operation().unwrap(),
-                    Ok(SettingsPresentation::from_store(
-                        &ConfigEnvReader::parse(
-                            "/unused/config.env",
-                            "screen_idle_blank=disabled\n",
-                        )
-                        .into_store(),
-                    )
-                    .groups()
-                    .to_vec()),
-                )
-                .unwrap();
-            assert_eq!(
-                ready
-                    .settings()
-                    .unwrap()
-                    .mutation_operation()
-                    .map(|op| op.setting()),
-                (!unpair).then_some(BehaviorSetting::ScreenIdleBlank)
-            );
-        }
+        use crate::settings::{ConfigEnvReader, SettingValue};
+        let (mut app, _, operation) = pairing();
+        let paired = app
+            .complete_pairing(
+                &operation,
+                Ok(PairingOutcome::new(
+                    profile(&operation),
+                    vec![crate::settings_view::BehaviorSetting::ScreenIdleBlank],
+                )),
+            )
+            .unwrap();
+        let store = ConfigEnvReader::parse(
+            "/unused/config.env",
+            "screen_idle_blank=disabled\nsystem_sleep_wake_policy=enabled\n",
+        )
+        .into_store();
+        let ready = app
+            .complete_settings_read(
+                paired.settings().unwrap().read_operation().unwrap(),
+                Ok(SettingsPresentation::from_store(&store).groups().to_vec()),
+            )
+            .unwrap();
+        assert!(ready.settings().unwrap().mutation_operation().is_none());
+        assert_eq!(
+            store
+                .effective_by_name("screen.idle_blank")
+                .unwrap()
+                .value(),
+            Some(SettingValue::Enum("disabled"))
+        );
     }
 
     #[test]
@@ -1012,6 +1144,35 @@ mod management_tests {
     }
 
     #[test]
+    fn entering_settings_rechecks_external_service_changes() {
+        use crate::{
+            navigation::ApplicationPage,
+            setup::{gui::fixtures::Fixture, StepResponse},
+        };
+        let fixture = Fixture::new(true, false);
+        fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
+        let (mut app, opening) = configured();
+        let first = opening.assessment_operation().unwrap();
+        let complete = app
+            .complete_setup_assessment(first, first.execute(&fixture))
+            .unwrap();
+        assert_eq!(complete.setup_status(), SetupStatus::Complete);
+        fixture.responses.lock().unwrap()[1] =
+            StepResponse::Failed(crate::setup::assessment::worker_stopped());
+        let refresh = app
+            .select_page(ApplicationPage::Settings)
+            .unwrap()
+            .assessment_operation()
+            .unwrap();
+        let incomplete = app
+            .complete_setup_assessment(refresh, refresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(incomplete.setup_status(), SetupStatus::Incomplete);
+        assert!(incomplete.onboarding().is_none());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn profile_change_invalidates_overview_reads_and_blocks_new_writes_until_reload() {
         let (mut app, opening) = configured();
         let change = app
@@ -1113,6 +1274,44 @@ mod settings_tests {
             .iter()
             .flat_map(|group| group.rows())
             .all(|row| row.editor_enabled())
+    }
+
+    #[test]
+    fn settings_mutations_discard_older_health_and_schedule_fresh_inspection() {
+        use crate::setup::gui::fixtures::Fixture;
+        let fixture = Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let old = opening.assessment_operation().unwrap();
+        app.complete_settings_read(
+            opening.settings().unwrap().read_operation().unwrap(),
+            Ok(settings()),
+        )
+        .unwrap();
+        let change = app
+            .handle_settings_intent(SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::ScreenIdleBlank,
+                enabled: false,
+            })
+            .unwrap();
+        let stale = app
+            .complete_setup_assessment(old, old.execute(&fixture))
+            .unwrap();
+        assert_eq!(stale.setup_status(), SetupStatus::Unchecked);
+        assert!(stale.assessment_operation().is_none());
+        let done = app
+            .complete_settings_mutation(
+                change.settings().unwrap().mutation_operation().unwrap(),
+                Err(SettingsMutationFailure::Persistence(SettingsError::Apply {
+                    message: "test failure".into(),
+                })),
+            )
+            .unwrap();
+        let fresh = done.assessment_operation().unwrap();
+        assert_ne!(fresh, old);
+        let inspected = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert_eq!(inspected.setup_status(), SetupStatus::Incomplete);
     }
 
     #[test]

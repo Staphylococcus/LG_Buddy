@@ -49,16 +49,17 @@ In the dialog:
    remote.
 
 Cancel is available until saving starts; once saving starts, the dialog stays
-open until the operation finishes. When verification and saving finish, the
-dialog closes and normal navigation becomes available. A fresh setup attempts
-the default Idle Blanking and TV Sleep & Wake behaviors. There is no separate
-confirmation for each service; approve the desktop authorization prompt when a
-system operation needs it. Pairing again reactivates previously enabled
-behaviors and keeps disabled choices off. If authorization is declined or a
-behavior cannot be activated, the paired TV remains saved while that behavior
-stays off. Enable it in **Settings** later to retry and activate the service. A
-failed pairing shows an error you can correct and submit again; a cancelled
-attempt does not save a TV.
+open until the operation finishes. When verification and saving finish,
+the same dialog continues with background services and any required Plasma
+integration. Each step explains its changes before you continue or authorize
+it. A local plugin build may ask separately to install development packages.
+Only **Setup complete** confirms that all applicable requirements are ready.
+
+Cancelling retains your paired TV and saved behavior choices. **Settings →
+Complete setup** resumes the remaining work, without pairing again when valid
+credentials are already saved. The row appears after setup has detected remaining work.
+Noncancelable service changes must finish before the dialog can close. Pairing
+errors remain in the dialog with a retry action.
 
 ![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
 
@@ -130,19 +131,69 @@ restored. If it was saved but could not take effect, the value stays saved and
 means its setup needs attention before the saved behavior can take effect;
 see [troubleshooting](#troubleshooting).
 
-Leave **Desktop integration** at **Automatic** unless you need to select a
-particular compatible desktop. See the [session backend model](session-backend-model.md)
-for compatibility details, including the deprecated `swayidle` option.
+Desktop integration is automatic. Configure behavior once; moving between
+GNOME Wayland and Plasma Wayland needs no LG Buddy setting change or repeated
+setup. The available native interfaces determine which sources contribute.
+
+If an older configuration explicitly selects `gnome`, `wayland` or `swayidle`,
+**Legacy desktop integration → Use automatic** offers a one-time switch.
+The confirmation keeps your behavior settings; cancellation or a failed switch
+preserves the previous configuration. If native idle support is unavailable,
+disable **Idle blanking** first to use automatic integration with the other
+application features. The legacy override remains visible even with idle
+blanking disabled. Existing explicit configurations keep their behavior until
+you choose to switch.
 
 This preference applies to the native GNOME and Wayland integrations. The
-deprecated `swayidle` integration always honors app inhibition, including when
-**Automatic** falls back to it. Selecting `swayidle` hides this preference.
+deprecated, explicitly selected `swayidle` integration always honors app
+inhibition. An existing `swayidle` override hides this preference. Automatic integration uses native
+sources only and never falls back to swayidle.
 
-Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**,
-**Desktop integration**, and **Idle timeout**
+Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**
+and **Idle timeout**
 while keeping their saved values for when you turn it back on. **Restore policy**
 stays available because it also controls restoration after system sleep and
 explicit screen-on requests.
+
+Backend selection is absent from `settings list` and `settings describe`
+without a key. Existing scripts can still explicitly use `settings get`,
+`describe`, `set` and `unset` with `screen.backend`. The accepted values remain
+`auto`, `gnome`, `wayland` and `swayidle`; `unset` restores the `auto` default.
+Reading or listing settings never migrates a saved override.
+
+These legacy writes keep their save-then-apply behavior: if service application
+fails, the command returns an error identifying the saved value, which remains
+in the configuration. Repeating the command retries application even when the
+value is unchanged. Use **Legacy desktop integration → Use automatic** for a
+validated transition that restores the previous configuration on apply failure.
+
+The hidden `detect-backend` compatibility command retains its output for older
+callers. Like the resolution field in `settings describe screen.backend`, it
+reports one native capability, not the automatic monitor's complete source set.
+Use the application's diagnostics for current activity and inhibition sources.
+See the [session backend model](session-backend-model.md).
+
+<a id="external-idle-automation"></a>
+## External idle automation
+
+When native idle monitoring is unavailable, disable **Idle blanking** to keep
+TV controls, GUI/CLI operation, session notifications and separately configured
+TV Sleep & Wake available. Missing optional inhibition sources do not require
+this: LG Buddy continues checking the sources that are available.
+
+You can manage an external swayidle process through the public screen commands:
+
+```bash
+lg-buddy settings set screen.idle_blank disabled
+swayidle -w timeout 300 'lg-buddy screen off' resume 'lg-buddy screen on'
+```
+
+You own swayidle installation, startup and timing. Leave LG Buddy's session
+service enabled. The public commands retain TV input checks, ownership and
+restore policy. This basic recipe does not provide integrated gamepad activity,
+lock-triggered blanking or delayed power-off. It is separate from the deprecated
+built-in `screen.backend=swayidle` integration, which remains available for
+existing explicit configurations until 2.0.0.
 
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad
@@ -160,10 +211,41 @@ guide](gamepad-subsystem.md) for supported input paths and troubleshooting.
 <a id="configuration"></a>
 ## Use commands for shortcuts, scripts, or a headless setup
 
-For first-time setup without the GUI, run `./configure.sh` from the extracted
-release archive before `./install.sh`. To select native control for an existing
+For first-time terminal setup, run `./install.sh --headless` from the extracted
+release archive. The installer deploys the application, then `lg-buddy setup`
+pairs the TV and completes required services and desktop integration. Rerun
+`lg-buddy setup` to resume or repair; completed steps are skipped and saved
+behavior settings are preserved. `configure.sh` now forwards to this command.
+Use `lg-buddy settings` to edit existing TV details and behavior preferences.
+
+For unattended input, pass setup arguments after `--`, for example:
+
+```bash
+./install.sh --headless -- --non-interactive --yes \
+  --tv-ip 192.168.1.100 --tv-mac 02:11:22:33:44:55 --input HDMI_1
+```
+
+The TV still needs to approve first-time pairing. `--non-interactive` prevents
+terminal and graphical password prompts in setup; required sudo permission must
+already be available. Use `LG_BUDDY_NONINTERACTIVE=1` to also prevent installer
+bootstrap prompts. `--yes` approves the described setup work but does not approve
+compiler/development packages: those require `--allow-build-dependencies`.
+Interactive setup uses sudo in the terminal. Ctrl+C cancels a cancelable step;
+service and integration changes finish before returning control.
+
+Exit codes are 0 for verified completion, 1 for failed or blocked setup, 2 for
+invalid arguments, 3 for missing input/consent, and 130 for cancellation. A TV
+may remain paired when a later step is incomplete; rerunning resumes the work.
+
+To select native control for an existing
 profile and verify it before saving, use `lg-buddy settings set tv.platform
-lg_webos`. The explicit `bscpylgtv` value remains a compatibility fallback.
+lg_webos`, accepting the pairing prompt on the TV. Existing `bscpylgtv`
+profiles, including older profiles without a platform key, remain supported
+through the final 1.x compatibility window when their installed environment
+works. Support ends in v2.0.0. The installer no longer creates or repairs that
+environment; if it is unhealthy, pair and select `lg_webos` before retrying.
+Upgrading a native profile removes the obsolete LG Buddy environment at
+`/usr/bin/LG_Buddy_PIP` while retaining configuration and credentials.
 
 These commands work without opening the GUI:
 
@@ -177,8 +259,8 @@ These commands work without opening the GUI:
 | Set OLED brightness to 65% | `lg-buddy brightness set 65` |
 | Set volume to 20 and unmute | `lg-buddy volume 20` |
 | Toggle mute | `lg-buddy volume mute` |
-| Inspect all settings | `lg-buddy settings list` |
-| Explain the selected desktop integration | `lg-buddy settings describe screen.backend` |
+| Inspect public settings | `lg-buddy settings list` |
+| Explain idle blanking | `lg-buddy settings describe screen.idle_blank` |
 | Wait ten minutes before blanking | `lg-buddy settings set screen.idle_timeout 600` |
 | Restore the default idle timeout | `lg-buddy settings unset screen.idle_timeout` |
 
@@ -289,7 +371,7 @@ checks include command-line alternatives for headless use:
 | Problem | Check |
 | --- | --- |
 | The TV is disconnected | Check its power, network, saved address, and Wake-on-LAN setting. For rejected authorization, follow [Fix a pairing problem](#fix-pairing-problem). |
-| Idle blanking does not work | `lg-buddy settings describe screen.backend`<br>`systemctl --user status LG_Buddy_screen.service`<br>`journalctl --user -u LG_Buddy_screen.service --since today` |
+| Idle blanking does not work | Check **Complete setup** in Settings and the current activity/inhibition sources in diagnostics. For headless use: `systemctl --user status LG_Buddy_screen.service` and `journalctl --user -u LG_Buddy_screen.service --since today`. |
 | A setting shows an error | Follow its message, then use **Retry apply** when offered. If a behavior is off after a declined or unavailable activation, enable it again in **Settings** after fixing the reported service or authorization issue. |
 | System sleep/wake behavior is wrong | `systemctl status LG_Buddy_lifecycle.service`<br>`journalctl -u LG_Buddy_lifecycle.service --since today` |
 | An update cannot be installed | In the GUI, use the update toast's **Copy details** action. For a headless update, keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |

@@ -1,0 +1,13 @@
+[Unit]
+Description=LG Buddy installed KWin integration loader
+After=graphical-session.target plasma-kwin_wayland.service
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/lg-buddy/kwin/setup.sh
+TimeoutStartSec=180
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical-session.target

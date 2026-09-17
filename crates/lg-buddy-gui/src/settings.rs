@@ -20,11 +20,32 @@ pub(crate) struct SettingsView {
     retry: gtk::Button,
     retry_intent: Rc<RefCell<Option<SettingsIntent>>>,
     updater: UpdaterView,
+    setup_group: adw::PreferencesGroup,
+    setup_row: adw::ActionRow,
 }
 
 impl SettingsView {
     pub(crate) fn new(on_intent: Rc<dyn Fn(SettingsIntent)>) -> Self {
         let page = adw::PreferencesPage::new();
+        let setup_group = adw::PreferencesGroup::builder().visible(false).build();
+        let setup_row = adw::ActionRow::builder()
+            .title("Complete setup")
+            .subtitle("Some required components still need to be set up.")
+            .activatable(true)
+            .build();
+        let setup_button = gtk::Button::builder()
+            .label("Continue")
+            .valign(gtk::Align::Center)
+            .build();
+        setup_button.update_property(&[gtk::accessible::Property::Label("Complete setup")]);
+        setup_button.connect_clicked({
+            let on_intent = on_intent.clone();
+            move |_| on_intent(SettingsIntent::CompleteSetup)
+        });
+        setup_row.add_suffix(&setup_button);
+        setup_row.set_activatable_widget(Some(&setup_button));
+        setup_group.add(&setup_row);
+        page.add(&setup_group);
         let status = adw::StatusPage::builder()
             .icon_name("preferences-system-symbolic")
             .vexpand(true)
@@ -63,9 +84,20 @@ impl SettingsView {
             retry,
             retry_intent,
             updater,
+            setup_group,
+            setup_row,
         }
     }
 
+    pub(crate) fn render_setup_status(
+        &self,
+        status: lg_buddy::setup::gui::SetupStatus,
+        available: bool,
+    ) {
+        self.setup_group
+            .set_visible(status == lg_buddy::setup::gui::SetupStatus::Incomplete);
+        self.setup_row.set_sensitive(available);
+    }
     pub(crate) fn widget(&self) -> &gtk::Stack {
         &self.root
     }
@@ -454,6 +486,7 @@ fn render_updater_button(
 }
 
 enum NativeEditor {
+    AutomaticIntegration(gtk::Button),
     Toggle(adw::SwitchRow),
     Choice(adw::ComboRow),
     Number {
@@ -478,6 +511,39 @@ impl NativeSettingRow {
         let presentation = Rc::new(RefCell::new(initial.clone()));
         let rendering = Rc::new(Cell::new(false));
         let (row, editor): (adw::ActionRow, NativeEditor) = match initial.editor() {
+            SettingsEditor::AutomaticIntegration { .. } => {
+                let row = adw::ActionRow::new();
+                let button = gtk::Button::with_label("Use automatic");
+                button.set_valign(gtk::Align::Center);
+                row.add_suffix(&button);
+                row.set_activatable_widget(Some(&button));
+                button.connect_clicked({
+                    let on_intent = Rc::clone(&on_intent);
+                    move |button| {
+                        let dialog = adw::AlertDialog::builder()
+                            .heading("Use automatic desktop integration?")
+                            .body("LG Buddy will discover the available desktop interfaces on each login. Your idle timeout, app inhibition and restore settings are kept. If the switch fails, your previous configuration is restored.")
+                            .build();
+                        dialog.add_responses(&[("cancel", "Cancel"), ("switch", "Use automatic integration")]);
+                        dialog.set_default_response(Some("cancel"));
+                        dialog.set_close_response("cancel");
+                        dialog.set_response_appearance("switch", adw::ResponseAppearance::Suggested);
+                        dialog.connect_response(None, {
+                            let on_intent = Rc::clone(&on_intent);
+                            move |_, response| {
+                                if response == "switch" {
+                                    on_intent(SettingsIntent::Commit {
+                                        setting: lg_buddy::settings_view::BehaviorSetting::ScreenBackend,
+                                        value: "auto".into(),
+                                    });
+                                }
+                            }
+                        });
+                        dialog.present(Some(button));
+                    }
+                });
+                (row, NativeEditor::AutomaticIntegration(button))
+            }
             SettingsEditor::Toggle { .. } => {
                 let switch = adw::SwitchRow::new();
                 switch.update_property(&[gtk::accessible::Property::Label(initial.title())]);
@@ -650,6 +716,10 @@ impl NativeSettingRow {
     fn render_editor(&self, editor: &SettingsEditor) {
         self.rendering.set(true);
         match (&self.editor, editor) {
+            (
+                NativeEditor::AutomaticIntegration(_),
+                SettingsEditor::AutomaticIntegration { .. },
+            ) => {}
             (NativeEditor::Toggle(switch), SettingsEditor::Toggle { value }) => {
                 switch.set_active(value.unwrap_or(false));
                 switch.update_state(&[gtk::accessible::State::Invalid(if value.is_none() {
@@ -693,6 +763,7 @@ impl NativeSettingRow {
 
     fn render_state(&self, current: &SettingsRow, visible: bool) {
         self.rendering.set(true);
+        self.row.set_subtitle(current.description());
         self.row.set_visible(visible);
         self.row.set_sensitive(current.editor_enabled());
         self.row.update_property(&[
@@ -703,6 +774,10 @@ impl NativeSettingRow {
                 current.value_label()
             )),
         ]);
+        if let NativeEditor::AutomaticIntegration(button) = &self.editor {
+            button.reset_relation(gtk::AccessibleRelation::LabelledBy);
+            button.update_property(&[gtk::accessible::Property::Label("Use automatic")]);
+        }
         self.problem
             .set_visible(visible && current.problem().is_some());
         self.problem.set_subtitle(current.problem().unwrap_or(""));
@@ -804,6 +879,32 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         let intents = Rc::clone(&intents);
         move |intent| intents.borrow_mut().push(intent)
     }));
+    use lg_buddy::setup::gui::SetupStatus;
+    for status in [
+        SetupStatus::Unchecked,
+        SetupStatus::Incomplete,
+        SetupStatus::Complete,
+    ] {
+        view.render_setup_status(status, true);
+        assert_eq!(
+            view.setup_group.is_visible(),
+            status == SetupStatus::Incomplete
+        );
+    }
+    view.render_setup_status(SetupStatus::Incomplete, false);
+    assert!(!view.setup_row.is_sensitive());
+    view.render_setup_status(SetupStatus::Incomplete, true);
+    view.setup_row
+        .activatable_widget()
+        .unwrap()
+        .downcast::<gtk::Button>()
+        .unwrap()
+        .emit_clicked();
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(SettingsIntent::CompleteSetup)
+    );
+    view.render_setup_status(SetupStatus::Complete, true);
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .default_width(1100)
@@ -897,7 +998,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
             .iter()
             .filter(|row| matches!(row.editor, NativeEditor::Choice(_)))
             .count(),
-        3
+        2
     );
     assert!(!widgets
         .iter()
@@ -1114,10 +1215,13 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     pump_until(|| !entry.is_mapped());
     assert!(rows[0].is_visible(), "Idle blanking remains available");
     assert!(!rows[1].is_visible(), "Idle inhibitor preference is hidden");
-    assert!(!rows[2].is_visible(), "Desktop integration is hidden");
+    assert!(
+        rows[2].is_visible(),
+        "the legacy override stays recoverable with idle blanking disabled"
+    );
     assert!(!rows[3].is_visible(), "Idle timeout is hidden");
     assert!(rows[4].is_visible(), "Restore policy remains available");
-    assert!(!view.rows.borrow()[2].problem.is_visible());
+    assert!(view.rows.borrow()[2].problem.is_visible());
     assert!(!view.rows.borrow()[3].feedback.is_visible());
     assert!(
         intents.borrow().is_empty(),
@@ -1128,7 +1232,10 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
 
     view.render(failed.presentation());
     pump_until(|| entry.is_mapped());
-    assert!(rows[2].is_visible());
+    assert!(
+        !rows[2].is_visible(),
+        "automatic integration needs no chooser"
+    );
     assert!(rows[3].is_visible());
     assert!(view.rows.borrow()[3].feedback.is_visible());
     assert_eq!(entry.text(), "721", "hiding must preserve the editor draft");
@@ -1147,8 +1254,105 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         "settings rows must fit a narrow window: {minimum}"
     );
     window.close();
+    automatic_integration_transition_requires_confirmation(application);
     choice_row_click_opens_the_value_menu(application);
     updater_renderer_scenarios(application);
+}
+
+#[cfg(test)]
+fn automatic_integration_transition_requires_confirmation(application: &adw::Application) {
+    fn response_button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button.clone());
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = response_button(&widget, label) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    use crate::controller_test_support::pump_until;
+    use lg_buddy::settings::ConfigEnvReader;
+    use lg_buddy::settings_view::BehaviorSetting;
+
+    let intents = Rc::new(RefCell::new(Vec::new()));
+    let view = SettingsView::new(Rc::new({
+        let intents = Rc::clone(&intents);
+        move |intent| intents.borrow_mut().push(intent)
+    }));
+    let window = adw::ApplicationWindow::builder()
+        .application(application)
+        .default_width(600)
+        .default_height(800)
+        .content(view.widget())
+        .build();
+    window.present();
+    for backend in ["gnome", "wayland", "swayidle"] {
+        let store = ConfigEnvReader::parse(
+            "/unused/config.env",
+            &format!("screen_backend={backend}\nscreen_idle_blank=disabled\n"),
+        )
+        .into_store();
+        let presentation = SettingsPresentation::from_store(&store);
+        view.render(&presentation);
+        let row = view.rows.borrow()[2].row.clone();
+        let button = row
+            .activatable_widget()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        pump_until(|| button.is_mapped());
+        assert_eq!(
+            row.subtitle().unwrap(),
+            presentation.groups()[0].rows()[2].description()
+        );
+        button.emit_clicked();
+        pump_until(|| window.visible_dialog().is_some());
+        assert!(
+            intents.borrow().is_empty(),
+            "opening the transition does not change settings"
+        );
+        let dialog = window
+            .visible_dialog()
+            .unwrap()
+            .downcast::<adw::AlertDialog>()
+            .unwrap();
+        let cancel = response_button(dialog.upcast_ref(), "Cancel").unwrap();
+        pump_until(|| cancel.is_mapped());
+        cancel.emit_clicked();
+        pump_until(|| window.visible_dialog().is_none());
+        assert!(
+            intents.borrow().is_empty(),
+            "cancellation preserves the legacy selection"
+        );
+        button.emit_clicked();
+        pump_until(|| window.visible_dialog().is_some());
+        let dialog = window.visible_dialog().unwrap();
+        let confirm = response_button(dialog.upcast_ref(), "Use automatic integration").unwrap();
+        pump_until(|| confirm.is_mapped());
+        confirm.emit_clicked();
+        pump_until(|| window.visible_dialog().is_none());
+        assert_eq!(
+            intents.borrow_mut().pop(),
+            Some(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenBackend,
+                value: "auto".into(),
+            })
+        );
+    }
+    view.render(&SettingsPresentation::from_store(
+        &ConfigEnvReader::parse("/unused/config.env", "").into_store(),
+    ));
+    assert!(
+        !view.rows.borrow()[2].row.is_visible(),
+        "fresh automatic configuration has no backend chooser or migration action"
+    );
+    window.close();
 }
 
 #[cfg(test)]
@@ -1191,7 +1395,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .content(view.widget())
         .build();
     window.present();
-    let choice = match &view.rows.borrow()[2].editor {
+    let choice = match &view.rows.borrow()[4].editor {
         NativeEditor::Choice(choice) => choice.clone(),
         _ => unreachable!(),
     };
@@ -1245,7 +1449,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
         .unwrap()
         .success());
     pump_until(|| !intents.borrow().is_empty());
-    let expected = ready.presentation().groups()[0].rows()[2]
+    let expected = ready.presentation().groups()[0].rows()[4]
         .editor()
         .choices()
         .unwrap()
@@ -1255,7 +1459,7 @@ fn choice_row_click_opens_the_value_menu(application: &adw::Application) {
     assert_eq!(
         *intents.borrow(),
         vec![SettingsIntent::Commit {
-            setting: BehaviorSetting::ScreenBackend,
+            setting: BehaviorSetting::ScreenRestorePolicy,
             value: expected.into(),
         }],
         "choosing a value must commit directly from the row"

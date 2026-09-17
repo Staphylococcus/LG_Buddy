@@ -24,6 +24,7 @@ ACCESSIBILITY_REGISTRY_PID=""
 ACCESSIBILITY_PYTHON=""
 TV_FIXTURE_PID=""
 GITHUB_FIXTURE_PID=""
+SYSTEMD_CONFIG_FIXTURE_PID=""
 
 fail() {
     echo "$1" >&2
@@ -39,7 +40,7 @@ cleanup() {
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
     fi
-    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID"; do
+    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID" "$SYSTEMD_CONFIG_FIXTURE_PID"; do
         if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
             kill "$fixture_pid" 2>/dev/null || true
             wait "$fixture_pid" 2>/dev/null || true
@@ -297,16 +298,16 @@ cp "$CONFIG_FILE" "$WORK_DIR/before-settings.env"
 printf '%s\n' 'screen_idle_timeout=600' 'updates_channel=not-a-channel' >> "$CONFIG_FILE"
 cp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env"
 observe_gui_state --select-page Settings
-observe_gui_state --expected-settings-state invalid --expected-settings-timeout 600
+observe_gui_state --expected-settings-state invalid --expected-settings-timeout 600 --expected-integration automatic
 xdotool windowsize --sync "$WINDOW_ID" 700 780
-observe_gui_state --focus-control "Desktop integration" --window-id "$WINDOW_ID"
+observe_gui_state --focus-control "Restore policy" --window-id "$WINDOW_ID"
 observe_gui_state --expected-settings-state invalid --expected-settings-timeout 600
 cmp "$CONFIG_FILE" "$WORK_DIR/settings-snapshot.env" || fail "Inspecting Settings changed configuration."
 # Returning to Settings reloads changes made outside the GUI.
 observe_gui_state --select-page TVs
 printf '%s\n' 'screen_idle_timeout=120' 'updates_channel=stable' >> "$CONFIG_FILE"
 observe_gui_state --select-page Settings
-observe_gui_state --expected-settings-state ready --expected-settings-timeout 120
+observe_gui_state --expected-settings-state ready --expected-settings-timeout 120 --expected-integration automatic
 # The timeout draft remains local until Enter.
 cp "$CONFIG_FILE" "$WORK_DIR/before-settings-edit.env"
 observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
@@ -318,6 +319,28 @@ observe_gui_state --edit-settings-timeout invalid --window-id "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" Return
 observe_gui_state --expected-settings-state ready --expected-settings-timeout 720
 [ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Invalid timeout changed configuration."
+# Every saved legacy override has one explicit transition. Cancellation leaves
+# the exact file intact; disabled idle monitoring needs no native idle provider.
+for legacy_backend in gnome wayland swayidle; do
+    observe_gui_state --select-page TVs
+    cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
+    printf '%s\n' "screen_backend=$legacy_backend" 'screen_idle_blank=disabled' \
+        'screen_idle_timeout=731' 'screen_restore_policy=aggressive' \
+        'screen_honor_idle_inhibitors=enabled' >> "$CONFIG_FILE"
+    cp "$CONFIG_FILE" "$WORK_DIR/legacy-transition.env"
+    observe_gui_state --select-page Settings
+    observe_gui_state --expected-settings-state ready --expected-integration legacy
+    observe_gui_state --activate-control "Use automatic"
+    observe_gui_state --activate-control "Cancel"
+    cmp "$CONFIG_FILE" "$WORK_DIR/legacy-transition.env" || fail "Cancelling automatic integration changed $legacy_backend settings."
+    observe_gui_state --activate-control "Use automatic"
+    observe_gui_state --activate-control "Use automatic integration"
+    observe_gui_state --expected-settings-state ready --expected-integration automatic
+    [ "$("$RUNTIME_BINARY" settings get screen.backend)" = auto ] || fail "Automatic integration did not persist."
+    sed "s/^screen_backend=$legacy_backend$/screen_backend=auto/" \
+        "$WORK_DIR/legacy-transition.env" > "$WORK_DIR/automatic-transition.env"
+    cmp "$CONFIG_FILE" "$WORK_DIR/automatic-transition.env" || fail "Automatic integration changed behavior settings."
+done
 cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
 observe_gui_state --select-page Overview
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true

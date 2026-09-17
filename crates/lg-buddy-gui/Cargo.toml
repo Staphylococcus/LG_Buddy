@@ -1,6 +1,6 @@
 [package]
 name = "lg-buddy-gui"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 publish = false
 
@@ -18,3 +18,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "lg-buddy-gui"
 path = "src/main.rs"
+
+[dev-dependencies]
+lg-buddy = { path = "../lg-buddy", features = ["gui-test-fixtures"] }

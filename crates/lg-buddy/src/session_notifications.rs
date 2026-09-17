@@ -24,6 +24,7 @@ use crate::notifications::{
     NotificationError, NotificationId, NotificationSignal, Notifier, NOTIFICATION_INTERFACE,
     NOTIFICATION_PATH, NOTIFICATION_SERVICE,
 };
+use crate::session::monitor_diagnostics::MonitorDiagnostics;
 use crate::session_bus::{
     bus_signal_from_dbus_message, new_session_bus_client, BusMethodCall, BusValue,
     SessionBusClient, SessionBusError, DBUS_INTERFACE, DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
@@ -39,6 +40,7 @@ pub(crate) const SESSION_BUS_NAME: &str = "io.github.Staphylococcus.LGBuddy";
 pub(crate) const SESSION_OBJECT_PATH: &str = "/io/github/Staphylococcus/LGBuddy/Session";
 pub(crate) const SESSION_INTERFACE: &str = "io.github.Staphylococcus.LGBuddy.Session1";
 pub(crate) const SHOW_UPDATE_NOTIFICATION_METHOD: &str = "ShowUpdateNotification";
+pub(crate) const GET_MONITOR_DIAGNOSTICS_METHOD: &str = "GetMonitorDiagnostics";
 pub(crate) const VIEW_RELEASE_ACTION_KEY: &str = "view-release";
 pub(crate) const DISABLE_UPDATE_CHECKS_ACTION_KEY: &str = "disable-update-checks";
 
@@ -595,17 +597,19 @@ impl Drop for SessionNotificationServiceThread {
 }
 
 pub(crate) fn spawn_session_notification_service(
+    diagnostics: MonitorDiagnostics,
 ) -> Result<SessionNotificationServiceThread, SessionServiceError> {
     let dispatcher = SessionUpdateNotificationDispatcher::new(
         FreedesktopNotifier,
         SystemReleaseOpener::default(),
         SettingsUpdateNotificationPreferences::from_env(),
     );
-    spawn_session_notification_service_with(dispatcher)
+    spawn_session_notification_service_with(dispatcher, diagnostics)
 }
 
 fn spawn_session_notification_service_with<N, O, P>(
     dispatcher: SessionUpdateNotificationDispatcher<N, O, P>,
+    diagnostics: MonitorDiagnostics,
 ) -> Result<SessionNotificationServiceThread, SessionServiceError>
 where
     N: Notifier + Send + 'static,
@@ -624,6 +628,7 @@ where
             thread_stop,
             loop_ready,
             thread_started,
+            diagnostics,
         );
         if let Err(err) = result {
             if started.load(Ordering::SeqCst) {
@@ -678,6 +683,7 @@ fn run_session_notification_service_loop<N, O, P>(
     stop: Arc<AtomicBool>,
     ready: mpsc::Sender<Result<(), SessionServiceError>>,
     started: Arc<AtomicBool>,
+    diagnostics: MonitorDiagnostics,
 ) -> Result<(), SessionServiceError>
 where
     N: Notifier + Send + 'static,
@@ -715,7 +721,7 @@ where
     if session_service_startup_stopped(&stop) {
         return Ok(());
     }
-    register_session_methods(&connection, Arc::clone(&dispatcher))?;
+    register_session_methods(&connection, Arc::clone(&dispatcher), diagnostics)?;
     if session_service_startup_stopped(&stop) {
         return Ok(());
     }
@@ -744,6 +750,7 @@ fn session_service_startup_stopped(stop: &AtomicBool) -> bool {
 fn register_session_methods<N, O, P>(
     connection: &DbusConnection,
     dispatcher: Arc<Mutex<SessionUpdateNotificationDispatcher<N, O, P>>>,
+    diagnostics: MonitorDiagnostics,
 ) -> Result<(), SessionServiceError>
 where
     N: Notifier + Send + 'static,
@@ -753,6 +760,12 @@ where
     let mut crossroads = Crossroads::new();
     let method_dispatcher = Arc::clone(&dispatcher);
     let iface = crossroads.register(SESSION_INTERFACE, move |builder| {
+        builder.method(
+            GET_MONITOR_DIAGNOSTICS_METHOD,
+            (),
+            ("activity", "inhibition", "context"),
+            move |_, _, ()| Ok(diagnostics.report()),
+        );
         let method_dispatcher = Arc::clone(&method_dispatcher);
         builder.method(
             SHOW_UPDATE_NOTIFICATION_METHOD,

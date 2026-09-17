@@ -10,11 +10,14 @@ pub mod audio;
 pub mod auth;
 pub mod backend;
 pub mod brightness;
+mod command;
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
 pub mod diagnostics_view;
 pub mod events;
+pub mod inhibition;
+pub mod kwin_bridge;
 pub mod lifecycle;
 pub mod navigation;
 pub mod notifications;
@@ -32,6 +35,7 @@ pub mod session_bus;
 pub mod session_notifications;
 pub mod settings;
 pub mod settings_view;
+pub mod setup;
 pub mod sources;
 pub mod state;
 pub mod tv;
@@ -90,12 +94,14 @@ pub enum Command {
     Monitor,
     Lifecycle,
     DetectBackend,
+    Setup(setup::cli::SetupOptions),
+    KWinBridge(kwin_bridge::KWinBridgeCommand),
     Dev(DevCommand),
     Settings(SettingsCommand),
     Updates(UpdatesCommand),
     UpgradePreflight {
         candidate_root: PathBuf,
-        repair_python: bool,
+        remove_legacy_env: bool,
         json: bool,
     },
 }
@@ -178,6 +184,7 @@ impl UpdatesHelpTopic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTopic {
     Global,
+    Setup,
     Brightness,
     Volume,
     Power,
@@ -237,6 +244,7 @@ pub enum ParseError {
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
     MissingUpgradePreflightRoot,
+    Setup(String),
     UnexpectedArguments {
         command: Command,
         arguments: Vec<String>,
@@ -287,6 +295,7 @@ impl fmt::Display for ParseError {
             Self::Dev(err) => write!(f, "{err}"),
             Self::Settings(err) => write!(f, "{err}"),
             Self::Updates(err) => write!(f, "{err}"),
+            Self::Setup(error) => write!(f, "{error}"),
             Self::MissingUpgradePreflightRoot => {
                 write!(f, "missing candidate root for `upgrade-preflight`")
             }
@@ -304,6 +313,7 @@ impl fmt::Display for ParseError {
 
 #[derive(Debug)]
 pub enum RunError {
+    Setup(setup::cli::SetupError),
     Io(io::Error),
     Policy(String),
     TvClientBuild(TvClientBuildError),
@@ -326,6 +336,7 @@ pub enum RunError {
 impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Setup(err) => write!(f, "{err}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Policy(err) => write!(f, "{err}"),
             Self::TvClientBuild(err) => write!(f, "{err}"),
@@ -353,6 +364,7 @@ impl fmt::Display for RunError {
 impl std::error::Error for RunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Setup(err) => Some(err),
             Self::Io(err) => Some(err),
             Self::Policy(_) => None,
             Self::TvClientBuild(err) => Some(err),
@@ -374,6 +386,7 @@ impl std::error::Error for RunError {
 impl ParseError {
     pub fn help_topic(&self) -> HelpTopic {
         match self {
+            Self::Setup(_) => HelpTopic::Setup,
             Self::UnknownBrightnessCommand(_)
             | Self::MissingBrightnessValue
             | Self::InvalidBrightnessValue(_) => HelpTopic::Brightness,
@@ -452,6 +465,8 @@ impl Command {
             Self::Monitor => "monitor",
             Self::Lifecycle => "lifecycle",
             Self::DetectBackend => "detect-backend",
+            Self::Setup(_) => "setup",
+            Self::KWinBridge(_) => "kwin-bridge",
             Self::Dev(command) => command.as_str(),
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
@@ -476,6 +491,8 @@ impl Command {
             Self::Monitor => "TODO: implemented via command handler",
             Self::Lifecycle => "TODO: implemented via command handler",
             Self::DetectBackend => "TODO: implement detect-backend command",
+            Self::Setup(_) => "TODO: implemented via command handler",
+            Self::KWinBridge(_) => "TODO: implemented via command handler",
             Self::Dev(_) => "TODO: implemented via temporary dev command handler",
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
@@ -499,6 +516,7 @@ Usage:
 With no command, open Overview in the installed graphical application.
 
 Commands:
+  setup           Complete or repair TV, services and desktop integration setup
   brightness      Open Overview focused on brightness
   brightness get  Print the current TV OLED brightness
   brightness set <0-100>
@@ -627,7 +645,7 @@ Usage:
 
 Commands:
   list                    List settings and their effective values
-  describe [KEY]          Describe one setting or the complete registry
+  describe [KEY]          Describe one setting or all public settings
   get <KEY>               Print one raw effective value
   set <KEY> <VALUE>       Save a setting value
   unset <KEY>             Remove a saved override
@@ -710,6 +728,7 @@ explicit confirmation. Channel and version arguments are not accepted.
 pub fn help(program: &str, topic: HelpTopic) -> String {
     match topic {
         HelpTopic::Global => usage(program),
+        HelpTopic::Setup => setup::cli::usage(program),
         HelpTopic::Brightness => brightness_usage(program),
         HelpTopic::Volume => volume_usage(program),
         HelpTopic::Power => power_usage(program),
@@ -761,20 +780,27 @@ where
 
             return Ok(ParseOutcome::Command(Command::Startup(startup_mode)));
         }
+        "setup" => return setup::cli::parse(args.map(|arg| arg.as_ref().to_string())),
         "settings" => return parse_settings_command(args),
         "updates" => return parse_updates_command(args),
+        "kwin-bridge" => {
+            let arguments: Vec<String> = args.map(|arg| arg.as_ref().to_string()).collect();
+            return kwin_bridge::KWinBridgeCommand::parse(&arguments)
+                .map(|command| ParseOutcome::Command(Command::KWinBridge(command)))
+                .ok_or_else(|| ParseError::UnknownCommand("kwin-bridge: expected info, check, load <plugin-id>, or unload <plugin-id>".into()));
+        }
         "upgrade-preflight" => {
             let candidate_root = PathBuf::from(
                 args.next()
                     .ok_or(ParseError::MissingUpgradePreflightRoot)?
                     .as_ref(),
             );
-            let mut repair_python = false;
+            let mut remove_legacy_env = false;
             let mut json = false;
             let mut unexpected = Vec::new();
             for argument in args {
-                if argument.as_ref() == "--repair-python" && !repair_python {
-                    repair_python = true;
+                if argument.as_ref() == "--remove-legacy-env" && !remove_legacy_env {
+                    remove_legacy_env = true;
                 } else if argument.as_ref() == "--json" && !json {
                     json = true;
                 } else {
@@ -783,7 +809,7 @@ where
             }
             let command = Command::UpgradePreflight {
                 candidate_root,
-                repair_python,
+                remove_legacy_env,
                 json,
             };
             if !unexpected.is_empty() {
@@ -828,6 +854,7 @@ where
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
     match command {
+        Command::Setup(options) => setup::cli::run(options, writer).map_err(RunError::Setup),
         Command::Overview => crate::commands::run_overview(),
         Command::Startup(mode) => crate::commands::run_startup(writer, mode),
         Command::Shutdown => run_shutdown(writer),
@@ -839,6 +866,7 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         Command::Brightness(command) => run_brightness(writer, command),
         Command::Volume(command) => run_volume(writer, command),
         Command::DetectBackend => run_detect_backend(writer),
+        Command::KWinBridge(command) => kwin_bridge::run(command, writer).map_err(RunError::Io),
         Command::Screen(ScreenCommand::Off) => run_screen_off(writer),
         Command::Screen(ScreenCommand::On) => run_screen_on(writer),
         Command::ScreenOff => run_screen_off(writer),
@@ -857,11 +885,13 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
         }
         Command::UpgradePreflight {
             candidate_root,
-            repair_python,
+            remove_legacy_env,
             json,
         } => {
-            let report =
-                crate::upgrade_preflight::candidate_host_preflight(&candidate_root, repair_python);
+            let report = crate::upgrade_preflight::candidate_host_preflight(
+                &candidate_root,
+                remove_legacy_env,
+            );
             if json {
                 writeln!(
                     writer,
@@ -896,6 +926,7 @@ where
         .map(|argument| argument.as_ref().to_string())
         .collect::<Vec<_>>();
     match topic.as_ref() {
+        "setup" if remaining.is_empty() => Ok(ParseOutcome::Help(HelpTopic::Setup)),
         "brightness" => {
             if remaining.is_empty()
                 || (remaining.len() == 1 && matches!(remaining[0].as_str(), "get" | "set"))
@@ -1703,7 +1734,7 @@ mod tests {
             parse_args(["upgrade-preflight", "/tmp/lg-buddy-candidate"]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
-                repair_python: false,
+                remove_legacy_env: false,
                 json: false,
             }))
         );
@@ -1711,11 +1742,11 @@ mod tests {
             parse_args([
                 "upgrade-preflight",
                 "/tmp/lg-buddy-candidate",
-                "--repair-python"
+                "--remove-legacy-env"
             ]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/lg-buddy-candidate"),
-                repair_python: true,
+                remove_legacy_env: true,
                 json: false,
             }))
         );
@@ -2013,11 +2044,11 @@ mod tests {
                 "upgrade-preflight",
                 "/tmp/candidate",
                 "--json",
-                "--repair-python"
+                "--remove-legacy-env"
             ]),
             Ok(ParseOutcome::Command(Command::UpgradePreflight {
                 candidate_root: PathBuf::from("/tmp/candidate"),
-                repair_python: true,
+                remove_legacy_env: true,
                 json: true
             }))
         );
@@ -2038,7 +2069,7 @@ mod tests {
             Err(ParseError::UnexpectedArguments {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
-                    repair_python: false,
+                    remove_legacy_env: false,
                     json: false,
                 },
                 arguments: vec!["extra".to_string()],
@@ -2048,16 +2079,16 @@ mod tests {
             parse_args([
                 "upgrade-preflight",
                 "/tmp/candidate",
-                "--repair-python",
-                "--repair-python"
+                "--remove-legacy-env",
+                "--remove-legacy-env"
             ]),
             Err(ParseError::UnexpectedArguments {
                 command: Command::UpgradePreflight {
                     candidate_root: PathBuf::from("/tmp/candidate"),
-                    repair_python: true,
+                    remove_legacy_env: true,
                     json: false,
                 },
-                arguments: vec!["--repair-python".to_string()],
+                arguments: vec!["--remove-legacy-env".to_string()],
             })
         );
     }

@@ -40,7 +40,11 @@ cleanup() {
         kill "$FRESH_ACCESSIBILITY_BUS_PID" 2>/dev/null || true
         wait "$FRESH_ACCESSIBILITY_BUS_PID" 2>/dev/null || true
     fi
-    rm -rf "$WORK_DIR"
+    if [ "${LG_BUDDY_KEEP_GUI_SMOKE:-0}" = 1 ]; then
+        echo "Installed GUI smoke evidence: $WORK_DIR" >&2
+    else
+        rm -rf "$WORK_DIR"
+    fi
 }
 trap cleanup EXIT
 
@@ -58,7 +62,7 @@ cat >"$HOME_DIR/.config/lg-buddy/config.env" <<'EOF'
 tvs_primary_ip=192.0.2.10
 tvs_primary_mac=02:00:00:00:00:10
 tvs_primary_input=HDMI_1
-tvs_primary_platform=bscpylgtv
+tvs_primary_platform=lg_webos
 screen_idle_blank=enabled
 screen_backend=auto
 screen_idle_timeout=300
@@ -74,11 +78,10 @@ export LG_BUDDY_INSTALL_ROOT="$INSTALL_ROOT"
 export LG_BUDDY_SUDO_CMD="none"
 export LG_BUDDY_NONINTERACTIVE="1"
 export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
-export LG_BUDDY_SKIP_PIP_INSTALL="1"
 export LG_BUDDY_TV_IP="192.0.2.10"
 export LG_BUDDY_TV_MAC="02:00:00:00:00:10"
 export LG_BUDDY_INPUT="HDMI_1"
-export LG_BUDDY_TV_PLATFORM="bscpylgtv"
+export LG_BUDDY_TV_PLATFORM="lg_webos"
 export LG_BUDDY_SCREEN_BACKEND="auto"
 export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="enabled"
 
@@ -159,7 +162,6 @@ run_fresh_gui_launch_smoke() {
         export LG_BUDDY_SUDO_CMD="none"
         export LG_BUDDY_NONINTERACTIVE="1"
         export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
-        export LG_BUDDY_SKIP_PIP_INSTALL="1"
         unset LG_BUDDY_GUI_RUNTIME_PROBE
         env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
             bash "$REPOSITORY_ROOT/install.sh" \

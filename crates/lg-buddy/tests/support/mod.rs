@@ -367,6 +367,7 @@ struct MockSessionBusIdleMonitorState {
     inhibitor_plan: VecDeque<(Duration, u32)>,
     inhibitor_started_at: Option<Instant>,
     next_inhibitor_query_delay: Option<Duration>,
+    inhibition_query_count: usize,
     default_idletime: u64,
     idletime_plan: VecDeque<u64>,
     idletime_reset_at: Option<Instant>,
@@ -452,6 +453,11 @@ impl MockSessionBusIdleMonitor {
         self.patch_state(|state| state.default_idletime = value);
     }
 
+    pub fn set_session_manager_available(&self, available: bool) {
+        self.patch_state(|state| state.session_manager_available = available);
+        wait_for_mock_bus_name_sync();
+    }
+
     pub fn set_idle_inhibitor_count(&self, count: u32) {
         self.patch_state(|state| {
             state.session_manager_available = true;
@@ -466,6 +472,13 @@ impl MockSessionBusIdleMonitor {
 
     pub fn delay_next_inhibited_query(&self, delay: Duration) {
         self.patch_state(|state| state.next_inhibitor_query_delay = Some(delay));
+    }
+
+    pub fn inhibition_query_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("mock session manager state lock")
+            .inhibition_query_count
     }
 
     pub fn set_idle_monitor_idletime_plan(&self, values: &[u64]) {
@@ -654,7 +667,230 @@ extern "C" fn kill_mock_system_logind_daemon() {
     }
 }
 
-fn start_private_session_bus() -> (String, i32) {
+/// Contract mock for PowerDevil's effective answer, not its policy engine.
+/// Attaches to an existing private bus; a second instance replaces the owner.
+#[allow(dead_code)]
+pub struct MockPowerDevil {
+    state: Arc<Mutex<MockPowerDevilState>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct MockPowerDevilState {
+    inhibited: bool,
+    next_delay: Duration,
+    fail_next: bool,
+    queries: usize,
+}
+
+#[allow(dead_code)]
+impl MockPowerDevil {
+    pub fn new(address: &str) -> Self {
+        let state = Arc::new(Mutex::new(MockPowerDevilState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_state = Arc::clone(&state);
+        let worker_stop = Arc::clone(&stop);
+        let address = address.to_string();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let connection = DbusConnection::new_address(&address).unwrap();
+            let mut crossroads = Crossroads::new();
+            let interface =
+                crossroads.register("org.kde.Solid.PowerManagement.PolicyAgent", |builder| {
+                    builder.method(
+                        "HasInhibition",
+                        ("types",),
+                        ("has_inhibition",),
+                        move |_, _: &mut (), (types,): (u32,)| {
+                            assert_eq!(
+                                types, 4,
+                                "only effective screen inhibition should be queried"
+                            );
+                            let (inhibited, delay, fail) = {
+                                let mut state = worker_state.lock().unwrap();
+                                state.queries += 1;
+                                (
+                                    state.inhibited,
+                                    std::mem::take(&mut state.next_delay),
+                                    std::mem::take(&mut state.fail_next),
+                                )
+                            };
+                            thread::sleep(delay);
+                            if fail {
+                                Err(MethodErr::failed("PowerDevil check failed"))
+                            } else {
+                                Ok((inhibited,))
+                            }
+                        },
+                    );
+                });
+            crossroads.insert(
+                "/org/kde/Solid/PowerManagement/PolicyAgent",
+                &[interface],
+                (),
+            );
+            connection.start_receive(
+                dbus::message::MatchRule::new_method_call(),
+                Box::new(move |message, conn| {
+                    crossroads.handle_message(message, conn).unwrap();
+                    true
+                }),
+            );
+            connection
+                .request_name("org.kde.Solid.PowerManagement", true, true, true)
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            while !worker_stop.load(Ordering::SeqCst) {
+                connection.process(Duration::from_millis(10)).unwrap();
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        Self {
+            state,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn set_inhibited(&self, inhibited: bool) {
+        self.state.lock().unwrap().inhibited = inhibited;
+    }
+
+    pub fn delay_next_query(&self, delay: Duration) {
+        self.state.lock().unwrap().next_delay = delay;
+    }
+
+    pub fn fail_next_query(&self) {
+        self.state.lock().unwrap().fail_next = true;
+    }
+
+    pub fn query_count(&self) -> usize {
+        self.state.lock().unwrap().queries
+    }
+}
+
+impl Drop for MockPowerDevil {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
+/// Contract mock for KWin's effective answer, not its policy engine.
+/// Attaches to an existing private bus; a second instance replaces the owner.
+#[allow(dead_code)]
+pub struct MockKWinInhibition {
+    state: Arc<Mutex<MockKWinInhibitionState>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct MockKWinInhibitionState {
+    inhibited: bool,
+    next_delay: Duration,
+    fail_next: bool,
+    queries: usize,
+}
+
+#[allow(dead_code)]
+impl MockKWinInhibition {
+    pub fn new(address: &str) -> Self {
+        let state = Arc::new(Mutex::new(MockKWinInhibitionState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_state = Arc::clone(&state);
+        let worker_stop = Arc::clone(&stop);
+        let address = address.to_string();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let connection = DbusConnection::new_address(&address).unwrap();
+            let mut crossroads = Crossroads::new();
+            let interface = crossroads.register(
+                "io.github.staphylococcus.LGBuddy.KWinInhibition1",
+                |builder| {
+                    builder.method(
+                        "IsInhibited",
+                        (),
+                        ("has_inhibition",),
+                        move |_, _: &mut (), (): ()| {
+                            let (inhibited, delay, fail) = {
+                                let mut state = worker_state.lock().unwrap();
+                                state.queries += 1;
+                                (
+                                    state.inhibited,
+                                    std::mem::take(&mut state.next_delay),
+                                    std::mem::take(&mut state.fail_next),
+                                )
+                            };
+                            thread::sleep(delay);
+                            if fail {
+                                Err(MethodErr::failed("KWin check failed"))
+                            } else {
+                                Ok((inhibited,))
+                            }
+                        },
+                    );
+                },
+            );
+            crossroads.insert(
+                "/io/github/staphylococcus/LGBuddy/KWinInhibition",
+                &[interface],
+                (),
+            );
+            connection.start_receive(
+                dbus::message::MatchRule::new_method_call(),
+                Box::new(move |message, conn| {
+                    crossroads.handle_message(message, conn).unwrap();
+                    true
+                }),
+            );
+            connection
+                .request_name(
+                    "io.github.staphylococcus.LGBuddy.KWinInhibition",
+                    true,
+                    true,
+                    true,
+                )
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            while !worker_stop.load(Ordering::SeqCst) {
+                connection.process(Duration::from_millis(10)).unwrap();
+            }
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        Self {
+            state,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn set_inhibited(&self, inhibited: bool) {
+        self.state.lock().unwrap().inhibited = inhibited;
+    }
+
+    pub fn delay_next_query(&self, delay: Duration) {
+        self.state.lock().unwrap().next_delay = delay;
+    }
+
+    pub fn fail_next_query(&self) {
+        self.state.lock().unwrap().fail_next = true;
+    }
+
+    pub fn query_count(&self) -> usize {
+        self.state.lock().unwrap().queries
+    }
+}
+
+impl Drop for MockKWinInhibition {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
+pub fn start_private_session_bus() -> (String, i32) {
     let output = ProcessCommand::new(dbus_daemon_path())
         .args([
             "--session",
@@ -714,6 +950,7 @@ fn spawn_mock_idle_monitor_service(
                                 .lock()
                                 .expect("mock session manager state lock");
                             state.inhibitor_started_at.get_or_insert_with(Instant::now);
+                            state.inhibition_query_count += 1;
                             let inhibited = flags & 8 != 0 && state.idle_inhibitor_count > 0;
                             let delay = if inhibited {
                                 state.next_inhibitor_query_delay.take()

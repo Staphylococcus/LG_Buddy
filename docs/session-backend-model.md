@@ -71,26 +71,215 @@ These are the semantic events the runtime should reason about.
 
 ## Runtime Contract
 
-Native sources publish `SessionObservation` values: canonical session events,
-inactivity facts, or idle-blanking permission updates, with an `EventSource` and
-observation time. A pending permission refresh suspends automatic blanking
-without changing the last confirmed permission or renewing the deadline.
-Source modules do not decide whether to blank or restore the screen.
+Native sources publish activity observations with an `EventSource` and original
+observation time. In automatic operation the runner starts GNOME/Mutter and
+native Wayland adapters once. Each adapter owns discovery, subscriptions,
+validation and reconnection, including interfaces that appear after startup.
+Explicit `gnome` and `wayland` configurations restrict activity to that source.
+The compatibility `detect-backend` presentation remains until #218; its single
+reported value does not select the automatic runtime's source set.
 
-GNOME and native Wayland feed activity facts to the shared runner, which owns
-their configured inactivity deadline. `swayidle` owns its initial timeout but
-publishes `Idle` and independent desktop-activity observations back to the same
-runner. All three backends therefore share blank, restore, and post-blank
-power-off policy.
+`session/activity.rs` keeps bounded contributions per source and activity
+kind. Newer observations replace pending observations of the same kind. Delivery
+preserves the original monotonic time without deduplicating across sources or
+kinds. The inactivity engine decides how each observation affects policy;
+overlapping reports do not extend a deadline beyond their observation times or
+repeat an already completed restore. Valid observations survive a later
+connection failure; transport loss does not undo activity that already happened.
+Connection handles, owner changes and obsolete protocol objects stay private to
+each adapter. Input received during setup is delivered immediately without a
+separate readiness gate in the collector.
 
-`screen.honor_idle_inhibitors` defaults to `disabled`. When enabled, native
-sources also publish `IdleBlankingPermission`. The runner initially withholds
-automatic blanking until the source establishes permission, including when an
-inhibitor predates startup. Restoring permission starts a fresh full timeout;
-duplicate observations do not extend it. Permission changes are never activity
-or restore requests. Real desktop and gamepad input still share the inactivity
-deadline. Explicit lock behavior and an already pending post-blank power-off
-deadline are unaffected.
+The runner owns one inactivity deadline. Loss of one source leaves the others
+running; loss of all native activity sources suspends automatic idle blanking
+until an adapter can observe activity again. This policy queries each adapter's
+current `ActivityStatus`; that assessment never authorizes or rejects an event.
+A quiet usable adapter remains available. Availability, bounded failure reasons
+and the last activity time form runtime diagnostics.
+Gamepad input, explicit lock and post-blank power-off
+remain independent. Reconnection itself does not count as input. Worker shutdown
+cancels quiet connections and joins their threads.
+
+`swayidle` still owns its initial timeout and publishes `Idle` and independent
+desktop activity to the shared policy. This path is available only for an
+explicit legacy selection. Automatic monitoring never probes or launches
+swayidle; it retries native discovery while
+no native activity source is available. Disabling built-in idle blanking keeps
+the passive session service and other GUI/CLI features available.
+
+### Independent inhibition and the blanking gate
+
+An adapter can supply activity, inhibition, or both. Each capability independently
+uses push or pull according to its source. Activity observations stay in the
+activity path. The native monitor starts GNOME's push inhibition and PowerDevil/KWin
+pull inhibition independently of the configured activity sources. Their only
+policy meeting point is `can_blank()` at an automatic idle-blanking decision.
+
+The inactivity engine invokes this Boolean gate only when its ordinary activity
+deadline is due. A false result leaves the deadline and phase untouched. Explicit
+lock, restore/ownership and post-blank power-off retain their existing semantics.
+The runner checks deadlines at a bounded 50 ms cadence, so a denied deadline
+does not cause a busy loop.
+
+`Inhibition` owns the source sections, honoring preference, release delay and
+pending pull work. Push workers live with the facade; one pull worker retains
+adapter diagnostic history and services bounded requests. Each attempt has its
+own cancellation flag and reply channel. Input, activity availability changes,
+logind sleep/resume or owner changes, configuration changes and shutdown discard
+affected pending checks. The logind observer supplies cancellation separately
+from activity and never duplicates the lifecycle service's TV actions.
+
+`can_blank()` performs no protocol I/O. Pending work returns false for that
+attempt; completed failures remain neutral source contributions. Both sections
+must allow and the configured idle timeout must have elapsed since the latest
+observed release. Release timestamps come from adapters, not from aggregate
+Boolean changes, so repeated clear checks, delayed delivery, absence and recovery
+do not manufacture releases. Pull-only transitions between checks cannot be
+reconstructed. A completed pull answer is consumed once; another attempt needs a
+fresh query. Retries are limited to once per second after completion. Push source
+changes invalidate pending work; refreshing an unchanged value does not.
+
+`diagnostics()` returns the same evaluation as the most recent Boolean call,
+including the preference, evaluated source contributions, pending work and
+release deadline. A missing section means it was not evaluated on that call.
+Diagnostics are separate from the inactivity engine's decision.
+
+The running monitor publishes these observations through its existing session
+D-Bus endpoint (`Session1.GetMonitorDiagnostics`). The endpoint retains policy
+details for debugging the current idle attempt; activity/lifecycle cancellation
+clears those evaluations.
+
+The graphical report starts with a current snapshot. It reads activity and
+scheduling fields from the running monitor, and separately queries GNOME,
+PowerDevil and KWin for their current inhibition state. These bounded reads use
+existing unique bus owners and do not activate services or feed results into
+the monitor's policy. They run even when no idle evaluation is pending or the
+honoring preference is disabled. Missing optional sources mean reduced coverage.
+
+A separate Recent logs section contains timestamped service messages from the
+current boot, newest first, including KWin setup. Each scope is limited to 40
+entries and 16 KiB of captured output; report sections are capped at 8 KiB and
+the whole report at 32 KiB. Credential-bearing lines and URLs are redacted.
+
+### Portable configuration and legacy overrides
+
+Fresh GUI and terminal setup use automatic discovery without a backend
+question. Existing `auto` configurations remain unchanged. Saved `gnome`,
+`wayland` and `swayidle` overrides retain their behavior and are reported as
+legacy overrides. Settings offers an explicit, confirmed switch to automatic
+integration.
+Setup itself preserves existing preferences.
+Native activity is validated before switching when built-in idle blanking is
+enabled. Failed service application restores the previous settings. Disabling
+idle blanking permits the transition without native idle capability; optional
+KWin inhibition never blocks it.
+
+Normal CLI discovery (`settings list` and unqualified `settings describe`)
+exposes public settings without `screen.backend` and does not resolve a backend.
+The complete internal registry remains available to diagnostics, so hiding a
+compatibility key does not hide an active legacy override from a support report.
+
+Explicit legacy CLI commands retain their contract: `get` returns the saved or
+default value, `describe screen.backend` identifies compatibility-only use,
+`set` accepts `auto`, `gnome`, `wayland` and `swayidle`, and `unset` removes the
+override to restore `auto`. Mutation output, exit behavior and save-before-apply
+semantics are retained. On service-apply failure the new value stays saved and
+the command fails; repeating the same command retries application. This is a
+compatibility operation, not the validated GUI transition with rollback.
+`detect-backend` remains a hidden compatibility command with unchanged output;
+neither it nor the explicit setting description resolves the composed source set.
+Final removal of swayidle remains separate work in #87. No resolved desktop
+choice is written on login or source recovery.
+
+`inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
+state, and `evaluate()` returns a Boolean permission with matching diagnostics
+without protocol I/O. `evaluate_push_inhibition()` combines these permissions:
+every contributor must allow blanking, and diagnostics retain each result.
+
+GNOME's capability lives in `sources/desktop/gnome/inhibition.rs` and requires
+only SessionManager. It subscribes before querying `IsInhibited(8)` and refreshes
+that same contribution on `InhibitorAdded`/`InhibitorRemoved`. It validates the
+unique owner and reconciles queued changes before publishing a snapshot.
+While connected, it also refreshes after 30 seconds without a successful refresh
+to correct drift when notifications are missed. Event-driven refreshes restart
+that interval. These internal queries update the same maintained contribution;
+they do not make GNOME a second pull contributor.
+
+Only observed inhibition denies permission. Startup, absence and source loss
+contribute no inhibitor. A healthy quiet subscription and an in-progress refresh
+retain the last observed value; a completed read updates it. If reading or
+monitoring fails, the adapter drops that source's contribution and retries.
+Diagnostics retain the observation time, a bounded failure reason, and the last
+observed inhibited-to-clear transition. Source loss and subsequent recovery do
+not create an observed release.
+
+`PullInhibitionAdapter::query()` performs a fresh source check on each call.
+`evaluate_pull_inhibition()` queries every participating adapter, ANDs their
+permissions, and returns the same section result and per-source diagnostic
+shape as push evaluation. It runs on a worker; exclusive mutable access orders
+requests without a separate request-generation tracker. Cancellation returns
+no verdict. A completed result belongs to that attempt and cannot be reused to
+authorize a later blank attempt. The facade consumes completions only for the
+current attempt and joins the sections.
+
+PowerDevil's capability lives in `sources/desktop/powerdevil.rs`. It opens a
+session-bus connection per check, discovers `org.kde.Solid.PowerManagement`
+without activating it, and queries `HasInhibition(4)` on
+`/org/kde/Solid/PowerManagement/PolicyAgent` using the resolved unique owner.
+It rechecks the owner before accepting the answer. No signals or background
+worker are required to maintain its state. Cancellation is checked between
+method calls and before completion; an in-flight call is bounded by the
+transport's one-second timeout. The next request handles discovery/recovery.
+Only diagnostic history survives between requests, recording inhibited-to-clear
+transitions within the same owner's successful observations. Failed checks,
+absence, cancelled in-flight checks and owner replacement break that continuity;
+recovery does not manufacture a release. Failures and absence are neutral under
+the same observed-inhibition rule as push. GNOME remains one push contribution.
+
+The adapters read no preferences, apply no aggregate release delay, and send no
+activity events or TV actions. Their facade owns that reconciliation.
+
+`evaluate_inhibition_preference(&Config)` is a separate, pure section. It reads
+the existing effective `screen_honor_idle_inhibitors` value and returns
+`bypass_inhibition` with diagnostics identifying the honoring policy. Disabled
+honoring (the existing default) returns `true`: bypass source restrictions and
+release delay. Enabled honoring returns `false`: the reconciler must evaluate
+both. This override must not be ANDed as a third source permission and never
+makes a non-idle session eligible to blank. It depends on no source availability,
+protocol I/O, activity state or release history. The legacy `swayidle` process
+still controls its own initial idle notification and honors its own inhibitors.
+
+CLI and GUI preference edits retain the existing persist-then-restart path for
+`LG_Buddy_screen.service`. A successful restart replaces the process and its
+pending attempts; the new runtime reads the new configuration. Apply failures
+remain reported separately from saved values and use the existing retry path.
+The preference evaluator retains no state. The facade consumes the loaded policy
+and `configure()` cancels any pending attempt before changing the preference or
+release delay. Old completions cannot become authoritative under a new policy.
+
+### PowerDevil route coverage
+
+The query delegates policy to PowerDevil, including activation delays, filtering
+and user overrides; LG Buddy does not count requested inhibitors or separately
+interpret logind's list. The following table records upstream source tracing;
+subsequent live checks are documented in the
+[desktop validation record](desktop-session-validation.md).
+
+| Application route | Relationship to the effective screen-policy query |
+| --- | --- |
+| PowerDevil `AddInhibition(4, ...)` | Direct screen-policy contribution; suppressed requests are excluded. [Policy implementation](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilpolicyagent.cpp#L549-L588) |
+| KDE portal `Inhibit` with Idle flag `8` | Translates to PowerDevil policy `4`. Suspend-only flag `4` translates to policy `1`, not screen inhibition. [Portal implementation](https://github.com/KDE/xdg-desktop-portal-kde/blob/9427f3bc8712532f4599dc54b19bd4975609d7f9/src/inhibit.cpp#L165-L182) |
+| `org.freedesktop.ScreenSaver.Inhibit` in Plasma | KScreenLocker forwards the request to PowerDevil `AddInhibition(4, ...)`. [KScreenLocker implementation](https://github.com/KDE/kscreenlocker/blob/4f8927000c3f5c5caa52f775580487b5c782132a/interface.cpp#L46-L68) |
+| logind `idle` inhibitors | PowerDevil imports qualifying `block` inhibitors, excluding its own; LG Buddy consumes the resulting policy. [Import/filter implementation](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilpolicyagent.cpp#L423-L501) |
+| `org.freedesktop.PowerManagement.Inhibit` | PowerDevil maps this to session interruption policy `1`; it does not by itself inhibit screen policy `4`. [FDO connector](https://github.com/KDE/powerdevil/blob/c075216f737a47b1979e2c0b679ed597ac8ea131/daemon/powerdevilfdoconnector.cpp#L84-L93) |
+| Native Wayland idle inhibitor | KWin feeds this into its own input idle-inhibitor set. This is a separate path; PowerDevil coverage is not established. [KWin implementation](https://github.com/KDE/kwin/blob/b3e286c172bb9df7ee8ba8f1ef3a8ca21a8c770f/src/idle_inhibition.cpp#L58-L81) |
+
+These are version-specific source findings, not a promise that every application
+uses a covered route. The [desktop validation record](desktop-session-validation.md)
+documents subsequent live checks and confirms that native-only mpv inhibition
+does not reach PowerDevil. The separate [KWin source](kwin-integration.md)
+queries the effective native inhibitor set when its plugin is available. Idle-notify remains
+an activity protocol and is not used as an inhibition query.
 
 ## Provider Map
 
@@ -113,29 +302,19 @@ Current mapping:
 | `org.gnome.ScreenSaver.ActiveChanged (true,)` | Idle observation that cannot bypass LG Buddy's timeout | Implemented |
 | `org.gnome.ScreenSaver.ActiveChanged (false,)` | `Active` | Implemented |
 | `org.gnome.ScreenSaver.WakeUpScreen` | `WakeRequested` | Implemented |
-| Recent activity from `org.gnome.Mutter.IdleMonitor.GetIdletime` (honoring disabled) | `UserActivity` | Implemented |
-| Mutter `WatchFired` for the current `AddUserActiveWatch` (honoring enabled) | `UserActivity` | Implemented |
-| `org.gnome.SessionManager.IsInhibited(8)` | Idle-blanking permission when honoring is enabled | Implemented |
+| Mutter `WatchFired` for the current `AddUserActiveWatch` | `UserActivity` | Implemented |
 
 Notes:
 
-- GNOME requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
-- Enabling inhibitor honoring additionally requires `org.gnome.SessionManager`.
-  The source reads its current aggregate idle-inhibition state at startup and
-  after trusted `InhibitorAdded`, `InhibitorRemoved`, or owner-change signals.
-  Automatic blanking pauses while each refresh is pending; an unchanged result
-  preserves the existing deadline. User input comes from Mutter's one-shot
-  user-active watches, rearmed after each signal. Unlike `GetIdletime`, these
-  do not treat the idle-counter reset on inhibitor release as activity.
-  Other inhibition flags do not block blanking. Losing the service or failing
-  to read its state ends the source with a diagnostic error rather than assuming
-  blanking is allowed. With the setting disabled, this extra dependency is not
-  queried or subscribed to.
+- GNOME activity requires GNOME Shell, `org.gnome.ScreenSaver`, and `org.gnome.Mutter.IdleMonitor`.
+- Activity always uses Mutter's one-shot user-active watches, rearmed after each
+  signal. SessionManager is neither required nor queried by the activity source.
+  Unlike `GetIdletime`, watches do not treat the idle-counter reset on inhibitor
+  release as input. When the Mutter owner disappears or changes, the adapter
+  reacquires its bus subscriptions and watches internally.
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
-- With honoring disabled, Mutter idletime is used only to detect recent desktop
-  activity. Its absolute value does not trigger blanking.
 - ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
   wake signals reset the same LG Buddy deadline and remain restore observations
   evaluated by screen policy.
@@ -210,17 +389,15 @@ notifications from `get_input_idle_notification`. Its `resumed` maps to desktop
 activity; `idled` remains observational, so only LG Buddy's inactivity deadline
 can trigger blanking.
 
-When inhibitor honoring is enabled, a separate zero-timeout
-`get_idle_notification` observes permission on each seat. Blanking is allowed
-only once every seat reports idle. Its inhibitor-aware `resumed` withdraws
-permission without reporting input or restoring the TV. New seats initially
-withhold permission, and removing a seat recomputes the aggregate state.
+Only `get_input_idle_notification` is used by this activity adapter. Idle-notify
+does not supply an inhibition capability. The separate KWin plugin supplies
+native inhibition without changing this activity adapter.
 
 Seats are added and removed dynamically. Connection or dispatch loss, removal
-of the bound notifier, or removal of the last seat is fatal to the provider and
-causes the user service to retry. Explicit selection reports capability errors
-without falling back. `auto` selects native Wayland after the complete GNOME
-contract and before the deprecated `swayidle` compatibility backend.
+of the bound notifier, or removal of the last seat causes the adapter to rebuild
+its connection and subscriptions while other adapters keep running. Previously
+published observations remain valid. Explicit selection does not enable another native source. Automatic
+operation attempts both native interfaces without desktop-name selection.
 
 ### `swayidle`
 
@@ -238,7 +415,7 @@ Notes:
   field-validated across supported compositors and the 1.x migration window.
 - `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
 - Its source-owned timeout always honors compositor inhibition, independently
-  of `screen.honor_idle_inhibitors`, including when `auto` falls back to it.
+  of `screen.honor_idle_inhibitors`.
   The preference is hidden for explicit `swayidle` selections; this compatibility
   backend does not offer the native default-off behavior.
 - `swayidle` does not provide a Mutter-style early activity surface.
@@ -257,6 +434,11 @@ The code split is:
 - `crates/lg-buddy/src/session/runner.rs`
   - source selection, worker lifetime, observation multiplexing, shared
     inactivity state, and policy dispatch
+- `crates/lg-buddy/src/session/activity.rs`
+  - bounded, identified contributions, observation ordering and source diagnostics
+- `crates/lg-buddy/src/inhibition.rs`
+  - push/pull contracts, source reconciliation, preference, release timing,
+    cancellable checks and Boolean gate diagnostics
 - `crates/lg-buddy/src/session/actions.rs`
   - action dependency assembly and native TV client ownership across compatible
     events; one-shot commands use the same assembly with a finite lifetime
@@ -264,7 +446,9 @@ The code split is:
   - desktop-independent auxiliary input discovery and activity observations
 - `crates/lg-buddy/src/sources/desktop/gnome.rs`
   - GNOME session-bus connection, subscriptions, owner validation, Mutter
-    polling, event loop, and observation mapping
+    activity watches, event loop, and observation mapping
+- `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs`
+  - independent SessionManager inhibition state, subscriptions and recovery
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
 - `crates/lg-buddy/src/sources/linux/logind.rs`

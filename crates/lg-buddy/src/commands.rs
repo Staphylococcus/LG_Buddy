@@ -1,21 +1,17 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::net::Ipv4Addr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::process::Output;
 
 use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
-use crate::brightness::{
-    notify_brightness_success_with, read_current_brightness_with, write_brightness_with,
-};
+use crate::brightness::{read_current_brightness_with, write_brightness_with};
 use crate::config::{load_config, resolve_config_path_from_env, Config};
 use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
 use crate::lifecycle::ThreadSleeper;
 use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
-use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
 use crate::session::actions::{RuntimeActionExecutor, SYSTEM_PRE_SLEEP_TV_COMMAND_TIMEOUT};
 use crate::state::{ScreenOwnershipMarker, StateScope, SystemSleepAttemptState};
 use crate::tv::{
@@ -28,33 +24,7 @@ use crate::{BrightnessCommand, MuteCommand, RunError, StartupMode, VolumeCommand
 const GUI_ENV: &str = "LG_BUDDY_GUI";
 const GUI_EXECUTABLE: &str = "lg-buddy-gui";
 
-trait ReachabilityChecker {
-    fn is_reachable(&self, tv_ip: Ipv4Addr) -> io::Result<bool>;
-}
-
-trait BrightnessUi {
-    fn prompt_brightness(&self, initial: OledBrightness) -> io::Result<Option<OledBrightness>>;
-    fn show_error(&self, title: &str, message: &str) -> io::Result<()>;
-}
-
-trait BrightnessCli {
-    fn get_brightness(&self) -> Result<OledBrightness, RunError>;
-    fn set_brightness(&self, brightness: OledBrightness) -> Result<String, RunError>;
-}
-
 struct SystemctlRebootDetector {
-    command_path: PathBuf,
-}
-
-struct PingReachabilityChecker {
-    command_path: PathBuf,
-}
-
-struct ZenityBrightnessUi {
-    command_path: PathBuf,
-}
-
-struct CurrentExeBrightnessCli {
     command_path: PathBuf,
 }
 
@@ -63,32 +33,7 @@ struct InstalledGui {
     command_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GuiLaunchOutcome {
-    Launched,
-    Missing,
-}
-
-struct BrightnessDialogDeps<'a, R, U, B, N> {
-    reachability: &'a R,
-    ui: &'a U,
-    brightness_cli: &'a B,
-    notifier: &'a N,
-}
-
 impl Default for SystemctlRebootDetector {
-    fn default() -> Self {
-        Self::from_env()
-    }
-}
-
-impl Default for PingReachabilityChecker {
-    fn default() -> Self {
-        Self::from_env()
-    }
-}
-
-impl Default for ZenityBrightnessUi {
     fn default() -> Self {
         Self::from_env()
     }
@@ -101,41 +46,6 @@ impl SystemctlRebootDetector {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("systemctl")),
         }
-    }
-}
-
-impl PingReachabilityChecker {
-    fn from_env() -> Self {
-        Self {
-            command_path: env::var_os("LG_BUDDY_PING")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("ping")),
-        }
-    }
-}
-
-impl ZenityBrightnessUi {
-    fn from_env() -> Self {
-        Self {
-            command_path: env::var_os("LG_BUDDY_ZENITY")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("zenity")),
-        }
-    }
-}
-
-impl CurrentExeBrightnessCli {
-    fn from_current_exe() -> Result<Self, RunError> {
-        Ok(Self {
-            command_path: env::current_exe()?,
-        })
-    }
-
-    fn run(&self, args: &[&str]) -> Result<Output, RunError> {
-        ProcessCommand::new(&self.command_path)
-            .args(args)
-            .output()
-            .map_err(RunError::Io)
     }
 }
 
@@ -164,11 +74,14 @@ impl InstalledGui {
         }
     }
 
-    fn launch(&self, arguments: &[&str]) -> Result<GuiLaunchOutcome, RunError> {
+    fn launch(&self, arguments: &[&str]) -> Result<(), RunError> {
         match fs::symlink_metadata(&self.command_path) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(GuiLaunchOutcome::Missing);
+                return Err(RunError::Policy(format!(
+                    "LG Buddy GUI is not installed at `{}`; install the matching lg-buddy-gui executable",
+                    self.command_path.display()
+                )));
             }
             Err(error) => {
                 return Err(RunError::Policy(format!(
@@ -215,7 +128,7 @@ impl InstalledGui {
             })?;
 
         if output.status.success() {
-            Ok(GuiLaunchOutcome::Launched)
+            Ok(())
         } else {
             Err(RunError::Policy(format!(
                 "installed LG Buddy GUI at `{}` failed: {}",
@@ -257,30 +170,6 @@ fn gui_output_message(output: &Output) -> String {
     )
 }
 
-impl BrightnessCli for CurrentExeBrightnessCli {
-    fn get_brightness(&self) -> Result<OledBrightness, RunError> {
-        let output = self.run(&["brightness", "get"])?;
-
-        if !output.status.success() {
-            return Err(RunError::Policy(command_output_message(&output)));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        OledBrightness::parse(stdout.trim())
-            .map_err(|err| RunError::Policy(format!("invalid output from `brightness get`: {err}")))
-    }
-
-    fn set_brightness(&self, brightness: OledBrightness) -> Result<String, RunError> {
-        let output = self.run(&["brightness", "set", &brightness.to_string()])?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            Err(RunError::Policy(command_output_message(&output)))
-        }
-    }
-}
-
 impl lifecycle::RebootDetector for SystemctlRebootDetector {
     fn is_reboot_pending(&self) -> io::Result<bool> {
         let output = ProcessCommand::new(&self.command_path)
@@ -296,82 +185,6 @@ impl lifecycle::RebootDetector for SystemctlRebootDetector {
             .lines()
             .any(|line| line.contains("reboot.target") && line.contains("start")))
     }
-}
-
-impl ReachabilityChecker for PingReachabilityChecker {
-    fn is_reachable(&self, tv_ip: Ipv4Addr) -> io::Result<bool> {
-        let output = ProcessCommand::new(&self.command_path)
-            .args(["-c", "1", "-W", "2"])
-            .arg(tv_ip.to_string())
-            .output()?;
-
-        Ok(output.status.success())
-    }
-}
-
-impl BrightnessUi for ZenityBrightnessUi {
-    fn prompt_brightness(&self, initial: OledBrightness) -> io::Result<Option<OledBrightness>> {
-        let output = ProcessCommand::new(&self.command_path)
-            .args([
-                "--scale",
-                "--title=LG TV Brightness",
-                "--text=Set OLED Pixel Brightness:",
-                "--min-value=0",
-                "--max-value=100",
-                &format!("--value={initial}"),
-                "--step=5",
-            ])
-            .output()?;
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let value = OledBrightness::parse(stdout.trim()).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid zenity brightness value: {err}"),
-            )
-        })?;
-
-        Ok(Some(value))
-    }
-
-    fn show_error(&self, title: &str, message: &str) -> io::Result<()> {
-        let _ = ProcessCommand::new(&self.command_path)
-            .arg("--error")
-            .arg(format!("--title={title}"))
-            .arg(format!("--text={message}"))
-            .output()?;
-
-        Ok(())
-    }
-}
-
-fn command_output_message(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return strip_lg_buddy_prefix(&stderr).to_string();
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return strip_lg_buddy_prefix(&stdout).to_string();
-    }
-
-    format!(
-        "brightness command failed with status {}",
-        output
-            .status
-            .code()
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "terminated by signal".to_string())
-    )
-}
-
-fn strip_lg_buddy_prefix(value: &str) -> &str {
-    value.strip_prefix("LG Buddy: ").unwrap_or(value)
 }
 
 pub fn run_screen_off<W: Write>(writer: &mut W) -> Result<(), RunError> {
@@ -450,14 +263,7 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
 }
 
 pub fn run_overview() -> Result<(), RunError> {
-    let gui = InstalledGui::from_env()?;
-    match gui.launch(&[])? {
-        GuiLaunchOutcome::Launched => Ok(()),
-        GuiLaunchOutcome::Missing => Err(RunError::Policy(format!(
-            "LG Buddy GUI is not installed at `{}`; install the matching lg-buddy-gui executable",
-            gui.command_path.display()
-        ))),
-    }
+    InstalledGui::from_env()?.launch(&[])
 }
 
 pub fn run_brightness<W: Write>(
@@ -465,28 +271,7 @@ pub fn run_brightness<W: Write>(
     command: BrightnessCommand,
 ) -> Result<(), RunError> {
     match command {
-        BrightnessCommand::Prompt => {
-            let gui = InstalledGui::from_env()?;
-            match gui.launch(&["brightness"])? {
-                GuiLaunchOutcome::Launched => return Ok(()),
-                GuiLaunchOutcome::Missing => {}
-            }
-
-            let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-            let config = load_config(&config_path).map_err(RunError::Config)?;
-            let reachability = PingReachabilityChecker::default();
-            let ui = ZenityBrightnessUi::default();
-            let brightness_cli = CurrentExeBrightnessCli::from_current_exe()?;
-            let notifier = FreedesktopNotifier;
-            let deps = BrightnessDialogDeps {
-                reachability: &reachability,
-                ui: &ui,
-                brightness_cli: &brightness_cli,
-                notifier: &notifier,
-            };
-
-            run_brightness_prompt_with(writer, &config, deps)
-        }
+        BrightnessCommand::Prompt => InstalledGui::from_env()?.launch(&["brightness"]),
         BrightnessCommand::Get | BrightnessCommand::Set(_) => {
             let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
             let config = load_config(&config_path).map_err(RunError::Config)?;
@@ -713,75 +498,6 @@ fn set_muted<C: TvClient>(config: &Config, tv_client: &C, muted: bool) -> Result
         .map_err(|err| RunError::Policy(err.to_string()))
 }
 
-fn run_brightness_prompt_with<
-    W: Write,
-    R: ReachabilityChecker,
-    U: BrightnessUi,
-    B: BrightnessCli,
-    N: Notifier,
->(
-    writer: &mut W,
-    config: &Config,
-    deps: BrightnessDialogDeps<'_, R, U, B, N>,
-) -> Result<(), RunError> {
-    match deps.reachability.is_reachable(config.tv_ip) {
-        Ok(true) => {}
-        Ok(false) => {
-            let message = format!("TV is not reachable at {}.", config.tv_ip);
-            let _ = deps.ui.show_error("LG Buddy", &message);
-            return Err(RunError::Policy(message));
-        }
-        Err(err) => {
-            let message = format!("Could not check TV reachability at {}. {err}", config.tv_ip);
-            let _ = deps.ui.show_error("LG Buddy", &message);
-            return Err(RunError::Policy(message));
-        }
-    }
-
-    let initial_brightness = deps
-        .brightness_cli
-        .get_brightness()
-        .unwrap_or(OledBrightness::DEFAULT);
-
-    let Some(brightness) = deps.ui.prompt_brightness(initial_brightness)? else {
-        return Ok(());
-    };
-
-    match deps.brightness_cli.set_brightness(brightness) {
-        Ok(stdout) => {
-            write!(writer, "{stdout}")?;
-            notify_brightness_success(deps.notifier, brightness)?;
-            Ok(())
-        }
-        Err(err) => Err(notify_brightness_failure(deps.notifier, err)),
-    }
-}
-
-fn notify_brightness_success<N: Notifier>(
-    notifier: &N,
-    brightness: OledBrightness,
-) -> Result<(), RunError> {
-    notify_brightness_success_with(notifier, brightness).map_err(|err| {
-        RunError::Policy(format!(
-            "brightness was set to {brightness}%, but desktop notification failed: {err}"
-        ))
-    })
-}
-
-fn notify_brightness_failure<N: Notifier>(notifier: &N, primary: RunError) -> RunError {
-    match notifier.notify(&Notification::new("LG TV", "Failed to set brightness")) {
-        Ok(_) => primary,
-        Err(notification_err) => append_notification_failure(primary, notification_err),
-    }
-}
-
-fn append_notification_failure(primary: RunError, notification_err: NotificationError) -> RunError {
-    RunError::NotificationAfterPrimary {
-        primary: Box::new(primary),
-        notification: notification_err,
-    }
-}
-
 fn set_oled_brightness<C: TvClient>(
     config: &Config,
     tv_client: &C,
@@ -797,10 +513,7 @@ mod tests {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
     }
 
-    use super::{
-        run_brightness_command_with, run_brightness_prompt_with, BrightnessCli,
-        BrightnessDialogDeps, BrightnessUi, GuiLaunchOutcome, InstalledGui, ReachabilityChecker,
-    };
+    use super::{run_brightness_command_with, InstalledGui};
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
         SystemSleepWakePolicy,
@@ -809,13 +522,12 @@ mod tests {
         run_shutdown_with, run_startup_with, NetworkWaiter, RebootDetector, SleepRequestDetector,
         Sleeper, StartupDeps,
     };
-    use crate::notifications::{Notification, NotificationError, NotificationId, Notifier};
     use crate::screen::{run_screen_off_with, run_screen_on_with};
     use crate::state::ScreenOwnershipMarker;
     use crate::state::SystemSleepAttemptState;
     use crate::tv::{BscpylgtvCommandClient, OledBrightness};
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
-    use crate::{BrightnessCommand, RunError, StartupMode};
+    use crate::{BrightnessCommand, StartupMode};
     use std::cell::RefCell;
     use std::env;
     use std::ffi::CString;
@@ -1564,53 +1276,19 @@ mod tests {
     }
 
     #[test]
-    fn brightness_dialog_uses_cli_get_and_set_then_notifies() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::selected(65);
-        let brightness_cli = FakeBrightnessCli::success(72)
-            .with_set_stdout("LG Buddy Brightness: Set OLED pixel brightness to 65%.\n");
-        let notifier = RecordingNotifier::default();
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect("brightness should succeed");
-
-        assert_eq!(ui.initial_values(), vec![72]);
-        assert!(ui.error_messages().is_empty());
-        assert_eq!(
-            notifier.messages(),
-            vec![("LG TV".to_string(), "Brightness set to 65%".to_string())]
-        );
-        assert_eq!(
-            brightness_cli.calls(),
-            vec![FakeBrightnessCliCall::Get, FakeBrightnessCliCall::Set(65),]
-        );
-        assert!(rendered(&output).contains("Set OLED pixel brightness to 65%."));
-    }
-
-    #[test]
     fn installed_brightness_gui_launches_only_the_brightness_command() {
         let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             find_command_in_path("test").expect("test executable"),
         );
 
-        assert_eq!(
-            launcher
-                .launch(&["brightness"])
-                .expect("GUI launch should succeed"),
-            GuiLaunchOutcome::Launched
-        );
+        launcher
+            .launch(&["brightness"])
+            .expect("GUI launch should succeed");
     }
 
     #[test]
-    fn missing_installed_brightness_gui_allows_compatibility_fallback() {
+    fn missing_installed_brightness_gui_reports_installation_remedy() {
         let anchor =
             ExecutableScript::new("brightness-gui-missing", "anchor", "#!/bin/sh\nexit 0\n");
         let launcher = InstalledGui::new(
@@ -1618,16 +1296,24 @@ mod tests {
             anchor.path().with_file_name("missing-lg-buddy-gui"),
         );
 
-        assert_eq!(
-            launcher
-                .launch(&["brightness"])
-                .expect("missing GUI should be recognized"),
-            GuiLaunchOutcome::Missing
+        let error = launcher
+            .launch(&["brightness"])
+            .expect_err("missing GUI must fail with installation guidance")
+            .to_string();
+
+        assert!(error.contains("LG Buddy GUI is not installed"), "{error}");
+        assert!(
+            error.contains(&launcher.command_path.display().to_string()),
+            "{error}"
+        );
+        assert!(
+            error.contains("install the matching lg-buddy-gui executable"),
+            "{error}"
         );
     }
 
     #[test]
-    fn failed_installed_brightness_gui_is_reported_without_fallback() {
+    fn failed_installed_brightness_gui_is_reported() {
         let launcher = InstalledGui::new(
             env::current_exe().expect("current executable"),
             python3_path(),
@@ -1635,7 +1321,7 @@ mod tests {
 
         let error = launcher
             .launch(&["brightness"])
-            .expect_err("failed GUI must not become a missing-GUI fallback");
+            .expect_err("failed GUI must report the launch error");
 
         let error = error.to_string();
         assert!(error.contains("brightness"), "{error}");
@@ -1672,7 +1358,7 @@ mod tests {
 
         let error = launcher
             .launch(&["brightness"])
-            .expect_err("dangling GUI installation must not use compatibility fallback");
+            .expect_err("dangling GUI installation must be reported");
 
         assert!(error
             .to_string()
@@ -1692,38 +1378,6 @@ mod tests {
         assert!(error
             .to_string()
             .contains("would recursively relaunch itself"));
-    }
-
-    #[test]
-    fn brightness_fails_after_success_when_notification_delivery_fails() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::selected(65);
-        let brightness_cli = FakeBrightnessCli::success(72)
-            .with_set_stdout("LG Buddy Brightness: Set OLED pixel brightness to 65%.\n");
-        let notifier = RecordingNotifier::failing("bus unavailable");
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        let err = run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect_err("notification failure after success should fail");
-
-        assert_eq!(
-            notifier.messages(),
-            vec![("LG TV".to_string(), "Brightness set to 65%".to_string())]
-        );
-        assert_eq!(
-            brightness_cli.calls(),
-            vec![FakeBrightnessCliCall::Get, FakeBrightnessCliCall::Set(65),]
-        );
-        assert!(rendered(&output).contains("Set OLED pixel brightness to 65%."));
-        assert!(err
-            .to_string()
-            .contains("brightness was set to 65%, but desktop notification failed"));
     }
 
     #[test]
@@ -1761,139 +1415,6 @@ mod tests {
         assert_eq!(mock.state_snapshot().backlight, 61);
         assert_call_commands(&mock, &["set_settings"]);
         assert!(rendered(&output).contains("Set OLED pixel brightness to 61%."));
-    }
-
-    #[test]
-    fn brightness_returns_ok_when_dialog_is_cancelled() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::cancelled();
-        let brightness_cli = FakeBrightnessCli::success(50);
-        let notifier = RecordingNotifier::default();
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect("cancel should exit cleanly");
-
-        assert_eq!(ui.initial_values(), vec![50]);
-        assert_eq!(brightness_cli.calls(), vec![FakeBrightnessCliCall::Get]);
-        assert!(notifier.messages().is_empty());
-        assert!(rendered(&output).is_empty());
-    }
-
-    #[test]
-    fn brightness_shows_error_and_fails_when_tv_is_unreachable() {
-        let reachability = FakeReachabilityChecker::unreachable();
-        let ui = FakeBrightnessUi::selected(50);
-        let brightness_cli = FakeBrightnessCli::success(50);
-        let notifier = RecordingNotifier::default();
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        let err = run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect_err("unreachable tv should fail");
-
-        assert!(matches!(err, crate::RunError::Policy(_)));
-        assert!(brightness_cli.calls().is_empty());
-        assert!(notifier.messages().is_empty());
-        assert_eq!(
-            ui.error_messages(),
-            vec![(
-                "LG Buddy".to_string(),
-                "TV is not reachable at 192.0.2.42.".to_string(),
-            )]
-        );
-    }
-
-    #[test]
-    fn brightness_defaults_to_fifty_when_current_brightness_query_fails() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::cancelled();
-        let brightness_cli = FakeBrightnessCli::get_error("offline");
-        let notifier = RecordingNotifier::default();
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect("fallback to default brightness should still allow cancellation");
-
-        assert_eq!(ui.initial_values(), vec![50]);
-        assert_eq!(brightness_cli.calls(), vec![FakeBrightnessCliCall::Get]);
-        assert!(notifier.messages().is_empty());
-        assert!(rendered(&output).is_empty());
-    }
-
-    #[test]
-    fn brightness_notifies_and_fails_when_tv_update_fails() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::selected(30);
-        let brightness_cli = FakeBrightnessCli::success(50).with_set_error("offline");
-        let notifier = RecordingNotifier::default();
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        let err = run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect_err("tv command failure should fail");
-
-        assert!(matches!(err, crate::RunError::Policy(_)));
-        assert_eq!(ui.initial_values(), vec![50]);
-        assert_eq!(
-            notifier.messages(),
-            vec![("LG TV".to_string(), "Failed to set brightness".to_string())]
-        );
-        assert_eq!(
-            brightness_cli.calls(),
-            vec![FakeBrightnessCliCall::Get, FakeBrightnessCliCall::Set(30),]
-        );
-        assert!(rendered(&output).is_empty());
-    }
-
-    #[test]
-    fn brightness_preserves_tv_failure_when_failure_notification_fails() {
-        let reachability = FakeReachabilityChecker::reachable();
-        let ui = FakeBrightnessUi::selected(30);
-        let brightness_cli = FakeBrightnessCli::success(50).with_set_error("offline");
-        let notifier = RecordingNotifier::failing("bus unavailable");
-        let deps = BrightnessDialogDeps {
-            reachability: &reachability,
-            ui: &ui,
-            brightness_cli: &brightness_cli,
-            notifier: &notifier,
-        };
-
-        let mut output = Vec::new();
-        let err = run_brightness_prompt_with(&mut output, &sample_config(HdmiInput::Hdmi2), deps)
-            .expect_err("tv and notification failure should fail");
-
-        assert_eq!(
-            notifier.messages(),
-            vec![("LG TV".to_string(), "Failed to set brightness".to_string())]
-        );
-        assert_eq!(
-            err.to_string(),
-            "offline; additionally, desktop notification failed: desktop notification service error: bus unavailable"
-        );
-        assert!(rendered(&output).is_empty());
     }
 
     #[test]
@@ -2270,192 +1791,6 @@ mod tests {
                 Ok(()) => Ok(()),
                 Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
             }
-        }
-    }
-
-    struct FakeReachabilityChecker {
-        reachable: io::Result<bool>,
-    }
-
-    impl FakeReachabilityChecker {
-        fn reachable() -> Self {
-            Self {
-                reachable: Ok(true),
-            }
-        }
-
-        fn unreachable() -> Self {
-            Self {
-                reachable: Ok(false),
-            }
-        }
-    }
-
-    impl ReachabilityChecker for FakeReachabilityChecker {
-        fn is_reachable(&self, _tv_ip: Ipv4Addr) -> io::Result<bool> {
-            match &self.reachable {
-                Ok(value) => Ok(*value),
-                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum FakeBrightnessCliCall {
-        Get,
-        Set(u8),
-    }
-
-    struct FakeBrightnessCli {
-        get_result: Result<OledBrightness, String>,
-        set_result: Result<String, String>,
-        calls: RefCell<Vec<FakeBrightnessCliCall>>,
-    }
-
-    impl FakeBrightnessCli {
-        fn success(current: u8) -> Self {
-            Self {
-                get_result: Ok(
-                    OledBrightness::new(current).expect("fake brightness value should be valid")
-                ),
-                set_result: Ok(String::new()),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn get_error(message: &str) -> Self {
-            Self {
-                get_result: Err(message.to_string()),
-                set_result: Ok(String::new()),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn with_set_error(mut self, message: &str) -> Self {
-            self.set_result = Err(message.to_string());
-            self
-        }
-
-        fn with_set_stdout(mut self, stdout: &str) -> Self {
-            self.set_result = Ok(stdout.to_string());
-            self
-        }
-
-        fn calls(&self) -> Vec<FakeBrightnessCliCall> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl BrightnessCli for FakeBrightnessCli {
-        fn get_brightness(&self) -> Result<OledBrightness, RunError> {
-            self.calls.borrow_mut().push(FakeBrightnessCliCall::Get);
-            self.get_result
-                .as_ref()
-                .copied()
-                .map_err(|message| RunError::Policy(message.clone()))
-        }
-
-        fn set_brightness(&self, brightness: OledBrightness) -> Result<String, RunError> {
-            self.calls
-                .borrow_mut()
-                .push(FakeBrightnessCliCall::Set(brightness.as_percent()));
-            self.set_result
-                .as_ref()
-                .cloned()
-                .map_err(|message| RunError::Policy(message.clone()))
-        }
-    }
-
-    struct FakeBrightnessUi {
-        selection: io::Result<Option<OledBrightness>>,
-        initial_values: RefCell<Vec<u8>>,
-        error_messages: RefCell<Vec<(String, String)>>,
-    }
-
-    impl FakeBrightnessUi {
-        fn selected(value: u8) -> Self {
-            Self {
-                selection: Ok(Some(
-                    OledBrightness::new(value).expect("fake brightness value should be valid"),
-                )),
-                initial_values: RefCell::new(Vec::new()),
-                error_messages: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn cancelled() -> Self {
-            Self {
-                selection: Ok(None),
-                initial_values: RefCell::new(Vec::new()),
-                error_messages: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn initial_values(&self) -> Vec<u8> {
-            self.initial_values.borrow().clone()
-        }
-
-        fn error_messages(&self) -> Vec<(String, String)> {
-            self.error_messages.borrow().clone()
-        }
-    }
-
-    impl BrightnessUi for FakeBrightnessUi {
-        fn prompt_brightness(&self, initial: OledBrightness) -> io::Result<Option<OledBrightness>> {
-            self.initial_values.borrow_mut().push(initial.as_percent());
-            match &self.selection {
-                Ok(value) => Ok(*value),
-                Err(err) => Err(io::Error::new(err.kind(), err.to_string())),
-            }
-        }
-
-        fn show_error(&self, title: &str, message: &str) -> io::Result<()> {
-            self.error_messages
-                .borrow_mut()
-                .push((title.to_string(), message.to_string()));
-            Ok(())
-        }
-    }
-
-    struct RecordingNotifier {
-        messages: RefCell<Vec<(String, String)>>,
-        result: Result<NotificationId, NotificationError>,
-    }
-
-    impl RecordingNotifier {
-        fn failing(message: &str) -> Self {
-            Self {
-                messages: RefCell::new(Vec::new()),
-                result: Err(NotificationError::Transport(message.to_string())),
-            }
-        }
-
-        fn messages(&self) -> Vec<(String, String)> {
-            self.messages.borrow().clone()
-        }
-    }
-
-    impl Default for RecordingNotifier {
-        fn default() -> Self {
-            Self {
-                messages: RefCell::new(Vec::new()),
-                result: Ok(NotificationId(1)),
-            }
-        }
-    }
-
-    impl Notifier for RecordingNotifier {
-        fn capabilities(
-            &self,
-        ) -> Result<crate::notifications::NotificationCapabilities, NotificationError> {
-            Ok(crate::notifications::NotificationCapabilities { actions: true })
-        }
-
-        fn notify(&self, notification: &Notification) -> Result<NotificationId, NotificationError> {
-            self.messages
-                .borrow_mut()
-                .push((notification.summary.clone(), notification.body.clone()));
-            self.result.clone()
         }
     }
 

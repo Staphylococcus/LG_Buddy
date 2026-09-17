@@ -140,7 +140,46 @@ const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     ),
 ];
 
-const PYTHON_REPAIR_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
+// Older releases do not have the setup helper yet. Its destinations must be
+// safe to create when absent and safe to replace when already installed.
+const SETUP_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
+    requirement("/usr/lib/lg-buddy", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "/usr/lib/lg-buddy/setup",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/lib/lg-buddy/setup/systemd",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/lib/lg-buddy/setup-services",
+        InstallerPathPolicy::ReplaceExecutable,
+    ),
+    requirement(
+        "/usr/lib/lg-buddy/setup/systemd/LG_Buddy.service",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/usr/lib/lg-buddy/setup/systemd/LG_Buddy_lifecycle.service",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement(
+        "/usr/lib/lg-buddy/setup/systemd/lg_buddy.conf",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+    requirement("/usr/share/polkit-1", InstallerPathPolicy::MutateDirectory),
+    requirement(
+        "/usr/share/polkit-1/actions",
+        InstallerPathPolicy::MutateDirectory,
+    ),
+    requirement(
+        "/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy",
+        InstallerPathPolicy::ReplaceFile,
+    ),
+];
+
+const LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
     "/usr/bin/LG_Buddy_PIP",
     InstallerPathPolicy::RecursiveClear,
 )];
@@ -203,6 +242,11 @@ const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
     requirement("release-manifest.json", InstallerPathPolicy::ReadableInput),
     requirement("install.sh", InstallerPathPolicy::ExecutableInput),
     requirement("lg-buddy", InstallerPathPolicy::ExecutableInput),
+    requirement("docs/setup-services.sh", InstallerPathPolicy::ReadableInput),
+    requirement(
+        "docs/io.github.staphylococcus.LGBuddy.setup.policy",
+        InstallerPathPolicy::ReadableInput,
+    ),
     requirement(
         "docs/lg-buddy-gui-x86_64-unknown-linux-gnu",
         InstallerPathPolicy::ReadableInput,
@@ -423,13 +467,24 @@ fn observe_systemd(user: bool) -> CapabilityFact {
 pub struct InstalledLayout {
     pub system_root: PathBuf,
     pub user_home: PathBuf,
+    pub user_config_home: PathBuf,
 }
 
 impl InstalledLayout {
-    pub fn new(system_root: impl Into<PathBuf>, user_home: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        system_root: impl Into<PathBuf>,
+        user_home: impl Into<PathBuf>,
+        xdg_config_home: Option<OsString>,
+    ) -> Self {
+        let user_home = user_home.into();
+        let user_config_home = xdg_config_home
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| user_home.join(".config"));
         Self {
             system_root: system_root.into(),
-            user_home: user_home.into(),
+            user_home,
+            user_config_home,
         }
     }
 
@@ -451,7 +506,7 @@ impl InstalledLayout {
     }
 
     fn user_systemd_path(&self, path: &str) -> PathBuf {
-        self.user_home.join(".config/systemd/user").join(path)
+        self.user_config_home.join("systemd/user").join(path)
     }
 }
 
@@ -584,12 +639,20 @@ pub fn current_gui_host_preflight() -> CompatibilityReport {
     evaluate_gui_initial_preflight(&OsFilesystemFacts, &facts)
 }
 
-pub fn candidate_host_preflight(candidate_root: &Path, repair_python: bool) -> CompatibilityReport {
+pub fn candidate_host_preflight(
+    candidate_root: &Path,
+    remove_legacy_env: bool,
+) -> CompatibilityReport {
     let facts = match observe_current_process() {
         Ok(facts) => facts,
         Err(report) => return report,
     };
-    evaluate_candidate_host_preflight(&OsFilesystemFacts, &facts, candidate_root, repair_python)
+    evaluate_candidate_host_preflight(
+        &OsFilesystemFacts,
+        &facts,
+        candidate_root,
+        remove_legacy_env,
+    )
 }
 
 fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> {
@@ -631,7 +694,7 @@ fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> 
             ServiceManagerFacts::observe()
         };
     Ok(HostPreflightFacts {
-        layout: InstalledLayout::new(system_root, user_home),
+        layout: InstalledLayout::new(system_root, user_home, env::var_os("XDG_CONFIG_HOME")),
         running_executable,
         effective_uid,
         system_owner_uid: if sandboxed_install { effective_uid } else { 0 },
@@ -693,12 +756,21 @@ fn evaluate_installed_state(
     expected_running_executable: &Path,
     executable_check: &'static str,
     executable_remedy: &'static str,
-    repair_python: bool,
+    remove_legacy_env: bool,
     require_gui: bool,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
     let system_trust = TrustedRoot::strict(&facts.layout.system_root, facts.system_owner_uid);
     let user_trust = TrustedRoot::owned(&facts.layout.user_home, facts.user_owner_uid);
+    let user_units_trust = if facts
+        .layout
+        .user_config_home
+        .starts_with(&facts.layout.user_home)
+    {
+        user_trust
+    } else {
+        TrustedRoot::owned(&facts.layout.user_config_home, facts.user_owner_uid)
+    };
 
     if facts.effective_uid == 0 {
         checker.report.refuse(
@@ -714,6 +786,11 @@ fn evaluate_installed_state(
         &facts.layout.system_root,
     );
     check_normalized_absolute(&mut checker.report, "user-home", &facts.layout.user_home);
+    check_normalized_absolute(
+        &mut checker.report,
+        "user-config-home",
+        &facts.layout.user_config_home,
+    );
 
     if facts.running_executable != expected_running_executable {
         checker.report.refuse(
@@ -772,14 +849,23 @@ fn evaluate_installed_state(
             );
         }
     }
-    if repair_python {
-        for requirement in PYTHON_REPAIR_PATH_REQUIREMENTS {
+    for requirement in SETUP_PATH_REQUIREMENTS {
+        checker.check_install_destination(
+            &facts.layout.system_path(requirement.path),
+            facts.system_owner_uid,
+            Some(system_trust),
+            requirement.policy,
+            "setup-installation",
+        );
+    }
+    if remove_legacy_env {
+        for requirement in LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS {
             checker.check_requirement(
                 &facts.layout.system_path(requirement.path),
                 facts.system_owner_uid,
                 Some(system_trust),
                 requirement.policy,
-                "python-environment-repair",
+                "legacy-environment-removal",
             );
         }
     }
@@ -792,7 +878,7 @@ fn evaluate_installed_state(
         checker.check_requirement(
             &facts.layout.user_systemd_path(requirement.path),
             facts.user_owner_uid,
-            Some(user_trust),
+            Some(user_units_trust),
             requirement.policy,
             check,
         );
@@ -878,7 +964,7 @@ pub fn evaluate_candidate_host_preflight(
     filesystem: &impl FilesystemFacts,
     facts: &HostPreflightFacts,
     candidate_root: &Path,
-    repair_python: bool,
+    remove_legacy_env: bool,
 ) -> CompatibilityReport {
     let expected_candidate_executable = candidate_root.join("lg-buddy");
     let mut report = evaluate_installed_state(
@@ -887,7 +973,7 @@ pub fn evaluate_candidate_host_preflight(
         &expected_candidate_executable,
         "candidate-executable",
         "run the preflight with the verified candidate binary from this bundle",
-        repair_python,
+        remove_legacy_env,
         false,
     );
     report.extend(evaluate_candidate_preflight(
@@ -1111,6 +1197,37 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     ) {
         match self.filesystem.path_facts(path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            _ => self.check_requirement(path, owner_uid, trusted_root, policy, check),
+        }
+    }
+
+    fn check_install_destination(
+        &mut self,
+        path: &Path,
+        owner_uid: u32,
+        trusted_root: Option<TrustedRoot<'_>>,
+        policy: InstallerPathPolicy,
+        check: &'static str,
+    ) {
+        match self.filesystem.path_facts(path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // install -d can create missing ancestors. Validate the nearest
+                // existing one, including a dangling symlink, before trusting it.
+                for ancestor in path.ancestors().skip(1) {
+                    if matches!(self.filesystem.path_facts(ancestor), Err(err) if err.kind() == io::ErrorKind::NotFound)
+                    {
+                        continue;
+                    }
+                    self.check_requirement(
+                        ancestor,
+                        owner_uid,
+                        trusted_root,
+                        InstallerPathPolicy::MutateDirectory,
+                        check,
+                    );
+                    break;
+                }
+            }
             _ => self.check_requirement(path, owner_uid, trusted_root, policy, check),
         }
     }
@@ -1694,6 +1811,207 @@ mod tests {
     }
 
     #[test]
+    fn user_units_follow_absolute_xdg_config_home_with_default_fallbacks() {
+        for xdg in [None, Some("".into()), Some("relative/config".into())] {
+            let layout = InstalledLayout::new("/", "/home/user", xdg);
+            assert_eq!(
+                layout.user_systemd_path("service"),
+                Path::new("/home/user/.config/systemd/user/service")
+            );
+        }
+        let layout = InstalledLayout::new("/", "/home/user", Some("/custom/config".into()));
+        assert_eq!(
+            layout.user_systemd_path("service"),
+            Path::new("/custom/config/systemd/user/service")
+        );
+    }
+
+    #[test]
+    fn process_observation_uses_xdg_config_home() {
+        const CHILD: &str = "LG_BUDDY_PREFLIGHT_ENV_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let facts = observe_current_process().unwrap();
+            assert_eq!(facts.layout.user_config_home, Path::new("/custom/config"));
+            return;
+        }
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "upgrade_preflight::tests::process_observation_uses_xdg_config_home",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", "/home/user")
+            .env("XDG_CONFIG_HOME", "/custom/config")
+            .env("LG_BUDDY_INSTALL_ROOT", "/isolated-root")
+            .env("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    #[test]
+    fn custom_user_units_pass_cli_gui_and_candidate_checks() {
+        let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
+        for external in [false, true] {
+            let mut fixture = InstalledFixture::new("xdg-config");
+            let config_home = if external {
+                fixture.root.join("custom-config")
+            } else {
+                fixture.facts.layout.user_home.join("custom-config")
+            };
+            fs::create_dir_all(&config_home).unwrap();
+            fs::rename(
+                fixture.facts.layout.user_config_home.join("systemd"),
+                config_home.join("systemd"),
+            )
+            .unwrap();
+            fixture.facts.layout.user_config_home = config_home;
+            write_file(
+                &fixture.facts.layout.system_path("/usr/bin/lg-buddy-gui"),
+                true,
+            );
+
+            let initial = evaluate_initial_preflight(&filesystem, &fixture.facts);
+            assert!(initial.compatible(), "{}", initial.render());
+            let mut gui_facts = fixture.facts.clone();
+            gui_facts.running_executable = gui_facts.layout.system_path("/usr/bin/lg-buddy-gui");
+            let gui = evaluate_gui_initial_preflight(&filesystem, &gui_facts);
+            assert!(gui.compatible(), "{}", gui.render());
+            let mut candidate_facts = fixture.facts.clone();
+            candidate_facts.running_executable = fixture.candidate_root.join("lg-buddy");
+            let candidate = evaluate_candidate_host_preflight(
+                &filesystem,
+                &candidate_facts,
+                &fixture.candidate_root,
+                false,
+            );
+            assert!(candidate.compatible(), "{}", candidate.render());
+
+            let override_path = fixture
+                .facts
+                .layout
+                .user_systemd_path("LG_Buddy_screen.service.d/config.conf");
+            fs::write(
+                &override_path,
+                "[Service]\nEnvironment=\"LG_BUDDY_CONFIG=/wrong/config\"\n",
+            )
+            .unwrap();
+            let mismatch = evaluate_initial_preflight(&filesystem, &fixture.facts);
+            assert!(!mismatch.compatible());
+            assert!(mismatch
+                .failures()
+                .iter()
+                .any(|failure| failure.path.as_ref() == Some(&override_path)));
+        }
+    }
+
+    #[test]
+    fn default_units_do_not_mask_missing_custom_units() {
+        let mut fixture = InstalledFixture::new("missing-xdg-units");
+        fixture.facts.layout.user_config_home = fixture.root.join("custom-config");
+        let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert_failure(
+            &report,
+            "user-integration",
+            &fixture
+                .facts
+                .layout
+                .user_systemd_path("LG_Buddy_screen.service"),
+            "missing",
+        );
+    }
+
+    #[test]
+    fn external_config_root_must_be_user_owned() {
+        let mut fixture = InstalledFixture::new("xdg-root-owner");
+        let config_home = fixture.root.join("external-config");
+        fs::create_dir_all(&config_home).unwrap();
+        fs::rename(
+            fixture.facts.layout.user_config_home.join("systemd"),
+            config_home.join("systemd"),
+        )
+        .unwrap();
+        fixture.facts.layout.user_config_home = config_home.clone();
+        let baseline = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(baseline.compatible(), "{}", baseline.render());
+        let filesystem = OverriddenFilesystem {
+            path: config_home.clone(),
+            owner_uid: Some(fixture.facts.user_owner_uid + 1),
+            ..Default::default()
+        };
+        let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+        assert_failure(&report, "path-containment", &config_home, "owned by uid");
+    }
+
+    #[test]
+    fn setup_destinations_can_be_created_on_old_installations_or_replaced() {
+        let fixture = InstalledFixture::new("setup-upgrade");
+        let old = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(old.compatible(), "{}", old.render());
+        for requirement in SETUP_PATH_REQUIREMENTS {
+            let path = fixture.facts.layout.system_path(requirement.path);
+            if requirement.policy.expects_directory() {
+                fs::create_dir_all(path).unwrap();
+            } else {
+                write_file(
+                    &path,
+                    requirement.policy == InstallerPathPolicy::ReplaceExecutable,
+                );
+            }
+        }
+        let installed = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+        assert!(installed.compatible(), "{}", installed.render());
+    }
+
+    #[test]
+    fn setup_destinations_reject_symlinks_including_dangling_ancestors() {
+        for requirement in SETUP_PATH_REQUIREMENTS {
+            let fixture = InstalledFixture::new("setup-symlink");
+            let path = fixture.facts.layout.system_path(requirement.path);
+            if path.is_dir() {
+                fs::remove_dir_all(&path).unwrap();
+            }
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            symlink(fixture.root.join("missing-destination"), &path).unwrap();
+            let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
+            assert_failure(&report, "setup-installation", &path, "found Symlink");
+        }
+    }
+
+    #[test]
+    fn missing_setup_destinations_require_a_trusted_mutable_parent() {
+        for parent in ["/usr/lib/lg-buddy", "/usr/share"] {
+            let fixture = InstalledFixture::new("setup-parent");
+            let path = fixture.facts.layout.system_path(parent);
+            for filesystem in [
+                OverriddenFilesystem {
+                    path: path.clone(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
+                OverriddenFilesystem {
+                    path: path.clone(),
+                    owner_uid: Some(fixture.facts.system_owner_uid + 1),
+                    ..Default::default()
+                },
+                OverriddenFilesystem {
+                    path: path.clone(),
+                    mode: Some(0o777),
+                    ..Default::default()
+                },
+            ] {
+                let report = evaluate_initial_preflight(&filesystem, &fixture.facts);
+                assert!(!report.compatible(), "{}", report.render());
+                assert!(report
+                    .failures()
+                    .iter()
+                    .any(|failure| failure.path.as_ref() == Some(&path)));
+            }
+        }
+    }
+
+    #[test]
     fn new_gui_installation_paths_are_optional_but_validated_when_present() {
         let fixture = InstalledFixture::new("optional-installed-gui");
         let gui = fixture.facts.layout.system_path("/usr/bin/lg-buddy-gui");
@@ -1756,8 +2074,8 @@ mod tests {
     }
 
     #[test]
-    fn python_environment_safety_is_required_only_when_repair_is_requested() {
-        let fixture = InstalledFixture::new("conditional-python-repair");
+    fn legacy_environment_safety_is_required_only_when_removal_is_requested() {
+        let fixture = InstalledFixture::new("conditional-legacy-removal");
         let filesystem = RootOwnedFilesystem(OsFilesystemFacts);
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let mut candidate_facts = fixture.facts.clone();
@@ -1772,13 +2090,13 @@ mod tests {
         assert!(missing.compatible(), "{}", missing.render());
 
         fs::create_dir_all(&virtualenv).unwrap();
-        let repair = evaluate_candidate_host_preflight(
+        let removal = evaluate_candidate_host_preflight(
             &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
             true,
         );
-        assert!(repair.compatible(), "{}", repair.render());
+        assert!(removal.compatible(), "{}", removal.render());
 
         fs::remove_dir(&virtualenv).unwrap();
         symlink(&fixture.config_directory, &virtualenv).unwrap();
@@ -1788,7 +2106,7 @@ mod tests {
             &fixture.candidate_root,
             false,
         );
-        let repair = evaluate_candidate_host_preflight(
+        let removal = evaluate_candidate_host_preflight(
             &filesystem,
             &candidate_facts,
             &fixture.candidate_root,
@@ -1796,7 +2114,12 @@ mod tests {
         );
 
         assert!(preserving.compatible(), "{}", preserving.render());
-        assert_failure(&repair, "python-environment-repair", &virtualenv, "Symlink");
+        assert_failure(
+            &removal,
+            "legacy-environment-removal",
+            &virtualenv,
+            "Symlink",
+        );
     }
 
     #[test]
@@ -2119,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn python_repair_preflight_refuses_a_symlinked_installed_virtualenv() {
+    fn legacy_environment_removal_preflight_refuses_a_symlinked_installed_virtualenv() {
         let fixture = InstalledFixture::new("symlink-virtualenv");
         let virtualenv = fixture.facts.layout.system_path("/usr/bin/LG_Buddy_PIP");
         let target = fixture.root.join("external-virtualenv");
@@ -2137,11 +2460,16 @@ mod tests {
             true,
         );
 
-        assert_failure(&report, "python-environment-repair", &virtualenv, "Symlink");
+        assert_failure(
+            &report,
+            "legacy-environment-removal",
+            &virtualenv,
+            "Symlink",
+        );
     }
 
     #[test]
-    fn python_repair_preflight_refuses_a_nested_virtualenv_mount() {
+    fn legacy_environment_removal_preflight_refuses_a_nested_virtualenv_mount() {
         let fixture = InstalledFixture::new("nested-virtualenv-mount");
         let nested_mount = fixture
             .facts
@@ -2167,7 +2495,7 @@ mod tests {
 
         assert_failure(
             &report,
-            "python-environment-repair",
+            "legacy-environment-removal",
             &nested_mount,
             "nested mount point",
         );
@@ -2681,6 +3009,7 @@ mod tests {
         assert!(!failure.remedy.is_empty());
     }
 
+    #[derive(Default)]
     struct OverriddenFilesystem {
         path: PathBuf,
         owner_uid: Option<u32>,
@@ -2773,7 +3102,7 @@ mod tests {
             ));
             let system_root = root.join("root");
             let user_home = root.join("home/user");
-            let layout = InstalledLayout::new(&system_root, &user_home);
+            let layout = InstalledLayout::new(&system_root, &user_home, None);
             let config_directory = user_home.join(".config/lg-buddy");
             let config_path = config_directory.join("config.env");
 

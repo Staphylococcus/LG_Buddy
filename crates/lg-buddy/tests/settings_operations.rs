@@ -2,6 +2,8 @@ mod support;
 
 use std::fs;
 
+use lg_buddy::config::load_config;
+use lg_buddy::inhibition::evaluate_inhibition_preference;
 use lg_buddy::presentation::settings::{
     SettingsEditStatus, SettingsFeedbackSeverity, SettingsPresentation, SettingsStatus,
 };
@@ -14,6 +16,77 @@ use lg_buddy::settings_view::{
     SettingsIntent, SettingsTransition,
 };
 use support::{ExecutableScript, TestConfigFile, TestEnv};
+
+#[test]
+fn inhibition_preference_follows_persisted_settings_and_existing_restart_application() {
+    let config = TestConfigFile::new("inhibition-preference-settings");
+    config.write_contents("tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\n");
+    let restart_snapshot = config.path().with_extension("applied");
+    let systemctl = ExecutableScript::new(
+        "inhibition-preference-systemctl",
+        "systemctl",
+        r#"#!/bin/sh
+[ "$1" = "--user" ] || exit 23
+case "$2" in
+  cat|is-active|is-enabled) exit 0 ;;
+  restart)
+    [ "$3" = "LG_Buddy_screen.service" ] || exit 23
+    cp "$LG_BUDDY_CONFIG" "$LG_BUDDY_TEST_RESTART_SNAPSHOT"
+    ;;
+  *) exit 23 ;;
+esac
+"#,
+    );
+    let mut env = TestEnv::new();
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.set("LG_BUDDY_TEST_RESTART_SNAPSHOT", &restart_snapshot);
+    env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
+    let key = "screen.honor_idle_inhibitors";
+    assert!(evaluate_inhibition_preference(&load_config(config.path()).unwrap()).bypass_inhibition);
+
+    for (value, bypass) in [
+        (Some("enabled"), false),
+        (Some("disabled"), true),
+        (Some("enabled"), false),
+        (None, true),
+    ] {
+        let command = match value {
+            Some(value) => SettingsCommand::Set {
+                key: key.into(),
+                value: value.into(),
+            },
+            None => SettingsCommand::Unset(key.into()),
+        };
+        let runner = SettingsCommandRunner::new(SettingsStore::load(config.path()).unwrap());
+        let mut output = Vec::new();
+        runner.run(command, &mut output).unwrap();
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("apply: restarted LG_Buddy_screen.service"));
+        // The normal apply path sees the new file, including resetting to the
+        // default. Evaluate what the restarted monitor would actually load.
+        assert_eq!(
+            fs::read(&restart_snapshot).unwrap(),
+            fs::read(config.path()).unwrap()
+        );
+        let result = evaluate_inhibition_preference(&load_config(&restart_snapshot).unwrap());
+        assert_eq!(result.bypass_inhibition, bypass);
+        let effective = SettingsStore::load(config.path())
+            .unwrap()
+            .effective_by_name(key)
+            .unwrap();
+        assert_eq!(
+            effective.value().unwrap().to_string(),
+            result.diagnostics.honoring.as_str()
+        );
+        if value.is_none() {
+            assert!(!fs::read_to_string(config.path())
+                .unwrap()
+                .contains("screen_honor_idle_inhibitors="));
+        }
+    }
+}
 
 const BEHAVIOR_CONFIG: &str = "screen_backend=auto
 screen_idle_blank=enabled
@@ -201,7 +274,7 @@ fn environment_backend_edits_all_behavior_settings_without_a_tv_and_matches_cli(
 #[test]
 fn reset_removes_a_setting_override_without_a_tv() {
     let config = TestConfigFile::new("settings-reset");
-    config.write_contents("screen_backend=wayland\n");
+    config.write_contents("screen_idle_timeout=731\n");
     let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
     env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
@@ -212,14 +285,17 @@ fn reset_removes_a_setting_override_without_a_tv() {
     let transition = run_mutation(
         &mut app,
         &backend,
-        SettingsIntent::Reset(BehaviorSetting::ScreenBackend),
+        SettingsIntent::Reset(BehaviorSetting::ScreenIdleTimeout),
     );
 
     assert!(!fs::read_to_string(config.path())
         .unwrap()
-        .contains("screen_backend="));
-    let setting = row(transition.presentation(), BehaviorSetting::ScreenBackend);
-    assert_eq!(setting.value_label(), "Automatic");
+        .contains("screen_idle_timeout="));
+    let setting = row(
+        transition.presentation(),
+        BehaviorSetting::ScreenIdleTimeout,
+    );
+    assert_eq!(setting.value_label(), "300 seconds");
     assert_eq!(setting.source_label(), "Default");
 }
 
@@ -384,6 +460,9 @@ case "$(cat "$LG_BUDDY_CONFIG")" in
   *) exit 99 ;;
 esac
 printf '%s\n' "$@" >> "$LG_BUDDY_TEST_AUTH_LOG"
+if [ "$LG_BUDDY_TEST_AUTH_EXIT" = 0 ] && [ "$LG_BUDDY_TEST_ACTIVATE" = 1 ]; then
+    touch "$LG_BUDDY_TEST_ACTIVE_STATE"
+fi
 exit "$LG_BUDDY_TEST_AUTH_EXIT"
 "#,
     );
@@ -392,14 +471,18 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         "systemctl",
         r#"#!/bin/sh
 [ "$*" = 'is-active --quiet LG_Buddy_lifecycle.service' ] || exit 99
-[ "$LG_BUDDY_TEST_LIFECYCLE_ACTIVE" = 1 ]
+[ "$LG_BUDDY_TEST_LIFECYCLE_ACTIVE" = 1 ] || [ -f "$LG_BUDDY_TEST_ACTIVE_STATE" ]
 "#,
     );
     let log = install_root.join("authorization.log");
     let mut env = TestEnv::new();
     let path = std::env::join_paths(
-        std::iter::once(authorization.path().parent().unwrap().to_path_buf())
-            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        [
+            authorization.path().parent().unwrap().to_path_buf(),
+            systemctl.path().parent().unwrap().to_path_buf(),
+        ]
+        .into_iter()
+        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
     env.set("PATH", path);
@@ -407,6 +490,8 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
     env.set("LG_BUDDY_INSTALL_ROOT", &install_root);
     env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
     env.set("LG_BUDDY_TEST_AUTH_LOG", &log);
+    env.set("LG_BUDDY_TEST_ACTIVE_STATE", install_root.join("active"));
+    env.set("LG_BUDDY_TEST_ACTIVATE", "0");
     env.set("LG_BUDDY_TEST_LIFECYCLE_ACTIVE", "0");
     env.remove("LG_BUDDY_SKIP_SYSTEMD_ACTIONS");
     let backend = EnvironmentSettingsBackend;
@@ -424,6 +509,13 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         (
             "127",
             SettingsIntent::Reset(BehaviorSetting::SystemSleepWakePolicy),
+        ),
+        (
+            "0",
+            SettingsIntent::SetEnabled {
+                setting: BehaviorSetting::SystemSleepWakePolicy,
+                enabled: true,
+            },
         ),
     ] {
         env.set("LG_BUDDY_TEST_AUTH_EXIT", code);
@@ -456,6 +548,7 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
     }
 
     env.set("LG_BUDDY_TEST_AUTH_EXIT", "0");
+    env.set("LG_BUDDY_TEST_ACTIVATE", "1");
     let enabled = run_mutation(
         &mut app,
         &backend,
@@ -476,8 +569,19 @@ exit "$LG_BUDDY_TEST_AUTH_EXIT"
         .unwrap()
         .contains("system_sleep_wake_policy=enabled"));
     let calls = fs::read_to_string(&log).unwrap();
-    let expected_call = "--disable-internal-agent\nsystemctl\nstart\nLG_Buddy_lifecycle.service\n";
-    assert_eq!(calls, expected_call.repeat(3));
+    let arguments: Vec<_> = calls.lines().collect();
+    assert_eq!(arguments.len(), 16);
+    for call in arguments.as_chunks::<4>().0 {
+        assert_eq!(call[0], "--disable-internal-agent");
+        assert!(
+            matches!(
+                call[1],
+                "/usr/bin/systemctl" | "/run/current-system/sw/bin/systemctl"
+            ),
+            "privileged activation must ignore PATH and LG_BUDDY_SYSTEMCTL: {call:?}"
+        );
+        assert_eq!(&call[2..], &["start", "LG_Buddy_lifecycle.service"]);
+    }
 
     run_mutation(
         &mut app,

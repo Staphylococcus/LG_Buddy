@@ -1,11 +1,8 @@
 //! Foreground first-TV pairing. The application validates the draft and owns
 //! cancellation; its worker pairs and verifies before publishing any profile.
 
+use crate::setup::StepCancellation;
 use std::net::Ipv4Addr;
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
 use std::time::Duration;
 
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
@@ -63,6 +60,14 @@ pub struct PairingRequest {
 }
 
 impl PairingRequest {
+    pub fn parse(address: &str, mac: &str, input: HdmiInput) -> Result<Self, UserFacingError> {
+        validate(&PairingDraft {
+            address: address.into(),
+            mac: mac.into(),
+            input,
+        })
+    }
+
     pub fn address(&self) -> Ipv4Addr {
         self.address
     }
@@ -76,20 +81,17 @@ impl PairingRequest {
 
 // Exactly one side wins the cancellation/commit boundary. The UI never waits
 // for a filesystem lock: cancellation is accepted until publication starts.
-const ACTIVE: u8 = 0;
-const CANCELLED: u8 = 1;
-const SAVING: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct PairingOperation {
     id: u64,
     request: PairingRequest,
-    gate: Arc<AtomicU8>,
+    gate: StepCancellation,
 }
 
 impl PartialEq for PairingOperation {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && Arc::ptr_eq(&self.gate, &other.gate)
+        self.id == other.id && self.gate.same_attempt(&other.gate)
     }
 }
 impl Eq for PairingOperation {}
@@ -99,18 +101,20 @@ impl PairingOperation {
         self.request
     }
     pub fn is_cancelled(&self) -> bool {
-        self.gate.load(Ordering::Acquire) == CANCELLED
+        self.gate.is_cancelled()
     }
     fn cancel(&self) -> bool {
-        self.gate
-            .compare_exchange(ACTIVE, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-            || self.is_cancelled()
+        self.gate.cancel() || self.gate.is_cancelled()
     }
     fn begin_save(&self) -> bool {
-        self.gate
-            .compare_exchange(ACTIVE, SAVING, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.gate.begin()
+    }
+    pub(crate) fn for_setup(request: PairingRequest, gate: StepCancellation) -> Self {
+        Self {
+            id: 0,
+            request,
+            gate,
+        }
     }
 }
 
@@ -138,7 +142,7 @@ impl PairingError {
     pub fn failure(&self) -> PairingFailure {
         self.failure
     }
-    fn presentation(&self) -> UserFacingError {
+    pub(crate) fn presentation(&self) -> UserFacingError {
         let (title, detail) = match self.failure {
             PairingFailure::Cancelled => ("Pairing cancelled", "No TV was saved."),
             PairingFailure::Rejected => ("Connection declined on TV", "Start pairing again and use the TV remote to allow the connection request."),
@@ -213,7 +217,7 @@ impl PairingBackend for EnvironmentPairingBackend {
     }
 }
 
-fn pair_and_save_webos(
+pub(crate) fn pair_and_save_webos(
     operation: &PairingOperation,
     path: &std::path::Path,
     endpoint: WebOsEndpoint,
@@ -268,7 +272,7 @@ fn map_pairing_read_error(error: WebOsPairingReadError) -> PairingError {
     })
 }
 
-fn pair_and_save(
+pub(crate) fn pair_and_save(
     operation: &PairingOperation,
     path: &std::path::Path,
     progress: &mut dyn FnMut(PairingStage),
@@ -281,7 +285,25 @@ fn pair_and_save(
         return Err(PairingError::new(PairingFailure::Cancelled));
     }
     let persistence_error = || PairingError::new(PairingFailure::Persistence);
-    let store = PairingStore::prepare(path).map_err(|_| persistence_error())?;
+    let store = crate::settings::SettingsStore::load(path).map_err(|_| persistence_error())?;
+    let profiles =
+        crate::tvs::read_profiles_from_store(path, &store).map_err(|_| persistence_error())?;
+    if let Some(profile) = profiles.first() {
+        let request = operation.request;
+        if profile.address() != request.address
+            || profile.mac() != request.mac
+            || profile.input() != request.input
+            || profile.platform() != TvPlatform::LgWebOs
+        {
+            return Err(persistence_error());
+        }
+        if profile.credentials() == TvCredentialState::Stored {
+            return Ok(PairingOutcome::from(profile.clone()));
+        }
+    }
+
+    let store =
+        PairingStore::prepare_pairing(path, &operation.request).map_err(|_| persistence_error())?;
     let token = authenticate(progress)?;
     if !operation.begin_save() {
         return Err(PairingError::new(PairingFailure::Cancelled));
@@ -364,7 +386,7 @@ impl PairingApplication {
                 let operation = PairingOperation {
                     id: operation_id,
                     request,
-                    gate: Arc::new(AtomicU8::new(ACTIVE)),
+                    gate: StepCancellation::default(),
                 };
                 self.active = Some(operation.clone());
                 self.error = None;
@@ -471,128 +493,48 @@ mod tests {
     }
 
     #[test]
-    fn pairing_again_reactivates_saved_sleep_preference_and_keeps_it_off_on_failure() {
+    fn pairing_again_preserves_saved_behavior_preferences() {
         if skip_pairing_tests_as_root() {
             return;
         }
-        use crate::application::Application;
         use crate::platform_access_token::PlatformAccessToken;
-        use crate::presentation::settings::{SettingsEditor, SettingsPresentation};
-        use crate::settings::{
-            execute_settings_mutation, ConfigEnvReader, SettingsApplier, SettingsError,
-            SettingsMutation, SettingsMutationFailure,
-        };
+        use crate::settings::ConfigEnvReader;
         use std::fs;
-
-        for failure in [
-            None,
-            Some(SettingsError::ActivationCancelled),
-            Some(SettingsError::Activation {
-                message: "lifecycle service could not start".into(),
-            }),
-        ] {
-            let path = pairing_test_path("retained-sleep-preference");
-            let (mut app, opening) = Application::open();
-            app.complete_tvs_read(opening.tvs().unwrap().read_operation().unwrap(), Ok(vec![]))
-                .unwrap();
-            for intent in [
-                TvsIntent::PairTv,
-                TvsIntent::Pairing(PairingIntent::SetAddress("192.0.2.10".into())),
-                TvsIntent::Pairing(PairingIntent::SetMac("02:11:22:33:44:55".into())),
-            ] {
-                app.handle_tvs_intent(intent).unwrap();
-            }
-            let submitted = app
-                .handle_tvs_intent(TvsIntent::Pairing(PairingIntent::Submit))
-                .unwrap();
-            let operation = submitted.tvs().unwrap().pairing_operation().unwrap();
-            let request = operation.request();
-            let profile = TvProfile::new(
-                TvId::primary(),
-                "Primary TV",
-                request.address(),
-                request.mac(),
-                request.input(),
-                TvPlatform::LgWebOs,
-                TvCredentialState::Stored,
-            );
-            // Unpairing and reinstalling can retain these preferences while
-            // the lifecycle service is no longer running.
-            let preferences = "screen_idle_blank=disabled\nsystem_sleep_wake_policy=enabled\n";
-            fs::write(&path, format!(
-                "{preferences}tvs_primary_ip={}\ntvs_primary_mac={}\ntvs_primary_input={}\ntvs_primary_platform=lg_webos\n",
-                request.address(), request.mac(), request.input().as_str(),
-            )).unwrap();
-            PairingStore::unpair_primary(&path, &profile).unwrap();
-            assert_eq!(fs::read_to_string(&path).unwrap(), preferences);
-
-            let outcome = pair_and_save(operation, &path, &mut |_| {}, |_| {
-                Ok(PlatformAccessToken::new("test-client-key").unwrap())
-            })
-            .unwrap();
-            assert_eq!(
-                outcome.requested_behaviors(),
-                &[BehaviorSetting::SystemSleepWakePolicy]
-            );
-            let paired = app.complete_pairing(operation, Ok(outcome)).unwrap();
-            let store = ConfigEnvReader::load(&path).unwrap().into_store();
-            assert_eq!(
-                store.raw_storage_value("system_sleep_wake_policy"),
-                Some("disabled")
-            );
-            let ready = app
-                .complete_settings_read(
-                    paired.settings().unwrap().read_operation().unwrap(),
-                    Ok(SettingsPresentation::from_store(&store).groups().to_vec()),
-                )
-                .unwrap();
-            let activation = ready.settings().unwrap().mutation_operation().unwrap();
-            assert_eq!(activation.setting(), BehaviorSetting::SystemSleepWakePolicy);
-
-            let enabled = failure.is_none();
-            // Model the service-activation result at the worker boundary;
-            // a successful activation uses the shared persistence executor.
-            let result = match failure {
-                Some(error) => Err(SettingsMutationFailure::Activation(error)),
-                None => execute_settings_mutation(
-                    &path,
-                    SettingsMutation::set(&store, "system.sleep_wake_policy", "enabled").unwrap(),
-                    &SettingsApplier::from_env(),
-                    &mut |_| {},
-                ),
-            };
-            let completed = app.complete_settings_mutation(activation, result).unwrap();
-            let settings = completed.settings().unwrap();
-            assert!(settings.mutation_operation().is_none());
-            for (setting, expected) in [
-                (BehaviorSetting::ScreenIdleBlank, false),
-                (BehaviorSetting::SystemSleepWakePolicy, enabled),
-            ] {
-                let row = settings
-                    .presentation()
-                    .groups()
-                    .iter()
-                    .flat_map(|group| group.rows())
-                    .find(|row| row.setting() == setting)
-                    .unwrap();
-                assert_eq!(
-                    row.editor(),
-                    &SettingsEditor::Toggle {
-                        value: Some(expected)
-                    }
-                );
-            }
-            let saved = ConfigEnvReader::load(&path).unwrap().into_store();
-            assert_eq!(
-                saved.raw_storage_value("system_sleep_wake_policy"),
-                Some(if enabled { "enabled" } else { "disabled" })
-            );
-            assert_eq!(
-                saved.raw_storage_value("tvs_primary_ip"),
-                Some("192.0.2.10")
-            );
-            fs::remove_dir_all(path.parent().unwrap()).unwrap();
-        }
+        let path = pairing_test_path("retained-sleep-preference");
+        let request =
+            PairingRequest::parse("192.0.2.10", "02:11:22:33:44:55", HdmiInput::Hdmi1).unwrap();
+        let profile = TvProfile::new(
+            TvId::primary(),
+            "Primary TV",
+            request.address(),
+            request.mac(),
+            request.input(),
+            TvPlatform::LgWebOs,
+            TvCredentialState::Stored,
+        );
+        let preferences = "screen_idle_blank=disabled\nsystem_sleep_wake_policy=enabled\n";
+        fs::write(&path, format!("{preferences}tvs_primary_ip={}\ntvs_primary_mac={}\ntvs_primary_input={}\ntvs_primary_platform=lg_webos\n", request.address(), request.mac(), request.input().as_str())).unwrap();
+        PairingStore::unpair_primary(&path, &profile).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), preferences);
+        let operation = PairingOperation::for_setup(request, StepCancellation::default());
+        pair_and_save(&operation, &path, &mut |_| {}, |_| {
+            Ok(PlatformAccessToken::new("test-client-key").unwrap())
+        })
+        .unwrap();
+        let saved = ConfigEnvReader::load(&path).unwrap().into_store();
+        assert_eq!(
+            saved.raw_storage_value("system_sleep_wake_policy"),
+            Some("enabled")
+        );
+        assert_eq!(
+            saved.raw_storage_value("screen_idle_blank"),
+            Some("disabled")
+        );
+        assert_eq!(
+            saved.raw_storage_value("tvs_primary_ip"),
+            Some("192.0.2.10")
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -826,9 +768,12 @@ mod tests {
                     assert!(complete.profile_changed());
                     assert_eq!(stages.last(), Some(&PairingStage::Saving));
                     let retry = pair_and_save(&operation, &path, &mut |_| {}, |_| {
-                        panic!("existing profile must refuse before connecting")
+                        panic!("existing pairing must not connect again")
                     });
-                    assert_eq!(retry.unwrap_err().failure(), PairingFailure::Persistence);
+                    assert_eq!(
+                        retry.unwrap().profile().credentials(),
+                        TvCredentialState::Stored
+                    );
                 }
             }
         }

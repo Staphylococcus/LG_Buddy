@@ -49,6 +49,21 @@ Its stateful TV behavior includes:
 - moving between `Active` and `Screen Off`
 - moving to `Power Off` and rejecting an immediate new registration
 
+Connections share TV state and are served concurrently. Power-off disconnects
+existing clients; fixture shutdown also closes clients waiting in a handshake or
+for a request. Worker failures are surfaced instead of leaving a healthy-looking
+listener behind. The shared-client characterization links to the
+[Hearth lifecycle observations][hearth-lifecycle].
+Closing sockets at power-off exercises stale-session recovery; it does not
+assert the exact time at which hardware closes each connection.
+
+The test-only `simulate_wake` operation restores power without resetting input,
+picture/audio settings, credentials or observation counters. It can delay
+readiness, rejecting registration until the deadline. That delay and the chosen
+temporary rejection are synthetic controls for retry tests: the hardware run
+established that restoration can require retries, not an exact readiness timing
+or failure frame. Repeated wake requests do not restart that deadline.
+
 The server has exact firmware profiles for observed device behavior:
 
 - `WebOs24Version92261` is the local webOS24 / 9.2.2-61 baseline. It accepts the
@@ -110,6 +125,48 @@ the mock must not invent a plausible response to make a test pass.
 Complete webOS response JSON belongs in this server. Tests may assert domain
 values and error details that matter to LG Buddy, but must not create another
 server or peer that carries response fixtures.
+
+### Process fixture for desktop/lifecycle validation
+
+Build `gui_journey_tv` with `cargo build -p lg-buddy --example gui_journey_tv`.
+It uses the same server, binds WSS on `127.0.0.1:3001`, and publishes atomic
+`state.json` snapshots in its control directory. The existing one-argument GUI
+journey invocation remains supported. For a dedicated VM's real WoL sender:
+
+```sh
+gui_journey_tv /path/to/control 0.0.0.0:9 02:00:00:00:02:17 8000
+```
+
+The optional arguments are UDP bind address, test MAC and readiness delay in
+milliseconds (default zero). Binding port 9 may require `CAP_NET_BIND_SERVICE`.
+Only an exact 102-byte magic packet for that MAC wakes the fixture. It does not
+forward packets or control a real TV. `state.json` reports the bound
+`wol_address`, so a test can bind port zero and discover its allocated port.
+
+Write commands through an atomic rename to `<control-dir>/command`:
+
+- `wake` or `wake <delay-ms>` wakes a powered-off fixture without resetting it.
+- `ready` releases an injected readiness delay without powering on an off TV.
+  Tests can keep startup pending until their assertions complete.
+- `stateful`, `pairing-rejected`, `stall` and `interrupted` restart the fixture
+  with that scenario, preserving the existing GUI journey behavior.
+- `stop` closes all connections and exits.
+
+Snapshots include `tv_ready`, current and cumulative connection counts,
+`power_off_count` and `wake_count`, alongside the existing TV settings and
+registration history. Active connections include pending transport handshakes.
+`screen_on` describes TV blanking only; it does not mean that the compositor
+supplies an HDMI signal or that a desktop image is visible.
+
+The process smoke uses the real CLI, independent UDP packets and snapshot
+assertions. Run with TCP port 3001 free:
+
+```sh
+python3 scripts/test-tv-fixture.py target/debug/lg-buddy target/debug/examples/gui_journey_tv
+```
+
+It checks power/wake cycles, retained settings and credentials, invalid packets,
+delayed readiness, repeated packets and shutdown with an unfinished handshake.
 
 ### Characterization tests
 
@@ -210,6 +267,7 @@ semantics, while a WSS test failure points to transport setup.
 [webos24-luna]: https://github.com/Staphylococcus/LG_Buddy/issues/76#issuecomment-5420796570
 [webos26-direct]: https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5277399395
 [webos26-luna]: https://github.com/JPersson77/LGTVCompanion/issues/351#issuecomment-5309740894
+[hearth-lifecycle]: https://github.com/Staphylococcus/LG_Buddy/issues/217#issuecomment-5647209853
 
 ## Review Checklist
 

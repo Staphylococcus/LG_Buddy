@@ -99,7 +99,7 @@ The main runtime consumers are:
 - the installed `lg-buddy` launcher with no arguments, which opens normal
   Overview through the matching GTK executable
 - the `lg-buddy brightness` launcher, which opens the matching GTK executable
-  focused on brightness and uses Zenity only when that executable is absent
+  focused on brightness
 - the `lg-buddy-gui` GTK window, which renders Overview, TVs, pairing, and
   Settings from typed application state and sends semantic user intents through
   the in-process Rust API
@@ -125,7 +125,6 @@ flowchart LR
     end
 
     subgraph Frontend["Frontend"]
-        ZENITY["zenity brightness dialog<br/>interactive prompt"]
         GTK["lg-buddy-gui<br/>Overview / TVs / Settings / dialogs"]
     end
 
@@ -199,8 +198,6 @@ flowchart LR
     NM --> MAIN
     TERMINAL --> MAIN
     MAIN -->|"normal / brightness launcher"| GTK
-    MAIN -.->|"brightness only; GUI absent"| ZENITY
-    ZENITY --> MAIN
     GTK -->|"semantic intents / worker completions"| APPLICATION
     APPLICATION --> VIEWS
     VIEWS --> PRESENTATION
@@ -408,7 +405,16 @@ The current split is:
   - emits `NetworkTeardownImminent` with the logind sleep-phase reading
 - `sources/desktop/gnome.rs`
   - owns GNOME session-bus setup, subscriptions, sender validation, Mutter
-    polling, and translation into normalized observations
+    user-active watches, and translation into normalized observations
+- `inhibition.rs`
+  - independent push/pull inhibition, preference override, release timing,
+    cancellable checks and diagnostics behind the Boolean blanking gate
+- `sources/desktop/gnome/inhibition.rs`
+  - SessionManager inhibition subscriptions, state refresh and recovery,
+    independent of GNOME activity
+- `sources/desktop/powerdevil.rs`
+  - fresh effective screen-policy queries, cancellation and owner validation;
+    independent of activity and GNOME's maintained inhibition
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
@@ -518,19 +524,18 @@ owns an operational cache under the user cache directory for GitHub ETag,
 latest release metadata, and last-notified release state used by the observable
 update notification policy; that cache is not user configuration and is not
 part of the settings API.
-The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the running CLI
-and launches its no-argument entrypoint for normal Overview. A missing GUI is an
-error on this path. The `brightness` command locates the same executable and
-launches its `brightness` entrypoint, which selects the brightness control even
-when another view is already open. Only an absent GUI on this focused path
-selects the temporary Zenity compatibility flow; an invalid installation or
-failed GUI process is returned directly without a second prompt. The
-`brightness get` and `brightness set` commands never enter either launcher and
-use the TV picture abstraction in `tv.rs` for typed OLED brightness validation
-and live TV read/write operations. The interactive Zenity brightness dialog
-delegates its TV operations back through those direct CLI commands. The GTK
-entrypoint opens one Overview alongside the primary TV summary, volume, and
-mute. Two icon-and-slider rows submit changes as the sliders move; the sound
+
+The installer supplies the matching runtime and GTK executable together, checks
+GTK/libadwaita versions, and offers to install missing runtime packages before
+proceeding. The no-argument `lg-buddy` command locates `lg-buddy-gui` beside the
+running CLI and launches its no-argument entrypoint for normal Overview.
+The `brightness` command locates the same executable and launches its
+`brightness` entrypoint, which selects the brightness control even when another
+view is already open. The `brightness get` and `brightness set` commands never
+enter either launcher and use the TV picture abstraction in `tv.rs` for typed
+OLED brightness validation and live TV read/write operations. The GTK entrypoint
+opens one Overview alongside the primary TV summary, volume, and mute.
+Two icon-and-slider rows submit changes as the sliders move; the sound
 icon toggles mute. The core Overview application owns its declarations and semantic
 intents; GTK renders them without adding TV or configuration policy. Workers
 keep blocking operations off the GTK main loop. Capability state is independent,
@@ -643,12 +648,18 @@ Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
 
-The installer then reads the existing platform choice and checks the legacy
-Python environment without mutating either. Native installations and healthy
-compatibility environments preserve that directory unchanged. Only an
-unhealthy compatibility environment triggers a second candidate preflight for
-recursive repair; that conditional pass also refuses unsafe virtualenv roots
-and nested mounts before the directory is cleared.
+The installer reads the existing platform choice before dependency installation.
+A healthy legacy environment is preserved with a final deprecation notice; an
+unhealthy one is refused with the native pairing command before privileged
+mutation. Native upgrades run a second candidate preflight for removal of the
+obsolete `/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested
+mounts before removal. Configuration and credentials remain unchanged.
+
+Fresh installation never provisions Python. GTK/libadwaita requirements are
+checked through the bundled GUI's internal `--check-runtime` entrypoint, which
+reads the loaded library versions without initializing a display. A failed
+probe prompts for the distribution's GTK/libadwaita packages and is repeated
+before binary identity validation and installation.
 
 These checks are a conservative, evolving safety boundary, not an exhaustive
 host-support declaration or a promise that no later privileged operation can
@@ -941,6 +952,35 @@ outcomes.
 
 Desktop backends are treated as adapters, not owners of policy.
 
+The automatic monitor composes available GNOME and Wayland activity sources.
+Each adapter lives for the application lifetime, manages its own connections,
+and contributes validated observations with their original time.
+`session/activity.rs` bounds pending observations without tracking connections or
+invalidating facts on connection loss. The runner queries adapter activity
+availability separately for idle policy and diagnostics. The compatibility backend resolver still serves
+existing settings/CLI callers; it does not select the automatic native source
+set. See [Session backend model](session-backend-model.md) for the current
+activity and inhibition contracts, timing and coverage limits.
+
+Adapters may expose activity and inhibition independently, each through push or
+pull according to the source. The push inhibition section
+combines maintained Boolean permissions with diagnostics. The pull section
+combines fresh, cancellable requests in the same diagnostic shape. PowerDevil
+supplies effective screen policy; an optional [KWin plugin](kwin-integration.md)
+supplies the compositor's native inhibition state. The GNOME capability
+requires only SessionManager and keeps subscriptions, state queries and owner
+recovery internal. It contributes no activity observations. The `Inhibition`
+facade joins the sections, owns release timing and cancellable pull work, and
+exposes `can_blank()` when the ordinary activity deadline is due. A denial leaves
+that deadline unchanged and is retried at a bounded cadence. Explicit lock and
+post-blank policy remain independent.
+
+The separate preference section evaluates the existing honoring setting
+without I/O. Disabled honoring supplies a bypass for inhibition restrictions and
+release delay; it does not grant activity eligibility. Settings retain their
+screen-service restart apply path. The facade also cancels pending attempts
+before applying an in-process preference or timeout change.
+
 The runtime core owns:
 
 - config
@@ -975,10 +1015,10 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 
 - the GNOME session-bus connection and subscriptions
 - ScreenSaver sender ownership validation and signal mapping
-- Mutter user-active watches when honoring inhibitors, legacy idletime polling
-  otherwise, and normalized activity observations
+- Mutter user-active watches independent of inhibition, and normalized activity
+  observations
 
-`sources/desktop/wayland.rs` is the native non-GNOME adapter. It owns the
+`sources/desktop/wayland.rs` is the native Wayland adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.
@@ -1008,9 +1048,10 @@ asymmetric:
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
-`swayidle` remains an explicit and automatic compatibility fallback during the
-1.x migration window, but emits a deprecation notice and is not offered by
-fresh interactive configuration. Removal is planned for 2.0.0 after native
+`swayidle` remains an explicit legacy integration during the 1.x migration
+window and emits a deprecation notice. Automatic monitoring never probes or
+starts it, and fresh interactive configuration does not offer it. Removal is
+planned for 2.0.0 after native
 Wayland remains field-validated across supported compositors and unsupported
 sessions have precise diagnostics.
 

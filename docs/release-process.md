@@ -169,8 +169,12 @@ release or privilege-related effects. A verified candidate's binary performs a
 second pass for its own installer requirements and trusted external ancestor
 chain before privileged mutation.
 The checker assigns each target an installer-operation policy so replacement,
-directory mutation, recursive repair, exact drop-in, and candidate-input
+directory mutation, recursive removal, exact drop-in, and candidate-input
 requirements cannot silently lose their operation-specific safeguards.
+User service checks follow an absolute `XDG_CONFIG_HOME`, falling back to
+`~/.config` otherwise, as the installer and setup flow do. Setup helper and
+polkit destinations may be absent on older installations; the preflight checks
+that they can be safely created or replaced and requires their candidate payloads.
 
 The installed GUI uses the same compatibility checks with its own installed
 executable path; a source checkout or externally managed GUI cannot substitute
@@ -184,9 +188,11 @@ The extracted candidate exposes this second pass through the hidden
 `upgrade-preflight` installer entrypoint. `install.sh --upgrade` invokes it
 before sudo or installation writes, loads the existing config pointer and
 settings without rewriting them, and never runs configuration, discovery, or
-pairing. Native and healthy compatibility installations preserve their Python
-environment; an unhealthy compatibility environment must pass the additional
-recursive-repair checks before it is rebuilt. After replacing owned runtime and
+pairing. Native upgrades remove the obsolete LG Buddy Python environment after
+additional directory and mount checks. Healthy legacy environments are preserved
+through the final 1.x window; unhealthy ones are refused before privileged
+mutation with instructions to pair and select `lg_webos`. Fresh installations
+never create an environment. After replacing owned runtime and
 integration files, the installer reloads system integrations before user
 integrations and verifies that the installed binary matches the candidate.
 
@@ -226,11 +232,12 @@ End users can extract the release archive and run:
 ```
 
 That path uses the bundled `lg-buddy` binary and does not require a Rust toolchain.
-For a fresh installation it opens the installed GUI for TV pairing and attempts
-the default Idle Blanking and TV Sleep & Wake behaviors. An unavailable or
-declined behavior stays off and can be retried in Settings. Run it as the regular
+For a fresh installation it opens the installed GUI for TV pairing and subsequent
+service setup. Failed or cancelled setup preserves desired settings. Both GUI
+and CLI consume the [shared completion flow](onboarding.md); the GUI checks setup
+readiness asynchronously on startup. Run it as the regular
 user; the installer and GUI request only the elevation their system operations
-need. For terminal-only setup, run `./configure.sh` first. Existing TV
+need. For terminal setup, run `./install.sh --headless`; pass setup arguments after `--`. Existing TV
 configurations retain their saved preferences.
 
 To update an existing compatible release-bundle installation from an already

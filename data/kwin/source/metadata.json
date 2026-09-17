@@ -1,0 +1,7 @@
+{
+    "KPlugin": {
+        "Name": "LG Buddy native inhibition",
+        "Description": "Expose KWin's effective native idle inhibition to LG Buddy",
+        "EnabledByDefault": false
+    }
+}

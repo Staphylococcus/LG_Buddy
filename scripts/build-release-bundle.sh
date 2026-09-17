@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 --target <runtime-target> --gui-target <gui-target> --version <version> [--output-dir <dir>]"
+    echo "Usage: $0 --target <runtime-target> --gui-target <gui-target> --version <version> [--output-dir <dir>] [--require-kwin-matrix]"
     exit 1
 }
 
@@ -13,6 +13,7 @@ OUTPUT_DIR="$REPO_ROOT/dist"
 TARGET=""
 GUI_TARGET=""
 VERSION=""
+REQUIRE_KWIN_MATRIX=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -32,6 +33,10 @@ while [ "$#" -gt 0 ]; do
             OUTPUT_DIR="${2:-}"
             shift 2
             ;;
+        --require-kwin-matrix)
+            REQUIRE_KWIN_MATRIX=1
+            shift
+            ;;
         *)
             usage
             ;;
@@ -41,6 +46,10 @@ done
 [ -n "$TARGET" ] || usage
 [ -n "$GUI_TARGET" ] || usage
 [ -n "$VERSION" ] || usage
+
+if [ "$REQUIRE_KWIN_MATRIX" -eq 1 ]; then
+    python3 "$SCRIPT_DIR/kwin_matrix.py" verify --directory "$REPO_ROOT/target/kwin-bridges"
+fi
 
 BINARY_PATH="$REPO_ROOT/target/$TARGET/release/lg-buddy"
 GUI_BINARY_PATH="$REPO_ROOT/target/$GUI_TARGET/release/lg-buddy-gui"
@@ -73,6 +82,8 @@ install -d "$BUNDLE_DIR"
 install -d "$BUNDLE_DIR/bin"
 install -d "$BUNDLE_DIR/docs"
 install -d "$BUNDLE_DIR/systemd"
+install -m 755 "$REPO_ROOT/data/setup-services.sh" "$BUNDLE_DIR/docs/setup-services.sh"
+install -m 644 "$REPO_ROOT/data/io.github.staphylococcus.LGBuddy.setup.policy" "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 
 install -m 755 "$BINARY_PATH" "$BUNDLE_DIR/lg-buddy"
 install -m 755 "$REPO_ROOT/install.sh" "$BUNDLE_DIR/install.sh"
@@ -86,6 +97,20 @@ install -m 644 "$REPO_ROOT/io.github.staphylococcus.LGBuddy.desktop" \
 install -m 644 "$REPO_ROOT/README.md" "$BUNDLE_DIR/README.md"
 install -m 644 "$REPO_ROOT/LICENSE" "$BUNDLE_DIR/LICENSE"
 cp -R "$REPO_ROOT/docs/." "$BUNDLE_DIR/docs/"
+# Keep optional bridge assets under docs/ for older verified bundle readers.
+install -d "$BUNDLE_DIR/docs/kwin"
+cp -R "$REPO_ROOT/data/kwin/." "$BUNDLE_DIR/docs/kwin/"
+if [ -d "$REPO_ROOT/target/kwin-bridges" ]; then
+    install -d "$BUNDLE_DIR/docs/kwin/prebuilt"
+    cp -R "$REPO_ROOT/target/kwin-bridges/." "$BUNDLE_DIR/docs/kwin/prebuilt/"
+fi
+if [ "$REQUIRE_KWIN_MATRIX" -eq 1 ]; then
+    python3 "$SCRIPT_DIR/kwin_matrix.py" verify --directory "$BUNDLE_DIR/docs/kwin/prebuilt"
+    install -m 644 "$SCRIPT_DIR/kwin-matrix/targets.json" "$BUNDLE_DIR/docs/kwin/matrix.json"
+fi
+find "$BUNDLE_DIR/docs/kwin" -type d -exec chmod 755 {} +
+find "$BUNDLE_DIR/docs/kwin" -type f -exec chmod 644 {} +
+chmod 755 "$BUNDLE_DIR/docs/kwin/setup.sh" "$BUNDLE_DIR/docs/kwin/build.sh"
 install -m 755 "$GUI_BINARY_PATH" "$BUNDLE_DIR/$GUI_BUNDLE_PATH"
 install -m 644 "$APP_ICON_SOURCE" "$BUNDLE_DIR/$APP_ICON_BUNDLE_PATH"
 # Documentation uses the source-tree icon path; older updaters require bundled

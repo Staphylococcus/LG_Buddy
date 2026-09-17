@@ -1,0 +1,371 @@
+{
+  "schema_version": 1,
+  "architecture": "x86_64",
+  "environments": {
+    "6.8": {
+      "qt_version": "6.8.3",
+      "qt_nixpkgs": {
+        "rev": "50ab793786d9de88ee30ec4e4c24fb4236fc2674",
+        "hash": "sha256-/bVBlRpECLVzjV19t5KMdMFWSwKLtb5RyXdjz3LJT+g="
+      }
+    },
+    "6.9": {
+      "qt_version": "6.9.2",
+      "qt_nixpkgs": {
+        "rev": "551496cdbda86e7dca864e4ee01c79d270504b02",
+        "hash": "sha256-dZ8Ocy6vUyLtNVsTpH/EQg9euFBjzQt3sAU2l5QFDp0="
+      }
+    },
+    "6.10": {
+      "qt_version": "6.10.2",
+      "qt_nixpkgs": {
+        "rev": "ffe209c20b131499796c6fb7dfbb93a3df202d0b",
+        "hash": "sha256-ekxVxETqu86AheXLqi9oTgpBwzb6tzaOfS9qfID3rG0="
+      }
+    },
+    "6.11": {
+      "qt_version": "6.11.2",
+      "qt_nixpkgs": {
+        "rev": "eaad089433ca2bb662274377d33df3d0e51ef28b",
+        "hash": "sha256-H6GwaZzZf+4npqv0tph94w9tZddSjFjmQrVsW0z78uk="
+      }
+    }
+  },
+  "kwin": [
+    {
+      "version": "6.4.0",
+      "rev": "2a3718c3914f2a2b96c1758211e90ea1a8eda5e8",
+      "sha256": "13mpgk4gx3vn16bgvlhidq0hd1shliwh1mi4g4mp9hylxr6rcpld",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.1",
+      "rev": "5de50d4784e9b158359bec62ea1834e8965620a2",
+      "sha256": "1acwmac07cz4sfkykc0dm8q4k06zyll3xr1hfi6sq96znly4dzk8",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.2",
+      "rev": "0d46ef4936f6d1f9befa2d96b5e0f604b19a15e0",
+      "sha256": "1865k53xh1vmfxqg0v0m9xnclyhkwcfw0hl6g6xgr28sxn1cclax",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.3",
+      "rev": "d6bedb4b744ba22940254ea9c151664d03cec72c",
+      "sha256": "01rdnd6iqilvw6fdmvb6d9rm8n0mrsxlv1aj31mya47m7i4r06r1",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.4",
+      "rev": "b54c0832f3381a7c67274d430cb9fac3fa6126e8",
+      "sha256": "1w7z5lbz98l1li7qvnclcv9mzypi0ifvwy0as2cbpls0s8ndyrnd",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.5",
+      "rev": "4b168ff03fb8c56e48837c100a5f6ee2433764d9",
+      "sha256": "1sa87h5g579f4and7y8s0a1syf0r9zlgv8zxa8wghv6wgmczk05h",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.4.6",
+      "rev": "4018344761abe6b7c5fb7b1c22374799f769cae6",
+      "sha256": "04fjdbrxz5lhby0m3vf7h8x82g3idkf0x0niws3gajbmn9zqndzk",
+      "qt_minors": [
+        "6.8"
+      ]
+    },
+    {
+      "version": "6.5.0",
+      "rev": "580a077e94f35c73417de9e880508f1c0b5d8dbd",
+      "sha256": "03pcdk86yvnvda0hz7wby554gsplm2nbav305f56dacz2yyzynq2",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.1",
+      "rev": "460e9b33f4ae624ad93f8cd76760cc0f9dc279ca",
+      "sha256": "1zzx6jis4h0a3hjcinzjj5kp09q6cxyqmhpgqs3ga6mc9rcmgpjl",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.2",
+      "rev": "bab4658ad11381ad73263cc51c14c0246ea45e03",
+      "sha256": "1npszx5yprsl8d86ffp03bm18441ax2w26bv496y0qar5ybh18m8",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.3",
+      "rev": "8b25936b278d8944c8b3e4b04a849f7bb6f3c404",
+      "sha256": "00d2lki79vh8l9c4xnhbc87hnnqfl7rwhpgf2sdcrl6hkdj1p7nd",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.4",
+      "rev": "0b892333028054c3d86ca50f0270c8da48d28930",
+      "sha256": "003h8b5fjqp00r2zz32ri99q1ah0dy235nsrvr7rbrwqg8gl70lm",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.5",
+      "rev": "a400c751feaf1f0feef821eb60d7df84c3b1bf34",
+      "sha256": "1c5yf6zn8qsppm9gkmzy6gaqf9n48x7drb71c9p79gizfc5q6pnr",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.5.6",
+      "rev": "8276c53534a41b3dbd1a55b92026c1276f8a2946",
+      "sha256": "0y0h18mrzb719311y22002bcv6qbh6k1y4kf4a6rw57ywb2h6ix4",
+      "qt_minors": [
+        "6.9"
+      ]
+    },
+    {
+      "version": "6.6.0",
+      "rev": "e53bb3be7ecf1735c7739b797f94d66de422ab4d",
+      "sha256": "1hym30lhhp9dl65gdxlmf6a8kjs4xi36jy2knnwlrn89vsqfcnc0",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.1",
+      "rev": "4fdd6adcfcf43baaf3ef44c99663fb1680df709c",
+      "sha256": "118h26jbs9chd52vdpr4x8gknrkg82iz7gq21mvi6isxb3ncj1j4",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.2",
+      "rev": "8cb5aff09cdb27799dcdc6625f6725484385f514",
+      "sha256": "1yzhicnz0a2f3znwz8c8h3g66x6a28m07rxqr3h0w8krxwgw4yri",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.3",
+      "rev": "11a59436076a96d55b59d7934d3cc25a2d693853",
+      "sha256": "1qyc7aa9sskw8hpna5j50jd6dnc9nfmxr58l2qfis0vdjvn858a1",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.4",
+      "rev": "203f8d127b93b7ced97345a3b640ae22bb5d5919",
+      "sha256": "08y5fk34yfw948p5rfr4y27nfca6c0zy54nx914a7779d6r3mh4j",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.5",
+      "rev": "b04d59c03749484a8a0ed5a8d4cda515a267c59b",
+      "sha256": "18dglgxwr54kxd1wkdhkcc0laa0620xd0v5x3kiaxycj2w1805aw",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.6.6",
+      "rev": "9bf2235fad10de9048c634e376bf12e56b3023e6",
+      "sha256": "0rvjs4nrydy9hbbdbs97rf1h9knr2wlyx65zy0n94pf2nblwhx6i",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
+      "version": "6.7.0",
+      "rev": "365683c0442f20a76df115405c50bdf20413b05c",
+      "sha256": "1zkz3nbdi559w8wq8gc76gsmknzsd3hz42djk1g77xd5yfzsy2g7",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.1",
+      "rev": "b69b7d2cc688f64dd8425b2c1bd3b45ba96a8dbf",
+      "sha256": "1286bv8052civasm9346y7gfb1wkbb9ir95m1gh8p06v0in84c90",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.2",
+      "rev": "e34ec104bd373692eeb167947654e8411ccb1c1c",
+      "sha256": "02hnikk5214sndfczppqkg1fm5p11rhnz2mim4ds1hng0zfrn00g",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.3",
+      "rev": "45ec9a6d0ed312a803ff5658a2a3e61f221566c6",
+      "sha256": "0hj8g1g4zrnwyx5wk0syqs526jxz5vrpxxscpifps83ncfbyz7yy",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.4",
+      "rev": "8438567a741826da8b7536a8b10eb3af8fc8820d",
+      "sha256": "1pzq8i9q8f1dwr342hf9bg832jj59acdlq6qz95pim14m64c9d0h",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.5",
+      "rev": "ab7df7ccb7c6af20f4b279cd6220f7cd3d2267d7",
+      "sha256": "04masrnay03vg3g3y6gxfkm6pbjx6smnn6yb33rgyx9v9mwq702b",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    }
+  ],
+  "kde_environments": {
+    "6.4": {
+      "rev": "f5db46f5e45db3be365ef420d9ce2c86a639ae72",
+      "hash": "sha256-gpk41RjpmXkc8lpjdCiGuJxuHt5BaWFhJMyjM51GvH0=",
+      "plasma": {
+        "version": "6.4.6",
+        "sources": {
+          "aurorae": {
+            "rev": "db6d5745fb19cb1f60224ea06bd1e75df5ac2ce7",
+            "sha256": "11iclvry24bzr2lalcnd1frnnawv9nziqz6p9w5jcq6dkkqjygs5"
+          },
+          "breeze": {
+            "rev": "b1c8449ef4d1c290a29d83ce3af4fa0a9099760c",
+            "sha256": "1ynddhbz2ydab3q9ws1isfgains136v076g4x5di4czc3mx4fm24"
+          },
+          "kdecoration": {
+            "rev": "b74758e63bd52d9073a54bcd2de03822cc14c8e7",
+            "sha256": "08b66wfg0zcp6y3z8zx4125fwiq26hl2r5h4ixaypiaqxzzij05w"
+          },
+          "kwayland": {
+            "rev": "e123cb5a6a9ff367c7fbc7f6e520c15c7951ef20",
+            "sha256": "0z50nxzb68q139hlbn6rhyq06wvddaq932yd6lmx4mricx555nzf"
+          },
+          "libplasma": {
+            "rev": "2f4704633547ca7d27b3fe3b4432e931fc216478",
+            "sha256": "0aj3q85vx8dnj5qhzz80kgf2rssz7hpchnx3dmk5gz14dxcbbxj1"
+          },
+          "plasma-activities": {
+            "rev": "ce5b624611f1ba8a31682566b3d6ebe88dba3065",
+            "sha256": "1g39wj78mzbhb3h8a10j29z0y2db3yy2vc8i5yq5v0k9l28w7cxq"
+          }
+        }
+      }
+    },
+    "6.5": {
+      "rev": "760e51de1ae079b093f9f635bcec195e01021c72",
+      "hash": "sha256-VbM0iyZaIH8Uqg4tbJ0B2Zr+KiTf6/zTSaQIJnjLeDE=",
+      "plasma": {
+        "version": "6.5.6",
+        "sources": {
+          "aurorae": {
+            "rev": "926faa23bd8a7db6639b23cc1951ea4771a6ff8d",
+            "sha256": "023zv6h766jpf0fhh86njkywr9x7ssjbzpbkbb0h79qswv536pbv"
+          },
+          "breeze": {
+            "rev": "71c8904d064b1266a7d91aefd709a2c14790fd5b",
+            "sha256": "0pjmiqjaanisx4j8fj2rmm79ly4p20skqmsyg7c38qk781f89aqa"
+          },
+          "kdecoration": {
+            "rev": "8e9fb0791c0af46ac86c9401f454e9cc02c4a87f",
+            "sha256": "1zppzfypwr2gk0jmsmgzal2548si4vigv10z8nwrcr0wq8gspccd"
+          },
+          "kwayland": {
+            "rev": "5f3731f4dd8924866fe72f2c69f3a55c2ba36df0",
+            "sha256": "139y13x48qzcz7gyw7q06s7vzn45byvik7c66wppsycr9s5cs0wv"
+          },
+          "libplasma": {
+            "rev": "e912aeb224511702cb24d160ad1d771bb3971a6d",
+            "sha256": "02hh59h89kvhnnpf1rlxyczb9fz4fmrbyn3nbbzld4mz49wh9f16"
+          },
+          "plasma-activities": {
+            "rev": "61efd84cb91a9f17eeb6ea12fb1737693e29e1d8",
+            "sha256": "0kalpk5y9xb9wsr4w7hbgjjp9v7yqbv6gdxgi3kjkpylfafb94m2"
+          },
+          "knighttime": {
+            "rev": "2c34188b37a3392fcfd8a9f3d04e1c393380ab5e",
+            "sha256": "17v6s0dmlwxv82l1j60a7ym2xjp0s9nvjzn8c2d2yjz7m0a6apm8"
+          }
+        }
+      }
+    },
+    "6.6": {
+      "rev": "ffe209c20b131499796c6fb7dfbb93a3df202d0b",
+      "hash": "sha256-ekxVxETqu86AheXLqi9oTgpBwzb6tzaOfS9qfID3rG0=",
+      "plasma": {
+        "version": "6.6.6",
+        "sources": {
+          "aurorae": {
+            "rev": "af2b530e0997ddd2f57546f39a16c55bd4ee17fc",
+            "sha256": "0r7vf9gyyahzgk5x864q30nkni5s40qa1xm4cy3aazsby4mk3jy1"
+          },
+          "breeze": {
+            "rev": "f01a6d29787cfe8b9736b221d121199b2d8bfa34",
+            "sha256": "0g9vcv8qrfwl34zmhf01r3yg7zsxnd849as8c2csy7dyj9vn5q7k"
+          },
+          "kdecoration": {
+            "rev": "80b838cec6ebc8fe7dbb2d5a2d3e464059835c30",
+            "sha256": "0ss0pln6i343a1850pdm4ddrcxyn8qx9gl2nfb8glnaflw10f1fy"
+          },
+          "kwayland": {
+            "rev": "0e4900cdb12684758ab57d1b8a5933f9ddf49a59",
+            "sha256": "159qj647lmi8qiq3h7pb8ma219b0qq07w91w6rbyx21mjvm2da86"
+          },
+          "libplasma": {
+            "rev": "ad46e96eef08dc7f9ed91fe389a860c3f938e186",
+            "sha256": "15brw7cbbbkh4jxwmbpqnk8mmbb4r9zhzfhf48mahh525jvgmn3f"
+          },
+          "plasma-activities": {
+            "rev": "bd86dd7198db2cffb6f82026b97369511d54e29c",
+            "sha256": "1jh539m6pzax27njhzr36fz915r6mcl8iy5gfnsx4m0sbswaj819"
+          },
+          "knighttime": {
+            "rev": "1e70a43b4e583ef3702ad15bde0d5bad7546ba3f",
+            "sha256": "14ay8q4wdqvs1q621dccf4q9aamr6xpiz7lqg7y9pr327v3gx030"
+          }
+        }
+      }
+    },
+    "6.7": {
+      "rev": "eaad089433ca2bb662274377d33df3d0e51ef28b",
+      "hash": "sha256-H6GwaZzZf+4npqv0tph94w9tZddSjFjmQrVsW0z78uk="
+    }
+  }
+}

@@ -184,9 +184,8 @@ swayidle timeout/resume
 `sources/desktop/swayidle.rs` owns only process invocation and translation of
 timeout/resume callbacks into facts. It does not invoke public TV commands.
 
-This deprecated path remains for existing explicit selections and as an
-automatic compatibility fallback on unsupported native sessions, without a
-separate screen-policy mode.
+This deprecated path remains for existing explicit selections, with the shared
+screen policy. Automatic monitoring never probes or launches swayidle.
 
 ## System Lifecycle Event Handling
 

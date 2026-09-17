@@ -10,7 +10,6 @@ INSTALL_ROOT="${INSTALL_ROOT%/}"
 SUDO_CMD="${LG_BUDDY_SUDO_CMD:-sudo}"
 NONINTERACTIVE="${LG_BUDDY_NONINTERACTIVE:-0}"
 SKIP_SYSTEMD_ACTIONS="${LG_BUDDY_SKIP_SYSTEMD_ACTIONS:-0}"
-SKIP_PIP_INSTALL="${LG_BUDDY_SKIP_PIP_INSTALL:-0}"
 DEFAULT_RUNTIME_BINARY="$SCRIPT_DIR/lg-buddy"
 GUI_TARGET="x86_64-unknown-linux-gnu"
 DEFAULT_GUI_BINARY="$SCRIPT_DIR/docs/lg-buddy-gui-$GUI_TARGET"
@@ -24,6 +23,8 @@ GUI_BINARY="$DEFAULT_GUI_BINARY"
 APP_ICON="$DEFAULT_APP_ICON"
 RUNTIME_BINARY_OVERRIDDEN=0
 GUI_BINARY_OVERRIDDEN=0
+HEADLESS=0
+SETUP_ARGS=()
 UPGRADE_MODE=0
 SYSTEM_UPGRADE_MODE=0
 MUTATION_STARTED=0
@@ -33,8 +34,7 @@ SYSTEM_UPGRADE_INSTALL_ROOT=""
 SYSTEM_UPGRADE_CANDIDATE_ROOT=""
 SYSTEM_UPGRADE_CONFIG_OVERRIDE=""
 SYSTEM_UPGRADE_NM_HOOK=""
-SYSTEM_UPGRADE_REPAIR_PYTHON="0"
-SYSTEM_UPGRADE_SKIP_PIP="0"
+SYSTEM_UPGRADE_REMOVE_LEGACY="0"
 CONFIG_FILE=""
 FRESH_SETUP_MODE=0
 SYSTEM_UPGRADE_SKIP_SYSTEMD="0"
@@ -46,6 +46,8 @@ Usage: $0 [--upgrade] [--runtime-binary /path/to/lg-buddy] [--gui-binary /path/t
 Install LG Buddy from existing runtime and GUI binaries.
 
 Options:
+  --headless        Run shared setup in the terminal after deploying the application
+                    Pass setup options after -- (see lg-buddy setup --help)
   --upgrade         Upgrade an existing compatible release-bundle installation
 
 Defaults:
@@ -70,6 +72,16 @@ while [ "$#" -gt 0 ]; do
             GUI_BINARY_OVERRIDDEN=1
             shift 2
             ;;
+        --headless)
+            HEADLESS=1
+            shift
+            ;;
+        --)
+            [ "$HEADLESS" -eq 1 ] || usage
+            shift
+            SETUP_ARGS=("$@")
+            break
+            ;;
         --upgrade)
             [ "$UPGRADE_MODE" -eq 0 ] || usage
             UPGRADE_MODE=1
@@ -80,15 +92,14 @@ while [ "$#" -gt 0 ]; do
             SYSTEM_UPGRADE_MODE=1
             UPGRADE_MODE=1
             shift
-            [ "$#" -eq 7 ] || usage
+            [ "$#" -eq 6 ] || usage
             SYSTEM_UPGRADE_INSTALL_ROOT="$1"
             SYSTEM_UPGRADE_CANDIDATE_ROOT="$2"
             SYSTEM_UPGRADE_CONFIG_OVERRIDE="$3"
             SYSTEM_UPGRADE_NM_HOOK="$4"
-            SYSTEM_UPGRADE_REPAIR_PYTHON="$5"
-            SYSTEM_UPGRADE_SKIP_PIP="$6"
-            SYSTEM_UPGRADE_SKIP_SYSTEMD="$7"
-            shift 7
+            SYSTEM_UPGRADE_REMOVE_LEGACY="$5"
+            SYSTEM_UPGRADE_SKIP_SYSTEMD="$6"
+            shift 6
             ;;
         -h|--help)
             usage
@@ -98,6 +109,17 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+[ "$HEADLESS" -eq 0 ] || [ "$UPGRADE_MODE" -eq 0 ] || usage
+if [ "$HEADLESS" -eq 1 ]; then
+    for option in "${SETUP_ARGS[@]}"; do
+        [ "$option" != --non-interactive ] || NONINTERACTIVE=1
+    done
+fi
+if [ "$HEADLESS" -eq 1 ] && [ "${SUDO_CMD##*/}" = pkexec ]; then
+    echo "Headless installation uses terminal authorization; use sudo instead of pkexec." >&2
+    exit 2
+fi
 
 if [ "$UPGRADE_MODE" -eq 1 ] && { [ "$RUNTIME_BINARY_OVERRIDDEN" -eq 1 ] || [ "$GUI_BINARY_OVERRIDDEN" -eq 1 ]; }; then
     echo "Error: --upgrade uses the verified lg-buddy and lg-buddy-gui binaries from this release bundle."
@@ -154,6 +176,8 @@ run_privileged() {
         "$@"
     elif [ "$SUDO_CMD" = "pkexec" ]; then
         pkexec --disable-internal-agent "$@"
+    elif [ "$HEADLESS" -eq 1 ] && [ "$NONINTERACTIVE" = 1 ]; then
+        "$SUDO_CMD" -n "$@"
     else
         "$SUDO_CMD" "$@"
     fi
@@ -178,6 +202,9 @@ initialize_install_paths() {
     SYSTEM_LIB_DIR="$(prefix_path "/usr/lib/lg-buddy")"
     CONFIG_POINTER_PATH="${SYSTEM_LIB_DIR}/config-path"
     COMMON_HELPER_PATH="${SYSTEM_LIB_DIR}/common.sh"
+    KWIN_PAYLOAD_DIR="$SCRIPT_DIR/data/kwin"
+    if [ ! -d "$KWIN_PAYLOAD_DIR" ]; then KWIN_PAYLOAD_DIR="$SCRIPT_DIR/docs/kwin"; fi
+    KWIN_INSTALL_DIR="${SYSTEM_LIB_DIR}/kwin"
     SYSTEM_SLEEP_HOOK_PATH="$(prefix_path "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook")"
     SYSTEMD_SYSTEM_DIR="$(prefix_path "/etc/systemd/system")"
     SYSTEMD_SERVICE_PATH="${SYSTEMD_SYSTEM_DIR}/LG_Buddy.service"
@@ -207,8 +234,12 @@ initialize_install_paths() {
     APP_ICON_PATH="${APP_ICON_DIR}/${APP_ICON_NAME}"
     USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/${DESKTOP_ENTRY_NAME}"
     LEGACY_USER_DESKTOP_ENTRY_PATH="${HOME}/Desktop/LG_Buddy_Brightness.desktop"
-    USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+    case "${XDG_CONFIG_HOME:-}" in
+        /*) USER_SYSTEMD_DIR="$XDG_CONFIG_HOME/systemd/user" ;;
+        *) USER_SYSTEMD_DIR="${HOME}/.config/systemd/user" ;;
+    esac
     USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
+    USER_KWIN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_kwin.service"
     USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
     USER_UPDATE_CHECK_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.service"
     USER_UPDATE_CHECK_TIMER_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_update_check.timer"
@@ -295,20 +326,6 @@ check_dep() {
     fi
 }
 
-check_python3_venv() {
-    local tmp_venv_dir=""
-    tmp_venv_dir="$(mktemp -d)" || return 1
-
-    if python3 -m venv "$tmp_venv_dir" >/dev/null 2>&1 &&
-        "$tmp_venv_dir/bin/pip" --version >/dev/null 2>&1; then
-        rm -rf "$tmp_venv_dir"
-        return 0
-    fi
-
-    rm -rf "$tmp_venv_dir"
-    return 1
-}
-
 detect_package_manager() {
     if command -v apt &>/dev/null; then
         PM="apt"
@@ -340,6 +357,7 @@ pkexec_available() {
 }
 
 require_sleep_wake_pkexec() {
+    [ "$HEADLESS" -eq 0 ] || return 0
     [ "$FRESH_SETUP_MODE" -eq 1 ] || return 0
     if pkexec_available; then
         return 0
@@ -364,64 +382,24 @@ gui_runtime_package() {
     esac
 }
 
-gui_runtime_version_at_least() {
-    local library="$1"
-    local symbol_prefix="$2"
-    local required_major="$3"
-    local required_minor="$4"
-
-    if [ -n "${LG_BUDDY_GUI_RUNTIME_PROBE:-}" ]; then
-        "$LG_BUDDY_GUI_RUNTIME_PROBE" \
-            "$library" "$symbol_prefix" "$required_major" "$required_minor"
-        return
-    fi
-
-    python3 - "$library" "$symbol_prefix" "$required_major" "$required_minor" <<'PY'
-import ctypes
-import sys
-
-library, prefix, required_major, required_minor = sys.argv[1:]
-try:
-    runtime = ctypes.CDLL(library)
-    major = getattr(runtime, f"{prefix}_get_major_version")
-    minor = getattr(runtime, f"{prefix}_get_minor_version")
-    major.argtypes = []
-    minor.argtypes = []
-    major.restype = ctypes.c_uint
-    minor.restype = ctypes.c_uint
-    installed = (major(), minor())
-except (AttributeError, OSError):
-    raise SystemExit(1)
-
-required = (int(required_major), int(required_minor))
-raise SystemExit(0 if installed >= required else 1)
-PY
+gui_runtime_available() {
+    "${LG_BUDDY_GUI_RUNTIME_PROBE:-$GUI_BINARY}" --check-runtime
 }
 
 check_gui_runtime_prerequisites() {
-    check_dep \
-        "GTK 4.14 or newer" \
-        "$(gui_runtime_package gtk)" \
-        "gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14"
-    check_dep \
-        "libadwaita 1.5 or newer" \
-        "$(gui_runtime_package libadwaita)" \
-        "gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5"
+    if gui_runtime_available >/dev/null 2>&1; then
+        echo "  [OK] GTK 4.14 and libadwaita 1.5 or newer"
+    else
+        echo "  [MISSING] GTK 4.14 and libadwaita 1.5 or newer"
+        MISSING_PKGS+=("$(gui_runtime_package gtk)" "$(gui_runtime_package libadwaita)")
+    fi
 }
 
 verify_gui_runtime_prerequisites() {
-    local missing=0
-
-    if ! gui_runtime_version_at_least libgtk-4.so.1 gtk 4 14; then
-        echo "Error: GTK 4.14 or newer is still unavailable."
-        missing=1
+    if ! gui_runtime_available; then
+        echo "Error: GTK 4.14 and libadwaita 1.5 or newer are still unavailable."
+        return 1
     fi
-    if ! gui_runtime_version_at_least libadwaita-1.so.0 adw 1 5; then
-        echo "Error: libadwaita 1.5 or newer is still unavailable."
-        missing=1
-    fi
-
-    [ "$missing" -eq 0 ] || return 1
 }
 
 print_manual_install_command() {
@@ -517,26 +495,17 @@ run_system_mutation_command() {
 }
 
 perform_privileged_runtime_installation() {
-    if [ "$UPGRADE_MODE" -eq 0 ] || [ "$REPAIR_PYTHON_ENVIRONMENT" -eq 1 ]; then
+    if [ "$REMOVE_LEGACY_ENVIRONMENT" -eq 1 ]; then
         MUTATION_STARTED=1
-        system_upgrade_message "Creating Python virtual environment at $VENV_DIR..."
-        # Recreate the helper venv so OS Python minor-version upgrades do not leave
-        # bscpylgtv installed under an interpreter-specific site-packages directory
-        # that the new `/usr/bin/python3` no longer reads.
-        run_system_mutation_command python3 -m venv --clear "$VENV_DIR"
-        system_upgrade_message "Done."
-
-        if [ "$SKIP_PIP_INSTALL" = "1" ]; then
-            system_upgrade_message "Skipping bscpylgtv installation because LG_BUDDY_SKIP_PIP_INSTALL=1."
-        else
-            system_upgrade_message "Installing bscpylgtv into the virtual environment..."
-            run_system_mutation_command "$VENV_DIR/bin/pip" install bscpylgtv
-            system_upgrade_message "Done."
-        fi
+        system_upgrade_message "Removing the obsolete LG Buddy Python environment at $VENV_DIR..."
+        run_system_mutation_command rm -rf --one-file-system -- "$VENV_DIR"
     fi
 
     MUTATION_STARTED=1
     system_upgrade_message "Installing Rust runtime and support files..."
+    if [ "$UPGRADE_MODE" -eq 0 ]; then
+        run_system_mutation_command install -d "$SYSTEM_BIN_DIR"
+    fi
     run_system_mutation_command install -m 755 "$RUNTIME_BINARY" "$RUNTIME_INSTALL_PATH"
     run_system_mutation_command install -m 755 "$GUI_BINARY" "$GUI_INSTALL_PATH"
     if [ "$UPGRADE_MODE" -eq 0 ]; then
@@ -554,6 +523,26 @@ perform_privileged_runtime_installation() {
     if [ "$UPGRADE_MODE" -eq 0 ]; then
         run_system_mutation_command install -d "$SYSTEM_LIB_DIR"
         run_system_mutation_command install -m 644 "$CONFIG_POINTER_TMP" "$CONFIG_POINTER_PATH"
+    fi
+    local setup_source="$SCRIPT_DIR/data/setup-services.sh"
+    local setup_policy="$SCRIPT_DIR/data/io.github.staphylococcus.LGBuddy.setup.policy"
+    if [ ! -f "$setup_source" ]; then
+        setup_source="$SCRIPT_DIR/docs/setup-services.sh"
+        setup_policy="$SCRIPT_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
+    fi
+    if [ -f "$setup_source" ]; then
+        run_system_mutation_command install -d "$SYSTEM_LIB_DIR/setup/systemd" "$(prefix_path /usr/share/polkit-1/actions)"
+        run_system_mutation_command install -m 755 "$setup_source" "$SYSTEM_LIB_DIR/setup-services"
+        run_system_mutation_command install -m 644 "$setup_policy" "$(prefix_path /usr/share/polkit-1/actions)/io.github.staphylococcus.LGBuddy.setup.policy"
+        for unit in LG_Buddy.service LG_Buddy_lifecycle.service lg_buddy.conf; do
+            run_system_mutation_command install -m 644 "$SCRIPT_DIR/systemd/$unit" "$SYSTEM_LIB_DIR/setup/systemd/$unit"
+        done
+    fi
+    if [ -d "$KWIN_PAYLOAD_DIR" ]; then
+        run_system_mutation_command rm -rf -- "$KWIN_INSTALL_DIR"
+        run_system_mutation_command install -d "$KWIN_INSTALL_DIR"
+        run_system_mutation_command cp -R "$KWIN_PAYLOAD_DIR/." "$KWIN_INSTALL_DIR/"
+        run_system_mutation_command chmod 755 "$KWIN_INSTALL_DIR/setup.sh" "$KWIN_INSTALL_DIR/build.sh"
     fi
     system_upgrade_message "Installing LG Buddy desktop entry..."
     run_system_mutation_command install -d "$APPLICATIONS_DIR"
@@ -607,15 +596,14 @@ perform_privileged_installation() {
 
 run_system_upgrade_helper() {
     [ "$(id -u)" -eq 0 ] || exit 126
-    [ "$#" -eq 7 ] || exit 2
+    [ "$#" -eq 6 ] || exit 2
 
     INSTALL_ROOT="$1"
     SCRIPT_DIR="$2"
     SYSTEM_CONFIG_OVERRIDE_TMP="$3"
     NM_HOOK_TMP="$4"
-    REPAIR_PYTHON_ENVIRONMENT="$5"
-    SKIP_PIP_INSTALL="$6"
-    SKIP_SYSTEMD_ACTIONS="$7"
+    REMOVE_LEGACY_ENVIRONMENT="$5"
+    SKIP_SYSTEMD_ACTIONS="$6"
 
     case "$INSTALL_ROOT" in
         ""|/*) ;;
@@ -627,8 +615,8 @@ run_system_upgrade_helper() {
         /*:/*:/*) ;;
         *) exit 2 ;;
     esac
-    case "$REPAIR_PYTHON_ENVIRONMENT:$SKIP_PIP_INSTALL:$SKIP_SYSTEMD_ACTIONS" in
-        0:0:0|0:0:1|0:1:0|0:1:1|1:0:0|1:0:1|1:1:0|1:1:1) ;;
+    case "$REMOVE_LEGACY_ENVIRONMENT:$SKIP_SYSTEMD_ACTIONS" in
+        0:0|0:1|1:0|1:1) ;;
         *) exit 2 ;;
     esac
 
@@ -790,12 +778,8 @@ check_install_prerequisites() {
     MISSING_PKGS=()
     detect_package_manager
     check_gui_runtime_prerequisites
-    if [ "$UPGRADE_MODE" -eq 0 ]; then
-        check_dep "python3-venv" "python3-venv" "check_python3_venv"
-        check_dep "zenity" "zenity" "command -v zenity"
-        if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-            check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
-        fi
+    if [ "$FRESH_SETUP_MODE" -eq 1 ] && [ "$HEADLESS" -eq 0 ]; then
+        check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"
     fi
     install_missing_prerequisites
     require_sleep_wake_pkexec
@@ -806,29 +790,24 @@ check_install_prerequisites() {
     fi
 }
 
-require_python_repair_prerequisites() {
-    echo "Checking Python compatibility-platform repair prerequisites..."
-    MISSING_PKGS=()
-    check_dep "python3-venv" "python3-venv" "check_python3_venv"
-    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-        echo "Upgrade requires Python environment repair, but these prerequisites are missing: ${MISSING_PKGS[*]}"
-        echo "Install them manually and rerun the upgrade. No installation files were changed."
-        exit 1
-    fi
-}
-
-python_environment_healthy() {
-    local python_version=""
-    local site_packages=""
-
-    python_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" || return 1
-    site_packages="$VENV_DIR/lib/python$python_version/site-packages"
-
+legacy_environment_healthy() {
     [ -f "$VENV_DIR/pyvenv.cfg" ] &&
         [ -x "$VENV_DIR/bin/python" ] &&
-        [ -x "$VENV_DIR/bin/pip" ] &&
         [ -x "$VENV_DIR/bin/bscpylgtvcommand" ] &&
-        { [ -d "$site_packages/bscpylgtv" ] || [ -f "$site_packages/bscpylgtv.py" ]; }
+        "$VENV_DIR/bin/python" -I -B -c 'import bscpylgtv' >/dev/null 2>&1
+}
+
+check_legacy_environment() {
+    local migration_runtime="$RUNTIME_INSTALL_PATH"
+    [ -x "$migration_runtime" ] || migration_runtime="$RUNTIME_BINARY"
+    [ "$TV_PLATFORM" = "bscpylgtv" ] || return 0
+    if ! legacy_environment_healthy; then
+        echo "The existing bscpylgtv environment is missing or unhealthy; LG Buddy no longer installs or repairs it."
+        echo "As your regular user, run LG_BUDDY_CONFIG=\"$CONFIG_FILE\" \"$migration_runtime\" settings set tv.platform lg_webos, accept pairing on the TV, then retry this installation."
+        return 1
+    fi
+    echo "Preserving the healthy bscpylgtv environment unchanged."
+    echo "Deprecated: bscpylgtv is supported only through the final 1.x compatibility window and will be removed in v2.0.0. Pair and select lg_webos to migrate."
 }
 
 load_upgrade_configuration() {
@@ -906,8 +885,7 @@ if [ "$SYSTEM_UPGRADE_MODE" -eq 1 ]; then
         "$SYSTEM_UPGRADE_CANDIDATE_ROOT" \
         "$SYSTEM_UPGRADE_CONFIG_OVERRIDE" \
         "$SYSTEM_UPGRADE_NM_HOOK" \
-        "$SYSTEM_UPGRADE_REPAIR_PYTHON" \
-        "$SYSTEM_UPGRADE_SKIP_PIP" \
+        "$SYSTEM_UPGRADE_REMOVE_LEGACY" \
         "$SYSTEM_UPGRADE_SKIP_SYSTEMD"
     exit $?
 fi
@@ -915,7 +893,7 @@ fi
 trap cleanup EXIT
 
 resolve_runtime_binary
-REPAIR_PYTHON_ENVIRONMENT=0
+REMOVE_LEGACY_ENVIRONMENT=0
 
 if [ "$UPGRADE_MODE" -eq 0 ] && ! config_has_saved_tv_profile; then
     FRESH_SETUP_MODE=1
@@ -927,36 +905,39 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR"
     resolve_gui_binary
     resolve_app_icon
+    load_upgrade_configuration
+    check_legacy_environment
+    if [ "$TV_PLATFORM" = "lg_webos" ]; then
+        REMOVE_LEGACY_ENVIRONMENT=1
+        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --remove-legacy-env
+    fi
     check_install_prerequisites
     validate_candidate_binary_identity
-    load_upgrade_configuration
-
-    if [ "$TV_PLATFORM" = "lg_webos" ]; then
-        echo "Native TV platform selected; preserving the existing Python environment unchanged."
-    elif python_environment_healthy; then
-        echo "Python compatibility environment is healthy; preserving it unchanged."
-    else
-        REPAIR_PYTHON_ENVIRONMENT=1
-        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --repair-python
-        require_python_repair_prerequisites
-    fi
 else
     resolve_gui_binary
     resolve_app_icon
+    if [ "$FRESH_SETUP_MODE" -eq 0 ]; then
+        load_existing_configuration
+        check_legacy_environment
+    fi
     check_install_prerequisites
     validate_candidate_binary_identity
 
-if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    create_empty_config_if_absent
-    echo "Prepared an empty user configuration for first-run TV pairing."
-    echo "Pairing will attempt the default Idle Blanking and TV Sleep & Wake behaviors."
-    echo "If a behavior is declined or unavailable, it stays off until retried in Settings."
-else
-    load_existing_configuration
-fi
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        create_empty_config_if_absent
+        echo "Prepared an empty user configuration for first-run TV pairing."
+        if [ "$HEADLESS" -eq 0 ]; then
+            echo "Pair your TV, then complete background service setup in LG Buddy."
+        fi
+    fi
 fi
 
 prepare_installation_files
+
+if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ] && [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+    # Finish/cancel optional setup before replacing its build inputs on upgrade.
+    systemctl --user stop LG_Buddy_kwin.service || true
+fi
 
 if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
     echo "Requesting graphical authorization for system installation changes..."
@@ -968,8 +949,7 @@ if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
         "$SCRIPT_DIR" \
         "$SYSTEM_CONFIG_OVERRIDE_TMP" \
         "$NM_HOOK_TMP" \
-        "$REPAIR_PYTHON_ENVIRONMENT" \
-        "$SKIP_PIP_INSTALL" \
+        "$REMOVE_LEGACY_ENVIRONMENT" \
         "$SKIP_SYSTEMD_ACTIONS" | tee "$SYSTEM_UPGRADE_OUTPUT_TMP"
     HELPER_STATUS="${PIPESTATUS[0]}"
     set -e
@@ -997,7 +977,7 @@ if [ "$UPGRADE_MODE" -eq 1 ] && [ "$SUDO_CMD" = "pkexec" ]; then
     MUTATION_STARTED=1
 fi
 
-# 4. CREATE VIRTUAL ENVIRONMENT
+# 4. INSTALL RUNTIME PAYLOAD
 if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
     perform_privileged_runtime_installation
 fi
@@ -1012,60 +992,81 @@ elif [ -f "$USER_DESKTOP_ENTRY_PATH" ] || [ -f "$LEGACY_USER_DESKTOP_ENTRY_PATH"
 fi
 echo "Done."
 
-if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
-    perform_privileged_services_installation
-fi
-
-# 8. INSTALL USER SERVICES
-echo "Installing background update check user timer..."
+# The login unit only loads already-installed plugins; it never provisions them.
 mkdir -p "$USER_SYSTEMD_DIR"
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
-mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
-install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
-echo "Done."
-
-echo "Installing screen monitor user service..."
-install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
-mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
-install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_SCREEN_OVERRIDE_DIR}/config.conf"
-if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
-    systemctl --user daemon-reload
+if [ -f "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" ]; then
+    install -m 644 "$KWIN_PAYLOAD_DIR/LG_Buddy_kwin.service" "$USER_KWIN_SERVICE_PATH"
+    if [ "$SKIP_SYSTEMD_ACTIONS" != 1 ] && { [ "$FRESH_SETUP_MODE" -eq 1 ] || [ "$HEADLESS" -eq 1 ]; }; then
+        systemctl --user daemon-reload
+        systemctl --user enable LG_Buddy_kwin.service
+        systemctl --user restart --no-block LG_Buddy_kwin.service || true
+    fi
 fi
 
-if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
-    echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
-else
-    systemctl --user enable LG_Buddy_screen.service
-    systemctl --user restart LG_Buddy_screen.service
-    if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
-        echo "LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config."
-    else
-        echo "LG_Buddy_screen.service enabled and started for session notifications."
-        echo "It will retry idle blanking until a compatible screen backend is available."
+# First-run GUI and terminal onboarding own service setup after TV pairing.
+# Existing installation refreshes and release upgrades retain their deployment path.
+if [ "$HEADLESS" -eq 0 ] && [ "$FRESH_SETUP_MODE" -eq 0 ]; then
+    if [ "$UPGRADE_MODE" -ne 1 ] || [ "$SUDO_CMD" != "pkexec" ]; then
+        perform_privileged_services_installation
     fi
 
-    if [ "$UPDATE_AUTO_CHECK" = "enabled" ]; then
-        systemctl --user enable LG_Buddy_update_check.timer
-        if systemctl --user is-active --quiet graphical-session.target; then
-            systemctl --user start LG_Buddy_update_check.timer
-            echo "LG_Buddy_update_check.timer enabled and started."
-        else
-            echo "LG_Buddy_update_check.timer enabled; it will start with the graphical session."
+    # 8. INSTALL USER SERVICES
+    echo "Installing background update check user timer..."
+    mkdir -p "$USER_SYSTEMD_DIR"
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_CHECK_SERVICE_PATH"
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIMER_PATH"
+    mkdir -p "$USER_UPDATE_CHECK_OVERRIDE_DIR"
+    install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_UPDATE_CHECK_OVERRIDE_DIR}/config.conf"
+    echo "Done."
+
+
+    echo "Installing screen monitor user service..."
+    install -m 644 "$SCRIPT_DIR/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE_PATH"
+    mkdir -p "$USER_SCREEN_OVERRIDE_DIR"
+    install -m 644 "$SYSTEM_CONFIG_OVERRIDE_TMP" "${USER_SCREEN_OVERRIDE_DIR}/config.conf"
+    if [ "$SKIP_SYSTEMD_ACTIONS" != "1" ]; then
+        systemctl --user daemon-reload
+    fi
+
+    if [ "$SKIP_SYSTEMD_ACTIONS" = "1" ]; then
+        echo "Skipping user service enable/start because LG_BUDDY_SKIP_SYSTEMD_ACTIONS=1."
+    else
+        if [ -f "$USER_KWIN_SERVICE_PATH" ]; then
+            systemctl --user enable LG_Buddy_kwin.service
+            systemctl --user restart --no-block LG_Buddy_kwin.service || true
         fi
-    else
-        systemctl --user disable --now LG_Buddy_update_check.timer 2>/dev/null || true
-        echo "LG_Buddy_update_check.timer installed but disabled by config."
-    fi
-fi
+        systemctl --user enable LG_Buddy_screen.service
+        systemctl --user restart LG_Buddy_screen.service
+        if [ "$SCREEN_IDLE_BLANK" = "disabled" ]; then
+            echo "LG_Buddy_screen.service enabled and started for session notifications; idle blanking is disabled by config."
+        else
+            echo "LG_Buddy_screen.service enabled and started for session notifications."
+            echo "It will retry idle blanking until a compatible screen backend is available."
+        fi
 
-if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
-    echo "System sleep/wake integration installed; pairing will attempt TV Sleep & Wake."
-    echo "If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings."
-elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
-    echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
-else
-    echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
+        if [ "$UPDATE_AUTO_CHECK" = "enabled" ]; then
+            systemctl --user enable LG_Buddy_update_check.timer
+            if systemctl --user is-active --quiet graphical-session.target; then
+                systemctl --user start LG_Buddy_update_check.timer
+                echo "LG_Buddy_update_check.timer enabled and started."
+            else
+                echo "LG_Buddy_update_check.timer enabled; it will start with the graphical session."
+            fi
+        else
+            systemctl --user disable --now LG_Buddy_update_check.timer 2>/dev/null || true
+            echo "LG_Buddy_update_check.timer installed but disabled by config."
+        fi
+    fi
+
+    if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
+        echo "System sleep/wake integration installed; pairing will attempt TV Sleep & Wake."
+        echo "If authorization or activation fails, TV Sleep & Wake stays off until retried in Settings."
+    elif [ "$SYSTEM_SLEEP_WAKE_POLICY" = "enabled" ]; then
+        echo "System sleep/wake TV control enabled via LG_Buddy_lifecycle.service and NetworkManager pre-down gate."
+    else
+        echo "System sleep/wake TV control disabled by config. Lifecycle integration is installed and will no-op until re-enabled."
+    fi
+
 fi
 
 INSTALLED_GUI_VERSION_OUTPUT="$("$GUI_INSTALL_PATH" --version)"
@@ -1090,6 +1091,12 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     if [ "$SUDO_CMD" = "pkexec" ]; then
         system_upgrade_status complete
     fi
+elif [ "$HEADLESS" -eq 1 ]; then
+    echo "Application files installed. Starting terminal setup..."
+    if [ "$NONINTERACTIVE" = 1 ] && [[ " ${SETUP_ARGS[*]} " != *" --non-interactive "* ]]; then
+        SETUP_ARGS=(--non-interactive "${SETUP_ARGS[@]}")
+    fi
+    LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_INSTALL_PATH" setup "${SETUP_ARGS[@]}"
 else
     if [ "$FRESH_SETUP_MODE" -eq 1 ]; then
         require_sleep_wake_pkexec

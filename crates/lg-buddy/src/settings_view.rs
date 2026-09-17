@@ -64,6 +64,7 @@ impl BehaviorSetting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsIntent {
+    CompleteSetup,
     Retry,
     Refresh,
     CheckForUpdates,
@@ -1095,7 +1096,7 @@ mod tests {
         assert_eq!(groups[1].rows().len(), 1);
         assert_eq!(groups[2].rows().len(), 2);
 
-        let backend = row(&groups, "Screen", "Desktop integration");
+        let backend = row(&groups, "Screen", "Legacy desktop integration");
         assert_eq!(backend.value_label(), "Automatic");
         assert_eq!(backend.source_label(), "Default");
         assert_eq!(backend.default_label(), "Automatic");
@@ -1119,12 +1120,12 @@ mod tests {
         ] {
             let presentation = SettingsPresentation::ready(groups(config));
             for setting in [
-                BehaviorSetting::ScreenBackend,
                 BehaviorSetting::ScreenHonorIdleInhibitors,
                 BehaviorSetting::ScreenIdleTimeout,
             ] {
                 assert_eq!(presentation.row_visible(setting), visible, "{config}");
             }
+            assert!(!presentation.row_visible(BehaviorSetting::ScreenBackend));
             assert!(presentation.row_visible(BehaviorSetting::ScreenIdleBlank));
             assert!(presentation.row_visible(BehaviorSetting::ScreenRestorePolicy));
         }
@@ -1305,11 +1306,11 @@ mod tests {
             "screen_backend=wayland\nscreen_idle_blank=disabled\nscreen_idle_timeout=450\nscreen_restore_policy=aggressive\nsystem_sleep_wake_policy=disabled\nupdates_auto_check=disabled\nupdates_channel=prerelease\n",
         );
         assert_eq!(
-            row(&groups, "Screen", "Desktop integration").value_label(),
+            row(&groups, "Screen", "Legacy desktop integration").value_label(),
             "Wayland"
         );
         assert_eq!(
-            row(&groups, "Screen", "Desktop integration").source_label(),
+            row(&groups, "Screen", "Legacy desktop integration").source_label(),
             "Saved configuration"
         );
         assert_eq!(
@@ -1334,7 +1335,7 @@ mod tests {
     #[test]
     fn invalid_values_are_visible_and_never_replaced_by_defaults() {
         let groups = groups("screen_backend=not-a-backend\n");
-        let backend = row(&groups, "Screen", "Desktop integration");
+        let backend = row(&groups, "Screen", "Legacy desktop integration");
         assert_eq!(backend.value_label(), "Invalid value");
         assert_eq!(backend.source_label(), "Invalid configuration");
         assert_eq!(
@@ -1370,7 +1371,7 @@ screen_backend=wayland\n",
             ),
             (
                 "screen.backend",
-                "Desktop integration",
+                "Legacy desktop integration",
                 "Automatic",
                 "Automatic, GNOME, Wayland, swayidle (deprecated)",
             ),
@@ -1414,7 +1415,16 @@ screen_backend=wayland\n",
         for ((key, title, default, accepted), rendered) in expected.iter().zip(rendered.iter()) {
             let definition = SETTINGS_REGISTRY.get_by_name(key).unwrap();
             assert_eq!(rendered.title(), *title);
-            assert_eq!(rendered.description(), definition.description());
+            if *key == "screen.backend" {
+                assert!(rendered.description().contains("Saved override: Wayland"));
+                assert!(matches!(
+                    rendered.editor(),
+                    SettingsEditor::AutomaticIntegration { .. }
+                ));
+                assert!(rendered.reset_action().is_none());
+            } else {
+                assert_eq!(rendered.description(), definition.description());
+            }
             assert_eq!(rendered.default_label(), *default);
             assert_eq!(rendered.accepted_values_label(), *accepted);
             assert!(definition.default_value().is_some());

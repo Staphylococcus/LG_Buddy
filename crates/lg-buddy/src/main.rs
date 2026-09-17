@@ -19,7 +19,10 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("LG Buddy: {err}");
-                ExitCode::from(1)
+                ExitCode::from(match err {
+                    lg_buddy::RunError::Setup(error) => error.exit_code(),
+                    _ => 1,
+                })
             }
         },
         Err(err) => {

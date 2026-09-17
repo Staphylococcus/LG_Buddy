@@ -142,6 +142,7 @@ impl SettingsFormatter {
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
         writeln!(writer, "  current: {}", format_described_value(setting)).map_err(output_error)?;
         if setting.key_name() == "screen.backend" {
+            writeln!(writer, "  compatibility: legacy CLI only; omitted from settings list and unqualified describe").map_err(output_error)?;
             let configured = format_effective_value(setting);
             if let Some((resolved, fallback_reason)) =
                 screen::resolution_details(&configured, screen_backend)
@@ -154,6 +155,9 @@ impl SettingsFormatter {
             }
             if let Some(notice) = screen::swayidle_inhibitor_notice(&configured) {
                 writeln!(writer, "  compatibility: {notice}.").map_err(output_error)?;
+            }
+            if matches!(configured.as_str(), "gnome" | "wayland" | "swayidle") {
+                writeln!(writer, "  legacy override: {configured}; activity discovery is restricted. Use automatic integration in Settings for a recoverable transition.").map_err(output_error)?;
             }
         }
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;

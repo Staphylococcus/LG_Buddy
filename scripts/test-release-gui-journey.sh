@@ -2,13 +2,20 @@
 # Sourced by test-release-gui-behavior.sh; reuse its installed app, isolated
 # configuration, accessibility observer, and process lifecycle helpers.
 
+journey_capture() {
+    if [ "${LG_BUDDY_KEEP_GUI_SMOKE:-0}" = 1 ] && command -v xwd >/dev/null; then
+        xwd -silent -id "$WINDOW_ID" -out "$WORK_DIR/$1.xwd"
+    fi
+}
+
 journey_setting() {
     local key="$1" expected="$2"
     for ((attempt = 0; attempt < 100; attempt++)); do
         [ "$("$RUNTIME_BINARY" settings get "$key" 2>/dev/null)" = "$expected" ] && return
         sleep 0.1
     done
-    fail "The installed GUI did not persist $key=$expected."
+    journey_capture failed-setting
+    fail "The installed GUI did not persist $key=$expected (current value: $("$RUNTIME_BINARY" settings get "$key" 2>/dev/null))."
 }
 
 journey_tv_scenario() {
@@ -58,7 +65,20 @@ journey_diagnostics() {
     if grep -E 'webos-test-access-token|diagnostics-secret-canary' "$WORK_DIR/$label-report.txt"; then
         fail "Diagnostics exported a credential or raw failure payload."
     fi
-    grep -q 'no accessible entries' "$WORK_DIR/$label-report.txt" || fail "Diagnostics did not explain unavailable observations."
+    python3 - "$WORK_DIR/$label-report.txt" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+snapshot, logs = text.split("\nRecent logs\n", 1)
+assert "\nCurrent snapshot\n" in snapshot, "Diagnostics did not identify the current snapshot."
+for section in ("Desktop", "Inhibition sources", "Effective settings", "Services", "TV observation", "Application and build"):
+    assert f"\n{section}:\n" in snapshot, f"Missing snapshot section: {section}"
+for scope in ("User", "System"):
+    heading = f"{scope} services (current boot, latest 40 entries):\n"
+    assert heading not in snapshot, "Service logs appeared in the current snapshot."
+    assert heading + "Logs unavailable\n" in logs, f"Missing {scope.lower()} journal failure."
+PY
     observe_gui_state --activate-control Refresh
     observe_gui_state --expected-diagnostics-state report
     observe_gui_state --activate-control Close
@@ -79,8 +99,9 @@ run_installed_gui_journey() {
     mkdir -p "$WORK_DIR/journey-bin" "$WORK_DIR/services" "$WORK_DIR/native-tv"
     export LG_BUDDY_GUI_SERVICE_FIXTURE="$WORK_DIR/services"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
+    : > "$WORK_DIR/services/authorizations"
     cat > "$WORK_DIR/journey-bin/systemctl" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 scope=system
@@ -117,14 +138,14 @@ case "$action" in
 esac
 SH
     cat > "$WORK_DIR/journey-bin/pkexec" <<'SH'
-#!/bin/bash
+#!/usr/bin/env bash
 set -eu
 dir="$LG_BUDDY_GUI_SERVICE_FIXTURE"
 [ "${1:-}" = --disable-internal-agent ] || exit 2
 shift
 printf '%s\n' "$*" >> "$dir/authorizations"
 [ "$(cat "$dir/auth-mode")" != decline ] || exit 126
-if { [ "${1:-}" = systemctl ] || [ "${1:-}" = /usr/bin/systemctl ]; } &&
+if { [ "${1:-}" = /usr/bin/systemctl ] || [ "${1:-}" = /run/current-system/sw/bin/systemctl ]; } &&
     [ "${2:-}" = start ] && [ "${3:-}" = LG_Buddy_lifecycle.service ]; then
     shift
     exec "$LG_BUDDY_SYSTEMCTL" "$@"
@@ -141,6 +162,22 @@ SH
     export LG_BUDDY_SYSTEMCTL="$WORK_DIR/journey-bin/systemctl"
     export LG_BUDDY_JOURNALCTL="$WORK_DIR/journey-bin/journalctl"
     export LG_BUDDY_SKIP_SYSTEMD_ACTIONS=0
+    # Keep the GUI's session bus separate from the user manager, as with
+    # dbus-run-session. Include D-Bus address delimiters in the socket path.
+    local XDG_RUNTIME_DIR="$WORK_DIR/runtime with spaces,percent%and;separator"
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    export XDG_RUNTIME_DIR
+    "$ACCESSIBILITY_PYTHON" "$REPOSITORY_ROOT/scripts/test-systemd-service-config.py" \
+        --config "$CONFIG_FILE" --ready-file "$WORK_DIR/services/config-ready" \
+        --runtime-dir "$XDG_RUNTIME_DIR" \
+        > "$WORK_DIR/services/config-fixture.output" 2>&1 &
+    SYSTEMD_CONFIG_FIXTURE_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -e "$WORK_DIR/services/config-ready" ] || break
+        kill -0 "$SYSTEMD_CONFIG_FIXTURE_PID" 2>/dev/null || fail "Service configuration fixture failed."
+        sleep 0.05
+    done
+    [ -e "$WORK_DIR/services/config-ready" ] || fail "Service configuration fixture did not become ready."
     "$TV_FIXTURE" "$WORK_DIR/native-tv" > "$WORK_DIR/native-tv.output" 2>&1 &
     TV_FIXTURE_PID=$!
     journey_tv_scenario stateful
@@ -166,7 +203,7 @@ SH
 
     journey_tv_scenario stall
     journey_pair
-    observe_gui_state --expected-text "Verifying TV Access"
+    observe_gui_state --expected-text "Verifying TV access"
     journey_close "interrupted first-run pairing"
     [ ! -s "$CONFIG_FILE" ] && [ ! -e "$token" ] || fail "Interrupted pairing saved incomplete state."
     journey_tv_scenario stateful
@@ -176,7 +213,28 @@ SH
     journey_setting tv.ip 127.0.0.1
     journey_setting screen.idle_blank enabled
     journey_setting system.sleep_wake_policy enabled
+    observe_gui_state --expected-text "Background services"
+    journey_capture onboarding-services
+    observe_gui_state --activate-control Cancel
     observe_gui_state --select-page Settings
+    observe_gui_state --expected-text "Complete setup"
+    journey_capture incomplete-setup-settings
+    observe_gui_state --activate-control "Complete setup"
+    observe_gui_state --expected-text "Background services"
+    observe_gui_state --activate-control Cancel
+    # Native service repair is exercised by the backend/helper tests. This
+    # installed transport journey keeps its isolated Settings service adapter.
+    observe_gui_state --activate-control 'Idle blanking'
+    journey_setting screen.idle_blank disabled
+    observe_gui_state --expected-toggle 'Idle blanking=off'
+    observe_gui_state --activate-control 'Idle blanking'
+    journey_setting screen.idle_blank enabled
+    observe_gui_state --expected-toggle 'Idle blanking=on'
+    observe_gui_state --activate-control 'TV sleep & wake'
+    journey_setting system.sleep_wake_policy disabled
+    observe_gui_state --expected-toggle 'TV sleep & wake=off'
+    observe_gui_state --activate-control 'TV sleep & wake'
+    journey_setting system.sleep_wake_policy enabled
     observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
     "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Default idle blanking did not activate its service."
     "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Default sleep/wake did not activate its service."
@@ -186,8 +244,7 @@ SH
     cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Diagnostics changed configuration."
     cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Diagnostics changed credentials."
 
-    # Re-pairing preserves preferences; failed activation leaves honest toggles
-    # and can be retried from Settings without repeating TV pairing.
+    # Settings apply/retry remains independent of the setup flow.
     touch "$WORK_DIR/services/screen-fails"
     observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
     xdotool key --window "$WINDOW_ID" Return
@@ -214,20 +271,33 @@ SH
     printf 'decline\n' > "$WORK_DIR/services/auth-mode"
     journey_pair
     journey_setting tv.ip 127.0.0.1
+    observe_gui_state --expected-text "Background services"
+    observe_gui_state --activate-control Cancel
     observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=off' --expected-toggle 'TV sleep & wake=off'
-    journey_setting screen.idle_blank disabled
-    journey_setting system.sleep_wake_policy disabled
-    journey_close "paired TV with declined activation"
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
+    journey_setting screen.idle_blank enabled
+    journey_setting system.sleep_wake_policy enabled
+    ! "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Failed activation reported the screen service active."
+    ! "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Declined activation reported the lifecycle service active."
+    journey_close "paired TV with deferred service setup"
     cp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot"
     start_gui enabled "" "" normal
     observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=off' --expected-toggle 'TV sleep & wake=off'
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
     cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Relaunch unexpectedly requested activation again."
     rm "$WORK_DIR/services/screen-fails"
     printf 'accept\n' > "$WORK_DIR/services/auth-mode"
+    # Package-managed screen services do not need the shell installer's pointer.
+    mv "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path" "$WORK_DIR/config-path.saved"
+    # Switching off/on exercises the Settings activation adapter with retained
+    # preferences, independently of onboarding's native service repair.
+    observe_gui_state --activate-control 'Idle blanking'
+    journey_setting screen.idle_blank disabled
     observe_gui_state --activate-control 'Idle blanking'
     journey_setting screen.idle_blank enabled
+    mv "$WORK_DIR/config-path.saved" "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path"
+    observe_gui_state --activate-control 'TV sleep & wake'
+    journey_setting system.sleep_wake_policy disabled
     observe_gui_state --activate-control 'TV sleep & wake'
     journey_setting system.sleep_wake_policy enabled
     journey_setting screen.idle_timeout 720
