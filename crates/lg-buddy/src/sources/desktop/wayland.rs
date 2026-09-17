@@ -612,7 +612,14 @@ fn dispatch_once<State: 'static>(
                 return Err(WaylandProviderError::Dispatch(err.to_string()));
             }
         } else if ready > 0 {
-            match guard.read() {
+            let result = guard.read();
+            // Queued events retain their own queue through the proxy data. Drain
+            // each read before setup can reject a capability or monitoring stops,
+            // including events queued before a later message reports an error.
+            queue
+                .dispatch_pending(state)
+                .map_err(|err| WaylandProviderError::Dispatch(err.to_string()))?;
+            match result {
                 Ok(_) => (),
                 // Readable bytes may contain only part of an event. The backend
                 // retains them until a later read can complete the message.
@@ -759,6 +766,61 @@ mod tests {
         ));
     }
 
+    fn assert_read_releases_event_data(protocol_error: bool) {
+        use std::io::Write;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use wayland_client::Proxy;
+
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = wayland_client::Connection::from_socket(socket).unwrap();
+        let mut queue = connection.new_event_queue();
+        let mut state = super::WaylandCapabilityProbeState::default();
+        let done = Arc::new(AtomicBool::new(false));
+        let retained = Arc::downgrade(&done);
+        let callback = connection
+            .display()
+            .sync(&queue.handle(), Arc::clone(&done));
+        let mut words = vec![callback.id().protocol_id(), 12 << 16, 0];
+        if protocol_error {
+            // wl_display.error after the callback: the read queues an event
+            // before failing, and still needs to release that event's data.
+            words.extend([1, 24 << 16, 1, 0, 2, u32::from_ne_bytes([b'x', 0, 0, 0])]);
+        }
+        let bytes: Vec<u8> = words.into_iter().flat_map(u32::to_ne_bytes).collect();
+        peer.write_all(&bytes).unwrap();
+
+        let result = super::dispatch_once(&mut queue, &mut state);
+        let dispatched = done.load(Ordering::SeqCst);
+        drop(done);
+        drop(callback);
+        drop(queue);
+        drop(connection);
+
+        // Dropping the socket/queue alone does not break the cycle between a
+        // pending event's proxy data and its queue. Check actual reclamation.
+        assert!(retained.upgrade().is_none(), "queued event data leaked");
+        assert!(
+            dispatched,
+            "the read must deliver its callback before returning"
+        );
+        assert_eq!(result.is_err(), protocol_error);
+    }
+
+    #[test]
+    fn repeated_connection_teardown_releases_events_from_the_final_read() {
+        for _ in 0..32 {
+            assert_read_releases_event_data(false);
+        }
+    }
+
+    #[test]
+    fn protocol_failure_releases_events_queued_before_the_error() {
+        assert_read_releases_event_data(true);
+    }
+
     #[test]
     fn partial_event_waits_for_remaining_bytes_and_disconnect_is_still_an_error() {
         use std::io::Write;
@@ -788,7 +850,6 @@ mod tests {
 
         peer.write_all(&message[4..]).unwrap();
         super::dispatch_once(&mut queue, &mut state).unwrap();
-        queue.dispatch_pending(&mut state).unwrap();
         assert!(done.load(Ordering::SeqCst));
 
         drop(peer);
