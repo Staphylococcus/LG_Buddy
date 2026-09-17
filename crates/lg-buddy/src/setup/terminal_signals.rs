@@ -169,7 +169,12 @@ mod tests {
                 // owner, supervisor and helper. Mutation must still finish.
                 let group = unsafe { libc::getpgrp() }.to_string();
                 let output = command_with_lock("/bin/sh", Some(&lease.file()))
-                    .args(["-c", "kill -INT -- \"-$1\"; sleep 0.1", "helper", &group])
+                    .args([
+                        "-c",
+                        "kill -s INT -- \"-$1\" && sleep 0.1",
+                        "helper",
+                        &group,
+                    ])
                     .output()
                     .unwrap();
                 assert!(output.status.success(), "{output:?}");

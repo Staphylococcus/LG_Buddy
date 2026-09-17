@@ -171,6 +171,10 @@ chain before privileged mutation.
 The checker assigns each target an installer-operation policy so replacement,
 directory mutation, recursive removal, exact drop-in, and candidate-input
 requirements cannot silently lose their operation-specific safeguards.
+User service checks follow an absolute `XDG_CONFIG_HOME`, falling back to
+`~/.config` otherwise, as the installer and setup flow do. Setup helper and
+polkit destinations may be absent on older installations; the preflight checks
+that they can be safely created or replaced and requires their candidate payloads.
 
 The installed GUI uses the same compatibility checks with its own installed
 executable path; a source checkout or externally managed GUI cannot substitute
