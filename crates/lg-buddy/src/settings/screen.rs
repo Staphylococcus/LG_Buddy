@@ -30,7 +30,7 @@ pub(super) const BACKEND: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Choose how LG Buddy detects inactivity and activity in your desktop session. Automatic composes available native integrations. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
+    description: "Legacy CLI compatibility only. Automatic composes available native integrations. Writes save before applying; an apply failure leaves the saved value in place. Use automatic integration in Settings for a validated transition with rollback. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
 };
 
 pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
@@ -104,7 +104,6 @@ pub(super) fn presentation_for_command(
     configured: Option<&str>,
 ) -> BackendPresentation {
     let describes_backend = match command {
-        SettingsCommand::Describe(None) => true,
         SettingsCommand::Describe(Some(key)) => key == "screen.backend",
         _ => false,
     };
@@ -195,6 +194,55 @@ mod tests {
     use super::super::*;
     use super::*;
     use std::fs;
+
+    #[test]
+    fn public_discovery_never_resolves_a_backend() {
+        for command in [SettingsCommand::List, SettingsCommand::Describe(None)] {
+            assert_eq!(
+                presentation_for_command(&command, Some("auto")),
+                BackendPresentation::Raw
+            );
+        }
+    }
+
+    #[test]
+    fn hiding_legacy_choices_preserves_explicit_access_and_diagnostic_values() {
+        for backend in ["auto", "gnome", "wayland", "swayidle"] {
+            let store = ConfigEnvReader::parse(
+                "/fixture/config.env",
+                &format!("screen_backend={backend}\nscreen_idle_timeout=731\n"),
+            )
+            .into_store();
+            // Diagnostics must retain the complete effective configuration.
+            assert!(store.all_effective().iter().any(|setting| {
+                setting.key_name() == "screen.backend"
+                    && setting.required_value().unwrap().to_string() == backend
+            }));
+            let runner = SettingsCommandRunner::new(store);
+            for command in [SettingsCommand::List, SettingsCommand::Describe(None)] {
+                let mut output = Vec::new();
+                runner.run(command, &mut output).unwrap();
+                let output = String::from_utf8(output).unwrap();
+                assert!(!output.contains("screen.backend"));
+                assert!(output.contains("screen.idle_timeout"));
+            }
+            let mut output = Vec::new();
+            runner
+                .run(SettingsCommand::Get("screen.backend".into()), &mut output)
+                .unwrap();
+            assert_eq!(String::from_utf8(output).unwrap(), format!("{backend}\n"));
+            let mut output = Vec::new();
+            runner
+                .run(
+                    SettingsCommand::Describe(Some("screen.backend".into())),
+                    &mut output,
+                )
+                .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("compatibility: legacy CLI only"));
+            assert!(output.contains("an apply failure leaves the saved value in place"));
+        }
+    }
 
     #[test]
     fn settings_runner_describe_includes_metadata_and_operations() {

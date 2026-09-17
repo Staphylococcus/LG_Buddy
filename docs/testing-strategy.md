@@ -428,8 +428,8 @@ executable and direct headless brightness get/set operations.
 Parser coverage keeps bare launch separate from `--help` and `help`, which
 remain global CLI help. Existing headless CLI, service, and update paths remain
 covered by their current tests. First-run application tests cover saved-profile
-navigation, default behavior activation after pairing, declined or unavailable
-behaviors remaining off, Settings retries, and preserving existing settings.
+navigation, default behavior activation after pairing, desired settings surviving
+declined or failed activation, Settings retries, and preserving existing settings.
 Storage and service-boundary tests verify that pairing publication remains valid
 when a behavior activation fails. Installer fixtures verify handoff to the
 installed executable and preservation of existing configuration.
@@ -605,3 +605,31 @@ That loop covers most of the first two questions:
 - do the important runtime boundaries interoperate correctly?
 
 The third question, user needs, should be covered by a small acceptance layer and selected smoke checks, not by trying to force every test into daily local runs.
+
+### Shared terminal setup
+
+`cargo test -p lg-buddy` covers the terminal adapter against the shared flow,
+including dependency consent, distinct exit results and signal cancellation gates.
+Native-adapter integration verifies service/KWin repair and preservation of saved
+settings. `scripts/test-setup-cli.py` runs the real CLI with a loopback TV and
+bubblewrap isolation, covering missing inputs, terminal EOF/Ctrl+C, pairing,
+partial completion and resumption without pairing again. Run it with the runtime
+and `gui_journey_tv` example paths. The service requirement is intentionally
+blocked in that process fixture; whole-flow completion is checked in Rust.
+`scripts/test-installer-first-run.sh` also checks the headless installer handoff
+and its exit-status propagation. `test-automatic-configuration.sh` verifies that
+the compatibility wrapper forwards inputs without rewriting configuration.
+
+### Public settings and legacy CLI compatibility
+
+Settings unit and Cucumber tests verify that ordinary discovery excludes the
+legacy backend selector while explicit access and diagnostic values remain
+available. They cover unchanged raw reads, accepted legacy values, unset to the
+automatic default, validation failures and save-before-apply failure semantics.
+The GUI automatic transition separately tests capability validation and rollback.
+
+`bash scripts/test-settings-compatibility.sh <lg-buddy-binary>` exercises the
+same contract through a real binary with an isolated configuration and service
+stub. Both release-bundle and cross-version-upgrade smoke invoke it against the
+installed candidate. Their existing checks additionally preserve the upgraded
+user's legacy configuration and credentials.

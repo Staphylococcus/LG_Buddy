@@ -4,7 +4,7 @@
 //! those sections into a current snapshot followed by recent logs.
 
 mod application;
-mod command;
+use crate::command;
 mod desktop;
 mod inhibition;
 mod journal;

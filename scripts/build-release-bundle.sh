@@ -82,6 +82,8 @@ install -d "$BUNDLE_DIR"
 install -d "$BUNDLE_DIR/bin"
 install -d "$BUNDLE_DIR/docs"
 install -d "$BUNDLE_DIR/systemd"
+install -m 755 "$REPO_ROOT/data/setup-services.sh" "$BUNDLE_DIR/docs/setup-services.sh"
+install -m 644 "$REPO_ROOT/data/io.github.staphylococcus.LGBuddy.setup.policy" "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 
 install -m 755 "$BINARY_PATH" "$BUNDLE_DIR/lg-buddy"
 install -m 755 "$REPO_ROOT/install.sh" "$BUNDLE_DIR/install.sh"

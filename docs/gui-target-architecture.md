@@ -4,10 +4,10 @@ This document describes the current first-party Linux frontend in the
 development tree. The application and GUI are a single Rust workspace, with
 the application owning state and the GTK crate rendering it.
 
-> The `v1.7.0` frontend covers Overview, TVs, Settings, first-TV pairing,
+> The frontend covers Overview, TVs, Settings, first-TV pairing,
 > About, manual update checks, user-confirmed release-bundle installation in
-> Settings, and first-run pairing with default behavior activation. Unavailable
-> or declined behaviors remain off and can be retried in Settings. The app menu
+> Settings, and shared onboarding for TV pairing and required services. Desired
+> settings survive failed or cancelled setup. The app menu
 > provides on-demand diagnostics with report viewing, refresh, copying, and
 > saving.
 
@@ -18,7 +18,7 @@ flowchart LR
     LAUNCH["lg-buddy launcher"] --> GUI["lg-buddy-gui"]
 
     subgraph APP["lg-buddy application"]
-        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication\nDiagnosticsApplication"]
+        MODEL["Application\nOverviewApplication\nTvsApplication\nSettingsApplication\nDiagnosticsApplication\nOnboardingApplication"]
         PRESENT["presentation/*\ntyped state and actions"]
         MODEL --> PRESENT
     end
@@ -40,6 +40,21 @@ normalization. `crates/lg-buddy-gui` owns the libadwaita application, native
 widgets, focus, dialogs, and the worker-to-main-loop bridge. GTK callbacks do
 not load configuration, call a TV, invoke the CLI, or decide workflow state.
 
+The shared setup contract is documented in [Shared onboarding and setup
+completion](onboarding.md). CLI and GUI consume its backend-owned steps and
+flow. The GUI reuses the pairing modal as a segmented wrapper, entered from
+the unchanged **Pair a TV** prompt or the Settings **Complete setup** row.
+An independent read-only startup assessment supplies the current setup status.
+Steps return uniform structured outcomes and own domain error handling and
+recovery. The flow composes those outcomes and forwards requests; it does not
+interpret step-specific errors or implement their fallback policies.
+The flow owns execution context and permits one active flow across CLI and GUI.
+Setup steps are independently testable but only pairing remains separately
+accessible. Steps report and enforce whether they are currently cancelable;
+the flow and frontends respect that decision.
+Startup assessment composes the same granular status checks used by step
+execution, so service and integration readiness rules have a single owner.
+
 The contract is in-process Rust data. It is not JSON, a widget tree, a daemon
 protocol, or a versioned transport. The composition root may construct the
 application and renderer together, but product decisions remain in the
@@ -57,6 +72,7 @@ crates/lg-buddy/src/
   tvs.rs                         TV collection, selection, and management
   pairing.rs                     first-TV pairing workflow and persistence
   pairing_store.rs               profile/token persistence and rollback
+  setup/gui.rs                   onboarding presentation and worker operations
   settings_view.rs               Settings state, intents, and mutations
   presentation/
     overview.rs                  summary, brightness, audio declarations
@@ -70,7 +86,8 @@ crates/lg-buddy-gui/src/
   window.rs                      Adwaita window, navigation, About dialog
   overview.rs                    Overview widgets and slider rendering
   tvs.rs                         TV details, adaptive list, and unpair dialog
-  pairing.rs                     native first-TV pairing dialog
+  pairing.rs                     reusable TV connection form
+  onboarding.rs                  shared setup modal and step rendering
   settings.rs                    native settings rows and editors
 ```
 
@@ -119,7 +136,7 @@ schema. These are the current presentation types and renderer-facing intents:
 | --- | --- | --- |
 | Overview | `OverviewPresentation` containing `TvSummaryPresentation`, `BrightnessPresentation`, and `AudioPresentation`; brightness/audio status is `Loading`, `Ready`, `Applying`, or `Failed(UserFacingError)`. | `OverviewIntent::SetBrightness(u8)`, `SetVolume(u8)`, `SetMuted(bool)`, `RetryBrightness`, `RetryAudio`, `RetrySummary`, and `Cancel`. |
 | TVs | `TvsPresentation` with `TvsStatus`, `Vec<TvProfile>`, selected `TvId`, actions, and optional `PairingPresentation`. | `TvsIntent::Select`, `Retry`, `PairTv`, `SetInput`, `UnpairTv`, `ConfirmUnpair`, `CancelUnpair`, `RetryInputApply`, and `Pairing`. |
-| Pairing | `PairingPresentation` with the draft, `PairingStage`, and optional `UserFacingError`. | `PairingIntent::SetAddress`, `SetMac`, `SetInput`, `Submit`, and `Cancel`, wrapped in `TvsIntent::Pairing`. |
+| Onboarding | `OnboardingPresentation` with backend-selected step content, an optional `PairingPresentation`, action, progress and cancellation state. | `OnboardingIntent::Open`, `SetAddress`, `SetMac`, `SetInput`, `Submit`, and `Cancel`. |
 | Settings | `SettingsPresentation` with `SettingsGroup` and `SettingsRow` values; rows use `SettingsEditor` and `SettingsCommitPolicy`. | `SettingsIntent::Retry`, `SetEnabled`, `Commit`, and `RetryApply`; `Refresh` is requested by application navigation on entry. |
 
 `OverviewTransition`, `TvsTransition`, and `SettingsTransition` carry these
@@ -164,27 +181,27 @@ single details/blank view. Selection is application state. A separate bounded
 model-name read may replace the profile heading, but it does not rewrite the
 profile.
 
-The zero-TV blank state exposes **Pair a TV**. The native pairing dialog owns
-the address, MAC, and HDMI input fields as widget state while forwarding each
-edit as a `PairingIntent`. Its application stages are Editing, Connecting,
-WaitingForConfirmation, Verifying, Saving, and Failed. Pairing verifies power,
-audio, and OLED brightness before publishing the profile. It saves the token
-and configuration through `pairing_store.rs`; the GUI does not own those files.
-On success the application refreshes the other views and activates each requested
-Idle Blanking and TV Sleep & Wake behavior, including saved enabled preferences
-when pairing again. Explicit off choices remain off. Requested behaviors are
-saved disabled until activation succeeds; an unavailable or declined behavior
-remains off, and its Settings toggle retries activation. Unpairing is a native
-destructive alert dialog and likewise delegates confirmation and removal to the
-application.
+The zero-TV blank state exposes **Pair a TV**, which opens the shared onboarding
+modal. The extracted form forwards address, MAC and input edits to
+`setup::gui::OnboardingApplication`. Workers keep the `OnboardingFlow` alive
+between responses, including authorization and additional dependency consent.
+Only the flow decides which step comes next and when setup is complete.
 
-The fresh installer creates an empty configuration only when absent and hands
-off to the installed foreground GUI. It enables the system units while deferring
-lifecycle start until pairing, and enables the user screen monitor and update
-timer for passive notifications and scheduled checks. TV Sleep & Wake requires
-graphical authorization when pairing activates it; pairing and user files remain
-unprivileged. Existing configured installations preserve their saved policies and
-do not run fresh-install activation on ordinary launch.
+Pairing verifies the TV and saves its profile before the service and integration
+steps. Cancellation consults the live flow gate. Accepted cancellation retains
+completed work; noncancelable mutations keep the modal and application open.
+Closing the modal refreshes TV, Overview and Settings state, including when a
+later step was cancelled. No post-pairing behavior-toggle queue remains.
+
+The Settings **Complete setup** row consumes backend `SetupStatus`. Flow
+observations and independent assessment update that status. Checks refresh on
+window reactivation, entering Settings, and after setup or configuration mutations.
+Older results cannot overwrite a newer flow observation. Both entry points open the same modal and re-inspect current state.
+
+Fresh graphical installation deploys binaries and repair payloads, creates an
+empty configuration only when absent, and opens the existing **Pair a TV**
+prompt. Onboarding owns subsequent service setup. Existing-installation refresh
+and release-upgrade paths retain their deployment responsibilities.
 
 Settings is built from the existing registry-backed `SettingsStore`. It shows
 three groups—Screen, Sleep & Wake, and Updates—with seven behavior settings.
@@ -258,8 +275,8 @@ URLs, and control characters are removed before retention. The error toast
 provides the details on demand, and the application presentation retains them
 for the diagnostics readout independently of launcher stderr handling.
 
-Resolved screen backend, service health, and runtime observations belong in
-Diagnostics. Normal successful setting changes
+Configured legacy overrides, service health, and current activity/inhibition
+source observations belong in Diagnostics. Normal successful setting changes
 are silent. Feedback appears
 when a read, validation, persistence, or runtime apply result needs attention;
 an apply warning keeps the saved value and can offer **Retry apply**.
@@ -308,8 +325,8 @@ The renderer uses GTK/libadwaita controls and system behavior:
 - Overview uses native horizontal scales and a toggle button.
 - TVs uses status pages, action rows, a combo row, an adaptive split view, and
   an alert dialog for unpair confirmation.
-- Pairing uses an `adw::Dialog`, grouped entry rows, a combo row, a native
-  progress bar, and Cancel/Pair actions.
+- Onboarding uses an `adw::Dialog`, the grouped TV form, a native spinner,
+  and backend-selected actions and cancellation state.
 - Settings uses an `adw::PreferencesPage`, preference groups, switch rows,
   combo rows, and action rows.
 - Errors and actionable warnings use accessible alert/status presentation;
@@ -323,16 +340,15 @@ focuses the address field when the dialog opens, and TVs restores focus after
 unpair confirmation closes. Native dialog dismissal routes through the same
 application intent as an explicit Cancel action.
 
-The pairing progress fraction represents completed workflow milestones, not a
-time estimate: Connecting 0%, WaitingForConfirmation 25%, Verifying 50%, and
-Saving 75%. Dismissal is disabled once saving begins. A successful pairing
-closes the dialog and the coordinator reloads the other views from the new
-profile.
+Onboarding displays the backend's progress message and a spinner while work
+runs. Dismissal follows the step's live cancellation gate. Pairing success
+advances to remaining setup in the same modal; closing it reloads the other
+views from the saved state.
 
 ## Workers, stale completions, cancellation, and persistence
 
 GTK objects stay on the main thread. `ApplicationController` runs Overview
-reads/writes, TV profile/model reads, TV management, pairing, and Settings
+reads/writes, TV profile/model reads, TV management, onboarding, and Settings
 reads/writes on worker threads. GLib timers deliver progress and typed results
 from worker channels to the main loop. The controller reports unexpected worker
 termination to the application for failure handling.
@@ -346,16 +362,15 @@ Renderer focus and draft preservation are separate invariants tested while
 applying the current presentation; stale application results are never
 rendered into that path.
 
-Closing the window sends `OverviewIntent::Cancel` and shuts down the
-application models. Cancellation stops accepting new work and invalidates old
+Closing the window sends `OverviewIntent::Cancel`; application policy decides
+when the models can shut down. Cancellation stops accepting new work and invalidates old
 reads. A TV write or settings mutation already accepted by a worker is not
 undone by closing; the window may close while the controller keeps the
 application alive until that worker settles, then ignores any stale UI
-transition. Pairing cancellation is accepted until the save publication
-boundary. The pairing dialog disables its own dismissal once saving begins; a
-top-level application close can still close the window, while the worker
-finishes an already-owned publication and the closed application ignores its
-completion.
+transition. During onboarding, both modal dismissal and application quit
+consult the live step gate. A noncancelable step rejects the request and keeps
+the window open. Accepted cancellation waits for running work to settle before
+closing, preserving completed steps and the flow's exclusion lock.
 
 Persistence remains application-owned:
 

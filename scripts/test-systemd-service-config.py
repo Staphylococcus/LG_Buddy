@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Expose the GUI fixture's service environment on a systemd-style peer socket."""
+"""Expose the GUI fixture's service environment on a standard user bus."""
 
 import argparse
+import signal
+import subprocess
 from pathlib import Path
 
 from gi.repository import Gio, GLib
@@ -12,16 +14,24 @@ parser.add_argument("--config", required=True)
 parser.add_argument("--ready-file", required=True, type=Path)
 parser.add_argument("--runtime-dir", required=True, type=Path)
 args = parser.parse_args()
-socket_path = args.runtime_dir / "systemd" / "private"
+socket_path = args.runtime_dir / "bus"
 socket_path.parent.mkdir(parents=True, exist_ok=True)
-server = Gio.DBusServer.new_sync(
-    "unix:path=" + Gio.dbus_address_escape_value(str(socket_path)),
-    Gio.DBusServerFlags.NONE, Gio.dbus_generate_guid(), None, None,
+daemon = subprocess.Popen([
+    "dbus-daemon", "--session", "--nofork", "--print-address=1",
+    "--address=unix:path=" + Gio.dbus_address_escape_value(str(socket_path)),
+], stdout=subprocess.PIPE, text=True)
+address = daemon.stdout.readline().strip()
+connection = Gio.DBusConnection.new_for_address_sync(
+    address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+    None, None,
 )
+connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
+    GLib.Variant("(su)", ("org.freedesktop.systemd1", 0)), GLib.VariantType.new("(u)"),
+    Gio.DBusCallFlags.NONE, -1, None)
 
 manager = Gio.DBusNodeInfo.new_for_xml("""
 <node><interface name="org.freedesktop.systemd1.Manager">
-<method name="LoadUnit"><arg type="s" direction="in"/><arg type="o" direction="out"/></method>
+<method name="GetUnit"><arg type="s" direction="in"/><arg type="o" direction="out"/></method>
 </interface></node>
 """)
 service = Gio.DBusNodeInfo.new_for_xml("""
@@ -49,18 +59,14 @@ def property_value(connection, sender, path, interface, name):
     }[name]
 
 
-connections = set()
-
-
-def new_connection(server, connection):
-    connection.register_object("/org/freedesktop/systemd1", manager.interfaces[0], load_unit, None, None)
-    connection.register_object(unit_path, service.interfaces[0], None, property_value, None)
-    connections.add(connection)
-    connection.connect("closed", lambda connection, *unused: connections.discard(connection))
-    return True
-
-
-server.connect("new-connection", new_connection)
-server.start()
+connection.register_object("/org/freedesktop/systemd1", manager.interfaces[0], load_unit, None, None)
+connection.register_object(unit_path, service.interfaces[0], None, property_value, None)
+loop = GLib.MainLoop()
+signal.signal(signal.SIGTERM, lambda *_: loop.quit())
 args.ready_file.touch()
-GLib.MainLoop().run()
+try:
+    loop.run()
+finally:
+    connection.close_sync(None)
+    daemon.terminate()
+    daemon.wait(timeout=5)

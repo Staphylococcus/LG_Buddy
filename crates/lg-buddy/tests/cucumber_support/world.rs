@@ -725,36 +725,6 @@ exit 1\n",
         });
     }
 
-    pub fn run_default_initial_configuration(&mut self) {
-        self.ensure_env().set("LG_BUDDY_NONINTERACTIVE", "1");
-        self.ensure_env().set("LG_BUDDY_TV_IP", "127.0.0.1");
-        self.ensure_env()
-            .set("LG_BUDDY_TV_MAC", "22:33:44:55:66:77");
-        self.ensure_env().set("LG_BUDDY_INPUT", "HDMI_2");
-        self.ensure_env().remove("LG_BUDDY_TV_PLATFORM");
-        self.ensure_env()
-            .set("LG_BUDDY_RUNTIME_BINARY", env!("CARGO_BIN_EXE_lg-buddy"));
-        self.ensure_env().set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
-
-        let configure = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("configure.sh");
-        let started = std::time::Instant::now();
-        let output = ProcessCommand::new("bash")
-            .arg(configure)
-            .output()
-            .expect("run initial configuration");
-        let duration = started.elapsed();
-
-        self.command_result = Some(CommandExecution {
-            success: output.status.success(),
-            exit_code: output.status.code(),
-            stdout: String::from_utf8(output.stdout).expect("utf8 configure output"),
-            stderr: String::from_utf8(output.stderr).expect("utf8 configure stderr"),
-            duration,
-        });
-    }
-
     pub fn assert_tv_input(&self, expected: &str) {
         if let Some(tv) = &self.webos_tv {
             assert_eq!(tv.snapshot().input, expected);

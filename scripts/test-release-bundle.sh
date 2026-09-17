@@ -394,6 +394,8 @@ while IFS= read -r -d '' metadata; do
 done < <(find "$BUNDLE_DIR/docs/kwin/prebuilt" -name metadata.tsv -type f -print0)
 [ "$KWIN_PREBUILT_COUNT" -gt 0 ] || fail "Release bundle contains no verified KWin prebuilts."
 assert_file "$BUNDLE_DIR/docs/release-process.md"
+assert_file "$BUNDLE_DIR/docs/setup-services.sh"
+assert_file "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_lifecycle.service"
 assert_file "$BUNDLE_DIR/systemd/LG_Buddy_screen.service"
@@ -487,65 +489,9 @@ grep -F -q 'GUI binary is writable by its group or by other users' "$UNSAFE_GUI_
     exit 1
 }
 
-FRESH_CONFIG_HOME="$WORK_DIR/fresh-config-home"
-FRESH_CONFIG_OUTPUT="$WORK_DIR/fresh-config.output"
-FRESH_NATIVE_RUNTIME="$WORK_DIR/fresh-native-runtime"
-FRESH_NATIVE_PAIRING_MARKER="$WORK_DIR/fresh-native-pairing"
-FRESH_NATIVE_TOKEN="$FRESH_CONFIG_HOME/.config/lg-buddy/tvs/primary/access-token.json"
-cat >"$FRESH_NATIVE_RUNTIME" <<'EOF'
-#!/bin/sh
-set -eu
-
-[ "$#" -eq 4 ] &&
-    [ "$1" = "settings" ] &&
-    [ "$2" = "set" ] &&
-    [ "$3" = "tv.platform" ] &&
-    [ "$4" = "lg_webos" ] || exit 2
-
-config_path="${LG_BUDDY_CONFIG:?}"
-token_dir="$(dirname "$config_path")/tvs/primary"
-sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$config_path"
-mkdir -p "$token_dir"
-chmod 700 "$(dirname "$token_dir")" "$token_dir"
-printf '{\n  "access_token": "release-smoke-native-token"\n}\n' >"$token_dir/access-token.json"
-chmod 600 "$token_dir/access-token.json"
-: >"${LG_BUDDY_NATIVE_PAIRING_MARKER:?}"
-echo "LG Buddy native webOS preflight: pairing required; accept the prompt on the TV."
-echo "LG Buddy native webOS preflight: stored access token at $token_dir/access-token.json"
-echo "LG Buddy native webOS preflight succeeded: power_state=Active"
-EOF
-chmod 755 "$FRESH_NATIVE_RUNTIME"
-mkdir -p "$FRESH_CONFIG_HOME"
-(
-    unset LG_BUDDY_NONINTERACTIVE LG_BUDDY_TV_PLATFORM LG_BUDDY_SCREEN_BACKEND LG_BUDDY_CONFIG
-    export HOME="$FRESH_CONFIG_HOME"
-    export XDG_CONFIG_HOME="$FRESH_CONFIG_HOME/.config"
-    export LG_BUDDY_RUNTIME_BINARY="$FRESH_NATIVE_RUNTIME"
-    export LG_BUDDY_NATIVE_PAIRING_MARKER="$FRESH_NATIVE_PAIRING_MARKER"
-    export LG_BUDDY_SKIP_SYSTEMD_ACTIONS="1"
-    printf '%s\n' \
-        '192.0.2.10' 'aa:bb:cc:dd:ee:ff' '2' '' 'Y' '300' '1' 'n' 'Y' \
-        | bash "$BUNDLE_DIR/configure.sh" >"$FRESH_CONFIG_OUTPUT" 2>&1
-)
-grep -F -q 'TV Platform:         lg_webos' "$FRESH_CONFIG_OUTPUT"
-grep -F -q 'pairing required; accept the prompt on the TV' "$FRESH_CONFIG_OUTPUT"
-grep -q '^tvs_primary_platform=lg_webos$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
-assert_file "$FRESH_NATIVE_PAIRING_MARKER"
-assert_file "$FRESH_NATIVE_TOKEN"
-assert_mode "$FRESH_NATIVE_TOKEN" 600
-python3 -c 'import json, sys; assert json.load(open(sys.argv[1], encoding="utf-8")) == {"access_token": "release-smoke-native-token"}' "$FRESH_NATIVE_TOKEN"
-grep -F -q 'Desktop integration: automatic discovery' "$FRESH_CONFIG_OUTPUT"
-grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
-if grep -F -q 'Choose the screen idle backend' "$FRESH_CONFIG_OUTPUT"; then
-    echo "Fresh interactive configuration asked for a backend."
-    exit 1
-fi
-if grep -F -q 'swayidle' "$FRESH_CONFIG_OUTPUT"; then
-    echo "Fresh interactive configuration presented swayidle."
-    exit 1
-fi
-grep -q '^screen_backend=auto$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
-grep -q '^screen_honor_idle_inhibitors=disabled$' "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env"
+# configure.sh is a thin adapter; exercise the bundled command/help surface.
+"$BUNDLE_DIR/lg-buddy" setup --help | grep -F -q 'Complete LG Buddy setup'
+LG_BUDDY_RUNTIME_BINARY="$BUNDLE_DIR/lg-buddy" bash "$BUNDLE_DIR/configure.sh" --help | grep -F -q 'Complete LG Buddy setup'
 
 export HOME="$HOME_DIR"
 export XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
@@ -625,6 +571,12 @@ cmp -s "$BUNDLE_GUI" "$INSTALLED_GUI"
 }
 [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Fresh native install provisioned a Python environment."
 assert_file "$INSTALLED_POINTER"
+assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services"
+cmp -s "$BUNDLE_DIR/docs/setup-services.sh" "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services"
+cmp -s "$BUNDLE_DIR/docs/io.github.staphylococcus.LGBuddy.setup.policy" "$INSTALL_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy"
+for unit in LG_Buddy.service LG_Buddy_lifecycle.service lg_buddy.conf; do
+    cmp -s "$BUNDLE_DIR/systemd/$unit" "$INSTALL_ROOT/usr/lib/lg-buddy/setup/systemd/$unit"
+done
 assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/setup.sh"
 assert_executable "$INSTALL_ROOT/usr/lib/lg-buddy/kwin/build.sh"
 diff -r "$BUNDLE_DIR/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
@@ -668,22 +620,11 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --gui-binary "$INSTALLED_GUI" \
     "${MANIFEST_EXPECTATIONS[@]}"
 
-# Existing profiles without the platform key remain on bscpylgtv. Rewriting
-# one through configure.sh materializes that choice instead of applying the
-# fresh-profile default. Then use a controlled raw-config fixture to prove an
-# unpaired native shutdown skips immediately without contacting a TV.
+# Legacy platform defaults remain unchanged; a raw native fixture with no
+# credential must skip unattended shutdown without contacting a TV.
 sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^bscpylgtv$'
-LEGACY_MISSING_CONFIGURE_OUTPUT="$WORK_DIR/legacy-missing-configure.output"
-(
-    unset LG_BUDDY_TV_PLATFORM
-    cd "$BUNDLE_DIR"
-    bash ./configure.sh >"$LEGACY_MISSING_CONFIGURE_OUTPUT" 2>&1
-)
-grep -F -q 'TV Platform:         bscpylgtv' "$LEGACY_MISSING_CONFIGURE_OUTPUT"
-grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
-
-sed -i 's/^tvs_primary_platform=bscpylgtv$/tvs_primary_platform=lg_webos/' "$CONFIG_FILE"
+printf '%s\n' tvs_primary_platform=lg_webos >> "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
 NATIVE_PLATFORM_OUTPUT="$("$INSTALLED_BINARY" shutdown 2>&1)"
 printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV credential; skipping unattended TV control.'
@@ -692,6 +633,7 @@ printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV creden
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 "$INSTALLED_BINARY" settings set screen.backend swayidle
+bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
 "$INSTALLED_BINARY" settings set screen.idle_timeout 90000
@@ -719,40 +661,20 @@ grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
-# Configure should read inline-commented platform values with the same value
-# semantics as the Rust config parser, then persist the sanitized choice.
+# Settings owns reconfiguration; setup must not rewrite existing behavior choices.
 sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
-printf '%s\n' 'tvs_primary_platform =  lg_webos # native' >>"$CONFIG_FILE"
-LEGACY_CONFIGURE_OUTPUT="$WORK_DIR/legacy-configure.output"
-
-(
-    unset LG_BUDDY_TV_PLATFORM
-    unset LG_BUDDY_SCREEN_BACKEND
-    unset LG_BUDDY_SCREEN_IDLE_TIMEOUT
-    unset LG_BUDDY_SCREEN_RESTORE_POLICY
-    unset LG_BUDDY_SCREEN_HONOR_IDLE_INHIBITORS
-    unset LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY
-    export LG_BUDDY_TV_IP="192.168.1.11"
-    export LG_BUDDY_TV_MAC="11:22:33:44:55:66"
-    export LG_BUDDY_INPUT="HDMI_3"
-    cd "$BUNDLE_DIR"
-    bash ./configure.sh >"$LEGACY_CONFIGURE_OUTPUT" 2>&1
-)
-
-grep -F -q 'Warning: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0' "$LEGACY_CONFIGURE_OUTPUT"
-
-grep -q '^tvs_primary_ip=192.168.1.11$' "$CONFIG_FILE"
-grep -q '^tvs_primary_mac=11:22:33:44:55:66$' "$CONFIG_FILE"
-grep -q '^tvs_primary_input=HDMI_3$' "$CONFIG_FILE"
-grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
+printf '%s\n' 'tvs_primary_platform = lg_webos # native' >> "$CONFIG_FILE"
+"$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
+"$INSTALLED_BINARY" settings set tv.ip 192.168.1.11
+"$INSTALLED_BINARY" settings set tv.mac 11:22:33:44:55:66
+"$INSTALLED_BINARY" settings set tv.input HDMI_3
+# Normalize this controlled fixture for the following invalid-platform cases.
+sed -i '/tvs_primary_platform/d' "$CONFIG_FILE"
+printf '%s\n' tvs_primary_platform=lg_webos >> "$CONFIG_FILE"
 grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
-grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
-grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
-grep -q '^system_sleep_wake_policy=enabled$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
-grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
 VALID_PLATFORM_CONFIG="$WORK_DIR/config-valid-platform.snapshot"
 cp "$CONFIG_FILE" "$VALID_PLATFORM_CONFIG"
@@ -767,16 +689,16 @@ do
     cp "$CONFIG_FILE" "$INVALID_PLATFORM_CONFIG"
     if (
         cd "$BUNDLE_DIR"
-        bash ./configure.sh >"$INVALID_PLATFORM_OUTPUT" 2>&1
+        "$INSTALLED_BINARY" settings get tv.platform >"$INVALID_PLATFORM_OUTPUT" 2>&1
     ); then
-        echo "configure.sh unexpectedly accepted invalid TV platform: $invalid_platform_line"
+        echo "Settings unexpectedly accepted invalid TV platform: $invalid_platform_line"
         exit 1
     fi
     cmp -s "$INVALID_PLATFORM_CONFIG" "$CONFIG_FILE" || {
-        echo "configure.sh rewrote invalid TV platform config: $invalid_platform_line"
+        echo "Settings rewrote invalid TV platform config: $invalid_platform_line"
         exit 1
     }
-    grep -F -q 'invalid TV platform' "$INVALID_PLATFORM_OUTPUT"
+    grep -F -q 'invalid value for setting `tv.platform`' "$INVALID_PLATFORM_OUTPUT"
 done
 cp "$VALID_PLATFORM_CONFIG" "$CONFIG_FILE"
 rm -f "$VALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_CONFIG" "$INVALID_PLATFORM_OUTPUT"
@@ -1157,6 +1079,9 @@ export LG_BUDDY_REMOVE_CONFIG="1"
     exit 1
 }
 [ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/kwin" ] || fail "KWin payload remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/setup" ] || fail "Service repair payload remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/lib/lg-buddy/setup-services" ] || fail "Service repair helper remains after uninstall."
+[ ! -e "$INSTALL_ROOT/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy" ] || fail "Setup authorization policy remains after uninstall."
 [ ! -e "$HOME/.config/systemd/user/LG_Buddy_kwin.service" ] || fail "KWin setup unit remains after uninstall."
 [ ! -e "$INSTALLED_GUI" ] || {
     echo "Installed GUI still present after uninstall: $INSTALLED_GUI"
@@ -1237,8 +1162,14 @@ export LG_BUDDY_SYSTEM_SLEEP_WAKE_POLICY="disabled"
     # This fixture tests headless reinstall with a disabled policy. Fresh
     # installs otherwise hand off to the GUI and wait for TV pairing.
     mkdir -p "$(dirname "$CONFIG_FILE")"
-    cp "$FRESH_CONFIG_HOME/.config/lg-buddy/config.env" "$CONFIG_FILE"
-    bash ./configure.sh
+    cat > "$CONFIG_FILE" <<'EOF'
+tvs_primary_ip=192.168.1.10
+tvs_primary_mac=aa:bb:cc:dd:ee:ff
+tvs_primary_input=HDMI_2
+tvs_primary_platform=lg_webos
+screen_idle_blank=enabled
+system_sleep_wake_policy=disabled
+EOF
     bash "$SCRIPT_DIR/test-without-python.sh" bash ./install.sh
 )
 

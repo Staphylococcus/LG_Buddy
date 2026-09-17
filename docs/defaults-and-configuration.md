@@ -18,6 +18,12 @@ matrix, increases regression risk, complicates documentation, and makes support
 harder. A config key should exist only when the non-default behavior is a real
 user need and the project is willing to preserve and test that behavior.
 
+Required infrastructure is derived from the environment and real behavior
+settings. Missing basic services are incomplete setup, not an implicit off
+choice; cancelling authorization must not create such a preference. The
+[onboarding contract](onboarding.md) records how desired behavior and observed
+readiness are reconciled across initial, headless and resumed setup.
+
 Installer prompts are appropriate for required facts that cannot be inferred,
 such as the TV IP address, TV MAC address, configured HDMI input, or an explicit
 path to a locally built runtime binary.
@@ -42,11 +48,18 @@ the existing `config.env` key `screen_restore_policy`. This keeps manual config
 editing, `configure.sh`, installer preservation, and `lg-buddy settings` on one
 durable source of truth.
 
-The settings CLI should not hide malformed durable config. If a raw
+Public CLI discovery lists behavior and TV settings. The legacy `screen.backend`
+key is excluded from `settings list` and unqualified `settings describe`, but
+explicit commands and diagnostics retain access for compatibility. Existing
+overrides are preserved. See the [legacy CLI contract](session-backend-model.md#portable-configuration-and-legacy-overrides).
+
+The settings CLI should not hide malformed public settings. If a public
 `config.env` value fails validation, `settings list` and `settings describe`
 should show it as invalid, and `settings get <key>` should return the validation
 error. Mutation commands may still overwrite or unset the bad value so users can
-repair the file through the structured interface.
+repair the file through the structured interface. Invalid legacy backend values
+remain visible in diagnostics and `settings describe screen.backend`; explicitly
+reading or correcting that key retains the same validation behavior.
 
 The current public settings interface exposes one TV through `tv.ip`, `tv.mac`,
 `tv.input`, and `tv.platform`. New writes store those values as

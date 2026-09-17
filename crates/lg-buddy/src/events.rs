@@ -108,6 +108,7 @@ impl RuntimeEventKind {
             Command::Overview
             | Command::Monitor
             | Command::Lifecycle
+            | Command::Setup(_)
             | Command::DetectBackend
             | Command::Dev(_)
             | Command::Settings(_)

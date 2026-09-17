@@ -66,13 +66,24 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
+          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
+
+      - name: Enable setup CLI test namespaces
+        # Match the disposable-runner preparation in the bundle smoke job.
+        # Probe bwrap itself, since this is the sandbox used by the CLI tests.
+        run: |
+          if ! bwrap --ro-bind / / --dev /dev true >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev true
 
       - name: Run display-backed GTK test suite
         run: |
           cargo build -p lg-buddy -p lg-buddy-gui
+          bash scripts/test-settings-compatibility.sh ./target/debug/lg-buddy
           cargo build --locked -p lg-buddy --example gui_journey_tv
           python3 scripts/test-tv-fixture.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
+          python3 scripts/test-setup-cli.py ./target/debug/lg-buddy ./target/debug/examples/gui_journey_tv
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
           dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
           dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh \
@@ -92,8 +103,10 @@ jobs:
       - name: Validate deterministic GUI GitHub fixture
         run: python3 scripts/test_mock_github_gui.py
 
-      - name: Verify KWin provisioning fallbacks
+      - name: Verify setup helpers and KWin fallbacks
         run: |
+          bash -n data/setup-services.sh scripts/test-service-setup.sh
+          bash scripts/test-service-setup.sh
           bash scripts/test-kwin-setup.sh
           python3 scripts/test_kwin_matrix.py
 
@@ -363,6 +376,9 @@ jobs:
         shell: bash
         run: |
           useradd --create-home tester
+          # runuser in these containers has no logind session to create this.
+          # Onboarding uses the canonical per-user runtime directory for its lock.
+          install -d -m 700 -o tester -g "$(id -gn tester)" "/run/user/$(id -u tester)"
           archive="$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
           extraction="$(mktemp -d)"
           tar --no-same-owner -C "$extraction" -xzf "$archive"

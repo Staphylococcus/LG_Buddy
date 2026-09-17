@@ -163,20 +163,33 @@ the whole report at 32 KiB. Credential-bearing lines and URLs are redacted.
 
 ### Portable configuration and legacy overrides
 
-Fresh GUI setup and `configure.sh` use automatic discovery without a backend
+Fresh GUI and terminal setup use automatic discovery without a backend
 question. Existing `auto` configurations remain unchanged. Saved `gnome`,
 `wayland` and `swayidle` overrides retain their behavior and are reported as
 legacy overrides. Settings offers an explicit, confirmed switch to automatic
-integration; `configure.sh` offers the same choice when an override exists.
+integration.
+Setup itself preserves existing preferences.
 Native activity is validated before switching when built-in idle blanking is
 enabled. Failed service application restores the previous settings. Disabling
 idle blanking permits the transition without native idle capability; optional
 KWin inhibition never blocks it.
 
-Legacy CLI mutation and `detect-backend` output remain compatible during the
-MVP. CLI writes still persist before applying; the dedicated graphical and
-configuration transitions supply rollback. Final retirement belongs to #219
-and #87. No resolved desktop choice is written on login or source recovery.
+Normal CLI discovery (`settings list` and unqualified `settings describe`)
+exposes public settings without `screen.backend` and does not resolve a backend.
+The complete internal registry remains available to diagnostics, so hiding a
+compatibility key does not hide an active legacy override from a support report.
+
+Explicit legacy CLI commands retain their contract: `get` returns the saved or
+default value, `describe screen.backend` identifies compatibility-only use,
+`set` accepts `auto`, `gnome`, `wayland` and `swayidle`, and `unset` removes the
+override to restore `auto`. Mutation output, exit behavior and save-before-apply
+semantics are retained. On service-apply failure the new value stays saved and
+the command fails; repeating the same command retries application. This is a
+compatibility operation, not the validated GUI transition with rollback.
+`detect-backend` remains a hidden compatibility command with unchanged output;
+neither it nor the explicit setting description resolves the composed source set.
+Final removal of swayidle remains separate work in #87. No resolved desktop
+choice is written on login or source recovery.
 
 `inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
 state, and `evaluate()` returns a Boolean permission with matching diagnostics

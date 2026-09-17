@@ -8,12 +8,14 @@
 //! boundary and repair an interrupted pairing on the next attempt.
 
 use crate::auth::{resolve_config_owner, AuthContextError, SystemUser};
+use crate::config::TvPlatform;
 use crate::config::{parse_config_entries, HdmiInput, MacAddress};
 use crate::platform_access_token::{
     PlatformAccessToken, PlatformAccessTokenStore, PlatformAccessTokenStoreError,
 };
 use crate::settings::{ConfigEnvEditor, ConfigEnvReader, SettingValue};
 use crate::settings_view::BehaviorSetting;
+use crate::tvs::{TvCredentialState, TvId, TvProfile};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -66,6 +68,34 @@ pub(crate) struct PairingStore {
 
 impl PairingStore {
     /// Prepare a first-primary-TV transaction before starting network pairing.
+    pub(crate) fn prepare_pairing(
+        config_path: &Path,
+        request: &crate::pairing::PairingRequest,
+    ) -> Result<Self, PairingStoreError> {
+        let store = prepare_transaction(config_path, current_euid(), false)?;
+        let existing = store.snapshot.as_deref().unwrap_or_default();
+        let text =
+            std::str::from_utf8(existing).map_err(|source| PairingStoreError::ConfigRead {
+                path: config_path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            })?;
+        let entries = parse_config_entries(text);
+        if TV_KEYS.iter().any(|key| entries.contains_key(*key)) {
+            let expected = TvProfile::new(
+                TvId::primary(),
+                "Primary TV",
+                request.address(),
+                request.mac(),
+                request.input(),
+                TvPlatform::LgWebOs,
+                TvCredentialState::Stored,
+            );
+            validate_primary_identity(config_path, store.snapshot.as_deref(), &expected)?;
+        }
+        Ok(store)
+    }
+
+    #[cfg(test)]
     pub(crate) fn prepare(config_path: &Path) -> Result<Self, PairingStoreError> {
         prepare_with_euid(config_path, current_euid())
     }
@@ -363,6 +393,7 @@ impl PairingStore {
     }
 }
 
+#[cfg(test)]
 fn prepare_with_euid(config_path: &Path, euid: u32) -> Result<PairingStore, PairingStoreError> {
     prepare_transaction(config_path, euid, true)
 }
@@ -846,20 +877,18 @@ fn render_first_primary_config(
             .expect("known behavior");
         if effective.value() == Some(SettingValue::Enum("enabled")) {
             requested.push(setting);
-            editor.set(effective.storage_key(), SettingValue::Enum("disabled"));
         }
     }
-    // Publish requested policies off with the TV until their services are
-    // available. Saved enabled choices need activation too, for example after
-    // reinstalling with retained settings. Explicit off choices stay off.
-    let mut contents = editor.render().into_bytes();
-    if !contents.is_empty() && !contents.ends_with(b"\n") {
-        contents.push(b'\n');
+    // Pairing persists desired behavior unchanged. Readiness is checked separately.
+    for (key, value) in [
+        ("tvs_primary_ip", SettingValue::Ipv4(address)),
+        ("tvs_primary_mac", SettingValue::MacAddress(mac)),
+        ("tvs_primary_input", SettingValue::Enum(input.as_str())),
+        ("tvs_primary_platform", SettingValue::Enum("lg_webos")),
+    ] {
+        editor.set(key, value);
     }
-    contents.extend_from_slice(format!("tvs_primary_ip={address}\n").as_bytes());
-    contents.extend_from_slice(format!("tvs_primary_mac={mac}\n").as_bytes());
-    contents.extend_from_slice(format!("tvs_primary_input={}\n", input.as_str()).as_bytes());
-    contents.extend_from_slice(b"tvs_primary_platform=lg_webos\n");
+    let contents = editor.render().into_bytes();
     (contents, requested)
 }
 
@@ -1386,8 +1415,8 @@ mod tests {
                 BehaviorSetting::SystemSleepWakePolicy
             ]
         );
-        assert!(config.contains("screen_idle_blank=disabled\n"));
-        assert!(config.contains("system_sleep_wake_policy=disabled\n"));
+        assert!(!config.contains("screen_idle_blank="));
+        assert!(!config.contains("system_sleep_wake_policy="));
         assert!(config.starts_with("# keep\nscreen_backend=gnome\n"));
         assert!(config.contains("tvs_primary_ip=192.0.2.42\n"));
         assert!(config.contains("tvs_primary_mac=aa:bb:cc:dd:ee:ff\n"));
@@ -1431,13 +1460,10 @@ mod tests {
             .collect();
             assert_eq!(requested, expected);
             let saved = ConfigEnvReader::load(dir.config()).unwrap().into_store();
-            assert_eq!(
-                saved.raw_storage_value("screen_idle_blank"),
-                Some("disabled")
-            );
+            assert_eq!(saved.raw_storage_value("screen_idle_blank"), Some(idle));
             assert_eq!(
                 saved.raw_storage_value("system_sleep_wake_policy"),
-                Some("disabled")
+                Some(sleep)
             );
             assert_eq!(saved.raw_storage_value("screen_idle_timeout"), Some("42"));
         }

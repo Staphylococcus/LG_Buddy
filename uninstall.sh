@@ -51,7 +51,10 @@ DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/io.github.staphylococcus.LGBuddy.desktop
 LEGACY_DESKTOP_ENTRY_PATH="${APPLICATIONS_DIR}/LG_Buddy_Brightness.desktop"
 APP_ICON_PATH="$(prefix_path "/usr/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg")"
 RUN_STATE_DIR="$(prefix_path "/run/lg_buddy")"
-USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+case "${XDG_CONFIG_HOME:-}" in
+    /*) USER_SYSTEMD_DIR="$XDG_CONFIG_HOME/systemd/user" ;;
+    *) USER_SYSTEMD_DIR="${HOME}/.config/systemd/user" ;;
+esac
 USER_SCREEN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service"
 USER_KWIN_SERVICE_PATH="${USER_SYSTEMD_DIR}/LG_Buddy_kwin.service"
 USER_SCREEN_OVERRIDE_DIR="${USER_SYSTEMD_DIR}/LG_Buddy_screen.service.d"
@@ -122,7 +125,8 @@ echo "Done."
 if [ -z "$INSTALL_ROOT" ] && [ -f "$SYSTEM_LIB_DIR/kwin/setup.sh" ]; then
     /bin/bash "$SYSTEM_LIB_DIR/kwin/setup.sh" --remove || true
 fi
-run_privileged rm -rf -- "$SYSTEM_LIB_DIR/kwin"
+run_privileged rm -rf -- "$SYSTEM_LIB_DIR/kwin" "$SYSTEM_LIB_DIR/setup"
+run_privileged rm -f -- "$SYSTEM_LIB_DIR/setup-services" "$(prefix_path /usr/share/polkit-1/actions)/io.github.staphylococcus.LGBuddy.setup.policy"
 
 echo "Removing scripts"
 run_privileged rm -f "$RUNTIME_INSTALL_PATH"

@@ -528,6 +528,7 @@ grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings describe screen.backend \
     | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
+bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --manifest "$CANDIDATE_BUNDLE/release-manifest.json" \
