@@ -255,15 +255,8 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
     );
     let uris = tv.snapshot().request_uris;
     assert!(
-        !uris
-            .iter()
-            .any(|uri| matches!(
-                uri.as_str(),
-                "ssap://system/turnOff"
-                    | "ssap://tv/switchInput"
-                    | "ssap://com.webos.service.tvpower/power/turnOnScreen"
-            )),
-        "invalidation must neither blank nor dispatch sleep/wake TV actions: {uris:?}"
+        uris.is_empty(),
+        "invalidation must not dispatch any TV operation: {uris:?}"
     );
     runtime.assert_session_marker_absent();
 }
@@ -1159,27 +1152,13 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
 
     let uris = tv.snapshot().request_uris;
     assert_eq!(
-        uris.iter().filter(|uri| uri.as_str() == "ssap://system/turnOff").count(),
-        1,
-        "pre-sleep must power the TV off exactly once"
-    );
-    assert_eq!(
-        uris
-            .iter()
-            .filter(|uri| uri.as_str() == "ssap://com.webos.applicationManager/getForegroundAppInfo")
-            .count(),
-        1,
-        "pre-sleep must confirm the current input before power-off"
-    );
-    assert!(
-        !uris.iter().any(|uri| uri.as_str() == "ssap://tv/switchInput"),
-        "pre-sleep must not switch inputs: {uris:?}"
-    );
-    assert!(
-        !uris
-            .iter()
-            .any(|uri| uri.as_str() == "ssap://com.webos.service.tvpower/power/turnOffScreen"),
-        "pre-sleep must not blank the screen: {uris:?}"
+        uris,
+        vec![
+            "ssap://com.webos.applicationManager/getForegroundAppInfo".to_string(),
+            "ssap://com.webos.service.tvpower/power/getPowerState".to_string(),
+            "ssap://system/turnOff".to_string(),
+        ],
+        "pre-sleep must follow the exact native sequence (read input, read power state, power off) and nothing else: {uris:?}"
     );
     assert!(tv.snapshot().power_off_count == 1);
     runtime.assert_system_marker_exists();
