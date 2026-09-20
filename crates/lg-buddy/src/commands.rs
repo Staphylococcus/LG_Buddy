@@ -8,7 +8,7 @@ use std::process::Output;
 
 use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
 use crate::brightness::{read_current_brightness_with, write_brightness_with};
-use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::config::{load_config, require_current_config, resolve_config_path_from_env, Config};
 use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
 use crate::lifecycle::ThreadSleeper;
 use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
@@ -301,6 +301,7 @@ pub fn run_volume<W: Write>(writer: &mut W, command: VolumeCommand) -> Result<()
 
 pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    require_current_config(&config_path)?;
     let config = load_config(&config_path).map_err(RunError::Config)?;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let tv_client = build_tv_client(
@@ -513,7 +514,7 @@ mod tests {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/mod.rs"));
     }
 
-    use super::{run_brightness_command_with, InstalledGui};
+    use super::{run_brightness_command_with, run_startup, InstalledGui};
     use crate::config::{
         Config, HdmiInput, MacAddress, ScreenBackend, ScreenIdleBlankPolicy, ScreenRestorePolicy,
         SystemSleepWakePolicy,
@@ -991,6 +992,28 @@ mod tests {
         let rendered = rendered(&output);
         assert!(rendered.contains("Aggressive restore policy is enabled"));
         assert!(rendered.contains("Wake failed after 6 attempts."));
+    }
+
+    #[test]
+    fn startup_refuses_stale_config_before_any_runtime_work() {
+        let _lock = crate::session::test_env_lock().lock().unwrap();
+        let temp_dir = TestDir::new("startup-stale-config");
+        let config_path = temp_dir.path().join("config.env");
+        fs::write(&config_path, "tvs_primary_input=HDMI_2\n").unwrap();
+        let previous = env::var_os("LG_BUDDY_CONFIG");
+        env::set_var("LG_BUDDY_CONFIG", &config_path);
+        let result = {
+            let mut output = Vec::new();
+            run_startup(&mut output, StartupMode::Auto)
+        };
+        match previous {
+            Some(value) => env::set_var("LG_BUDDY_CONFIG", value),
+            None => env::remove_var("LG_BUDDY_CONFIG"),
+        }
+
+        let err = result.expect_err("stale config must not run startup work").to_string();
+        assert!(err.contains("v2 migration required"), "got: {err}");
+        assert!(err.contains("tvs_primary_platform is not set"), "got: {err}");
     }
 
     #[test]

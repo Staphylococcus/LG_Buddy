@@ -20,8 +20,8 @@ use crate::backend::{
 };
 use crate::config::{
     load_config, normalize_idle_timeout_secs, parse_config_entries, parse_idle_timeout_secs,
-    resolve_config_path_from_env, ConfigPathError, ScreenBackend, ScreenIdleBlankPolicy,
-    DEFAULT_IDLE_TIMEOUT,
+    require_current_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend,
+    ScreenIdleBlankPolicy, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
 use crate::inhibition::Inhibition;
@@ -366,6 +366,8 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 }
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
+    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    require_current_config(&config_path)?;
     run_monitor_with_executor(writer, RuntimeActionExecutor::default()).map_err(|err| match err {
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
@@ -375,6 +377,7 @@ pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_lifecycle_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    require_current_config(&config_path)?;
     run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor::default(), &config_path)
         .map_err(|err| match err {
             SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),

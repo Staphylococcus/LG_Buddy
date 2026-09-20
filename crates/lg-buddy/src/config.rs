@@ -477,9 +477,90 @@ fn parse_home_from_passwd_entries(contents: &str, user: &str) -> Option<PathBuf>
     None
 }
 
+/// A reason a saved configuration is stale and must be migrated before the
+/// services can run on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleConfigReason {
+    /// `tvs_primary_platform` was never written; 1.x configs predate the key,
+    /// so it would load as the legacy `bscpylgtv` default.
+    MissingTvPlatform,
+    /// The selected platform is `bscpylgtv`, which is removed in 1.9.0.
+    BscpylgtvPlatform,
+    /// The screen backend is the legacy `swayidle` override.
+    SwayidleBackend,
+}
+
+impl StaleConfigReason {
+    /// Operator-facing message for the reason.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MissingTvPlatform => {
+                "tvs_primary_platform is not set (loads as the legacy `bscpylgtv` default)"
+            }
+            Self::BscpylgtvPlatform => {
+                "tvs_primary_platform=bscpylgtv is being removed in 1.9.0; set it to lg_webos"
+            }
+            Self::SwayidleBackend => {
+                "screen_backend=swayidle is a legacy override; set it to auto, gnome, or wayland"
+            }
+        }
+    }
+}
+
+/// Reasons `contents` is a stale 1.x configuration, reading the raw entries
+/// *before* defaults are applied.
+///
+/// The absence of `tvs_primary_platform` is itself the stale signal: `load_config`
+/// would silently default it to the legacy platform, so detection must happen
+/// on the raw entries rather than the loaded [`Config`].
+pub fn stale_config_reasons(contents: &str) -> Vec<StaleConfigReason> {
+    let entries = parse_config_entries(contents);
+    let mut reasons = Vec::new();
+
+    if let Some(value) = entries.get("tvs_primary_platform") {
+        if value.parse::<TvPlatform>().is_ok_and(|platform| platform == TvPlatform::Bscpylgtv) {
+            reasons.push(StaleConfigReason::BscpylgtvPlatform);
+        }
+    } else {
+        reasons.push(StaleConfigReason::MissingTvPlatform);
+    }
+
+    if matches!(entries.get("screen_backend").map(String::as_str), Some("swayidle")) {
+        reasons.push(StaleConfigReason::SwayidleBackend);
+    }
+
+    reasons
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     let contents = fs::read_to_string(path)?;
     parse_config(&contents)
+}
+
+/// Render a migration-required message for the stale reasons.
+fn render_migration_required(reasons: &[StaleConfigReason]) -> String {
+    let mut message = "v2 migration required before this service can run:".to_string();
+    for reason in reasons {
+        message.push_str(&format!("\n  - {}", reason.message()));
+    }
+    message
+}
+
+/// Gate for startup and background services: refuses to run on a stale 1.x
+/// configuration, returning a distinct migration-required error *before* any
+/// runtime work. Reads the raw config (not [`load_config`]) so the absence of
+/// `tvs_primary_platform` — which `load_config` would silently default to the
+/// legacy platform — is visible.
+pub fn require_current_config(path: &Path) -> Result<(), crate::RunError> {
+    let contents = fs::read_to_string(path).map_err(crate::RunError::Io)?;
+    let reasons = stale_config_reasons(&contents);
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::RunError::MigrationRequired(render_migration_required(
+            &reasons,
+        )))
+    }
 }
 
 pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
@@ -622,7 +703,8 @@ mod tests {
         parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
         ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend,
         ScreenHonorIdleInhibitorsPolicy, ScreenIdleBlankPolicy, ScreenRestorePolicy,
-        SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT,
+        StaleConfigReason, SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT,
+        MAX_IDLE_TIMEOUT, stale_config_reasons,
     };
     use std::path::Path;
 
@@ -1119,5 +1201,84 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
         .expect("parse config with unknown keys");
 
         assert_eq!(config.input, HdmiInput::Hdmi3);
+    }
+
+    #[test]
+    fn missing_tv_platform_is_stale() {
+        let reasons = stale_config_reasons("tvs_primary_input=HDMI_2\n");
+        assert_eq!(reasons, vec![StaleConfigReason::MissingTvPlatform]);
+    }
+
+    #[test]
+    fn explicit_bscpylgtv_platform_is_stale() {
+        let reasons = stale_config_reasons("tvs_primary_platform=bscpylgtv\n");
+        assert_eq!(reasons, vec![StaleConfigReason::BscpylgtvPlatform]);
+    }
+
+    #[test]
+    fn lg_webos_platform_without_swayidle_is_clean() {
+        let reasons = stale_config_reasons(
+            "\
+            tvs_primary_platform=lg_webos
+            screen_backend=wayland
+            ",
+        );
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn lg_webos_with_swayidle_backend_is_stale() {
+        let reasons = stale_config_reasons(
+            "\
+            tvs_primary_platform=lg_webos
+            screen_backend=swayidle
+            ",
+        );
+        assert_eq!(reasons, vec![StaleConfigReason::SwayidleBackend]);
+    }
+
+    #[test]
+    fn legacy_config_with_swayidle_reports_both_reasons() {
+        let reasons = stale_config_reasons(
+            "\
+            screen_backend=swayidle
+            ",
+        );
+        assert_eq!(
+            reasons,
+            vec![
+                StaleConfigReason::MissingTvPlatform,
+                StaleConfigReason::SwayidleBackend
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_platform_value_is_not_stale() {
+        // `load_config` rejects an invalid platform value; detection must not
+        // misreport it as stale — only absent/bscpylgtv are stale signals.
+        let reasons = stale_config_reasons("tvs_primary_platform=not-a-platform\n");
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn require_current_config_passes_clean_config_and_rejects_stale() {
+        let dir = std::env::temp_dir();
+        let stale_path = dir.join("lg-buddy-stale-test.env");
+        let clean_path = dir.join("lg-buddy-clean-test.env");
+        std::fs::write(&stale_path, "tvs_primary_input=HDMI_2\n").unwrap();
+        std::fs::write(
+            &clean_path,
+            "tvs_primary_platform=lg_webos\nscreen_backend=wayland\n",
+        )
+        .unwrap();
+
+        assert!(crate::config::require_current_config(&clean_path).is_ok());
+        let err = crate::config::require_current_config(&stale_path).unwrap_err();
+        let message = err.to_string();
+        assert!(message.starts_with("v2 migration required"));
+        assert!(message.contains("tvs_primary_platform is not set"));
+        std::fs::remove_file(stale_path).ok();
+        std::fs::remove_file(clean_path).ok();
     }
 }
