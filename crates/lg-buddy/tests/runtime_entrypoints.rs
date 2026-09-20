@@ -30,7 +30,7 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
     let config = TestConfigFile::new("monitor-diagnostics-config");
     config.write_sample("HDMI_2");
     let original = format!(
-        "{}\nscreen_honor_idle_inhibitors=enabled\n",
+        "{}\ntvs_primary_platform=lg_webos\nscreen_honor_idle_inhibitors=enabled\n",
         fs::read_to_string(config.path()).unwrap()
     );
     fs::write(config.path(), &original).unwrap();
