@@ -85,6 +85,13 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_restore_policy={policy}"));
     }
 
+    pub fn set_screen_backend(&self, backend: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_backend={backend}"));
+    }
+
     pub fn set_screen_idle_blank(&self, policy: &str) {
         self.config
             .as_ref()

@@ -114,6 +114,11 @@ fn existing_tv_platform(world: &mut LgBuddyWorld, platform: String) {
     world.select_tv_platform(&platform);
 }
 
+#[given(regex = r#"the existing config sets screen backend \"([a-z]+)\""#)]
+fn existing_screen_backend(world: &mut LgBuddyWorld, backend: String) {
+    world.set_screen_backend(&backend);
+}
+
 #[given("a valid native TV access token is stored")]
 fn valid_native_access_token(world: &mut LgBuddyWorld) {
     world.store_valid_native_access_token();
