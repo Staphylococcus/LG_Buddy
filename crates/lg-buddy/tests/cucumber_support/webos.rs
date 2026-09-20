@@ -65,6 +65,7 @@ impl MockWebOsTv {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_version_screen_off(version: MockWebOsVersion, input: &str) -> Self {
         let input = match input {
             "HDMI_2" => WebOsTestInput::Hdmi2,

@@ -678,6 +678,7 @@ impl WebOsTestServer {
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn screen_off_tls_at(
         version: WebOsTestVersion,
         input: WebOsTestInput,
