@@ -1,4 +1,16 @@
 mod support;
+#[path = "cucumber_support/webos.rs"]
+mod web_os;
+
+mod auth {
+    pub use lg_buddy::auth::SystemUser;
+}
+
+mod platform_access_token {
+    pub use lg_buddy::platform_access_token::{
+        PlatformAccessToken, PlatformAccessTokenStore,
+    };
+}
 
 use lg_buddy::commands::{run_screen_off, run_screen_on, run_system_resume};
 use lg_buddy::session::runner::{RuntimeActionExecutor, SessionEventDispatcher};
@@ -1055,18 +1067,24 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-lifecycle-logind-sleep");
     logind.reset();
-    let mock = MockBscpylgtv::new("entrypoint-lifecycle-sleep-tv");
-    mock.set_input("HDMI_2");
-    let wrapper = mock.command_wrapper("entrypoint-lifecycle-sleep-wrapper");
+    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
 
     let config = TestConfigFile::new("entrypoint-lifecycle-sleep-config");
     config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
 
     let runtime = RuntimeStateLayout::new("entrypoint-lifecycle-sleep-runtime");
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_LIFECYCLE_MONITOR_TEST_EVENT_LIMIT", "1");
 
@@ -1080,10 +1098,10 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
     });
 
     wait_until(Duration::from_secs(4), || {
-        let calls = mock.calls();
-        let power_off_count = calls
+        let uris = tv.snapshot().request_uris;
+        let power_off_count = uris
             .iter()
-            .filter(|call| call.command == "power_off")
+            .filter(|uri| uri.as_str() == "ssap://system/turnOff")
             .count();
 
         if power_off_count == 0 {
@@ -1093,13 +1111,25 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
         power_off_count == 1 && runtime.system_marker_path().exists()
     });
 
+    let uris = tv.snapshot().request_uris;
     assert_eq!(
-        mock.calls()
-            .iter()
-            .map(|call| call.command.as_str())
-            .collect::<Vec<_>>(),
-        vec!["get_input", "power_off"]
+        uris.iter().filter(|uri| uri.as_str() == "ssap://system/turnOff").count(),
+        1,
+        "pre-sleep must power the TV off exactly once"
     );
+    assert_eq!(
+        uris
+            .iter()
+            .filter(|uri| uri.as_str() == "ssap://com.webos.applicationManager/getForegroundAppInfo")
+            .count(),
+        1,
+        "pre-sleep must confirm the current input before power-off"
+    );
+    assert!(
+        !uris.iter().any(|uri| uri.as_str() == "ssap://tv/switchInput"),
+        "pre-sleep must not switch inputs: {uris:?}"
+    );
+    assert!(tv.snapshot().power_off_count == 1);
     runtime.assert_system_marker_exists();
 
     let (result, output) = done_rx

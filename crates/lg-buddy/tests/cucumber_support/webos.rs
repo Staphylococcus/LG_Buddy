@@ -45,6 +45,7 @@ pub struct MockWebOsTvSnapshot {
     pub power_off_count: u64,
     pub pairing_prompt_count: u64,
     pub registration_tokens: Vec<Option<String>>,
+    pub request_uris: Vec<String>,
 }
 
 pub struct MockWebOsTv {
@@ -123,6 +124,7 @@ impl MockWebOsTv {
             power_off_count: snapshot.power_off_count,
             pairing_prompt_count: snapshot.pairing_prompt_count,
             registration_tokens: snapshot.registration_tokens,
+            request_uris: snapshot.request_uris,
         }
     }
 
