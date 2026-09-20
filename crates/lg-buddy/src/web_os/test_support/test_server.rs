@@ -678,6 +678,21 @@ impl WebOsTestServer {
         )
     }
 
+    pub(crate) fn screen_off_tls_at(
+        version: WebOsTestVersion,
+        input: WebOsTestInput,
+        address: std::net::SocketAddr,
+    ) -> Self {
+        Self::spawn_at(
+            version,
+            WebOsPowerState::ScreenOff,
+            input,
+            WebOsTestScenario::StatefulTv,
+            WebOsTestTransport::Tls,
+            address,
+        )
+    }
+
     fn spawn(
         version: WebOsTestVersion,
         power_state: WebOsPowerState,

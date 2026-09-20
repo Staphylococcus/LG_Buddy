@@ -65,6 +65,22 @@ impl MockWebOsTv {
         }
     }
 
+    pub fn with_version_screen_off(version: MockWebOsVersion, input: &str) -> Self {
+        let input = match input {
+            "HDMI_2" => WebOsTestInput::Hdmi2,
+            "HDMI_3" => WebOsTestInput::Hdmi3,
+            other => panic!("no hardware-backed native WebOS fixture exists for `{other}`"),
+        };
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, WEBOS_WSS_PORT));
+        Self {
+            server: WebOsTestServer::screen_off_tls_at(
+                version.test_version(),
+                input,
+                address,
+            ),
+        }
+    }
+
     pub fn reject_pairing(&self) {
         self.server.set_scenario(WebOsTestScenario::PairingRejected);
     }

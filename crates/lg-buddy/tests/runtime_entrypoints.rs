@@ -263,19 +263,27 @@ fn monitor_recovers_gnome_activity_after_the_service_disappears() {
     bus.set_idle_monitor_available(true);
     let logind = MockSystemLogind::new("entrypoint-gnome-recovery-logind");
     logind.reset();
-    let mock = MockBscpylgtv::new("entrypoint-gnome-recovery-tv");
-    mock.set_input("HDMI_2");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-gnome-recovery-wrapper");
+    let tv = web_os::MockWebOsTv::with_version_screen_off(
+        web_os::MockWebOsVersion::WebOs24Version92261,
+        "HDMI_2",
+    );
     let config = TestConfigFile::new("entrypoint-gnome-recovery-config");
     config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
     let runtime = RuntimeStateLayout::new("entrypoint-gnome-recovery-runtime");
     runtime.create_session_marker();
     let log_path = config.path().with_file_name("monitor.log");
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
         .arg("monitor")
         .env("LG_BUDDY_CONFIG", config.path())
-        .env("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path())
         .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
         .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
         .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
@@ -300,19 +308,28 @@ fn monitor_recovers_gnome_activity_after_the_service_disappears() {
     });
     bus.schedule_user_activity(Duration::ZERO);
     wait_until(Duration::from_secs(2), || {
-        mock.calls()
+        tv.snapshot()
+            .request_uris
             .iter()
-            .any(|call| call.command == "turn_screen_on")
+            .any(|uri| {
+                uri.as_str()
+                    == "ssap://com.webos.service.tvpower/power/turnOnScreen"
+            })
     });
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success(), "{result:?}\n{}", output());
     assert_eq!(output().matches("Using GNOME backend").count(), 1);
+    let uris = tv.snapshot().request_uris;
     assert_eq!(
-        mock.calls()
+        uris
             .iter()
-            .filter(|call| call.command == "turn_screen_on")
+            .filter(|uri| {
+                uri.as_str()
+                    == "ssap://com.webos.service.tvpower/power/turnOnScreen"
+            })
             .count(),
-        1
+        1,
+        "recovery must unblank exactly once: {uris:?}"
     );
     runtime.assert_session_marker_absent();
 }
