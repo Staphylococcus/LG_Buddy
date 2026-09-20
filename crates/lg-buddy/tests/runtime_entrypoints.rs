@@ -1,4 +1,5 @@
 mod support;
+#[allow(dead_code)] // Shared process fixture; methods it does not use belong to the cucumber binary.
 #[path = "cucumber_support/webos.rs"]
 mod web_os;
 
@@ -205,11 +206,10 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
     powerdevil.delay_next_query(Duration::from_millis(600));
     let logind = MockSystemLogind::new("monitor-inhibition-resume-logind");
     logind.reset();
-    let mock = MockBscpylgtv::new("monitor-inhibition-resume-tv");
-    mock.set_input("HDMI_2");
-    let wrapper = mock.command_wrapper("monitor-inhibition-resume-wrapper");
+    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
     let config = TestConfigFile::new("monitor-inhibition-resume-config");
     config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
     let contents = fs::read_to_string(config.path()).unwrap();
     fs::write(
         config.path(),
@@ -218,11 +218,17 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
         ),
     )
     .unwrap();
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
     let runtime = RuntimeStateLayout::new("monitor-inhibition-resume-runtime");
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
         .arg("monitor")
         .env("LG_BUDDY_CONFIG", config.path())
-        .env("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path())
         .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
         .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
         .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
@@ -247,9 +253,17 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
         powerdevil.query_count() >= 2,
         "resume must trigger a fresh query"
     );
+    let uris = tv.snapshot().request_uris;
     assert!(
-        mock.calls().is_empty(),
-        "invalidation must neither blank nor dispatch sleep/wake TV actions"
+        !uris
+            .iter()
+            .any(|uri| matches!(
+                uri.as_str(),
+                "ssap://system/turnOff"
+                    | "ssap://tv/switchInput"
+                    | "ssap://com.webos.service.tvpower/power/turnOnScreen"
+            )),
+        "invalidation must neither blank nor dispatch sleep/wake TV actions: {uris:?}"
     );
     runtime.assert_session_marker_absent();
 }
@@ -1007,7 +1021,7 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-lifecycle-logind");
     logind.reset();
-    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_3");
+    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
     let nm_online = MockNmOnline::new("entrypoint-lifecycle-nm-online");
     let nm_online_wrapper = nm_online.command_wrapper("entrypoint-lifecycle-nm-online-wrapper");
 
@@ -1069,6 +1083,10 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
             .count(),
         1,
         "wake restore must switch input exactly once: {uris:?}"
+    );
+    assert_eq!(
+        tv.snapshot().input, "HDMI_3",
+        "restore must land on the configured input (mock started on HDMI_2)"
     );
     runtime.assert_system_marker_absent();
     runtime.assert_system_sleep_attempt_marker_absent();
@@ -1156,6 +1174,12 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
     assert!(
         !uris.iter().any(|uri| uri.as_str() == "ssap://tv/switchInput"),
         "pre-sleep must not switch inputs: {uris:?}"
+    );
+    assert!(
+        !uris
+            .iter()
+            .any(|uri| uri.as_str() == "ssap://com.webos.service.tvpower/power/turnOffScreen"),
+        "pre-sleep must not blank the screen: {uris:?}"
     );
     assert!(tv.snapshot().power_off_count == 1);
     runtime.assert_system_marker_exists();
