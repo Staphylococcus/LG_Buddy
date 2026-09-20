@@ -3,15 +3,17 @@ Feature: Power
 
   Scenario: Power on restores the configured input using cold-boot behavior
     Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
     And LG Buddy session runtime is isolated
-    And a mock TV client
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
     And nm-online succeeds
     And startup delays are disabled
     When I run the command "power on"
     Then the command succeeds
-    And nm-online was invoked with "-q -t 60"
+    And stdout contains "TV turned on and set to HDMI_2."
     And the TV input is HDMI_2
-    And the TV client received "set_input"
+    And the native TV registration tokens are "webos-test-access-token"
 
   Scenario: Power off uses shutdown ownership behavior
     Given a temporary LG Buddy config using input HDMI_3
