@@ -988,13 +988,21 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-lifecycle-logind");
     logind.reset();
-    let mock = MockBscpylgtv::new("entrypoint-lifecycle-tv");
-    let wrapper = mock.command_wrapper("entrypoint-lifecycle-wrapper");
+    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_3");
     let nm_online = MockNmOnline::new("entrypoint-lifecycle-nm-online");
     let nm_online_wrapper = nm_online.command_wrapper("entrypoint-lifecycle-nm-online-wrapper");
 
     let config = TestConfigFile::new("entrypoint-lifecycle-config");
-    config.write_sample("HDMI_4");
+    config.write_sample("HDMI_3");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
 
     let runtime = RuntimeStateLayout::new("entrypoint-lifecycle-runtime");
     runtime.create_system_marker();
@@ -1002,7 +1010,6 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_NM_ONLINE", nm_online_wrapper.path());
     env.set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
@@ -1020,10 +1027,10 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     });
 
     wait_until(Duration::from_secs(4), || {
-        let calls = mock.calls();
-        let set_input_count = calls
+        let uris = tv.snapshot().request_uris;
+        let set_input_count = uris
             .iter()
-            .filter(|call| call.command == "set_input")
+            .filter(|uri| uri.as_str() == "ssap://tv/switchInput")
             .count();
 
         if set_input_count == 0 {
@@ -1035,12 +1042,14 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
             && !runtime.system_sleep_attempt_marker_path().exists()
     });
 
+    let uris = tv.snapshot().request_uris;
     assert_eq!(
-        mock.calls()
+        uris
             .iter()
-            .filter(|call| call.command == "set_input")
+            .filter(|uri| uri.as_str() == "ssap://tv/switchInput")
             .count(),
-        1
+        1,
+        "wake restore must switch input exactly once: {uris:?}"
     );
     runtime.assert_system_marker_absent();
     runtime.assert_system_sleep_attempt_marker_absent();
