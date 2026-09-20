@@ -373,6 +373,10 @@ fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
 
 #[given("the next input restore attempt powers the TV back on")]
 fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
+    if world.has_native_tv() {
+        world.webos_tv().simulate_wake(std::time::Duration::from_millis(0));
+        return;
+    }
     world.tv_mut().queue_set_input_wake_success();
 }
 

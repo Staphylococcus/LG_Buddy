@@ -338,6 +338,10 @@ exit 1\n",
         self.webos_tv.as_ref().expect("native webOS TV configured")
     }
 
+    pub fn has_native_tv(&self) -> bool {
+        self.webos_tv.is_some()
+    }
+
     pub fn webos_snapshot(&self) -> MockWebOsTvSnapshot {
         self.webos_tv().snapshot()
     }
