@@ -281,6 +281,10 @@ exit 1\n",
             .interrupt_restore_and_ack_input_without_unblanking();
     }
 
+    pub fn power_off_native_tv(&self) {
+        self.webos_tv().power_off_now();
+    }
+
     pub fn reject_native_set_mute(&self) {
         self.webos_tv().reject_set_mute();
     }

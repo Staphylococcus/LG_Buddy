@@ -431,6 +431,38 @@ Feature: GNOME monitor
     And the session marker is absent
     And the TV screen is visible
 
+  # Native port of the legacy "restore failure does not retry continuously"
+  # scenario. The TV is left blanked by `screen off` (ownership marker
+  # preserved), then the TV powers off and becomes unreachable: every
+  # connection attempt of the six bounded wake attempts is refused. The
+  # monitor performs a single bounded restore, logs the bounded-exhaustion
+  # line, and stops: it will only retry on the next session-active event,
+  # never spinning in a retry loop. Call-count asserts are a bscpylgtv
+  # concept; the native path proves the outcome via the bounded-exhaustion
+  # error ("screen-on wake sequence failed after 6 attempts") plus the
+  # preserved marker and the still-off TV.
+  Scenario: GNOME restore failure does not retry continuously while activity stays active
+    Given a temporary LG Buddy config using input HDMI_3
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    When I run the command "screen off"
+    Then the command succeeds
+    And the session marker exists
+    And the TV screen is blanked
+    Given the native webOS TV powers off
+    And screen wake delays are disabled
+    And GNOME reports the session active
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session event `active` requests screen restore."
+    And stdout contains "screen restore action failed. screen-on wake sequence failed after 6 attempts"
+    And the session marker exists
+    And the TV is powered off
+
   Scenario: Native activity works without an inhibition service
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds

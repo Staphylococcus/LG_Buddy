@@ -106,6 +106,13 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::SetAudioMuteRejected);
     }
 
+    /// Power the TV off as if unplugged: live sessions drop and new connections
+    /// are refused, so the TV is unreachable until an external wake.
+    #[allow(dead_code)] // Used by the process fixture, which shares this adapter.
+    pub fn power_off_now(&self) {
+        self.server.power_off_now();
+    }
+
     pub fn set_volume(&self, volume: i16) {
         self.server.set_volume(volume);
     }

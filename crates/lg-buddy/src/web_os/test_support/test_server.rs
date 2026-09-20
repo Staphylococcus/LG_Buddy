@@ -876,6 +876,17 @@ impl WebOsTestServer {
             .ready_at = None;
     }
 
+    /// Power the TV off as if it were unplugged: existing sessions drop and
+    /// new connections are refused until an external wake.
+    #[allow(dead_code)]
+    pub(crate) fn power_off_now(&self) {
+        self.close_active_connections();
+        let mut runtime = self.runtime.lock().expect("webOS test server state");
+        if runtime.tv.power_state != WebOsPowerState::PowerOff {
+            runtime.tv.power_state = WebOsPowerState::PowerOff;
+        }
+    }
+
     /// Close existing connections between operations, leaving the TV available.
     #[allow(dead_code)]
     pub(crate) fn close_active_connections(&self) {

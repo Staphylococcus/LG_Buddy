@@ -144,6 +144,11 @@ fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
     world.make_native_restore_ambiguous();
 }
 
+#[given("the native webOS TV powers off")]
+fn native_webos_tv_powers_off(world: &mut LgBuddyWorld) {
+    world.power_off_native_tv();
+}
+
 #[given("the native webOS TV rejects mute changes")]
 fn native_webos_tv_rejects_mute_changes(world: &mut LgBuddyWorld) {
     world.reject_native_set_mute();
