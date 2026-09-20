@@ -213,7 +213,9 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
     let contents = fs::read_to_string(config.path()).unwrap();
     fs::write(
         config.path(),
-        format!("{contents}\nscreen_honor_idle_inhibitors=enabled\n"),
+        format!(
+            "{contents}\ntvs_primary_platform=lg_webos\nscreen_honor_idle_inhibitors=enabled\n"
+        ),
     )
     .unwrap();
     let runtime = RuntimeStateLayout::new("monitor-inhibition-resume-runtime");
