@@ -345,8 +345,6 @@ Feature: GNOME monitor
     And reboot detection reports no pending reboot
     And the executable PATH is isolated
     And GNOME Shell is available
-    When I run the command "screen off"
-    Then the command succeeds
     When I run the command "power off"
     Then the command succeeds
     Given GNOME requests screen wake
@@ -354,6 +352,7 @@ Feature: GNOME monitor
     And the next input restore attempt powers the TV back on
     When I run the command "monitor"
     Then the command succeeds
+    And stdout contains "Aggressive restore policy is enabled"
     And stdout contains "Screen unblank succeeded."
     And the session marker is absent
     And the TV is powered on
