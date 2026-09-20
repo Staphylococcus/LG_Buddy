@@ -399,6 +399,38 @@ Feature: GNOME monitor
     And the session marker is absent
     And the TV screen is visible
 
+  # Native port of the legacy screen-visibility verification: the monitor's
+  # session-active restore hits an interrupting first restore session that
+  # acks the input write without unblanking, so the product falls back to the
+  # full-wake retry path and only clears the marker once visibility is proven.
+  # Call-count assertions are a bscpylgtv concept; the native path asserts the
+  # product outcome (screen visible, marker cleared) and the recovery trace.
+  Scenario: GNOME activity verifies legacy screen visibility after an input acknowledgement
+    Given a temporary LG Buddy config using input HDMI_3
+    And the existing config selects TV platform "lg_webos"
+    And LG Buddy session runtime is isolated
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
+    And the executable PATH is isolated
+    And GNOME Shell is available
+    When I run the command "screen off"
+    Then the command succeeds
+    And the session marker exists
+    And the TV screen is blanked
+    Given the native webOS TV interrupts the first restore session and acknowledges input without unblanking
+    And screen wake delays are disabled
+    And GNOME reports the session active
+    When I run the command "monitor"
+    Then the command succeeds
+    And stdout contains "Session event `active` requests screen restore."
+    And stdout contains "Screen visibility could not be verified. Falling back to full wake."
+    And stdout contains "operations: direct_unblank=failed kind=screen_not_visible"
+    And stdout contains "input_attempt_1=failed kind=screen_not_visible"
+    And stdout contains "recovery_unblank_1=succeeded"
+    And stdout contains "input_retry_1=succeeded"
+    And the session marker is absent
+    And the TV screen is visible
+
   Scenario: Native activity works without an inhibition service
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
