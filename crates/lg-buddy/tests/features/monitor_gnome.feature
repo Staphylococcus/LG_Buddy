@@ -443,8 +443,11 @@ Feature: GNOME monitor
   # line, and stops: activity stays active after exhaustion, but it only
   # retries on the next restore event, never spinning in a retry loop.
   # The exhaustion line appearing exactly once proves the single bounded
-  # cycle: a second restore cycle would emit it again, and the "after 6
-  # attempts" in the message carries the bounded-retry cap.
+  # cycle: a second restore cycle would emit it again. The "after 6
+  # attempts" text alone is a constant, not an observed count, so the
+  # bounded-attempt cap is proven by the connection count (15: 1 setup +
+  # 2 initial unblank+verify + 12 from six input attempts+verify, no
+  # continuous retry), which stays flat when the monitor stays open.
   Scenario: GNOME restore failure does not retry continuously while activity stays active
     Given a temporary LG Buddy config using input HDMI_3
     And the idle timeout is 1 seconds
@@ -466,6 +469,7 @@ Feature: GNOME monitor
     When I run the command "monitor"
     Then the command succeeds
     And stdout contains "screen restore action failed. screen-on wake sequence failed after 6 attempts" exactly 1 times
+    And the native TV connection count is 15
     And the session marker exists
     And the TV is powered off
 
