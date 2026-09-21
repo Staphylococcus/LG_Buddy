@@ -485,7 +485,7 @@ fn command_completes_within_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     );
 }
 
-#[then(regex = r#"stdout contains "([^"]+)""#)]
+#[then(regex = r#"^stdout contains "([^"]+)"$"#)]
 fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
     assert!(
         world.command_result().stdout.contains(&expected),
@@ -499,6 +499,17 @@ fn stdout_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
     assert!(
         !world.command_result().stdout.contains(&unexpected),
         "stdout was: {}",
+        world.command_result().stdout
+    );
+}
+
+#[then(regex = r#"^stdout contains "([^"]+)" exactly (\d+) times$"#)]
+fn stdout_contains_exactly(world: &mut LgBuddyWorld, expected: String, times: u32) {
+    let count = world.command_result().stdout.matches(&expected).count();
+    assert_eq!(
+        count as u32,
+        times,
+        "expected `{expected}` {times} time(s), saw {count}; stdout was:\n{}",
         world.command_result().stdout
     );
 }
