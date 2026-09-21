@@ -403,8 +403,10 @@ Feature: GNOME monitor
   # session-active restore hits an interrupting first restore session that
   # acks the input write without unblanking, so the product falls back to the
   # full-wake retry path and only clears the marker once visibility is proven.
-  # Call-count assertions are a bscpylgtv concept; the native path asserts the
-  # product outcome (screen visible, marker cleared) and the recovery trace.
+  # product outcome (screen visible, marker cleared), the recovery trace, and
+  # a no-extra-requests bound: exactly two turnOnScreen and two switchInput
+  # requests, the native stand-in for the legacy `turn_screen_on` x2 /
+  # `set_input` x2 call-count asserts.
   Scenario: GNOME activity verifies legacy screen visibility after an input acknowledgement
     Given a temporary LG Buddy config using input HDMI_3
     And the existing config selects TV platform "lg_webos"
@@ -430,6 +432,8 @@ Feature: GNOME monitor
     And stdout contains "input_retry_1=succeeded"
     And the session marker is absent
     And the TV screen is visible
+    And the native webOS TV received exactly 2 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+    And the native webOS TV received exactly 2 requests to "ssap://tv/switchInput"
 
   # Native port of the legacy "restore failure does not retry continuously"
   # scenario. The TV is left blanked by `screen off` (ownership marker

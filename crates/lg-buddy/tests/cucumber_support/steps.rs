@@ -649,6 +649,16 @@ fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
     );
 }
 
+#[then(regex = r#"^the native webOS TV received exactly (\d+) requests to "([^"]+)""#)]
+fn native_webos_received_exactly(world: &mut LgBuddyWorld, expected: usize, uri: String) {
+    let uris = world.webos_snapshot().request_uris;
+    let actual = uris.iter().filter(|u| *u == &uri).count();
+    assert_eq!(
+        actual, expected,
+        "expected {uri} {expected} time(s), saw {actual}; URIs were:\n{uris:?}"
+    );
+}
+
 #[then("a valid native TV access token is stored")]
 fn valid_native_access_token_is_stored(world: &mut LgBuddyWorld) {
     world.assert_valid_native_access_token();
