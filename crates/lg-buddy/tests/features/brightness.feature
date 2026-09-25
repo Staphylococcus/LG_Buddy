@@ -30,38 +30,41 @@ Feature: Brightness
 
   Scenario: Headless brightness remains usable without the GTK GUI
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
-    And the TV backlight is 58
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And the GTK brightness GUI is unavailable
     When I run the command "brightness get"
     Then the command succeeds
-    And stdout is "58"
+    And stdout is "90"
     When I run the command "brightness set 66"
     Then the command succeeds
     And the TV brightness is 66
+    And the native webOS TV received exactly 1 requests to "ssap://system.notifications/createAlert"
 
-  Scenario: Brightness get prints the current OLED brightness
+  Scenario: Brightness get requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_2
     And a mock TV client
     And the TV backlight is 58
     And a working GTK brightness GUI
     When I run the command "brightness get"
-    Then the command succeeds
-    And stdout is "58"
+    Then the command fails
+    And stderr contains "v2 migration required"
     And the GTK brightness GUI was not launched
-    And the TV client received "get_picture_settings"
+    And the TV client did not receive "get_picture_settings"
     And the TV client did not receive "set_settings"
 
   Scenario: Brightness set updates OLED brightness without opening a dialog
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
-    And the TV backlight is 44
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And a working GTK brightness GUI
     When I run the command "brightness set 66"
     Then the command succeeds
     And stdout contains "Set OLED pixel brightness to 66%."
     And the GTK brightness GUI was not launched
-    And the TV client received "set_settings"
+    And the native webOS TV received exactly 1 requests to "ssap://system.notifications/createAlert"
     And the TV brightness is 66
 
   Scenario: Brightness set rejects invalid values before touching the TV

@@ -320,6 +320,8 @@ pub enum TvsReadFailure {
     NotConfigured,
     InvalidConfiguration,
     Internal,
+    MigrationRequired,
+    ProfileChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,10 +399,24 @@ impl TvsBackend for EnvironmentTvsBackend {
     fn read_model_name(&self, profile: &TvProfile) -> Result<String, TvsReadError> {
         let path = ConfigPathResolver::resolve_from_env()
             .map_err(|error| TvsReadError::internal(error.to_string()))?;
+        let current =
+            crate::config::load_current_config(&path).map_err(|error| config_load_error(&error))?;
+        // A queued operation belongs to the profile it was created for. Do not
+        // contact either the old TV or its replacement after settings change.
+        if profile.id() != &TvId::primary()
+            || current.config.tv_platform != profile.platform()
+            || current.config.tv_ip != profile.address()
+            || current.config.tv_mac != profile.mac()
+        {
+            return Err(TvsReadError::new(
+                TvsReadFailure::ProfileChanged,
+                "the configured TV changed before model lookup; refresh the saved profile",
+            ));
+        }
         let client = build_tv_client(
-            &path,
-            profile.address(),
-            profile.platform(),
+            &current.path,
+            current.config.tv_ip,
+            current.config.tv_platform,
             TvClientBuildOptions::production()
                 .stored_token_only()
                 .with_command_timeout(MODEL_READ_TIMEOUT),
@@ -410,6 +426,20 @@ impl TvsBackend for EnvironmentTvsBackend {
             .model_name()
             .map_err(|error| TvsReadError::internal(error.to_string()))
     }
+}
+
+/// A configuration load failure keeps TV work out entirely: every variant is
+/// a typed error, and none of them falls through to the TV client.
+fn config_load_error(error: &crate::config::ConfigLoadError) -> TvsReadError {
+    use crate::config::ConfigLoadError;
+    let failure = match error {
+        ConfigLoadError::Missing => TvsReadFailure::NotConfigured,
+        ConfigLoadError::Stale(_) => TvsReadFailure::MigrationRequired,
+        ConfigLoadError::Unreadable(_) | ConfigLoadError::Parse(_) => {
+            TvsReadFailure::InvalidConfiguration
+        }
+    };
+    TvsReadError::new(failure, error.to_string())
 }
 
 pub(crate) fn read_profiles_from_store(
@@ -1058,6 +1088,14 @@ fn tvs_error(failure: TvsReadFailure) -> UserFacingError {
         TvsReadFailure::Internal => UserFacingError::new(
             "LG Buddy could not load its TVs.",
             "Retry. If this continues, check the LG Buddy logs.",
+        ),
+        TvsReadFailure::MigrationRequired => UserFacingError::new(
+            "LG Buddy configuration needs updating.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
+        ),
+        TvsReadFailure::ProfileChanged => UserFacingError::new(
+            "The saved TV settings changed.",
+            "Refresh the TVs view, then retry.",
         ),
     }
 }

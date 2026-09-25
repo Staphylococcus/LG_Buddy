@@ -571,6 +571,8 @@ struct WebOsTestRuntime {
     pairing_prompt_count: u64,
     registration_tokens: Vec<Option<String>>,
     request_uris: Vec<String>,
+    rejected_request_uri: Option<String>,
+    first_request_fault: Option<(String, Duration, bool)>,
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
     restore_session_interruption_injected: bool,
@@ -678,6 +680,22 @@ impl WebOsTestServer {
         )
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn screen_off_tls_at(
+        version: WebOsTestVersion,
+        input: WebOsTestInput,
+        address: std::net::SocketAddr,
+    ) -> Self {
+        Self::spawn_at(
+            version,
+            WebOsPowerState::ScreenOff,
+            input,
+            WebOsTestScenario::StatefulTv,
+            WebOsTestTransport::Tls,
+            address,
+        )
+    }
+
     fn spawn(
         version: WebOsTestVersion,
         power_state: WebOsPowerState,
@@ -720,6 +738,8 @@ impl WebOsTestServer {
             pairing_prompt_count: 0,
             registration_tokens: Vec::new(),
             request_uris: Vec::new(),
+            rejected_request_uri: None,
+            first_request_fault: None,
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
             restore_session_interruption_injected: false,
@@ -830,6 +850,34 @@ impl WebOsTestServer {
             .scenario = scenario;
     }
 
+    /// Inject a request failure without changing unrelated TV capabilities.
+    #[allow(dead_code)]
+    pub(crate) fn reject_request(&self, uri: Option<&str>) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .rejected_request_uri = uri.map(str::to_owned);
+    }
+
+    /// Delay or reject only the first matching request, preserving other capabilities.
+    #[allow(dead_code)]
+    pub(crate) fn fault_first_request(&self, uri: &str, delay: Duration, reject: bool) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .first_request_fault = Some((uri.to_owned(), delay, reject));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_backlight(&self, backlight: u8) {
+        assert!(backlight <= 100);
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .backlight = json!(backlight);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_input(&self, input: WebOsTestInput) {
         self.runtime
@@ -858,6 +906,28 @@ impl WebOsTestServer {
             .lock()
             .expect("webOS test server state")
             .ready_at = None;
+    }
+
+    /// Power the TV off as if it were unplugged: existing sessions drop and
+    /// new connections are refused until an external wake.
+    #[allow(dead_code)]
+    pub(crate) fn power_off_now(&self) {
+        self.close_active_connections();
+        let mut runtime = self.runtime.lock().expect("webOS test server state");
+        if runtime.tv.power_state != WebOsPowerState::PowerOff {
+            runtime.tv.power_state = WebOsPowerState::PowerOff;
+        }
+    }
+
+    /// Blank the screen while leaving the TV powered on and reachable, so
+    /// restore flows can unblank it.
+    #[allow(dead_code)]
+    pub(crate) fn screen_off_now(&self) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .power_state = WebOsPowerState::ScreenOff;
     }
 
     /// Close existing connections between operations, leaving the TV available.
@@ -1000,6 +1070,45 @@ fn serve_connection<S>(
                     .to_string(),
             );
 
+        let fault = {
+            let mut runtime = runtime.lock().expect("webOS test server state");
+            if runtime
+                .first_request_fault
+                .as_ref()
+                .is_some_and(|(uri, _, _)| request["uri"] == *uri)
+            {
+                runtime.first_request_fault.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, delay, _)) = &fault {
+            let deadline = Instant::now() + *delay;
+            while Instant::now() < deadline {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let rejected = fault.is_some_and(|(_, _, reject)| reject)
+            || runtime
+                .lock()
+                .expect("webOS test server state")
+                .rejected_request_uri
+                .as_deref()
+                .is_some_and(|uri| request["uri"] == uri);
+        if rejected {
+            send_json(
+                &mut socket,
+                webos_error(
+                    request["id"].as_str().expect("webOS request ID"),
+                    "500 injected request failure",
+                    json!({}),
+                ),
+            );
+            continue;
+        }
         let scenario = runtime.lock().expect("webOS test server state").scenario;
         if scenario == WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff {
             let should_interrupt = {

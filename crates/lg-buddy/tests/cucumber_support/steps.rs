@@ -114,6 +114,11 @@ fn existing_tv_platform(world: &mut LgBuddyWorld, platform: String) {
     world.select_tv_platform(&platform);
 }
 
+#[given(regex = r#"the existing config sets screen backend \"([a-z]+)\""#)]
+fn existing_screen_backend(world: &mut LgBuddyWorld, backend: String) {
+    world.set_screen_backend(&backend);
+}
+
 #[given("a valid native TV access token is stored")]
 fn valid_native_access_token(world: &mut LgBuddyWorld) {
     world.store_valid_native_access_token();
@@ -137,6 +142,16 @@ fn native_webos_tv_stalls_first_response(world: &mut LgBuddyWorld) {
 #[given("the native webOS TV interrupts the first restore session and acknowledges input without unblanking")]
 fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
     world.make_native_restore_ambiguous();
+}
+
+#[given("the native webOS TV powers off")]
+fn native_webos_tv_powers_off(world: &mut LgBuddyWorld) {
+    world.power_off_native_tv();
+}
+
+#[given("the native webOS TV screen is blanked")]
+fn native_webos_tv_screen_blanked(world: &mut LgBuddyWorld) {
+    world.blank_native_tv_screen();
 }
 
 #[given("the native webOS TV rejects mute changes")]
@@ -368,6 +383,12 @@ fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
 
 #[given("the next input restore attempt powers the TV back on")]
 fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
+    if world.has_native_tv() {
+        world
+            .webos_tv()
+            .simulate_wake(std::time::Duration::from_millis(0));
+        return;
+    }
     world.tv_mut().queue_set_input_wake_success();
 }
 
@@ -471,7 +492,7 @@ fn command_completes_within_seconds(world: &mut LgBuddyWorld, seconds: u64) {
     );
 }
 
-#[then(regex = r#"stdout contains "([^"]+)""#)]
+#[then(regex = r#"^stdout contains "([^"]+)"$"#)]
 fn stdout_contains(world: &mut LgBuddyWorld, expected: String) {
     assert!(
         world.command_result().stdout.contains(&expected),
@@ -485,6 +506,17 @@ fn stdout_does_not_contain(world: &mut LgBuddyWorld, unexpected: String) {
     assert!(
         !world.command_result().stdout.contains(&unexpected),
         "stdout was: {}",
+        world.command_result().stdout
+    );
+}
+
+#[then(regex = r#"^stdout contains "([^"]+)" exactly (\d+) times$"#)]
+fn stdout_contains_exactly(world: &mut LgBuddyWorld, expected: String, times: u32) {
+    let count = world.command_result().stdout.matches(&expected).count();
+    assert_eq!(
+        count as u32,
+        times,
+        "expected `{expected}` {times} time(s), saw {count}; stdout was:\n{}",
         world.command_result().stdout
     );
 }
@@ -621,6 +653,16 @@ fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
     assert!(
         calls.iter().all(|call| call != &command),
         "calls were: {calls:?}"
+    );
+}
+
+#[then(regex = r#"^the native webOS TV received exactly (\d+) requests to "([^"]+)""#)]
+fn native_webos_received_exactly(world: &mut LgBuddyWorld, expected: usize, uri: String) {
+    let uris = world.webos_snapshot().request_uris;
+    let actual = uris.iter().filter(|u| *u == &uri).count();
+    assert_eq!(
+        actual, expected,
+        "expected {uri} {expected} time(s), saw {actual}; URIs were:\n{uris:?}"
     );
 }
 

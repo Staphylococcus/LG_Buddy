@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::config::{load_current_config, resolve_config_path_from_env, Config, ConfigLoadError};
 use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
 use crate::presentation::brightness::{
     BrightnessFrontendUpdate, BrightnessIntent, BrightnessPresentation, UserFacingError,
@@ -14,6 +14,7 @@ use crate::tv::{
 pub enum BrightnessReadFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     Unreachable,
     Rejected,
@@ -57,6 +58,7 @@ pub trait BrightnessReader: Send + Sync + 'static {
 pub enum BrightnessWriteFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     Unreachable,
     Rejected,
@@ -128,12 +130,17 @@ impl BrightnessReader for EnvironmentBrightnessReader {
         let config_path = resolve_config_path_from_env().map_err(|error| {
             BrightnessReadError::new(BrightnessReadFailure::NotConfigured, error.to_string())
         })?;
-        let config = load_config(&config_path).map_err(|error| {
-            BrightnessReadError::new(
-                BrightnessReadFailure::InvalidConfiguration,
-                error.to_string(),
-            )
+        let current = load_current_config(&config_path).map_err(|error| {
+            let failure = match &error {
+                ConfigLoadError::Missing => BrightnessReadFailure::NotConfigured,
+                ConfigLoadError::Stale(_) => BrightnessReadFailure::MigrationRequired,
+                ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+                    BrightnessReadFailure::InvalidConfiguration
+                }
+            };
+            BrightnessReadError::new(failure, error.to_string())
         })?;
+        let config = &current.config;
         let client = build_tv_client(
             &config_path,
             config.tv_ip,
@@ -147,7 +154,7 @@ impl BrightnessReader for EnvironmentBrightnessReader {
             )
         })?;
 
-        read_current_brightness_with(&config, &client).map_err(BrightnessReadError::from)
+        read_current_brightness_with(&current.config, &client).map_err(BrightnessReadError::from)
     }
 }
 
@@ -159,12 +166,17 @@ impl BrightnessWriter for EnvironmentBrightnessWriter {
         let config_path = resolve_config_path_from_env().map_err(|error| {
             BrightnessWriteError::new(BrightnessWriteFailure::NotConfigured, error.to_string())
         })?;
-        let config = load_config(&config_path).map_err(|error| {
-            BrightnessWriteError::new(
-                BrightnessWriteFailure::InvalidConfiguration,
-                error.to_string(),
-            )
+        let current = load_current_config(&config_path).map_err(|error| {
+            let failure = match &error {
+                ConfigLoadError::Missing => BrightnessWriteFailure::NotConfigured,
+                ConfigLoadError::Stale(_) => BrightnessWriteFailure::MigrationRequired,
+                ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+                    BrightnessWriteFailure::InvalidConfiguration
+                }
+            };
+            BrightnessWriteError::new(failure, error.to_string())
         })?;
+        let config = &current.config;
         let client = build_tv_client(
             &config_path,
             config.tv_ip,
@@ -178,7 +190,7 @@ impl BrightnessWriter for EnvironmentBrightnessWriter {
             )
         })?;
 
-        write_brightness_and_notify_with(&config, &client, &FreedesktopNotifier, brightness)
+        write_brightness_and_notify_with(&current.config, &client, &FreedesktopNotifier, brightness)
     }
 }
 
@@ -553,6 +565,10 @@ pub(crate) fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFaci
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV address and platform settings, then retry.",
         ),
+        BrightnessReadFailure::MigrationRequired => (
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
+        ),
         BrightnessReadFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",
             "Run `lg-buddy brightness get` in a terminal, accept a TV pairing prompt if shown, then retry.",
@@ -590,6 +606,10 @@ pub(crate) fn user_facing_write_error(failure: BrightnessWriteFailure) -> UserFa
         BrightnessWriteFailure::InvalidConfiguration => (
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV address and platform settings, then retry.",
+        ),
+        BrightnessWriteFailure::MigrationRequired => (
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
         ),
         BrightnessWriteFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",

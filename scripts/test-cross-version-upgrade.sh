@@ -243,7 +243,7 @@ install_previous() (
 
 # Exercise both legacy selectors against an actual installation of the pinned
 # archive. Refusal leaves the old runtime intact; a healthy environment survives
-# the upgrade byte-for-byte, with a final deprecation notice.
+# the upgrade byte-for-byte, but TV operations then require configuration migration.
 for platform in explicit missing; do
     (
         export HOME="$WORK_DIR/legacy-$platform/home"
@@ -280,18 +280,33 @@ EOF
         site_packages="$("$venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
         mkdir -p "$site_packages/bscpylgtv"
         printf '__version__ = "cross-version-smoke"\n' >"$site_packages/bscpylgtv/__init__.py"
+        export LG_BUDDY_TEST_LEGACY_CALL_LOG="$WORK_DIR/legacy-$platform-tv-calls"
         cat >"$venv/bin/bscpylgtvcommand" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"${LG_BUDDY_TEST_LEGACY_CALL_LOG:?}"
 printf '%s\n' '{"backlight":72}'
 EOF
         chmod 755 "$venv/bin/bscpylgtvcommand"
+        # Establish the historical behavior before installing the gated runtime.
+        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
+        [ -s "$LG_BUDDY_TEST_LEGACY_CALL_LOG" ] || fail "Historical runtime did not use the legacy TV fixture."
+        rm "$LG_BUDDY_TEST_LEGACY_CALL_LOG"
         find "$venv" -type f -exec sha256sum {} + | sort >"$WORK_DIR/legacy-$platform-venv.snapshot"
         bash "$CANDIDATE_BUNDLE/install.sh" --upgrade >"$WORK_DIR/legacy-$platform-upgrade.output" 2>&1
         grep -F -q 'will be removed in v2.0.0' "$WORK_DIR/legacy-$platform-upgrade.output"
         cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
         cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
         find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
-        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
+        if LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" \
+            "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get \
+            >"$WORK_DIR/legacy-$platform-brightness.output" 2>&1; then
+            fail "Upgraded runtime accepted a stale $platform platform configuration."
+        fi
+        grep -F -q 'v2 migration required' "$WORK_DIR/legacy-$platform-brightness.output"
+        [ "$(LG_BUDDY_CONFIG="$config" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" settings get tv.platform)" = bscpylgtv ]
+        [ ! -e "$LG_BUDDY_TEST_LEGACY_CALL_LOG" ] || fail "Upgrade or migration-gated command contacted the legacy TV."
+        cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
+        find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
     )
 done
 

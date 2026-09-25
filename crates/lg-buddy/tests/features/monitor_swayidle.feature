@@ -1,11 +1,15 @@
 Feature: swayidle monitor
-  LG Buddy should consume swayidle idle and activity facts through the shared monitor policy.
+  LG Buddy consumes the legacy swayidle backend through the shared monitor policy.
+  A stale 1.x config (or an explicit swayidle backend override) is rejected by the
+  migration gate before any runtime work; the no-delegation behavior is still
+  verified against a clean native config.
 
   Scenario: automatic monitoring never delegates to installed swayidle
     Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And the executable PATH is isolated
     And swayidle is installed
     And swayidle will emit an idle timeout
@@ -14,81 +18,19 @@ Feature: swayidle monitor
     Then the command succeeds
     And stdout contains "no native activity source available"
     And stdout does not contain "Using swayidle backend"
-    And the TV client did not receive "turn_screen_off"
-
-  Scenario: swayidle timeout blanks the configured TV input
-    Given a temporary LG Buddy config using input HDMI_2
-    And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
-    And the executable PATH is isolated
-    And swayidle is installed
-    And the backend override is "swayidle"
-    And swayidle will emit an idle timeout
-    When I run the command "monitor"
-    Then the command succeeds
-    And stdout contains "swayidle is a deprecated compatibility backend"
-    And the TV client received "get_input"
-    And the TV client received "turn_screen_off"
-    And the session marker exists
-    And the TV screen is blanked
-
-  Scenario: swayidle idle feeds the shared timed power-off policy
-    Given a temporary LG Buddy config using input HDMI_2
-    And the timed power-off grace is 0.2 seconds
-    And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
-    And the executable PATH is isolated
-    And swayidle is installed
-    And the backend override is "swayidle"
-    And swayidle will emit an idle timeout
-    And swayidle stays open for 0.5 seconds
-    When I run the command "monitor"
-    Then the command succeeds
-    And stdout contains "Timed power-off deadline reached"
-    And the TV client received "turn_screen_off" exactly 1 times
-    And the TV client received "power_off" exactly 1 times
-    And the session marker exists
-    And the TV is powered off
-
-  Scenario: swayidle resume restores a previously blanked TV output
-    Given a temporary LG Buddy config using input HDMI_3
-    And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
-    And the TV screen is blanked
-    And the session marker exists
-    And the executable PATH is isolated
-    And swayidle is installed
-    And the backend override is "swayidle"
-    And swayidle will emit a resume event
-    When I run the command "monitor"
-    Then the command succeeds
-    And the TV client received "turn_screen_on"
-    And the session marker is absent
     And the TV screen is visible
 
-  Scenario: swayidle resume wakes a TV that was manually powered off after LG Buddy blanked it
-    Given a temporary LG Buddy config using input HDMI_3
+  Scenario: a legacy swayidle backend override is rejected before runtime work
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And the existing config sets screen backend "swayidle"
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
-    And the TV screen is blanked
-    And the TV is powered off
-    And the session marker exists
-    And the next input restore attempt powers the TV back on
-    And screen wake delays are disabled
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And the executable PATH is isolated
     And swayidle is installed
-    And the backend override is "swayidle"
-    And swayidle will emit a resume event
     When I run the command "monitor"
-    Then the command succeeds
-    And stdout contains "Sending initial Wake-on-LAN packet"
-    And stdout contains "Wake attempt 1 succeeded."
-    And the TV client received "turn_screen_on"
-    And the TV client received "set_input"
-    And the session marker is absent
-    And the TV is powered on
+    Then the command fails
+    And stderr contains "v2 migration required"
+    And stderr contains "screen_backend=swayidle"
     And the TV screen is visible

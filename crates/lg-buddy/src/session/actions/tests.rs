@@ -386,3 +386,43 @@ fn runtime_owner_discards_client_when_profile_cannot_be_loaded() {
     assert_eq!(server.snapshot().connection_count, 2);
     server.finish();
 }
+
+#[test]
+fn stale_reload_discards_a_connected_client_before_action_side_effects() {
+    let _lock = test_lock().lock().expect("runtime action test lock");
+    let server = server_at(7);
+    let fixture = Fixture::new(Ipv4Addr::new(127, 0, 0, 7));
+    let _env = EnvGuard::for_fixture(&fixture);
+    let mut owner = RuntimeActionExecutor::default();
+    let config = fixture.config();
+    let options = TvClientBuildOptions::production().stored_token_only();
+    let original = fs::read(&fixture.config_path).unwrap();
+
+    for (key, value) in [
+        ("tvs_primary_platform", "bscpylgtv"),
+        ("screen_backend", "swayidle"),
+    ] {
+        read_input(&mut owner, &fixture.config_path, &config, options);
+        assert!(owner.tv_client.is_some());
+        let before = server.snapshot();
+        fixture.set_value(key, value);
+        let event = crate::events::RuntimeEvent::from_command(crate::Command::SleepPre).unwrap();
+        assert!(matches!(
+            owner.run_sleep_pre(&mut Vec::new(), event),
+            Err(crate::RunError::MigrationRequired(_))
+        ));
+        assert!(owner.tv_client.is_none());
+        assert_eq!(server.snapshot().request_uris, before.request_uris);
+        assert_eq!(server.snapshot().connection_count, before.connection_count);
+        assert!(!fixture.system_dir.exists());
+        assert!(!fixture.session_dir.exists());
+
+        fs::write(&fixture.config_path, &original).unwrap();
+        read_input(&mut owner, &fixture.config_path, &config, options);
+        assert_eq!(
+            server.snapshot().connection_count,
+            before.connection_count + 1
+        );
+    }
+    server.finish();
+}

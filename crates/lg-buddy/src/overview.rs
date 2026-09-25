@@ -11,7 +11,9 @@ use crate::brightness::{
     BrightnessWriteError, BrightnessWriteOutcome, BrightnessWriter, EnvironmentBrightnessReader,
     EnvironmentBrightnessWriter,
 };
-use crate::config::{load_config, resolve_config_path_from_env, HdmiInput, TvPlatform};
+use crate::config::{
+    load_current_config, resolve_config_path_from_env, ConfigLoadError, HdmiInput, TvPlatform,
+};
 use crate::presentation::brightness::{BrightnessPresentation, UserFacingError};
 use crate::presentation::overview::{
     AudioPresentation, OverviewPresentation, TvConnectionState, TvSummaryPresentation,
@@ -140,12 +142,17 @@ impl OverviewBackend for EnvironmentOverviewBackend {
         let path = resolve_config_path_from_env().map_err(|error| {
             OverviewSummaryError::new(OverviewSummaryFailure::NotConfigured, error.to_string())
         })?;
-        let config = load_config(&path).map_err(|error| {
-            OverviewSummaryError::new(
-                OverviewSummaryFailure::InvalidConfiguration,
-                error.to_string(),
-            )
+        let current = load_current_config(&path).map_err(|error| {
+            let failure = match &error {
+                ConfigLoadError::Missing => OverviewSummaryFailure::NotConfigured,
+                ConfigLoadError::Stale(_) => OverviewSummaryFailure::MigrationRequired,
+                ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+                    OverviewSummaryFailure::InvalidConfiguration
+                }
+            };
+            OverviewSummaryError::new(failure, error.to_string())
         })?;
+        let config = current.config;
         Ok(OverviewTvIdentity::new(
             config.tv_ip,
             config.input,
@@ -179,8 +186,14 @@ fn environment_client(
 ) -> Result<(crate::config::Config, crate::tv::SelectedTvClient), EnvironmentClientError> {
     let path = resolve_config_path_from_env()
         .map_err(|error| EnvironmentClientError::NotConfigured(error.to_string()))?;
-    let config =
-        load_config(&path).map_err(|error| EnvironmentClientError::Config(error.to_string()))?;
+    let current = load_current_config(&path).map_err(|error| match &error {
+        ConfigLoadError::Missing => EnvironmentClientError::NotConfigured(error.to_string()),
+        ConfigLoadError::Stale(_) => EnvironmentClientError::MigrationRequired(error.to_string()),
+        ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+            EnvironmentClientError::Config(error.to_string())
+        }
+    })?;
+    let config = current.config;
     let client = build_tv_client(
         &path,
         config.tv_ip,
@@ -196,11 +209,15 @@ enum EnvironmentClientError {
     NotConfigured(String),
     Config(String),
     Client(String),
+    MigrationRequired(String),
 }
 impl fmt::Display for EnvironmentClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotConfigured(s) | Self::Config(s) | Self::Client(s) => f.write_str(s),
+            Self::NotConfigured(s)
+            | Self::Config(s)
+            | Self::Client(s)
+            | Self::MigrationRequired(s) => f.write_str(s),
         }
     }
 }
@@ -210,6 +227,7 @@ impl Error for EnvironmentClientError {}
 pub enum OverviewSummaryFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     Internal,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +257,7 @@ impl Error for OverviewSummaryError {}
 pub enum AudioReadFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     Unreachable,
     Rejected,
@@ -275,6 +294,7 @@ impl From<EnvironmentClientError> for AudioReadError {
                 EnvironmentClientError::NotConfigured(_) => AudioReadFailure::NotConfigured,
                 EnvironmentClientError::Config(_) => AudioReadFailure::InvalidConfiguration,
                 EnvironmentClientError::Client(_) => AudioReadFailure::CredentialsUnavailable,
+                EnvironmentClientError::MigrationRequired(_) => AudioReadFailure::MigrationRequired,
             },
             error.to_string(),
         )
@@ -308,6 +328,9 @@ impl From<EnvironmentClientError> for AudioWriteError {
                 }
                 EnvironmentClientError::Client(_) => {
                     crate::audio::AudioWriteFailure::CredentialsUnavailable
+                }
+                EnvironmentClientError::MigrationRequired(_) => {
+                    crate::audio::AudioWriteFailure::MigrationRequired
                 }
             },
             error.to_string(),
@@ -647,6 +670,7 @@ impl OverviewApplication {
                     ),
                     crate::audio::AudioWriteFailure::NotConfigured => audio_error(AudioReadFailure::NotConfigured),
                     crate::audio::AudioWriteFailure::InvalidConfiguration => audio_error(AudioReadFailure::InvalidConfiguration),
+                    crate::audio::AudioWriteFailure::MigrationRequired => audio_error(AudioReadFailure::MigrationRequired),
                     crate::audio::AudioWriteFailure::CredentialsUnavailable => audio_error(AudioReadFailure::CredentialsUnavailable),
                     _ => UserFacingError::new(
                         "The TV could not apply the audio change.",
@@ -1118,6 +1142,10 @@ fn summary_error(failure: OverviewSummaryFailure) -> UserFacingError {
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV address and platform settings, then retry.",
         ),
+        OverviewSummaryFailure::MigrationRequired => UserFacingError::new(
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
+        ),
         OverviewSummaryFailure::Internal => UserFacingError::new(
             "LG Buddy could not load the primary TV.",
             "Retry. If this continues, check the LG Buddy logs.",
@@ -1129,6 +1157,10 @@ fn audio_error(failure: AudioReadFailure) -> UserFacingError {
         AudioReadFailure::NotConfigured | AudioReadFailure::InvalidConfiguration => (
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV settings, then retry.",
+        ),
+        AudioReadFailure::MigrationRequired => (
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
         ),
         AudioReadFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",

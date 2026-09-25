@@ -85,6 +85,13 @@ impl LgBuddyWorld {
             .append_line(&format!("screen_restore_policy={policy}"));
     }
 
+    pub fn set_screen_backend(&self, backend: &str) {
+        self.config
+            .as_ref()
+            .expect("temporary config should be present")
+            .append_line(&format!("screen_backend={backend}"));
+    }
+
     pub fn set_screen_idle_blank(&self, policy: &str) {
         self.config
             .as_ref()
@@ -274,6 +281,10 @@ exit 1\n",
             .interrupt_restore_and_ack_input_without_unblanking();
     }
 
+    pub fn power_off_native_tv(&self) {
+        self.webos_tv().power_off_now();
+    }
+
     pub fn reject_native_set_mute(&self) {
         self.webos_tv().reject_set_mute();
     }
@@ -329,6 +340,14 @@ exit 1\n",
 
     pub fn webos_tv(&self) -> &MockWebOsTv {
         self.webos_tv.as_ref().expect("native webOS TV configured")
+    }
+
+    pub fn has_native_tv(&self) -> bool {
+        self.webos_tv.is_some()
+    }
+
+    pub fn blank_native_tv_screen(&self) {
+        self.webos_tv().screen_off_now();
     }
 
     pub fn webos_snapshot(&self) -> MockWebOsTvSnapshot {
@@ -846,6 +865,12 @@ exit 1\n",
             env.set(
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/tmp/lg-buddy-nonexistent-session-bus",
+            );
+            // Scenarios that need logind install a private mock system bus.
+            // Other scenarios must not observe the host's lock/sleep state.
+            env.set(
+                "DBUS_SYSTEM_BUS_ADDRESS",
+                "unix:path=/tmp/lg-buddy-nonexistent-system-bus",
             );
             self.env = Some(env);
         }
