@@ -360,6 +360,7 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs` | Independent SessionManager inhibition capability |
 | `crates/lg-buddy/src/sources/desktop/kwin.rs` | Optional pull inhibition through the native KWin plugin |
 | `data/kwin/` | Plugin source, compatible artifact selection and optional setup |
+| `data/gnome-shell/` | Optional GNOME Shell extension with a Quick Settings brightness slider |
 | `crates/lg-buddy/src/sources/desktop/powerdevil.rs` | Independent pull inhibition through PowerDevil's effective screen policy |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
 | `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
@@ -378,6 +379,7 @@ the branch contract and recovery process, see
 | `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
 | `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
+| `scripts/test-gnome-extension.sh` | GNOME Shell extension metadata and syntax check |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
 | `scripts/record_github_release_responses.py` | Sanitized production response recorder for offline mocks |

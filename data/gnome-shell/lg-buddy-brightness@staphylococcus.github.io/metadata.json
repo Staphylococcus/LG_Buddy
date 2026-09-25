@@ -1,0 +1,7 @@
+{
+  "uuid": "lg-buddy-brightness@staphylococcus.github.io",
+  "name": "LG Buddy TV Brightness",
+  "description": "Adjust your LG TV's OLED brightness from GNOME Quick Settings. Requires LG Buddy with a paired TV.",
+  "url": "https://github.com/Staphylococcus/LG_Buddy",
+  "shell-version": ["46", "47", "48", "49", "50"]
+}
