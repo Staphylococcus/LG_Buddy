@@ -8,7 +8,7 @@ use std::process::Output;
 
 use crate::audio::{apply_audio_operation_with, read_audio_status_with, AudioOperation};
 use crate::brightness::{read_current_brightness_with, write_brightness_with};
-use crate::config::{load_config, require_current_config, resolve_config_path_from_env, Config};
+use crate::config::{load_current_config, resolve_config_path_from_env, Config};
 use crate::events::{EventSource, RuntimeEvent, RuntimeEventKind};
 use crate::lifecycle::ThreadSleeper;
 use crate::lifecycle::{self, JournalctlSleepDetector, NmOnlineNetworkWaiter};
@@ -213,7 +213,8 @@ pub fn run_sleep_pre_for_event<W: Write>(
 
 pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let current = load_current_config(&config_path)?;
+    let config = current.config;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let tv_client = build_tv_client(
         &config_path,
@@ -231,7 +232,8 @@ pub fn run_sleep<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let current = load_current_config(&config_path)?;
+    let config = current.config;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let attempt_state =
         SystemSleepAttemptState::from_env(StateScope::System).map_err(RunError::StateDir)?;
@@ -274,7 +276,8 @@ pub fn run_brightness<W: Write>(
         BrightnessCommand::Prompt => InstalledGui::from_env()?.launch(&["brightness"]),
         BrightnessCommand::Get | BrightnessCommand::Set(_) => {
             let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-            let config = load_config(&config_path).map_err(RunError::Config)?;
+            let current = load_current_config(&config_path)?;
+            let config = current.config;
             let tv_client = build_tv_client(
                 &config_path,
                 config.tv_ip,
@@ -288,7 +291,8 @@ pub fn run_brightness<W: Write>(
 
 pub fn run_volume<W: Write>(writer: &mut W, command: VolumeCommand) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let current = load_current_config(&config_path)?;
+    let config = current.config;
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
@@ -301,8 +305,8 @@ pub fn run_volume<W: Write>(writer: &mut W, command: VolumeCommand) -> Result<()
 
 pub fn run_startup<W: Write>(writer: &mut W, mode: StartupMode) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    require_current_config(&config_path)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let current = load_current_config(&config_path)?;
+    let config = current.config;
     let marker = ScreenOwnershipMarker::from_env(StateScope::System).map_err(RunError::StateDir)?;
     let tv_client = build_tv_client(
         &config_path,
@@ -356,7 +360,8 @@ fn fail_open_nm_pre_down_after_system_bus_error<W: Write, E: std::fmt::Display>(
 
 pub fn run_shutdown<W: Write>(writer: &mut W) -> Result<(), RunError> {
     let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    let config = load_config(&config_path).map_err(RunError::Config)?;
+    let current = load_current_config(&config_path)?;
+    let config = current.config;
     let tv_client = build_tv_client(
         &config_path,
         config.tv_ip,
@@ -1011,9 +1016,14 @@ mod tests {
             None => env::remove_var("LG_BUDDY_CONFIG"),
         }
 
-        let err = result.expect_err("stale config must not run startup work").to_string();
+        let err = result
+            .expect_err("stale config must not run startup work")
+            .to_string();
         assert!(err.contains("v2 migration required"), "got: {err}");
-        assert!(err.contains("tvs_primary_platform is not set"), "got: {err}");
+        assert!(
+            err.contains("tvs_primary_platform is not set"),
+            "got: {err}"
+        );
     }
 
     #[test]

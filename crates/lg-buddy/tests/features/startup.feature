@@ -15,6 +15,7 @@ Feature: Startup
     Then the command succeeds
     And nm-online was invoked with "-q -t 60"
     And the TV input is HDMI_2
+    And the native webOS TV received exactly 1 requests to "ssap://tv/switchInput"
 
   Scenario: Startup continues even when nm-online fails
     Given a temporary LG Buddy config using input HDMI_2
@@ -28,6 +29,7 @@ Feature: Startup
     Then the command succeeds
     And nm-online was invoked with "-q -t 60"
     And the TV input is HDMI_2
+    And the native webOS TV received exactly 1 requests to "ssap://tv/switchInput"
 
   Scenario: Wake mode skips when the system marker is missing
     Given a temporary LG Buddy config using input HDMI_2
@@ -40,6 +42,7 @@ Feature: Startup
     Then the command succeeds
     And stdout contains "Wake from sleep: TV was not on our input. Skipping."
     And the system marker is absent
+    And the native webOS TV received exactly 0 requests to "ssap://tv/switchInput"
 
   Scenario: Auto mode restores the configured input when the system marker exists
     Given a temporary LG Buddy config using input HDMI_2
@@ -55,6 +58,7 @@ Feature: Startup
     And stdout contains "TV turned on and set to HDMI_2."
     And the system marker is absent
     And the TV input is HDMI_2
+    And the native webOS TV received exactly 1 requests to "ssap://tv/switchInput"
 
   Scenario: Boot mode clears an existing system marker and sets the configured input
     Given a temporary LG Buddy config using input HDMI_2
@@ -70,3 +74,4 @@ Feature: Startup
     And stdout contains "TV turned on and set to HDMI_2."
     And the system marker is absent
     And the TV input is HDMI_2
+    And the native webOS TV received exactly 1 requests to "ssap://tv/switchInput"

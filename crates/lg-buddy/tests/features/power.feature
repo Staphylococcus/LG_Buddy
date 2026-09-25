@@ -17,13 +17,14 @@ Feature: Power
 
   Scenario: Power off uses shutdown ownership behavior
     Given a temporary LG Buddy config using input HDMI_3
-    And a mock TV client
-    And the TV is on input HDMI_3
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
     And reboot detection reports no pending reboot
     When I run the command "power off"
     Then the command succeeds
-    And the TV client received "get_input"
-    And the TV client received "power_off"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.applicationManager/getForegroundAppInfo"
+    And the native webOS TV received exactly 1 requests to "ssap://system/turnOff"
     And the TV is powered off
 
   Scenario: Power help describes the public commands

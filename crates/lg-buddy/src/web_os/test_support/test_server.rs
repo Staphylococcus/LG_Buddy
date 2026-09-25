@@ -571,6 +571,7 @@ struct WebOsTestRuntime {
     pairing_prompt_count: u64,
     registration_tokens: Vec<Option<String>>,
     request_uris: Vec<String>,
+    rejected_request_uri: Option<String>,
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
     restore_session_interruption_injected: bool,
@@ -736,6 +737,7 @@ impl WebOsTestServer {
             pairing_prompt_count: 0,
             registration_tokens: Vec::new(),
             request_uris: Vec::new(),
+            rejected_request_uri: None,
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
             restore_session_interruption_injected: false,
@@ -846,6 +848,15 @@ impl WebOsTestServer {
             .scenario = scenario;
     }
 
+    /// Inject a request failure without changing unrelated TV capabilities.
+    #[allow(dead_code)]
+    pub(crate) fn reject_request(&self, uri: Option<&str>) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .rejected_request_uri = uri.map(str::to_owned);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_input(&self, input: WebOsTestInput) {
         self.runtime
@@ -885,6 +896,17 @@ impl WebOsTestServer {
         if runtime.tv.power_state != WebOsPowerState::PowerOff {
             runtime.tv.power_state = WebOsPowerState::PowerOff;
         }
+    }
+
+    /// Blank the screen while leaving the TV powered on and reachable, so
+    /// restore flows can unblank it.
+    #[allow(dead_code)]
+    pub(crate) fn screen_off_now(&self) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .power_state = WebOsPowerState::ScreenOff;
     }
 
     /// Close existing connections between operations, leaving the TV available.
@@ -1027,6 +1049,23 @@ fn serve_connection<S>(
                     .to_string(),
             );
 
+        let rejected = runtime
+            .lock()
+            .expect("webOS test server state")
+            .rejected_request_uri
+            .as_deref()
+            .is_some_and(|uri| request["uri"] == uri);
+        if rejected {
+            send_json(
+                &mut socket,
+                webos_error(
+                    request["id"].as_str().expect("webOS request ID"),
+                    "500 injected request failure",
+                    json!({}),
+                ),
+            );
+            continue;
+        }
         let scenario = runtime.lock().expect("webOS test server state").scenario;
         if scenario == WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff {
             let should_interrupt = {

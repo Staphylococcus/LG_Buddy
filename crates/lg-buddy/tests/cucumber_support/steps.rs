@@ -149,6 +149,11 @@ fn native_webos_tv_powers_off(world: &mut LgBuddyWorld) {
     world.power_off_native_tv();
 }
 
+#[given("the native webOS TV screen is blanked")]
+fn native_webos_tv_screen_blanked(world: &mut LgBuddyWorld) {
+    world.blank_native_tv_screen();
+}
+
 #[given("the native webOS TV rejects mute changes")]
 fn native_webos_tv_rejects_mute_changes(world: &mut LgBuddyWorld) {
     world.reject_native_set_mute();
@@ -379,7 +384,9 @@ fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
 #[given("the next input restore attempt powers the TV back on")]
 fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
     if world.has_native_tv() {
-        world.webos_tv().simulate_wake(std::time::Duration::from_millis(0));
+        world
+            .webos_tv()
+            .simulate_wake(std::time::Duration::from_millis(0));
         return;
     }
     world.tv_mut().queue_set_input_wake_success();

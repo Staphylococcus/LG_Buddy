@@ -346,6 +346,10 @@ exit 1\n",
         self.webos_tv.is_some()
     }
 
+    pub fn blank_native_tv_screen(&self) {
+        self.webos_tv().screen_off_now();
+    }
+
     pub fn webos_snapshot(&self) -> MockWebOsTvSnapshot {
         self.webos_tv().snapshot()
     }
@@ -861,6 +865,12 @@ exit 1\n",
             env.set(
                 "DBUS_SESSION_BUS_ADDRESS",
                 "unix:path=/tmp/lg-buddy-nonexistent-session-bus",
+            );
+            // Scenarios that need logind install a private mock system bus.
+            // Other scenarios must not observe the host's lock/sleep state.
+            env.set(
+                "DBUS_SYSTEM_BUS_ADDRESS",
+                "unix:path=/tmp/lg-buddy-nonexistent-system-bus",
             );
             self.env = Some(env);
         }

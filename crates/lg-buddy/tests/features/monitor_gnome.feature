@@ -18,6 +18,9 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "screen idle blanking is disabled by config"
     And the TV screen is visible
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+    And the native TV connection count is 0
 
   Scenario: unavailable idle backends do not suppress the session notification service
     Given a temporary LG Buddy config using input HDMI_2
@@ -242,6 +245,8 @@ Feature: GNOME monitor
     And GNOME monitor stays open for 1.2 seconds
     When I run the command "monitor"
     Then the command succeeds
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
     And the session marker exists
     And the TV screen is blanked
 
@@ -354,6 +359,7 @@ Feature: GNOME monitor
     Then the command succeeds
     And stdout contains "Aggressive restore policy is enabled"
     And stdout contains "Screen unblank succeeded."
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the session marker is absent
     And the TV is powered on
     And the TV screen is visible
@@ -382,6 +388,7 @@ Feature: GNOME monitor
     And the TV screen is visible
 
   # Allow watch registration and signal delivery, then stop before a second idle deadline.
+
   Scenario: GNOME early user activity restores a blanked TV before the session becomes active again
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 2 seconds
@@ -407,6 +414,7 @@ Feature: GNOME monitor
   # a no-extra-requests bound: exactly two turnOnScreen and two switchInput
   # requests, the native stand-in for the legacy `turn_screen_on` x2 /
   # `set_input` x2 call-count asserts.
+
   Scenario: GNOME activity verifies legacy screen visibility after an input acknowledgement
     Given a temporary LG Buddy config using input HDMI_3
     And the existing config selects TV platform "lg_webos"
@@ -448,6 +456,7 @@ Feature: GNOME monitor
   # bounded-attempt cap is proven by the connection count (15: 1 setup +
   # 2 initial unblank+verify + 12 from six input attempts+verify, no
   # continuous retry), which stays flat when the monitor stays open.
+
   Scenario: GNOME restore failure does not retry continuously while activity stays active
     Given a temporary LG Buddy config using input HDMI_3
     And the idle timeout is 1 seconds

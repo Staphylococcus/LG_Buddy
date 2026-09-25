@@ -60,7 +60,10 @@ use crate::commands::{
     run_brightness, run_nm_pre_down, run_screen_off, run_screen_on, run_shutdown, run_sleep,
     run_sleep_pre, run_volume,
 };
-use crate::config::{ConfigError, ConfigPathError};
+use crate::config::{
+    load_current_config, resolve_config_path_from_env, ConfigError, ConfigLoadError,
+    ConfigPathError,
+};
 use crate::dev::run_dev_command;
 use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
@@ -320,6 +323,7 @@ pub enum RunError {
     TvClientBuild(TvClientBuildError),
     ConfigPath(ConfigPathError),
     Config(ConfigError),
+    ConfigLoad(ConfigLoadError),
     StateDir(StateDirError),
     BackendSelection(BackendSelectionError),
     BackendDetection(BackendDetectionError),
@@ -344,6 +348,7 @@ impl fmt::Display for RunError {
             Self::TvClientBuild(err) => write!(f, "{err}"),
             Self::ConfigPath(err) => write!(f, "{err}"),
             Self::Config(err) => write!(f, "{err}"),
+            Self::ConfigLoad(err) => write!(f, "{err}"),
             Self::StateDir(err) => write!(f, "{err}"),
             Self::BackendSelection(err) => write!(f, "{err}"),
             Self::BackendDetection(err) => write!(f, "{err}"),
@@ -373,6 +378,7 @@ impl std::error::Error for RunError {
             Self::TvClientBuild(err) => Some(err),
             Self::ConfigPath(err) => Some(err),
             Self::Config(err) => Some(err),
+            Self::ConfigLoad(err) => Some(err),
             Self::StateDir(err) => Some(err),
             Self::BackendSelection(err) => Some(err),
             Self::BackendDetection(err) => Some(err),
@@ -382,6 +388,20 @@ impl std::error::Error for RunError {
             Self::UpdateInstall(err) => Some(err),
             Self::UpgradePreflight(_) => None,
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
+        }
+    }
+}
+
+/// Boundary mapping from the config module's typed loader error to the top-level
+/// application error. Stale configs surface as the distinct `MigrationRequired`
+/// failure (the pre-migration read-only signal); every other loader failure is
+/// carried as a config-load error. Kept here, not in the config module, so the
+/// config module stays free of top-level `RunError` construction.
+impl From<ConfigLoadError> for RunError {
+    fn from(err: ConfigLoadError) -> Self {
+        match err {
+            ConfigLoadError::Stale(_) => RunError::MigrationRequired(err.to_string()),
+            other => RunError::ConfigLoad(other),
         }
     }
 }
@@ -856,6 +876,17 @@ where
 }
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
+    // #256: TV-operating commands require a current (v2) config. A stale
+    // bscpylgtv/1.x config is a read-only failure (MigrationRequired) — no
+    // migration is attempted here; setup/overview/detect-backend/settings/dev
+    // stay available so the migration host is still reachable.
+    if requires_current_config(&command) {
+        let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+        // Early-feedback stale gate: a stale 1.x/bscpylgtv config is a
+        // read-only MigrationRequired failure before any runtime work. The
+        // command handler re-reads via the loader to obtain the snapshot.
+        load_current_config(&config_path)?;
+    }
     match command {
         Command::Setup(options) => setup::cli::run(options, writer).map_err(RunError::Setup),
         Command::Overview => crate::commands::run_overview(),
@@ -912,6 +943,46 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
                 Err(RunError::UpgradePreflight(report))
             }
         }
+    }
+}
+
+/// Commands that operate a TV require a current (v2) config; a stale 1.x /
+/// bscpylgtv config is a read-only `MigrationRequired` failure. The migration
+/// host (`setup` / `overview` / `detect-backend` / `settings` / `dev`) and the
+/// GUI-forwarding `brightness --prompt` stay available on a stale config so
+/// the migration flow is still reachable.
+///
+/// The match is exhaustive by design: adding a `Command` or `BrightnessCommand`
+/// variant is a compile error until its config requirement is decided here.
+fn requires_current_config(command: &Command) -> bool {
+    match command {
+        Command::Startup(_)
+        | Command::Shutdown
+        | Command::Power(_)
+        | Command::SleepPre
+        | Command::Sleep
+        | Command::Screen(ScreenCommand::Off)
+        | Command::Screen(ScreenCommand::On)
+        | Command::ScreenOff
+        | Command::ScreenOn
+        | Command::Monitor
+        | Command::Lifecycle
+        | Command::NetworkManagerPreDown
+        | Command::Volume(_)
+        // The TV-operating brightness variants are gated.
+        | Command::Brightness(BrightnessCommand::Get)
+        | Command::Brightness(BrightnessCommand::Set(_)) => true,
+        // Migration host / diagnostics / maintenance: no TV operation.
+        Command::Overview
+        | Command::DetectBackend
+        | Command::Setup(_)
+        | Command::KWinBridge(_)
+        | Command::Dev(_)
+        | Command::Settings(_)
+        | Command::Updates(_)
+        | Command::UpgradePreflight { .. }
+        // `prompt` opens the GUI migration host and must stay reachable.
+        | Command::Brightness(BrightnessCommand::Prompt) => false,
     }
 }
 
@@ -2273,5 +2344,53 @@ mod tests {
 
     fn volume(value: u8) -> VolumeLevel {
         VolumeLevel::new(value).expect("test volume should be valid")
+    }
+
+    #[test]
+    fn requires_current_config_covers_tv_operating_commands_only() {
+        use super::requires_current_config;
+        let gated = [
+            Command::Startup(StartupMode::Boot),
+            Command::Shutdown,
+            Command::Power(PowerCommand::On),
+            Command::Power(PowerCommand::Off),
+            Command::SleepPre,
+            Command::Sleep,
+            Command::Screen(ScreenCommand::Off),
+            Command::Screen(ScreenCommand::On),
+            Command::ScreenOff,
+            Command::ScreenOn,
+            Command::Monitor,
+            Command::Lifecycle,
+            Command::NetworkManagerPreDown,
+            Command::Volume(VolumeCommand::Mute(MuteCommand::Toggle)),
+            Command::Brightness(BrightnessCommand::Set(brightness(42))),
+        ];
+        for command in &gated {
+            assert!(
+                requires_current_config(command),
+                "{command:?} should be gated"
+            );
+        }
+        // The migration host and the GUI-forwarding brightness prompt stay
+        // available on a stale config.
+        let ungated = [
+            Command::Brightness(BrightnessCommand::Prompt),
+            Command::Dev(DevCommand::WebOsAuthProbe),
+            Command::DetectBackend,
+            Command::Settings(SettingsCommand::List),
+            Command::Updates(UpdatesCommand::Install),
+            Command::UpgradePreflight {
+                candidate_root: PathBuf::from("/tmp/lgbuddy-preflight-candidate"),
+                remove_legacy_env: true,
+                json: true,
+            },
+        ];
+        for command in &ungated {
+            assert!(
+                !requires_current_config(command),
+                "{command:?} should not be gated"
+            );
+        }
     }
 }

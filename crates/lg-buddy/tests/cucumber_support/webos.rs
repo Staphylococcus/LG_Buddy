@@ -74,11 +74,7 @@ impl MockWebOsTv {
         };
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, WEBOS_WSS_PORT));
         Self {
-            server: WebOsTestServer::screen_off_tls_at(
-                version.test_version(),
-                input,
-                address,
-            ),
+            server: WebOsTestServer::screen_off_tls_at(version.test_version(), input, address),
         }
     }
 
@@ -101,6 +97,11 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
     }
 
+    #[allow(dead_code)] // Used by the foreground integration tests.
+    pub fn reject_request(&self, uri: Option<&str>) {
+        self.server.reject_request(uri);
+    }
+
     pub fn reject_set_mute(&self) {
         self.server
             .set_scenario(WebOsTestScenario::SetAudioMuteRejected);
@@ -111,6 +112,11 @@ impl MockWebOsTv {
     #[allow(dead_code)] // Used by the process fixture, which shares this adapter.
     pub fn power_off_now(&self) {
         self.server.power_off_now();
+    }
+
+    /// Blank the native TV screen while it stays powered on and reachable.
+    pub fn screen_off_now(&self) {
+        self.server.screen_off_now();
     }
 
     pub fn set_volume(&self, volume: i16) {

@@ -518,49 +518,114 @@ pub fn stale_config_reasons(contents: &str) -> Vec<StaleConfigReason> {
     let mut reasons = Vec::new();
 
     if let Some(value) = entries.get("tvs_primary_platform") {
-        if value.parse::<TvPlatform>().is_ok_and(|platform| platform == TvPlatform::Bscpylgtv) {
+        if value
+            .parse::<TvPlatform>()
+            .is_ok_and(|platform| platform == TvPlatform::Bscpylgtv)
+        {
             reasons.push(StaleConfigReason::BscpylgtvPlatform);
         }
     } else {
         reasons.push(StaleConfigReason::MissingTvPlatform);
     }
 
-    if matches!(entries.get("screen_backend").map(String::as_str), Some("swayidle")) {
+    if matches!(
+        entries.get("screen_backend").map(String::as_str),
+        Some("swayidle")
+    ) {
         reasons.push(StaleConfigReason::SwayidleBackend);
     }
 
     reasons
 }
 
+/// A validated runtime configuration snapshot: the config read once from
+/// `path`, confirmed current (no stale 1.x / bscpylgtv entries), and parsed.
+///
+/// The caller keeps the `path` for TV-client construction (which reads
+/// credentials separately); the snapshot is the config actually consumed.
+#[derive(Debug)]
+pub struct CurrentConfig {
+    pub path: PathBuf,
+    pub config: Config,
+}
+
+/// A config-owned typed failure for the runtime configuration loader.
+///
+/// Migration reasons are carried as data (`[StaleConfigReason]`), not as a
+/// rendered string. The config module must not construct a top-level
+/// [`crate::RunError`] or render service-specific messages; each boundary maps
+/// these variants to its own typed error (CLI `RunError`, GTK failures).
+#[derive(Debug)]
+pub enum ConfigLoadError {
+    /// The configuration file does not exist.
+    Missing,
+    /// The file exists but cannot be read (permission denied, I/O error), or
+    /// is not valid UTF-8.
+    Unreadable(io::Error),
+    /// The config entries are stale (1.x / bscpylgtv) and must be migrated
+    /// before the runtime can consume them.
+    Stale(Vec<StaleConfigReason>),
+    /// The entries are current but fail to parse/validate.
+    Parse(ConfigError),
+}
+
+impl fmt::Display for ConfigLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => write!(f, "no LG Buddy configuration found"),
+            Self::Unreadable(err) => write!(f, "cannot read LG Buddy configuration: {err}"),
+            Self::Stale(reasons) => {
+                write!(f, "v2 migration required")?;
+                for reason in reasons {
+                    write!(f, "\n  - {}", reason.message())?;
+                }
+                Ok(())
+            }
+            Self::Parse(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl Error for ConfigLoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Unreadable(err) => Some(err),
+            Self::Parse(err) => Some(err),
+            Self::Missing | Self::Stale(_) => None,
+        }
+    }
+}
+
+/// Load a validated, current configuration snapshot from `path`, reading the
+/// file once.
+///
+/// Detection of stale raw entries happens *before* defaults are applied, on
+/// the same bytes that are then parsed, so a stale config is reported as such
+/// instead of silently loading the legacy platform default. Returns the typed
+/// [`ConfigLoadError`] for missing, unreadable, stale, or unparseable
+/// configuration; the caller maps it to a boundary-specific error.
+pub fn load_current_config(path: &Path) -> Result<CurrentConfig, ConfigLoadError> {
+    let contents = fs::read_to_string(path).map_err(|err| {
+        if err.kind() == io::ErrorKind::NotFound {
+            ConfigLoadError::Missing
+        } else {
+            ConfigLoadError::Unreadable(err)
+        }
+    })?;
+    let reasons = stale_config_reasons(&contents);
+    if !reasons.is_empty() {
+        return Err(ConfigLoadError::Stale(reasons));
+    }
+    let config = parse_config(&contents).map_err(ConfigLoadError::Parse)?;
+    Ok(CurrentConfig {
+        path: path.to_path_buf(),
+        config,
+    })
+}
+
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     let contents = fs::read_to_string(path)?;
     parse_config(&contents)
-}
-
-/// Render a migration-required message for the stale reasons.
-fn render_migration_required(reasons: &[StaleConfigReason]) -> String {
-    let mut message = "v2 migration required before this service can run:".to_string();
-    for reason in reasons {
-        message.push_str(&format!("\n  - {}", reason.message()));
-    }
-    message
-}
-
-/// Gate for startup and background services: refuses to run on a stale 1.x
-/// configuration, returning a distinct migration-required error *before* any
-/// runtime work. Reads the raw config (not [`load_config`]) so the absence of
-/// `tvs_primary_platform` — which `load_config` would silently default to the
-/// legacy platform — is visible.
-pub fn require_current_config(path: &Path) -> Result<(), crate::RunError> {
-    let contents = fs::read_to_string(path).map_err(crate::RunError::Io)?;
-    let reasons = stale_config_reasons(&contents);
-    if reasons.is_empty() {
-        Ok(())
-    } else {
-        Err(crate::RunError::MigrationRequired(render_migration_required(
-            &reasons,
-        )))
-    }
 }
 
 pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
@@ -700,11 +765,11 @@ fn sanitize_config_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_config, parse_home_from_passwd_entries, resolve_config_path, Config, ConfigError,
-        ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend,
+        parse_config, parse_home_from_passwd_entries, resolve_config_path, stale_config_reasons,
+        Config, ConfigError, ConfigPathError, ConfigPathSources, HdmiInput, ScreenBackend,
         ScreenHonorIdleInhibitorsPolicy, ScreenIdleBlankPolicy, ScreenRestorePolicy,
         StaleConfigReason, SystemSleepWakePolicy, TvPlatform, DEFAULT_IDLE_TIMEOUT,
-        MAX_IDLE_TIMEOUT, stale_config_reasons,
+        MAX_IDLE_TIMEOUT,
     };
     use std::path::Path;
 
@@ -1262,23 +1327,52 @@ vas:x:1000:1000:vas:/home/vas:/bin/bash\n";
     }
 
     #[test]
-    fn require_current_config_passes_clean_config_and_rejects_stale() {
+    fn load_current_config_passes_clean_config_and_rejects_stale() {
         let dir = std::env::temp_dir();
         let stale_path = dir.join("lg-buddy-stale-test.env");
         let clean_path = dir.join("lg-buddy-clean-test.env");
         std::fs::write(&stale_path, "tvs_primary_input=HDMI_2\n").unwrap();
         std::fs::write(
             &clean_path,
-            "tvs_primary_platform=lg_webos\nscreen_backend=wayland\n",
+            "tvs_primary_ip=192.0.2.42\ntvs_primary_mac=aa:bb:cc:dd:ee:ff\ntvs_primary_input=HDMI_2\ntvs_primary_platform=lg_webos\nscreen_backend=wayland\n",
         )
         .unwrap();
 
-        assert!(crate::config::require_current_config(&clean_path).is_ok());
-        let err = crate::config::require_current_config(&stale_path).unwrap_err();
+        assert!(crate::config::load_current_config(&clean_path).is_ok());
+        let err = crate::config::load_current_config(&stale_path).unwrap_err();
         let message = err.to_string();
         assert!(message.starts_with("v2 migration required"));
         assert!(message.contains("tvs_primary_platform is not set"));
         std::fs::remove_file(stale_path).ok();
         std::fs::remove_file(clean_path).ok();
+    }
+
+    #[test]
+    fn load_current_config_classifies_missing_unreadable_and_invalid_entries() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join("lg-buddy-does-not-exist.env");
+        let invalid = dir.join("lg-buddy-invalid-test.env");
+        let not_utf8 = dir.join("lg-buddy-not-utf8-test.env");
+        std::fs::write(&invalid, "tvs_primary_input=HDMI_2\n").unwrap();
+        std::fs::write(&not_utf8, [0xff, 0xfe, 0xfd, b'\n']).unwrap();
+
+        assert!(matches!(
+            crate::config::load_current_config(&missing),
+            Err(crate::config::ConfigLoadError::Missing)
+        ));
+        // Present but stale: the missing platform key is the stale signal.
+        assert!(matches!(
+            crate::config::load_current_config(&invalid),
+            Err(crate::config::ConfigLoadError::Stale(_))
+        ));
+        // Invalid UTF-8 is reported as Unreadable(InvalidData), never parsed.
+        match crate::config::load_current_config(&not_utf8).unwrap_err() {
+            crate::config::ConfigLoadError::Unreadable(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected Unreadable(InvalidData), got {other:?}"),
+        }
+        std::fs::remove_file(invalid).ok();
+        std::fs::remove_file(not_utf8).ok();
     }
 }

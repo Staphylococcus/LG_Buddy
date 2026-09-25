@@ -6,7 +6,9 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config, MacAddress, TvPlatform};
+use crate::config::{
+    load_current_config, resolve_config_path_from_env, Config, MacAddress, TvPlatform,
+};
 use crate::events::RuntimeEvent;
 use crate::lifecycle::{self, NmOnlineNetworkWaiter};
 use crate::runtime_phase::LogindRuntimePhaseProvider;
@@ -43,11 +45,13 @@ impl RuntimeActionExecutor {
     fn load_config(&mut self) -> Result<(PathBuf, Config), RunError> {
         let result = (|| {
             let path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-            let config = load_config(&path).map_err(RunError::Config)?;
-            Ok((path, config))
+            let current = load_current_config(&path)?;
+            Ok((current.path, current.config))
         })();
-        // An unpaired or unreadable profile must not leave an old TV connection
-        // available for reuse if configuration later becomes valid again.
+        // An unpaired, unreadable, or stale config must not leave an old TV
+        // connection available for reuse if configuration later becomes valid
+        // again. A stale reload invalidates the retained client so the legacy
+        // TV adapter is not driven off the legacy target.
         if result.is_err() {
             self.tv_client = None;
         }

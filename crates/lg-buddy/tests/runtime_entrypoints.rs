@@ -8,9 +8,7 @@ mod auth {
 }
 
 mod platform_access_token {
-    pub use lg_buddy::platform_access_token::{
-        PlatformAccessToken, PlatformAccessTokenStore,
-    };
+    pub use lg_buddy::platform_access_token::{PlatformAccessToken, PlatformAccessTokenStore};
 }
 
 use lg_buddy::commands::{run_screen_off, run_screen_on, run_system_resume};
@@ -23,9 +21,38 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use support::{
-    ExecutableScript, MockBscpylgtv, MockNmOnline, MockPowerDevil, MockSessionBusIdleMonitor,
-    MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
+    ExecutableScript, MockNmOnline, MockPowerDevil, MockSessionBusIdleMonitor, MockSystemLogind,
+    RuntimeStateLayout, TestConfigFile, TestEnv,
 };
+
+/// Native webOS config + token for a screen/lifecycle test. The v2 stale gate
+/// rejects configs without `tvs_primary_platform`, so every TV-operating
+/// entrypoint test must provision a current (native) config. `screen_off`
+/// starts the TV with a blanked screen (the screen-on/unblank case).
+fn native_config(
+    name: &str,
+    input: &str,
+    screen_off: bool,
+) -> (web_os::MockWebOsTv, TestConfigFile) {
+    let version = web_os::MockWebOsVersion::WebOs24Version92261;
+    let tv = if screen_off {
+        web_os::MockWebOsTv::with_version_screen_off(version, input)
+    } else {
+        web_os::MockWebOsTv::with_version(version, input)
+    };
+    let config = TestConfigFile::new(name);
+    config.write_sample(input);
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
+    (tv, config)
+}
 
 #[test]
 fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_new_checks() {
@@ -206,7 +233,8 @@ fn monitor_discards_a_pre_suspend_inhibition_answer_after_resume() {
     powerdevil.delay_next_query(Duration::from_millis(600));
     let logind = MockSystemLogind::new("monitor-inhibition-resume-logind");
     logind.reset();
-    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
+    let tv =
+        web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
     let config = TestConfigFile::new("monitor-inhibition-resume-config");
     config.write_sample("HDMI_2");
     config.set_value("tvs_primary_ip", "127.0.0.1");
@@ -318,22 +346,15 @@ fn monitor_recovers_gnome_activity_after_the_service_disappears() {
         tv.snapshot()
             .request_uris
             .iter()
-            .any(|uri| {
-                uri.as_str()
-                    == "ssap://com.webos.service.tvpower/power/turnOnScreen"
-            })
+            .any(|uri| uri.as_str() == "ssap://com.webos.service.tvpower/power/turnOnScreen")
     });
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success(), "{result:?}\n{}", output());
     assert_eq!(output().matches("Using GNOME backend").count(), 1);
     let uris = tv.snapshot().request_uris;
     assert_eq!(
-        uris
-            .iter()
-            .filter(|uri| {
-                uri.as_str()
-                    == "ssap://com.webos.service.tvpower/power/turnOnScreen"
-            })
+        uris.iter()
+            .filter(|uri| { uri.as_str() == "ssap://com.webos.service.tvpower/power/turnOnScreen" })
             .count(),
         1,
         "recovery must unblank exactly once: {uris:?}"
@@ -411,41 +432,26 @@ fn normal_launch_requires_the_gui_while_explicit_help_stays_headless() {
 
 #[test]
 fn run_screen_off_loads_config_and_uses_session_runtime_override() {
-    let mock = MockBscpylgtv::new("entrypoint-screen-off-tv");
-    mock.set_input("HDMI_2");
-    let wrapper = mock.command_wrapper("entrypoint-screen-off-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-screen-off-config");
-    config.write_sample("HDMI_2");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-screen-off-config", "HDMI_2", false);
 
     let runtime = RuntimeStateLayout::new("entrypoint-screen-off-runtime");
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
 
     let mut output = Vec::new();
     run_screen_off(&mut output).expect("screen-off should succeed");
 
     runtime.assert_session_marker_exists();
-    let calls = mock.calls();
     assert_eq!(
-        calls
-            .iter()
-            .cloned()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["get_input".to_string(), "turn_screen_off".to_string()]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://com.webos.applicationManager/getForegroundAppInfo",
+            "ssap://com.webos.service.tvpower/power/turnOffScreen",
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+        ]
     );
-    let expected_key_path = config
-        .path()
-        .parent()
-        .expect("config parent")
-        .join(".aiopylgtv.sqlite");
-    assert_eq!(
-        calls.first().and_then(|call| call.key_file_path.as_deref()),
-        Some(expected_key_path.to_str().expect("utf8 key path"))
-    );
+    assert!(!tv.snapshot().screen_on);
     assert!(String::from_utf8(output)
         .expect("utf8 output")
         .contains("Screen blank command succeeded."));
@@ -453,20 +459,13 @@ fn run_screen_off_loads_config_and_uses_session_runtime_override() {
 
 #[test]
 fn run_screen_on_loads_config_and_clears_session_marker() {
-    let mock = MockBscpylgtv::new("entrypoint-screen-on-tv");
-    mock.set_input("HDMI_3");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-screen-on-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-screen-on-config");
-    config.write_sample("HDMI_3");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-screen-on-config", "HDMI_3", true);
 
     let runtime = RuntimeStateLayout::new("entrypoint-screen-on-runtime");
     runtime.create_session_marker();
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
 
     let mut output = Vec::new();
@@ -474,12 +473,13 @@ fn run_screen_on_loads_config_and_clears_session_marker() {
 
     runtime.assert_session_marker_absent();
     assert_eq!(
-        mock.calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string(), "get_power_state".to_string(),]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://com.webos.service.tvpower/power/turnOnScreen",
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+        ]
     );
+    assert!(tv.snapshot().screen_on);
     assert!(String::from_utf8(output)
         .expect("utf8 output")
         .contains("Screen unblank succeeded."));
@@ -487,20 +487,13 @@ fn run_screen_on_loads_config_and_clears_session_marker() {
 
 #[test]
 fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
-    let mock = MockBscpylgtv::new("entrypoint-screen-on-aggressive-tv");
-    mock.set_input("HDMI_3");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-screen-on-aggressive-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-screen-on-aggressive-config");
-    config.write_sample("HDMI_3");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-screen-on-aggressive-config", "HDMI_3", true);
     config.append_line("screen_restore_policy=aggressive");
 
     let runtime = RuntimeStateLayout::new("entrypoint-screen-on-aggressive-runtime");
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
 
     let mut output = Vec::new();
@@ -508,12 +501,13 @@ fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
 
     runtime.assert_session_marker_absent();
     assert_eq!(
-        mock.calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string(), "get_power_state".to_string(),]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://com.webos.service.tvpower/power/turnOnScreen",
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+        ]
     );
+    assert!(tv.snapshot().screen_on);
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(output.contains("Aggressive restore policy is enabled"));
     assert!(output.contains("Screen unblank succeeded."));
@@ -521,18 +515,11 @@ fn run_screen_on_loads_aggressive_config_and_restores_without_session_marker() {
 
 #[test]
 fn settings_set_restore_policy_is_loaded_by_screen_runtime() {
-    let mock = MockBscpylgtv::new("entrypoint-settings-set-runtime-tv");
-    mock.set_input("HDMI_3");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-settings-set-runtime-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-settings-set-runtime-config");
-    config.write_sample("HDMI_3");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-settings-set-runtime-config", "HDMI_3", true);
     let runtime = RuntimeStateLayout::new("entrypoint-settings-set-runtime-state");
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
     env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
 
@@ -558,12 +545,13 @@ fn settings_set_restore_policy_is_loaded_by_screen_runtime() {
 
     runtime.assert_session_marker_absent();
     assert_eq!(
-        mock.calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["turn_screen_on".to_string(), "get_power_state".to_string(),]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://com.webos.service.tvpower/power/turnOnScreen",
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+        ]
     );
+    assert!(tv.snapshot().screen_on);
     assert!(String::from_utf8(output)
         .expect("screen output utf8")
         .contains("Aggressive restore policy is enabled"));
@@ -571,19 +559,12 @@ fn settings_set_restore_policy_is_loaded_by_screen_runtime() {
 
 #[test]
 fn settings_unset_restore_policy_is_loaded_as_screen_runtime_default() {
-    let mock = MockBscpylgtv::new("entrypoint-settings-unset-runtime-tv");
-    mock.set_input("HDMI_3");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-settings-unset-runtime-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-settings-unset-runtime-config");
-    config.write_sample("HDMI_3");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-settings-unset-runtime-config", "HDMI_3", true);
     config.append_line("screen_restore_policy=aggressive");
     let runtime = RuntimeStateLayout::new("entrypoint-settings-unset-runtime-state");
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
     env.set("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1");
 
@@ -605,7 +586,7 @@ fn settings_unset_restore_policy_is_loaded_as_screen_runtime_default() {
     run_screen_on(&mut output).expect("screen-on should use default conservative policy");
 
     runtime.assert_session_marker_absent();
-    assert!(mock.calls().is_empty());
+    assert!(tv.snapshot().request_uris.is_empty());
     assert!(String::from_utf8(output)
         .expect("screen output utf8")
         .contains("State file not found"));
@@ -686,13 +667,11 @@ fn settings_set_lifecycle_policy_updates_config_without_systemd_apply() {
 
 #[test]
 fn run_system_resume_clears_sleep_cycle_state_and_preserves_session_marker() {
-    let mock = MockBscpylgtv::new("entrypoint-system-resume-tv");
-    let wrapper = mock.command_wrapper("entrypoint-system-resume-wrapper");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-system-resume-config", "HDMI_2", false);
+    config.set_value("tvs_primary_input", "HDMI_3");
     let nm_online = MockNmOnline::new("entrypoint-system-resume-nm-online");
     let nm_online_wrapper = nm_online.command_wrapper("entrypoint-system-resume-nm-online-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-system-resume-config");
-    config.write_sample("HDMI_4");
 
     let runtime = RuntimeStateLayout::new("entrypoint-system-resume-runtime");
     runtime.create_session_marker();
@@ -702,9 +681,7 @@ fn run_system_resume_clears_sleep_cycle_state_and_preserves_session_marker() {
     fs::write(&attempt_marker, "").expect("create attempt marker");
     fs::write(&cycle_state, "outcome=completed\n").expect("create cycle state");
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_NM_ONLINE", nm_online_wrapper.path());
     env.set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
@@ -718,12 +695,15 @@ fn run_system_resume_clears_sleep_cycle_state_and_preserves_session_marker() {
     runtime.assert_session_marker_exists();
     assert!(!attempt_marker.exists());
     assert!(!cycle_state.exists());
+    let snapshot = tv.snapshot();
+    assert_eq!(snapshot.input, "HDMI_3");
     assert_eq!(
-        mock.calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["set_input".to_string(), "get_power_state".to_string()]
+        snapshot.request_uris,
+        vec![
+            "ssap://tv/switchInput",
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+            "ssap://com.webos.applicationManager/getForegroundAppInfo",
+        ]
     );
     assert_eq!(nm_online.invocations().len(), 1);
     assert!(String::from_utf8(output)
@@ -793,24 +773,24 @@ fn run_system_resume_cleans_sleep_state_when_native_token_is_malformed() {
 
 #[test]
 fn run_system_resume_aggressive_policy_restores_without_system_marker() {
-    let mock = MockBscpylgtv::new("entrypoint-system-resume-aggressive-tv");
-    let wrapper = mock.command_wrapper("entrypoint-system-resume-aggressive-wrapper");
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config(
+        "entrypoint-system-resume-aggressive-config",
+        "HDMI_2",
+        false,
+    );
+    config.set_value("screen_restore_policy", "aggressive");
+    config.set_value("tvs_primary_input", "HDMI_3");
     let nm_online = MockNmOnline::new("entrypoint-system-resume-aggressive-nm-online");
     let nm_online_wrapper =
         nm_online.command_wrapper("entrypoint-system-resume-aggressive-nm-online-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-system-resume-aggressive-config");
-    config.write_sample("HDMI_4");
-    config.append_line("screen_restore_policy=aggressive");
 
     let runtime = RuntimeStateLayout::new("entrypoint-system-resume-aggressive-runtime");
     let cycle_state = runtime.system_dir().join("system_sleep_cycle");
     fs::create_dir_all(runtime.system_dir()).expect("create system runtime dir");
     fs::write(&cycle_state, "outcome=completed\n").expect("create cycle state");
 
-    let mut env = TestEnv::new();
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     env.set("LG_BUDDY_NM_ONLINE", nm_online_wrapper.path());
     env.set("LG_BUDDY_STARTUP_INITIAL_WAKE_DELAY_SECS", "0");
@@ -823,12 +803,15 @@ fn run_system_resume_aggressive_policy_restores_without_system_marker() {
     runtime.assert_system_marker_absent();
     assert!(!cycle_state.exists());
     assert_eq!(
-        mock.calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect::<Vec<_>>(),
-        vec!["set_input".to_string(), "get_power_state".to_string()]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://tv/switchInput".to_string(),
+            "ssap://com.webos.service.tvpower/power/getPowerState".to_string(),
+            "ssap://com.webos.applicationManager/getForegroundAppInfo".to_string(),
+        ],
+        "native aggressive resume must switch input then verify power state and foreground app"
     );
+    assert_eq!(tv.snapshot().input, "HDMI_3");
     assert_eq!(nm_online.invocations().len(), 1);
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(output.contains("State file not found. Aggressive restore policy is enabled"));
@@ -842,18 +825,25 @@ fn run_nm_pre_down_uses_logind_property_and_retries_idempotently() {
     logind.reset();
     logind.set_preparing_for_sleep(true);
 
-    let mock = MockBscpylgtv::new("entrypoint-nm-pre-down-tv");
-    mock.set_input("HDMI_2");
-    let wrapper = mock.command_wrapper("entrypoint-nm-pre-down-wrapper");
+    let tv =
+        web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
 
     let config = TestConfigFile::new("entrypoint-nm-pre-down-config");
     config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
 
     let runtime = RuntimeStateLayout::new("entrypoint-nm-pre-down-runtime");
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
 
     let mut first_output = Vec::new();
@@ -863,13 +853,16 @@ fn run_nm_pre_down_uses_logind_property_and_retries_idempotently() {
     runtime.assert_system_marker_exists();
     runtime.assert_system_sleep_attempt_marker_absent();
     assert_eq!(
-        mock.calls()
-            .iter()
-            .map(|call| call.command.as_str())
-            .collect::<Vec<_>>(),
-        vec!["get_input", "power_off"]
+        tv.snapshot().request_uris,
+        vec![
+            "ssap://com.webos.applicationManager/getForegroundAppInfo".to_string(),
+            "ssap://com.webos.service.tvpower/power/getPowerState".to_string(),
+            "ssap://system/turnOff".to_string(),
+        ],
+        "pre-sleep must follow the exact native sequence (read input, read power state, power off) and nothing else"
     );
-    assert!(!mock.state_snapshot().power_on);
+    assert_eq!(tv.snapshot().power_off_count, 1);
+    assert!(!tv.snapshot().power_on);
     assert!(String::from_utf8(first_output)
         .expect("utf8 output")
         .contains("logind is preparing for sleep"));
@@ -878,13 +871,15 @@ fn run_nm_pre_down_uses_logind_property_and_retries_idempotently() {
     run_command(Command::NetworkManagerPreDown, &mut second_output)
         .expect("repeated NetworkManager pre-down should stay idempotent");
 
+    // Idempotent repeat: the completed cycle (system marker) short-circuits the
+    // second pre-down, so no further TV work is issued.
     assert_eq!(
-        mock.calls()
-            .iter()
-            .map(|call| call.command.as_str())
-            .collect::<Vec<_>>(),
-        vec!["get_input", "power_off"]
+        tv.snapshot().request_uris.len(),
+        3,
+        "repeat pre-down must not duplicate TV work: {:?}",
+        tv.snapshot().request_uris
     );
+    assert_eq!(tv.snapshot().power_off_count, 1);
     runtime.assert_system_marker_exists();
     runtime.assert_system_sleep_attempt_marker_absent();
     assert!(String::from_utf8(second_output)
@@ -899,18 +894,26 @@ fn run_nm_pre_down_skips_network_disconnect_and_clears_stale_attempt() {
     logind.reset();
     logind.set_preparing_for_sleep(false);
 
-    let mock = MockBscpylgtv::new("entrypoint-nm-pre-down-not-sleeping-tv");
-    let wrapper = mock.command_wrapper("entrypoint-nm-pre-down-not-sleeping-wrapper");
+    let tv =
+        web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
 
     let config = TestConfigFile::new("entrypoint-nm-pre-down-not-sleeping-config");
     config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "127.0.0.1");
+    config.append_line("tvs_primary_platform=lg_webos");
+    let token_dir = config.path().parent().unwrap().join("tvs/primary");
+    fs::create_dir_all(&token_dir).unwrap();
+    fs::write(
+        token_dir.join("access-token.json"),
+        r#"{"access_token": "webos-test-access-token"}"#,
+    )
+    .unwrap();
 
     let runtime = RuntimeStateLayout::new("entrypoint-nm-pre-down-not-sleeping-runtime");
     runtime.create_system_sleep_attempt_marker();
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
 
     let mut output = Vec::new();
@@ -919,7 +922,11 @@ fn run_nm_pre_down_skips_network_disconnect_and_clears_stale_attempt() {
 
     runtime.assert_system_sleep_attempt_marker_absent();
     runtime.assert_system_marker_absent();
-    assert!(mock.calls().is_empty());
+    assert!(
+        tv.snapshot().request_uris.is_empty(),
+        "non-sleep pre-down must make no TV calls: {:?}",
+        tv.snapshot().request_uris
+    );
     assert!(String::from_utf8(output)
         .expect("utf8 output")
         .contains("not preparing for sleep"));
@@ -932,18 +939,12 @@ fn session_dispatcher_skips_screen_action_while_logind_reports_sleep_pending() {
     logind.reset();
     logind.set_preparing_for_sleep(true);
 
-    let mock = MockBscpylgtv::new("entrypoint-monitor-sleep-pending-tv");
-    mock.set_input("HDMI_2");
-    let wrapper = mock.command_wrapper("entrypoint-monitor-sleep-pending-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-monitor-sleep-pending-config");
-    config.write_sample("HDMI_2");
+    let (tv, config) = native_config("entrypoint-monitor-sleep-pending-config", "HDMI_2", false);
 
     let runtime = RuntimeStateLayout::new("entrypoint-monitor-sleep-pending-runtime");
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
 
     let mut output = Vec::new();
@@ -953,7 +954,7 @@ fn session_dispatcher_skips_screen_action_while_logind_reports_sleep_pending() {
         .expect("session idle dispatch should succeed");
 
     runtime.assert_session_marker_absent();
-    assert!(mock.calls().is_empty());
+    assert!(tv.snapshot().request_uris.is_empty());
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(
         output.contains("Machine sleep is pending"),
@@ -972,12 +973,11 @@ fn session_dispatcher_skips_screen_restore_while_system_resume_restore_is_pendin
     logind.reset();
     logind.set_preparing_for_sleep(false);
 
-    let mock = MockBscpylgtv::new("entrypoint-monitor-system-restore-pending-tv");
-    mock.set_screen_on(false);
-    let wrapper = mock.command_wrapper("entrypoint-monitor-system-restore-pending-wrapper");
-
-    let config = TestConfigFile::new("entrypoint-monitor-system-restore-pending-config");
-    config.write_sample("HDMI_2");
+    let (tv, config) = native_config(
+        "entrypoint-monitor-system-restore-pending-config",
+        "HDMI_2",
+        true,
+    );
 
     let runtime = RuntimeStateLayout::new("entrypoint-monitor-system-restore-pending-runtime");
     runtime.create_session_marker();
@@ -985,7 +985,6 @@ fn session_dispatcher_skips_screen_restore_while_system_resume_restore_is_pendin
 
     env.set("DBUS_SYSTEM_BUS_ADDRESS", logind.address());
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
 
@@ -997,7 +996,7 @@ fn session_dispatcher_skips_screen_restore_while_system_resume_restore_is_pendin
 
     runtime.assert_session_marker_exists();
     runtime.assert_system_marker_exists();
-    assert!(mock.calls().is_empty());
+    assert!(tv.snapshot().request_uris.is_empty());
     let output = String::from_utf8(output).expect("utf8 output");
     assert!(
         output.contains("System resume restore is pending"),
@@ -1014,7 +1013,8 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-lifecycle-logind");
     logind.reset();
-    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
+    let tv =
+        web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
     let nm_online = MockNmOnline::new("entrypoint-lifecycle-nm-online");
     let nm_online_wrapper = nm_online.command_wrapper("entrypoint-lifecycle-nm-online-wrapper");
 
@@ -1070,15 +1070,15 @@ fn run_lifecycle_monitor_uses_logind_resume_signal_and_runtime_restore() {
 
     let uris = tv.snapshot().request_uris;
     assert_eq!(
-        uris
-            .iter()
+        uris.iter()
             .filter(|uri| uri.as_str() == "ssap://tv/switchInput")
             .count(),
         1,
         "wake restore must switch input exactly once: {uris:?}"
     );
     assert_eq!(
-        tv.snapshot().input, "HDMI_3",
+        tv.snapshot().input,
+        "HDMI_3",
         "restore must land on the configured input (mock started on HDMI_2)"
     );
     runtime.assert_system_marker_absent();
@@ -1106,7 +1106,8 @@ fn run_lifecycle_monitor_uses_logind_sleep_signal_for_pre_sleep_power_off() {
     let mut env = TestEnv::new();
     let logind = MockSystemLogind::new("entrypoint-lifecycle-logind-sleep");
     logind.reset();
-    let tv = web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
+    let tv =
+        web_os::MockWebOsTv::with_version(web_os::MockWebOsVersion::WebOs24Version92261, "HDMI_2");
 
     let config = TestConfigFile::new("entrypoint-lifecycle-sleep-config");
     config.write_sample("HDMI_2");
