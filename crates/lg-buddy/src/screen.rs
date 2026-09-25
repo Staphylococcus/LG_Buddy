@@ -1240,12 +1240,13 @@ fn compact_failure_detail(detail: &str) -> String {
         .to_string()
 }
 
-fn event_source_label(source: EventSource) -> &'static str {
+pub(crate) fn event_source_label(source: EventSource) -> &'static str {
     match source {
         EventSource::CliApi => "cli-api",
         EventSource::LinuxLogind => "linux-logind",
         EventSource::LinuxNetworkManager => "linux-network-manager",
         EventSource::LinuxSystemd => "linux-systemd",
+        EventSource::LinuxDpms => "linux-dpms",
         EventSource::DesktopSession => "desktop-session",
         EventSource::AuxiliaryInput => "auxiliary-input",
         EventSource::FuturePlatform => "future-platform",
@@ -1263,7 +1264,10 @@ fn marker_state(exists: bool) -> &'static str {
 fn is_session_screen_source(source: EventSource) -> bool {
     matches!(
         source,
-        EventSource::DesktopSession | EventSource::AuxiliaryInput | EventSource::LinuxLogind
+        EventSource::DesktopSession
+            | EventSource::AuxiliaryInput
+            | EventSource::LinuxLogind
+            | EventSource::LinuxDpms
     )
 }
 

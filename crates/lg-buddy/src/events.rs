@@ -46,6 +46,7 @@ pub enum EventSource {
     LinuxLogind,
     LinuxNetworkManager,
     LinuxSystemd,
+    LinuxDpms,
     DesktopSession,
     AuxiliaryInput,
     FuturePlatform,
