@@ -143,17 +143,36 @@ impl InactivityEngine {
         self.phase == InactivityPhase::Blanked && self.power_off_at.is_some()
     }
 
-    pub fn observe_provider_idle(&mut self) -> InactivityDecision {
-        if matches!(
+    /// Register a provider-idle observation (for example, the OS blanking the
+    /// display) at its observation instant.
+    ///
+    /// A fresh observation (at or after the current activity floor) arms the
+    /// blank and sets the observation instant as the activity floor, so input
+    /// observed before the blank cannot undo it or cancel its power-off
+    /// countdown. A delayed observation older than activity already handled is
+    /// rejected as a no-op. Once the engine is no longer idle, a repeated
+    /// observation never restarts a running countdown.
+    pub fn observe_provider_idle(&mut self, observed_at: Instant) -> InactivityDecision {
+        if !matches!(
             self.phase,
             InactivityPhase::Unknown | InactivityPhase::Active
         ) {
-            self.phase = InactivityPhase::BlankRequested;
-            self.blank_at = None;
-            return InactivityDecision::BlankNow;
+            return InactivityDecision::NoOp;
         }
-
-        InactivityDecision::NoOp
+        // A delayed system-blank observation older than activity already handled
+        // is stale: it must not re-blank or cancel a newer activity's deadlines.
+        if self.activity_floor.is_some_and(|floor| observed_at < floor) {
+            return InactivityDecision::NoOp;
+        }
+        // A fresh observation establishes the activity floor for the blank it
+        // triggers, so input observed before the blank cannot undo it or cancel
+        // its power-off countdown.
+        self.activity_floor = self
+            .activity_floor
+            .map_or(Some(observed_at), |floor| Some(floor.max(observed_at)));
+        self.phase = InactivityPhase::BlankRequested;
+        self.blank_at = None;
+        InactivityDecision::BlankNow
     }
 
     pub fn complete_blank(&mut self, succeeded: bool, completed_at: Instant) {
@@ -550,7 +569,10 @@ mod tests {
         let mut engine = InactivityEngine::new_provider_driven(Duration::from_secs(5), started_at);
 
         assert_eq!(engine.time_until_action(started_at), None);
-        assert_eq!(engine.observe_provider_idle(), InactivityDecision::BlankNow);
+        assert_eq!(
+            engine.observe_provider_idle(started_at),
+            InactivityDecision::BlankNow
+        );
         engine.complete_blank(true, started_at);
         assert_eq!(
             engine.observe_time(started_at + Duration::from_secs(5), || true),
@@ -563,7 +585,10 @@ mod tests {
         let started_at = Instant::now();
         let mut engine = InactivityEngine::new_provider_driven(Duration::from_secs(5), started_at);
 
-        assert_eq!(engine.observe_provider_idle(), InactivityDecision::BlankNow);
+        assert_eq!(
+            engine.observe_provider_idle(started_at),
+            InactivityDecision::BlankNow
+        );
         engine.complete_blank(true, started_at);
         assert_eq!(
             engine.observe_activity(
@@ -576,7 +601,12 @@ mod tests {
             engine.observe_time(started_at + Duration::from_secs(30), || true),
             InactivityDecision::NoOp
         );
-        assert_eq!(engine.observe_provider_idle(), InactivityDecision::BlankNow);
+        // A later provider-idle observation (after the restoring activity) arms
+        // the next blank again.
+        assert_eq!(
+            engine.observe_provider_idle(started_at + Duration::from_secs(2)),
+            InactivityDecision::BlankNow
+        );
     }
 
     #[test]
@@ -947,6 +977,108 @@ mod tests {
         assert_eq!(
             engine.observe_time(input_at + Duration::from_secs(1), || true),
             InactivityDecision::BlankNow
+        );
+    }
+
+    #[test]
+    fn system_blank_floor_rejects_delayed_pre_blank_activity() {
+        // Models a system blank observed at t=10 followed by delivery of input
+        // observed at t=9 (native activity drained ahead of the queued message).
+        let start = Instant::now();
+        let mut engine = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            start,
+        );
+        assert_eq!(
+            engine.observe_provider_idle(start + Duration::from_secs(10)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, start + Duration::from_secs(10));
+        assert!(engine.timed_power_off_pending());
+        assert_eq!(
+            engine.observe_activity(
+                InactivityObservation::DesktopActivityObserved,
+                start + Duration::from_secs(9)
+            ),
+            InactivityDecision::NoOp,
+            "input observed before the system blank must not restore it"
+        );
+        assert!(
+            engine.timed_power_off_pending(),
+            "stale input must not cancel the power-off countdown"
+        );
+    }
+
+    #[test]
+    fn delayed_system_blank_after_newer_activity_is_rejected() {
+        // Newer activity handled at t=5 raises the activity floor; a queued
+        // system blank observed earlier (t=3) must not re-blank or reset the
+        // deadline.
+        let start = Instant::now();
+        let mut engine = InactivityEngine::new(Duration::from_secs(60), start);
+        engine.observe_activity(
+            InactivityObservation::UserActivityObserved,
+            start + Duration::from_secs(5),
+        );
+        assert_eq!(
+            engine.observe_provider_idle(start + Duration::from_secs(3)),
+            InactivityDecision::NoOp,
+            "a stale system blank must not override newer activity"
+        );
+        assert_eq!(
+            engine.time_until_action(start),
+            Some(Duration::from_secs(65)),
+            "the newer activity's idle deadline is preserved"
+        );
+    }
+
+    #[test]
+    fn fresh_activity_restores_after_a_system_blank() {
+        let start = Instant::now();
+        let mut engine = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            start,
+        );
+        assert_eq!(
+            engine.observe_provider_idle(start + Duration::from_secs(10)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, start + Duration::from_secs(10));
+        assert!(engine.timed_power_off_pending());
+        assert_eq!(
+            engine.observe_activity(
+                InactivityObservation::UserActivityObserved,
+                start + Duration::from_secs(12)
+            ),
+            InactivityDecision::RestoreNow
+        );
+        assert!(!engine.timed_power_off_pending());
+    }
+
+    #[test]
+    fn repeated_system_blank_preserves_the_original_deadline() {
+        let start = Instant::now();
+        let mut engine = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(60),
+            Duration::from_secs(3),
+            start,
+        );
+        assert_eq!(
+            engine.observe_provider_idle(start + Duration::from_secs(2)),
+            InactivityDecision::BlankNow
+        );
+        engine.complete_blank(true, start + Duration::from_secs(2));
+        // A later repeated observation is a no-op and never restarts the countdown.
+        assert_eq!(
+            engine.observe_provider_idle(start + Duration::from_secs(4)),
+            InactivityDecision::NoOp
+        );
+        assert_eq!(
+            engine.time_until_action(start + Duration::from_secs(2)),
+            Some(Duration::from_secs(3)),
+            "the power-off deadline is anchored to the first blank completion"
         );
     }
 }
