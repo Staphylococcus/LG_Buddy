@@ -8,6 +8,18 @@ REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_BINARY="${1:-$REPOSITORY_ROOT/target/debug/lg-buddy}"
 GUI_BINARY="${2:-$REPOSITORY_ROOT/target/debug/lg-buddy-gui}"
 TV_FIXTURE="${3:-${LG_BUDDY_GUI_TV_FIXTURE:-}}"
+if [ -z "$TV_FIXTURE" ]; then
+    # Local builds and CI's downloaded fixture artifacts use these locations.
+    for candidate in \
+        "$REPOSITORY_ROOT/target/debug/examples/gui_journey_tv" \
+        "$REPOSITORY_ROOT/target/gui-journey-fixtures/gui_journey_tv" \
+        "$REPOSITORY_ROOT/gui-journey-fixtures/gui_journey_tv"; do
+        if [ -x "$candidate" ]; then
+            TV_FIXTURE="$candidate"
+            break
+        fi
+    done
+fi
 UPDATE_ARCHIVE="${4:-${LG_BUDDY_GUI_UPDATE_ARCHIVE:-}}"
 WORK_DIR="$(mktemp -d)"
 INSTALL_ROOT="$WORK_DIR/root"

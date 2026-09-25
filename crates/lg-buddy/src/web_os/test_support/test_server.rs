@@ -572,6 +572,7 @@ struct WebOsTestRuntime {
     registration_tokens: Vec<Option<String>>,
     request_uris: Vec<String>,
     rejected_request_uri: Option<String>,
+    first_request_fault: Option<(String, Duration, bool)>,
     ambiguous_input_write_injected: bool,
     stalled_request_injected: bool,
     restore_session_interruption_injected: bool,
@@ -738,6 +739,7 @@ impl WebOsTestServer {
             registration_tokens: Vec::new(),
             request_uris: Vec::new(),
             rejected_request_uri: None,
+            first_request_fault: None,
             ambiguous_input_write_injected: false,
             stalled_request_injected: false,
             restore_session_interruption_injected: false,
@@ -855,6 +857,25 @@ impl WebOsTestServer {
             .lock()
             .expect("webOS test server state")
             .rejected_request_uri = uri.map(str::to_owned);
+    }
+
+    /// Delay or reject only the first matching request, preserving other capabilities.
+    #[allow(dead_code)]
+    pub(crate) fn fault_first_request(&self, uri: &str, delay: Duration, reject: bool) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .first_request_fault = Some((uri.to_owned(), delay, reject));
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_backlight(&self, backlight: u8) {
+        assert!(backlight <= 100);
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .tv
+            .backlight = json!(backlight);
     }
 
     #[allow(dead_code)]
@@ -1049,12 +1070,34 @@ fn serve_connection<S>(
                     .to_string(),
             );
 
-        let rejected = runtime
-            .lock()
-            .expect("webOS test server state")
-            .rejected_request_uri
-            .as_deref()
-            .is_some_and(|uri| request["uri"] == uri);
+        let fault = {
+            let mut runtime = runtime.lock().expect("webOS test server state");
+            if runtime
+                .first_request_fault
+                .as_ref()
+                .is_some_and(|(uri, _, _)| request["uri"] == *uri)
+            {
+                runtime.first_request_fault.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, delay, _)) = &fault {
+            let deadline = Instant::now() + *delay;
+            while Instant::now() < deadline {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let rejected = fault.is_some_and(|(_, _, reject)| reject)
+            || runtime
+                .lock()
+                .expect("webOS test server state")
+                .rejected_request_uri
+                .as_deref()
+                .is_some_and(|uri| request["uri"] == uri);
         if rejected {
             send_json(
                 &mut socket,

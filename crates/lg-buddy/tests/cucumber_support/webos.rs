@@ -102,6 +102,16 @@ impl MockWebOsTv {
         self.server.reject_request(uri);
     }
 
+    #[allow(dead_code)] // Used by the installed GUI process fixture.
+    pub fn fault_first_request(&self, uri: &str, delay: Duration, reject: bool) {
+        self.server.fault_first_request(uri, delay, reject);
+    }
+
+    #[allow(dead_code)] // Used by the installed GUI process fixture.
+    pub fn set_backlight(&self, backlight: u8) {
+        self.server.set_backlight(backlight);
+    }
+
     pub fn reject_set_mute(&self) {
         self.server
             .set_scenario(WebOsTestScenario::SetAudioMuteRejected);

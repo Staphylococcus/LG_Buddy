@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <installed-lg-buddy> <config-file> [tv-fixture] [update-archive]"
+    echo "Usage: $0 <installed-lg-buddy> <config-file> <tv-fixture> [update-archive]"
     exit 1
 }
 
@@ -14,8 +14,12 @@ UPDATE_ARCHIVE="${4:-${LG_BUDDY_GUI_UPDATE_ARCHIVE:-}}"
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 REPOSITORY_ROOT="$(dirname "$SCRIPT_DIR")"
 WORK_DIR="$(mktemp -d)"
-STATE_FILE="$WORK_DIR/tv-state.json"
-MOCK_COMMAND="$WORK_DIR/bscpylgtvcommand"
+STATE_FILE="$WORK_DIR/behavior-tv/state.json"
+GET_BRIGHTNESS="ssap://settings/getSystemSettings"
+SET_BRIGHTNESS="ssap://system.notifications/createAlert"
+SET_VOLUME="ssap://audio/setVolume"
+SET_MUTE="ssap://audio/setMute"
+GET_MODEL="ssap://system/getSystemInfo"
 WINDOW_TITLE="LG Buddy"
 GUI_PID=""
 WINDOW_ID=""
@@ -67,28 +71,48 @@ trap cleanup EXIT
 [ -n "${DISPLAY:-}" ] || fail "DISPLAY is required for GUI behavior smoke."
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || fail "A D-Bus session is required for GUI behavior smoke."
 command -v xdotool >/dev/null || fail "xdotool is required for GUI behavior smoke."
-command -v flock >/dev/null || fail "flock is required to serialize the state-file mock."
+[ -x "$TV_FIXTURE" ] || fail "Native TV fixture is required for GUI behavior smoke: $TV_FIXTURE"
 
 cp "$CONFIG_FILE" "$WORK_DIR/config.env"
 CONFIG_FILE="$WORK_DIR/config.env"
-if grep -q '^tvs_primary_platform=' "$CONFIG_FILE"; then
-    sed -i 's/^tvs_primary_platform=.*/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
-else
-    printf '%s\n' 'tvs_primary_platform=bscpylgtv' >>"$CONFIG_FILE"
-fi
-
-cat >"$MOCK_COMMAND" <<EOF
-#!/bin/sh
-exec flock "$STATE_FILE.lock" python3 "$REPOSITORY_ROOT/tools/mock_bscpylgtvcommand.py" --state "$STATE_FILE" "\$@"
-EOF
-chmod 755 "$MOCK_COMMAND"
+# Operational GUI tests use the supported backend and only a loopback TV.
+sed -i '/^tvs_primary_platform=/d; /^tvs_primary_ip=/d' "$CONFIG_FILE"
+printf '%s\n' 'tvs_primary_platform=lg_webos' 'tvs_primary_ip=127.0.0.1' >> "$CONFIG_FILE"
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
-export LG_BUDDY_BSCPYLGTV_COMMAND="$MOCK_COMMAND"
+
+stop_behavior_tv() {
+    if [ -n "$TV_FIXTURE_PID" ]; then
+        printf 'stop\n' > "$WORK_DIR/behavior-tv/command.tmp"
+        mv "$WORK_DIR/behavior-tv/command.tmp" "$WORK_DIR/behavior-tv/command"
+        wait "$TV_FIXTURE_PID" || fail "Native TV fixture failed."
+        TV_FIXTURE_PID=""
+    fi
+}
 
 reset_tv_state() {
-    # Cancelled reads may still finish after the GUI exits. Serialize resets
-    # with their writes so an old snapshot cannot replace the next scenario.
-    flock "$STATE_FILE.lock" tee "$STATE_FILE" >/dev/null
+    stop_behavior_tv
+    mkdir -p "$WORK_DIR/behavior-tv" "$WORK_DIR/tvs/primary"
+    printf '%s\n' '{"access_token":"webos-test-access-token"}' > "$WORK_DIR/tvs/primary/access-token.json"
+    chmod 600 "$WORK_DIR/tvs/primary/access-token.json"
+    rm -f "$STATE_FILE"
+    python3 - "$WORK_DIR/behavior-tv/initial-state.json" "$@" <<'PY_STATE'
+import json, sys
+from pathlib import Path
+path, backlight, volume, muted, *fault = sys.argv[1:]
+state = {"backlight": int(backlight), "volume": int(volume), "muted": muted == "true"}
+if fault:
+    uri, delay, reject = fault
+    state["fault"] = {"uri": uri, "delay_ms": int(delay), "reject": reject == "true"}
+Path(path).write_text(json.dumps(state))
+PY_STATE
+    "$TV_FIXTURE" "$WORK_DIR/behavior-tv" > "$WORK_DIR/behavior-tv.output" 2>&1 &
+    TV_FIXTURE_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -e "$STATE_FILE" ] || return 0
+        kill -0 "$TV_FIXTURE_PID" 2>/dev/null || fail "Native TV fixture exited before becoming ready."
+        sleep 0.05
+    done
+    fail "Native TV fixture did not become ready."
 }
 
 start_gui() {
@@ -130,7 +154,7 @@ start_gui() {
     fail "GUI did not present its window."
 }
 
-wait_for_calls() {
+wait_for_requests() {
     local command="$1"
     local count="$2"
     for ((attempt = 0; attempt < 300; attempt++)); do
@@ -143,7 +167,7 @@ path = Path(sys.argv[1])
 if not path.exists():
     raise SystemExit(1)
 state = json.loads(path.read_text(encoding="utf-8"))
-observed = sum(call.get("command") == sys.argv[2] for call in state.get("calls", []))
+observed = state.get("request_uris", []).count(sys.argv[2])
 raise SystemExit(0 if observed >= int(sys.argv[3]) else 1)
 PY
         then
@@ -151,7 +175,7 @@ PY
         fi
         sleep 0.1
     done
-    fail "Timed out waiting for $count $command mock calls."
+    fail "Timed out waiting for $count $command native requests."
 }
 
 finish_gui() {
@@ -247,8 +271,24 @@ fi
 
 # A plain installed launch opens Overview. An explicit brightness activation
 # from TVs returns to the same window and focuses the slider after the read.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 50}","delay_seconds":2}]}}' | reset_tv_state
+reset_tv_state 50 20 true "$GET_BRIGHTNESS" 2000 false
 start_accessibility_bus
+cp "$CONFIG_FILE" "$WORK_DIR/current-config.env"
+sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
+cp "$CONFIG_FILE" "$WORK_DIR/stale-config.env"
+start_gui enabled "" "" normal
+observe_gui_state --expected-text "saved TV configuration needs migration"
+observe_gui_state --select-page Settings
+observe_gui_state --expected-settings-state ready
+send_closing_mnemonic Escape
+finish_gui "migration gate with Settings still available"
+cmp "$CONFIG_FILE" "$WORK_DIR/stale-config.env" || fail "Migration gate changed configuration."
+python3 - "$STATE_FILE" <<'PY_STALE'
+import json, sys
+state = json.load(open(sys.argv[1]))
+assert state["connection_count"] == 0 and not state["request_uris"], state
+PY_STALE
+cp "$WORK_DIR/current-config.env" "$CONFIG_FILE"
 start_gui enabled "" "" normal
 NORMAL_GUI_PID="$GUI_PID"
 NORMAL_WINDOW_ID="$WINDOW_ID"
@@ -269,25 +309,25 @@ finish_gui "brightness and normal activation from other views"
 
 # Read current state, edit the initially focused brightness slider through the
 # keyboard. Movement submits automatically and keeps Overview open.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{}}' | reset_tv_state
+reset_tv_state 50 20 true
 start_gui enabled
-wait_for_calls get_picture_settings 1
+wait_for_requests "$GET_BRIGHTNESS" 1
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --expected-state ready --expected-slider-value 50 \
     --expected-volume 20 --expected-muted true --require-brightness-focus
 xdotool key --window "$WINDOW_ID" Right
-wait_for_calls set_settings 1
+wait_for_requests "$SET_BRIGHTNESS" 1
 observe_gui_state --expected-state ready --expected-slider-value 55
 # Volume uses the CLI's set-then-unmute behavior. Mute remains independently
 # available, and both audio operations leave the brightness control usable.
 observe_gui_state --expected-volume 20 --expected-muted true
 observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" Right
-wait_for_calls set_volume 1
-wait_for_calls set_mute 1
+wait_for_requests "$SET_VOLUME" 1
+wait_for_requests "$SET_MUTE" 1
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted false
 observe_gui_state --activate-control "Mute TV"
-wait_for_calls set_mute 2
+wait_for_requests "$SET_MUTE" 2
 observe_gui_state --expected-slider-value 55 --expected-volume 21 --expected-muted true
 # Native tab navigation shows the configured profile and preserves live controls.
 observe_gui_state --select-page TVs
@@ -353,16 +393,16 @@ import sys
 
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 assert state["backlight"] != 50, state
-assert any(call.get("command") == "set_settings" for call in state["calls"]), state
+assert "ssap://system.notifications/createAlert" in state["request_uris"], state
 assert state["volume"] == 21 and state["muted"] is True, state
-audio_calls = [call["command"] for call in state["calls"] if call["command"] in ("set_volume", "set_mute")]
-assert audio_calls == ["set_volume", "set_mute", "set_mute"], audio_calls
+audio_calls = [uri for uri in state["request_uris"] if uri in ("ssap://audio/setVolume", "ssap://audio/setMute")]
+assert audio_calls == ["ssap://audio/setVolume", "ssap://audio/setMute", "ssap://audio/setMute"], audio_calls
 PY
 
 # TV management uses native controls and the real local persistence backend.
 cp "$CONFIG_FILE" "$WORK_DIR/before-management.env"
 mkdir -p "$WORK_DIR/tvs/primary"
-printf '%s\n' '{"access_token":"management-smoke-token"}' > "$WORK_DIR/tvs/primary/access-token.json"
+printf '%s\n' '{"access_token":"webos-test-access-token"}' > "$WORK_DIR/tvs/primary/access-token.json"
 chmod 600 "$WORK_DIR/tvs/primary/access-token.json"
 start_gui enabled
 observe_gui_state --select-page TVs
@@ -412,26 +452,31 @@ observe_gui_state --activate-control Cancel
 observe_gui_state --expected-tvs-state empty
 send_closing_mnemonic Escape
 finish_gui "empty TVs view"
-cmp -s "$STATE_FILE" "$WORK_DIR/before-empty.json" || fail "Empty profile performed a TV operation."
+python3 - "$WORK_DIR/before-empty.json" "$STATE_FILE" <<'PY_EMPTY'
+import json, sys
+before, after = [json.load(open(path)) for path in sys.argv[1:]]
+for key in ("request_uris", "connection_count"):
+    assert before[key] == after[key], f"Empty profile performed TV work: {key}"
+PY_EMPTY
 export LG_BUDDY_CONFIG="$CONFIG_FILE"
 
 # A failed optional model read retains the local TV details.
-printf '%s\n' '{"backlight":50,"calls":[],"plan":{"get_system_info":[{"result":"error","status":1,"stderr":"planned model read failure"}]}}' | reset_tv_state
+reset_tv_state 50 20 false "$GET_MODEL" 0 true
 start_gui enabled
-wait_for_calls get_system_info 1
+wait_for_requests "$GET_MODEL" 1
 observe_gui_state --select-page TVs
 observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS"
 send_closing_mnemonic Escape
 finish_gui "unavailable TV model"
 
 # A slow write must not disable the slider or discard subsequent movement.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":false,"calls":[],"plan":{"set_settings":[{"result":"success","delay_seconds":0.5,"state_update":{"backlight":55}}]}}' | reset_tv_state
+reset_tv_state 50 20 false "$SET_BRIGHTNESS" 500 false
 start_gui enabled
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --expected-slider-value 50 --expected-volume 20 --require-brightness-focus
 xdotool key --window "$WINDOW_ID" --repeat 5 --delay 20 Right
 observe_gui_state --expected-slider-value 75
-wait_for_calls set_settings 2
+wait_for_requests "$SET_BRIGHTNESS" 2
 send_closing_mnemonic Escape
 finish_gui "rapid slider movement"
 python3 - "$STATE_FILE" <<'PY'
@@ -440,23 +485,23 @@ import sys
 
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 assert state["backlight"] == 75, state
-assert sum(call["command"] == "set_settings" for call in state["calls"]) == 2, state
+assert state["request_uris"].count("ssap://system.notifications/createAlert") == 2, state
 PY
 
 # A failed read stays visible and Retry performs a fresh read. Observe each
 # rendered presentation before sending the action that depends on it.
-printf '%s\n' '{"backlight":64,"calls":[],"plan":{"get_picture_settings":[{"result":"error","status":1,"stderr":"planned read failure"},{"result":"success","stdout":"{\u0027backlight\u0027: 64}"}]}}' | reset_tv_state
+reset_tv_state 64 20 false "$GET_BRIGHTNESS" 0 true
 start_gui enabled
-wait_for_calls get_picture_settings 1
+wait_for_requests "$GET_BRIGHTNESS" 1
 observe_gui_state --expected-state read-failed --expected-volume 20 --expected-muted false
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" Right
-wait_for_calls set_volume 1
+wait_for_requests "$SET_VOLUME" 1
 observe_gui_state --expected-state read-failed --expected-volume 21 --expected-muted false
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --activate-control "Retry OLED Pixel Brightness"
-wait_for_calls get_picture_settings 2
+wait_for_requests "$GET_BRIGHTNESS" 2
 observe_gui_state --expected-state ready --expected-slider-value 64
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
@@ -464,16 +509,16 @@ finish_gui "read-failure cancellation"
 
 # Volume succeeded but unmuting failed: show the changed level and recover the
 # remaining mute operation without repeating the successful volume write.
-printf '%s\n' '{"backlight":50,"volume":20,"muted":true,"calls":[],"plan":{"set_mute":[{"result":"error","status":1,"stderr":"planned unmute failure"}]}}' | reset_tv_state
+reset_tv_state 50 20 true "$SET_MUTE" 0 true
 start_gui enabled
 observe_gui_state --expected-volume 20 --expected-muted true
 xdotool windowfocus --sync "$WINDOW_ID"
 observe_gui_state --focus-control "TV Volume" --window-id "$WINDOW_ID"
 xdotool key --window "$WINDOW_ID" Right
-wait_for_calls set_mute 1
+wait_for_requests "$SET_MUTE" 1
 observe_gui_state --expected-volume 21 --expected-muted true --require-audio-retry
 observe_gui_state --activate-control "Retry Audio"
-wait_for_calls set_mute 2
+wait_for_requests "$SET_MUTE" 2
 observe_gui_state --expected-volume 21 --expected-muted false
 send_closing_mnemonic Escape
 finish_gui "audio recovery cancellation"
@@ -483,18 +528,18 @@ import sys
 
 state = json.load(open(sys.argv[1], encoding="utf-8"))
 assert state["volume"] == 21 and state["muted"] is False, state
-assert sum(call["command"] == "set_volume" for call in state["calls"]) == 1, state
+assert state["request_uris"].count("ssap://audio/setVolume") == 1, state
 PY
 
 # Cancelling the loading window never writes a value.
-printf '%s\n' '{"backlight":37,"calls":[],"plan":{"get_picture_settings":[{"result":"success","stdout":"{\u0027backlight\u0027: 37}","delay_seconds":2}]}}' | reset_tv_state
+reset_tv_state 37 20 false "$GET_BRIGHTNESS" 2000 false
 start_gui
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
 finish_gui "loading cancellation"
 # Wait for the delayed brightness read before checking for writes. Other read
 # workers may still be finishing when the next scenario resets the state.
-wait_for_calls get_picture_settings 1
+wait_for_requests "$GET_BRIGHTNESS" 1
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -503,9 +548,10 @@ from pathlib import Path
 path = Path(sys.argv[1])
 if path.exists():
     state = json.loads(path.read_text(encoding="utf-8"))
-    assert not any(call.get("command") == "set_settings" for call in state.get("calls", [])), state
+    assert "ssap://system.notifications/createAlert" not in state["request_uris"], state
 PY
 
+stop_behavior_tv
 if [ -n "$TV_FIXTURE" ]; then
     source "$SCRIPT_DIR/test-release-gui-journey.sh"
     run_installed_gui_journey
@@ -521,9 +567,9 @@ if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
         local geometry=""
         local screenshot="$WORK_DIR/$label.xwd"
 
-        printf '%s\n' '{"backlight":50,"calls":[],"plan":{}}' | reset_tv_state
+        reset_tv_state 50 20 false
         start_gui enabled "$color_scheme" "$scale"
-        wait_for_calls get_picture_settings 1
+        wait_for_requests "$GET_BRIGHTNESS" 1
         observe_gui_state --expected-state ready --expected-slider-value 50
         geometry="$(xdotool getwindowgeometry --shell "$WINDOW_ID")"
         PLATFORM_WIDTH="$(printf '%s\n' "$geometry" | sed -n 's/^WIDTH=//p')"
@@ -568,4 +614,5 @@ if light_mean < dark_mean + 0.15:
 PY
 fi
 
+stop_behavior_tv
 echo "Release GUI behavior smoke passed."
