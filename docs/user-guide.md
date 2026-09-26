@@ -32,10 +32,10 @@ If a control fails, follow the error message beside it and retry.
 ### Add a brightness slider to GNOME Quick Settings
 
 On GNOME 46 or newer, an optional GNOME Shell extension adds a TV brightness
-slider with a TV icon to Quick Settings, below the volume sliders. It adds no
-top-bar icon. The slider reads the TV's brightness each time you open Quick
-Settings. It hides itself when the TV cannot be reached or a change fails, and
-tries again the next time you open Quick Settings.
+slider to Quick Settings, below the volume sliders. It adds no top-bar icon.
+The slider reads the TV's brightness each time you open Quick Settings. It
+hides itself when the TV cannot be reached or a change fails, and tries again
+the next time you open Quick Settings.
 
 From the extracted release archive, copy the extension into your user
 extensions folder:

@@ -27,9 +27,7 @@ function spawn(args) {
 
 export default class LgBuddyBrightness extends Extension {
     enable() {
-        // A TV icon keeps it distinct from GNOME's own brightness slider on
-        // machines that also have a built-in display.
-        this._item = new QuickSlider({iconName: 'tv-symbolic'});
+        this._item = new QuickSlider({iconName: 'display-brightness-symbolic'});
         this._item.slider.accessible_name = 'TV Brightness';
 
         let updating = false;
