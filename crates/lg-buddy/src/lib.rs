@@ -19,6 +19,7 @@ pub mod events;
 pub mod inhibition;
 pub mod kwin_bridge;
 pub mod lifecycle;
+pub mod migration;
 pub mod navigation;
 pub mod notifications;
 pub mod overview;

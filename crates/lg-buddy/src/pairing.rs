@@ -7,12 +7,14 @@ use std::time::Duration;
 
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::pairing_store::PairingStore;
+use crate::platform_access_token::PlatformAccessToken;
 use crate::presentation::{brightness::UserFacingError, pairing::PairingPresentation};
 use crate::settings::ConfigPathResolver;
 use crate::settings_view::BehaviorSetting;
 use crate::tvs::{TvCredentialState, TvId, TvProfile};
 use crate::web_os::{
     WebOsClient, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent, WebOsPairingReadError,
+    WebOsTokenAuthenticationError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,44 +226,118 @@ pub(crate) fn pair_and_save_webos(
     progress: &mut dyn FnMut(PairingStage),
 ) -> Result<PairingOutcome, PairingError> {
     pair_and_save(operation, path, progress, |progress| {
-        let (mut client, token) = WebOsClient::pair_in_memory(
+        pair_and_verify_webos_in_memory(operation, endpoint, progress)
+    })
+}
+
+/// Pairs a fresh native webOS client and verifies its capabilities without
+/// any persistence. The token is returned in memory only after every
+/// verification read and the final cancellation check pass.
+pub(crate) fn pair_and_verify_webos_in_memory(
+    operation: &PairingOperation,
+    endpoint: WebOsEndpoint,
+    progress: &mut dyn FnMut(PairingStage),
+) -> Result<crate::platform_access_token::PlatformAccessToken, PairingError> {
+    prepare_webos_pairing_in_memory(operation, endpoint, None, progress)
+}
+
+/// Prepares a native webOS client in memory, either by authenticating with a
+/// supplied credential or by pairing fresh when the TV says pairing is
+/// required, and verifies capabilities on either path before returning the
+/// credential in memory. A successful token-bearing authentication returns a
+/// clone of the original supplied token, never a replacement echoed by the
+/// TV. No config path or token store is read or written and nothing is
+/// persisted; cancellation stays available after preparation succeeds.
+pub(crate) fn prepare_webos_pairing_in_memory(
+    operation: &PairingOperation,
+    endpoint: WebOsEndpoint,
+    existing_token: Option<&PlatformAccessToken>,
+    progress: &mut dyn FnMut(PairingStage),
+) -> Result<PlatformAccessToken, PairingError> {
+    let (mut client, prepared_token) = match existing_token {
+        Some(token) => match WebOsClient::authenticate_in_memory(
             endpoint,
             Duration::from_secs(3),
-            Duration::from_secs(60),
+            Duration::from_secs(3),
+            token,
             &|| operation.is_cancelled(),
-            &mut |event| match event {
-                WebOsPairingEvent::WaitingForConfirmation => {
-                    progress(PairingStage::WaitingForConfirmation)
-                }
-            },
-        )
-        .map_err(|error| {
-            PairingError::new(match error {
-                WebOsPairingError::Cancelled => PairingFailure::Cancelled,
-                WebOsPairingError::Rejected => PairingFailure::Rejected,
-                WebOsPairingError::Timeout => PairingFailure::Timeout,
-                WebOsPairingError::Failed => PairingFailure::Connection,
-            })
-        })?;
+        ) {
+            Ok(client) => (client, token.clone()),
+            // Only a pairing-required TV may escalate to fresh pairing, on a
+            // new connection; every other authentication failure stops here
+            // without retry.
+            Err(WebOsTokenAuthenticationError::PairingRequired) => {
+                pair_fresh_webos_in_memory(operation, endpoint, progress)?
+            }
+            Err(error) => {
+                return Err(PairingError::new(match error {
+                    WebOsTokenAuthenticationError::Cancelled => PairingFailure::Cancelled,
+                    WebOsTokenAuthenticationError::Timeout => PairingFailure::Timeout,
+                    WebOsTokenAuthenticationError::Failed => PairingFailure::Connection,
+                    WebOsTokenAuthenticationError::PairingRequired => unreachable!(),
+                }));
+            }
+        },
+        None => pair_fresh_webos_in_memory(operation, endpoint, progress)?,
+    };
+    verify_webos_capabilities_in_memory(&mut client, operation, progress)?;
+    Ok(prepared_token)
+}
 
-        progress(PairingStage::Verifying);
-        const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
-        client
-            .power_state_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
-            .map_err(map_pairing_read_error)?;
-        client
-            .audio_status_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
-            .map_err(map_pairing_read_error)?;
-        client
-            .backlight_brightness_with_cancellation(VERIFICATION_TIMEOUT, &|| {
-                operation.is_cancelled()
-            })
-            .map_err(map_pairing_read_error)?;
-        if operation.is_cancelled() {
-            return Err(PairingError::new(PairingFailure::Cancelled));
-        }
-        Ok(token)
-    })
+/// Opens a new connection and pairs fresh within the existing 3s connect and
+/// 60s pairing bounds. Transport failure, rejection, timeout and
+/// cancellation each stop the preparation immediately; the pairing is never
+/// retried.
+fn pair_fresh_webos_in_memory(
+    operation: &PairingOperation,
+    endpoint: WebOsEndpoint,
+    progress: &mut dyn FnMut(PairingStage),
+) -> Result<(WebOsClient, PlatformAccessToken), PairingError> {
+    let (client, token) = WebOsClient::pair_in_memory(
+        endpoint,
+        Duration::from_secs(3),
+        Duration::from_secs(60),
+        &|| operation.is_cancelled(),
+        &mut |event| match event {
+            WebOsPairingEvent::WaitingForConfirmation => {
+                progress(PairingStage::WaitingForConfirmation)
+            }
+        },
+    )
+    .map_err(|error| {
+        PairingError::new(match error {
+            WebOsPairingError::Cancelled => PairingFailure::Cancelled,
+            WebOsPairingError::Rejected => PairingFailure::Rejected,
+            WebOsPairingError::Timeout => PairingFailure::Timeout,
+            WebOsPairingError::Failed => PairingFailure::Connection,
+        })
+    })?;
+    Ok((client, token))
+}
+
+/// Runs the shared verification sequence on a paired client: power state,
+/// audio status and OLED backlight reads, each cancellable within 3s,
+/// followed by a final cancellation check.
+fn verify_webos_capabilities_in_memory(
+    client: &mut WebOsClient,
+    operation: &PairingOperation,
+    progress: &mut dyn FnMut(PairingStage),
+) -> Result<(), PairingError> {
+    progress(PairingStage::Verifying);
+    const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
+    client
+        .power_state_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
+        .map_err(map_pairing_read_error)?;
+    client
+        .audio_status_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
+        .map_err(map_pairing_read_error)?;
+    client
+        .backlight_brightness_with_cancellation(VERIFICATION_TIMEOUT, &|| operation.is_cancelled())
+        .map_err(map_pairing_read_error)?;
+    if operation.is_cancelled() {
+        return Err(PairingError::new(PairingFailure::Cancelled));
+    }
+    Ok(())
 }
 
 fn map_pairing_read_error(error: WebOsPairingReadError) -> PairingError {
@@ -678,6 +754,400 @@ mod tests {
             .exists());
         server.finish();
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn in_memory_pairing_verification_returns_token_without_saving() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let mut stages = Vec::new();
+
+        let token = pair_and_verify_webos_in_memory(&operation, server.endpoint(), &mut |stage| {
+            stages.push(stage)
+        })
+        .expect("in-memory pairing should verify and return the token");
+
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying
+            ]
+        );
+        assert!(!stages.contains(&PairingStage::Saving));
+        assert!(!token.as_secret_str().is_empty());
+        let uris = server.snapshot().request_uris;
+        assert_eq!(
+            uris,
+            vec![
+                "ssap://com.webos.service.tvpower/power/getPowerState",
+                "ssap://audio/getStatus",
+                "ssap://settings/getSystemSettings",
+            ]
+        );
+        // Cancellation stays available after preparation succeeds; the save
+        // boundary has not started.
+        assert!(operation.cancel());
+        server.finish();
+    }
+
+    #[test]
+    fn in_memory_pairing_verification_failure_or_cancellation_yields_no_prepared_result() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let mut stages = Vec::new();
+
+        let error = pair_and_verify_webos_in_memory(&operation, server.endpoint(), &mut |stage| {
+            stages.push(stage)
+        })
+        .expect_err("capability denial must leave no prepared result");
+
+        assert_eq!(error.failure(), PairingFailure::Verification);
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying
+            ]
+        );
+        assert!(!stages.contains(&PairingStage::Saving));
+
+        // Cancellation before the first capability read leaves no result
+        // either, reusing the same fixture scenario.
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let operation_for_progress = operation.clone();
+        let mut stages = Vec::new();
+        let error = pair_and_verify_webos_in_memory(&operation, server.endpoint(), &mut |stage| {
+            stages.push(stage);
+            if stage == PairingStage::Verifying {
+                assert!(operation_for_progress.cancel());
+            }
+        })
+        .expect_err("cancellation must stop before the first capability read");
+        assert_eq!(error.failure(), PairingFailure::Cancelled);
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying
+            ]
+        );
+        assert!(!stages.contains(&PairingStage::Saving));
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_with_valid_token_verifies_and_returns_supplied_token() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let supplied = PlatformAccessToken::new("webos-test-access-token").unwrap();
+        let mut stages = Vec::new();
+
+        let prepared = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| stages.push(stage),
+        )
+        .expect("a valid token must prepare without fresh pairing");
+
+        assert_eq!(
+            stages,
+            vec![PairingStage::Verifying],
+            "only the verification stage is emitted for a token-bearing preparation"
+        );
+        let snapshot = server.snapshot();
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some("webos-test-access-token".to_string())],
+            "exactly one token-bearing registration, with no pairing prompt"
+        );
+        assert_eq!(
+            snapshot.connection_count, 1,
+            "a token-bearing preparation never opens a second connection"
+        );
+        assert_eq!(snapshot.pairing_prompt_count, 0);
+        assert_eq!(
+            snapshot.request_uris,
+            vec![
+                "ssap://com.webos.service.tvpower/power/getPowerState",
+                "ssap://audio/getStatus",
+                "ssap://settings/getSystemSettings",
+            ]
+        );
+        assert_eq!(
+            prepared, supplied,
+            "the prepared token must be the supplied token, not a TV echo"
+        );
+        // Cancellation stays available after preparation succeeds; the save
+        // boundary has not started.
+        assert!(operation.cancel());
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_stored_token_pairing_prompt_falls_back_to_fresh_pairing() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let stale = PlatformAccessToken::new("stale-client-key").unwrap();
+        let mut stages = Vec::new();
+
+        let prepared = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&stale),
+            &mut |stage| stages.push(stage),
+        )
+        .expect("a pairing-required TV must complete a fresh pairing");
+
+        assert_eq!(
+            stages,
+            vec![
+                PairingStage::WaitingForConfirmation,
+                PairingStage::Verifying
+            ]
+        );
+        assert!(!stages.contains(&PairingStage::Saving));
+        let snapshot = server.snapshot();
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some("stale-client-key".to_string()), None],
+            "the stale token is tried first, then the fresh pairing presents none"
+        );
+        assert_eq!(
+            snapshot.connection_count, 2,
+            "fresh pairing opens a new connection"
+        );
+        assert_eq!(
+            snapshot.request_uris,
+            vec![
+                "ssap://com.webos.service.tvpower/power/getPowerState",
+                "ssap://audio/getStatus",
+                "ssap://settings/getSystemSettings",
+            ]
+        );
+        assert_eq!(
+            prepared,
+            server.access_token(),
+            "the fresh pairing result is the server-issued token"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_verification_failure_does_not_repair_or_persist() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::PowerStatePermissionDenied,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let supplied = PlatformAccessToken::new("webos-test-access-token").unwrap();
+        let mut stages = Vec::new();
+
+        let error = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| stages.push(stage),
+        )
+        .expect_err("a denied capability read must fail the preparation");
+
+        assert_eq!(error.failure(), PairingFailure::Verification);
+        assert_eq!(stages, vec![PairingStage::Verifying]);
+        let snapshot = server.snapshot();
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some("webos-test-access-token".to_string())],
+            "the verification failure must not trigger a fresh pairing"
+        );
+        assert_eq!(snapshot.connection_count, 1);
+        assert_eq!(snapshot.pairing_prompt_count, 0);
+        assert_eq!(
+            snapshot.request_uris,
+            vec!["ssap://com.webos.service.tvpower/power/getPowerState"],
+            "the denied read is the only capability request"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_registration_timeout_is_distinct_without_fallback() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let supplied = PlatformAccessToken::new("webos-test-access-token").unwrap();
+        let mut stages = Vec::new();
+
+        let error = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| stages.push(stage),
+        )
+        .expect_err("a registration timeout must fail the preparation");
+
+        assert_eq!(error.failure(), PairingFailure::Timeout);
+        assert!(
+            stages.is_empty(),
+            "no fresh-pairing progress may be emitted before the registration gives up"
+        );
+        let snapshot = server.snapshot();
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some("webos-test-access-token".to_string())],
+            "the supplied token was tried exactly once, without fresh pairing"
+        );
+        assert_eq!(snapshot.connection_count, 1);
+        assert_eq!(snapshot.pairing_prompt_count, 0);
+        assert!(
+            snapshot.request_uris.is_empty(),
+            "no verification request may follow a stalled registration"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_cancellation_before_work_and_at_verifying_leaves_no_result() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        // Cancellation before any work: the preparation stops without
+        // connecting and without a prepared result.
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        assert!(operation.cancel());
+        let supplied = PlatformAccessToken::new("webos-test-access-token").unwrap();
+        let mut stages = Vec::new();
+        let error = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| stages.push(stage),
+        )
+        .expect_err("a cancelled operation must not prepare a token");
+        assert_eq!(error.failure(), PairingFailure::Cancelled);
+        assert!(stages.is_empty());
+        assert_eq!(server.snapshot().connection_count, 0);
+        server.finish();
+
+        // Cancellation at Verifying: no capability read may leave the client.
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let operation_for_progress = operation.clone();
+        let supplied = PlatformAccessToken::new("webos-test-access-token").unwrap();
+        let mut stages = Vec::new();
+        let error = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| {
+                stages.push(stage);
+                if stage == PairingStage::Verifying {
+                    assert!(operation_for_progress.cancel());
+                }
+            },
+        )
+        .expect_err("cancellation at Verifying must leave no prepared result");
+        assert_eq!(error.failure(), PairingFailure::Cancelled);
+        assert_eq!(stages, vec![PairingStage::Verifying]);
+        assert!(
+            server.snapshot().request_uris.is_empty(),
+            "no capability request may be sent after cancellation"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn prepare_in_memory_never_adopts_an_echoed_replacement_token() {
+        if skip_pairing_tests_as_root() {
+            return;
+        }
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenReplacement,
+        );
+        let (mut app, _) = blank();
+        let operation = submit(&mut app);
+        let supplied = PlatformAccessToken::new("stored-client-key").unwrap();
+        let mut stages = Vec::new();
+
+        let prepared = prepare_webos_pairing_in_memory(
+            &operation,
+            server.endpoint(),
+            Some(&supplied),
+            &mut |stage| stages.push(stage),
+        )
+        .expect("the supplied token authenticates and verification passes");
+
+        assert_eq!(stages, vec![PairingStage::Verifying]);
+        let snapshot = server.snapshot();
+        assert_eq!(
+            snapshot.registration_tokens,
+            vec![Some("stored-client-key".to_string())],
+            "the echoed replacement token must not trigger fresh pairing"
+        );
+        assert_eq!(snapshot.connection_count, 1);
+        assert_eq!(
+            snapshot.request_uris,
+            vec![
+                "ssap://com.webos.service.tvpower/power/getPowerState",
+                "ssap://audio/getStatus",
+                "ssap://settings/getSystemSettings",
+            ]
+        );
+        assert_eq!(
+            prepared, supplied,
+            "the prepared token is the supplied one, never the echoed replacement"
+        );
+        assert_ne!(prepared.as_secret_str(), "replacement-client-key");
+        server.finish();
     }
 
     #[test]
