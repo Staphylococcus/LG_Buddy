@@ -66,7 +66,7 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
+          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 gjs libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
 
       - name: Enable setup CLI test namespaces
         # Match the disposable-runner preparation in the bundle smoke job.
@@ -97,7 +97,7 @@ jobs:
 
       - name: Validate shell scripts
         run: |
-          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-distro.sh scripts/test-kwin-setup.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
+          bash -n data/kwin/setup.sh data/kwin/build.sh scripts/test-kwin-plugin.sh scripts/test-kwin-distro.sh scripts/test-kwin-setup.sh scripts/test-gnome-extension.sh install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-installer-first-run.sh scripts/test-installer-gui-dependencies.sh scripts/test-installer-graphical-auth.sh scripts/test-release-bundle.sh scripts/test-release-gui-behavior.sh scripts/test-release-gui-journey.sh scripts/test-release-linkage.sh scripts/test-cross-version-upgrade.sh scripts/test-without-python.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
           python3 -m py_compile scripts/test-release-gui-accessibility.py scripts/xwd_mean.py tools/mock_github_gui.py
 
       - name: Validate deterministic GUI GitHub fixture
@@ -109,6 +109,9 @@ jobs:
           bash scripts/test-service-setup.sh
           bash scripts/test-kwin-setup.sh
           python3 scripts/test_kwin_matrix.py
+
+      - name: Verify GNOME Shell extension
+        run: bash scripts/test-gnome-extension.sh
 
       - name: Run first-run installer smoke
         run: |
