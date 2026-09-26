@@ -379,7 +379,7 @@ the branch contract and recovery process, see
 | `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
 | `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
-| `scripts/test-gnome-extension.sh` | GNOME Shell extension metadata and syntax check |
+| `scripts/test-gnome-extension.sh` | GNOME Shell extension metadata, syntax and gjs behavior tests (`scripts/test_gnome_extension.js`) |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
 | `scripts/record_github_release_responses.py` | Sanitized production response recorder for offline mocks |

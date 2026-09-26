@@ -66,7 +66,7 @@ jobs:
           # Chrome is unused; its third-party index must not block Ubuntu dependencies.
           sudo rm -fv /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
           sudo apt-get update
-          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
+          sudo apt-get install -y at-spi2-core bubblewrap dbus-x11 gjs libadwaita-1-dev libglib2.0-bin libgtk-4-dev pkexec python3-pyatspi xdotool xvfb
 
       - name: Enable setup CLI test namespaces
         # Match the disposable-runner preparation in the bundle smoke job.

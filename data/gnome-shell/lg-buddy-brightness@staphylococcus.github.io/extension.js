@@ -4,88 +4,64 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {QuickSlider} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-function run(args, cancellable) {
-    return new Promise((resolve, reject) => {
-        const proc = Gio.Subprocess.new(['lg-buddy', ...args],
-            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE);
-        proc.communicate_utf8_async(null, cancellable, (p, res) => {
+import {BrightnessController} from './brightness.js';
+
+function spawn(args) {
+    const proc = Gio.Subprocess.new(['lg-buddy', ...args],
+        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE);
+    const result = new Promise((resolve, reject) => {
+        proc.communicate_utf8_async(null, null, (p, res) => {
             try {
                 const [, out] = p.communicate_utf8_finish(res);
                 if (p.get_successful())
                     resolve(out.trim());
                 else
-                    reject(new Error(out.trim()));
+                    reject(new Error(out.trim() || `lg-buddy ${args.join(' ')} failed`));
             } catch (e) {
                 reject(e);
             }
         });
     });
+    return {result, terminate: () => proc.force_exit()};
 }
 
 export default class LgBuddyBrightness extends Extension {
     enable() {
-        this._cancellable = new Gio.Cancellable();
-        this._pending = null;
-        this._busy = false;
-        this._updating = false;
-
-        this._item = new QuickSlider({iconName: 'display-brightness-symbolic'});
+        // A TV icon keeps it distinct from GNOME's own brightness slider on
+        // machines that also have a built-in display.
+        this._item = new QuickSlider({iconName: 'tv-symbolic'});
         this._item.slider.accessible_name = 'TV Brightness';
-        this._item.slider.connect('notify::value', () => this._onValue());
 
-        // Same spot GNOME puts its own (hidden, no backlight) brightness slider.
+        let updating = false;
+        this._controller = new BrightnessController(spawn, {
+            setValue: value => {
+                updating = true;
+                this._item.slider.value = value;
+                updating = false;
+            },
+            setVisible: visible => {
+                this._item.visible = visible;
+            },
+        });
+        this._item.slider.connect('notify::value', () => {
+            if (!updating)
+                this._controller.set(this._item.slider.value);
+        });
+
+        // Same spot GNOME puts its own brightness slider.
         const qs = Main.panel.statusArea.quickSettings;
         qs.menu.insertItemBefore(this._item, qs._brightness?.quickSettingsItems[0] ?? null, 2);
-        qs.menu.connectObject('open-state-changed', (_m, open) => open && this._refresh(), this);
+        qs.menu.connectObject('open-state-changed',
+            (_menu, open) => open && this._controller.refresh(), this);
 
-        this._refresh();
+        this._controller.refresh();
     }
 
     disable() {
-        this._cancellable.cancel();
+        this._controller.destroy();
         Main.panel.statusArea.quickSettings.menu.disconnectObject(this);
         this._item.destroy();
         this._item = null;
-    }
-
-    async _refresh() {
-        if (this._busy)
-            return;
-        try {
-            const value = parseInt(await run(['brightness', 'get'], this._cancellable));
-            if (!this._item || this._busy || isNaN(value))
-                return;
-            this._updating = true;
-            this._item.slider.value = value / 100;
-            this._updating = false;
-            this._item.visible = true;
-        } catch (e) {
-            if (this._item)
-                this._item.visible = false; // TV off/unreachable; retried on next menu open
-        }
-    }
-
-    _onValue() {
-        if (this._updating)
-            return;
-        this._pending = Math.round(this._item.slider.value * 100);
-        if (!this._busy)
-            this._flush();
-    }
-
-    // One `set` in flight at a time; the latest slider position always lands.
-    async _flush() {
-        this._busy = true;
-        while (this._pending !== null && this._item) {
-            const value = this._pending;
-            this._pending = null;
-            try {
-                await run(['brightness', 'set', String(value)], this._cancellable);
-            } catch (e) {
-                if (this._item)
-                    console.error(`lg-buddy-brightness: ${e.message}`);
-            }
-        }
-        this._busy = false;
+        this._controller = null;
     }
 }

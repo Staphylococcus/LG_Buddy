@@ -385,6 +385,7 @@ assert_file "$BUNDLE_DIR/docs/kwin/source/metadata.json"
 GNOME_EXTENSION_DIR="$BUNDLE_DIR/docs/gnome-shell/lg-buddy-brightness@staphylococcus.github.io"
 assert_file "$GNOME_EXTENSION_DIR/metadata.json"
 assert_file "$GNOME_EXTENSION_DIR/extension.js"
+assert_file "$GNOME_EXTENSION_DIR/brightness.js"
 KWIN_SOURCE_ID="$(cd "$BUNDLE_DIR/docs/kwin/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum | cut -d ' ' -f1)"
 KWIN_PREBUILT_COUNT=0
 while IFS= read -r -d '' metadata; do

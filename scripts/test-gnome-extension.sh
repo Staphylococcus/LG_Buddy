@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Validate the optional GNOME Shell extension: metadata shape and JS syntax.
+# Validate the optional GNOME Shell extension: metadata shape, JS syntax and
+# controller behavior.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,9 +26,12 @@ assert versions and all(v.isdigit() and int(v) >= 45 for v in versions), (
     f"{directory.name}: shell-version must list ESM-era major versions, got {versions}"
 )
 PY
-    node --check "$dir/extension.js"
+    for js in "$dir"/*.js; do
+        node --input-type=module --check < "$js"
+    done
     count=$((count + 1))
 done
 
 [ "$count" -gt 0 ] || { echo "No GNOME Shell extensions found in $EXTENSIONS_DIR" >&2; exit 1; }
+gjs -m "$REPO_ROOT/scripts/test_gnome_extension.js"
 echo "Verified $count GNOME Shell extension(s)."
