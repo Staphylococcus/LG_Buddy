@@ -710,9 +710,11 @@ mod tests {
         DBUS_SERVICE_NAME,
     };
     use dbus::arg::messageitem::{MessageItem, MessageItemArray, MessageItemDict};
+    use dbus::message::{MatchRule as DbusMatchRule, MessageType as DbusMessageType};
     use dbus::strings::{Path as DbusPath, Signature as DbusSignature};
     use dbus::Message as DbusMessage;
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::fs;
     use std::io::{BufRead, BufReader};
     use std::os::fd::AsRawFd;
     use std::process::{Child, Command, Stdio};
@@ -1480,6 +1482,252 @@ mod tests {
                 member: Some("Changed".to_string()),
             }],
             "the retained rule should match exactly the signal the daemon delivered"
+        );
+    }
+
+    /// Sample the daemon's fd count over a short window and return the minimum seen.
+    ///
+    /// The Rust Drop closes a client's socket, but the daemon reaps the connection (and
+    /// frees its fds) on its next main-loop EOF service, which is asynchronous. A single
+    /// snapshot can catch the daemon mid-reap and overcount — so we poll for up to ~2s
+    /// and take the floor: the steady, fully-reaped count. With every client already
+    /// dropped the count only trends down as reaping completes, so the minimum is the
+    /// reap-completed value. (0 on non-Linux, where /proc is unavailable.)
+    fn settled_fd_count(pid: libc::pid_t) -> u64 {
+        let mut floor = u64::MAX;
+        for _ in 0..40 {
+            if let Ok(count) = fs::read_dir(format!("/proc/{pid}/fd")).map(|e| e.count() as u64) {
+                floor = floor.min(count);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if floor == u64::MAX {
+            0
+        } else {
+            floor
+        }
+    }
+
+    /// Increment 4g: empirically settle whether a private dbus-daemon reaps a
+    /// disconnected client's matches (no leaked fd growth) — the gating open item
+    /// from the 4f acquisition review that the child-process design (Slices A/B)
+    /// cannot be accepted without.
+    ///
+    /// Model: each "ghost" cycle is a fully independent client that connects to the
+    /// *private* bus, registers ONE signal match (AddMatch), receives one emitted
+    /// signal (proof the subscription was live), then is DROPPED without a
+    /// RemoveMatch/RemoveWatch — the Rust Drop closes the socket with no client-side
+    /// cleanup, exactly modelling a SIGKILL'd child (which never runs Drop). After
+    /// 20 ghost cycles a 21st *clean* client runs the full AddMatch -> emit ->
+    /// receive -> RemoveMatch cycle to prove the bus is still usable.
+    ///
+    /// Decision (one of, recorded to the report):
+    ///   REAPED      — all 20 cycles deliver, the 21st client works, and the daemon
+    ///                 fd count stays within a few clients' worth of the baseline
+    ///                 (a REAPED daemon returns to steady state; the SIGKILL path
+    ///                 is safe and match reaping is not required to cap fds).
+    ///   NOT-REAPED  — the 21st client fails, or the fd count grew by far more than
+    ///                 a few clients' worth (one per leaked ghost).
+    ///
+    /// The fd measurement is a *magnitude* probe, not an exact-zero equality: the
+    /// daemon's own housekeeping fds add a handful of noise, and an un-reaped daemon
+    /// would retain ~4 fds PER client (≈80 over 20), an order of magnitude beyond a
+    /// 3x-per-client bound — so the bound is noise-robust yet still separates the
+    /// two verdicts. The delivery assertions count ACTUAL signals delivered (a local
+    /// shortcut / stub that never crosses the daemon would deliver 0 and fail).
+    #[test]
+    fn disconnected_client_match_cycles_leave_daemon_fd_count_bounded() {
+        let daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        let address = daemon.address().to_string();
+        let pid = daemon.child_pid();
+
+        // Baseline at steady state, no client live: the steady, fully-reaped count.
+        let baseline_fds = settled_fd_count(pid);
+
+        // One persistent emitter supplies the signal every cycle; it is dropped before
+        // each fd measurement so only the ghost/clean clients (the reaping subjects)
+        // are ever live when we read the daemon's fd table.
+        let emitter = DbusConnection::new_address(&address)
+            .expect("emitter should connect to the private bus");
+        let emitter_name = emitter.unique_name().to_string();
+        // Control reading: one *live* client's cost in daemon fds (the per-connection
+        // floor that must be released when the client disconnects).
+        let emitter_live_fds = settled_fd_count(pid);
+
+        const GHOSTS: u32 = 20;
+        const PATH: &str = "/org/lgbuddy/reap";
+        const IFACE: &str = "org.lgbuddy.Reap";
+        const MEMBER: &str = "Ticked";
+
+        let mut delivered = 0u32;
+        for cycle in 0..GHOSTS {
+            // A fresh ghost subscriber, built against the explicit fixture address.
+            let mut ghost = DbusSessionBusClient {
+                connection: DbusConnection::new_address(&address)
+                    .expect("ghost should connect to the private bus"),
+                method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+                signal_rules: Vec::new(),
+            };
+            let rule = BusSignalMatch {
+                sender: Some(&emitter_name),
+                path: Some(PATH),
+                interface: Some(IFACE),
+                member: Some(MEMBER),
+            };
+            ghost
+                .add_signal_match(rule)
+                .expect("ghost AddMatch should round-trip through the daemon");
+            assert_eq!(
+                ghost.signal_rules.len(),
+                1,
+                "ghost {cycle} should retain exactly one local rule"
+            );
+
+            // Emit once; the cycle index rides in the body so a real delivery is
+            // distinguishable from a coincidental/looped signal.
+            let message = DbusMessage::new_signal(PATH, IFACE, MEMBER)
+                .expect("valid signal")
+                .append1(cycle);
+            emitter
+                .channel()
+                .send(message)
+                .expect("emitter should emit the signal");
+
+            let received = ghost
+                .process(Duration::from_secs(2))
+                .expect("bounded process should surface the ghost's signal")
+                .unwrap_or_else(|| panic!("ghost {cycle} signal should be delivered"));
+            assert_eq!(
+                received.member, MEMBER,
+                "ghost {cycle} must receive the expected signal member"
+            );
+            assert_eq!(
+                received.sender.as_deref(),
+                Some(emitter_name.as_str()),
+                "the delivered signal's sender is the bus-assigned emitter name (proof it crossed the daemon)"
+            );
+            assert_eq!(
+                received.body,
+                vec![BusValue::U32(cycle)],
+                "the delivered body carries this cycle's index (real, not a stub delivery)"
+            );
+            delivered += 1;
+
+            // Drop the ghost WITHOUT RemoveMatch: its Rust Drop closes the socket with
+            // no client-side match/watch cleanup — the SIGKILL'd-child model.
+            drop(ghost);
+        }
+        assert_eq!(
+            delivered, GHOSTS,
+            "every ghost cycle must deliver exactly one signal"
+        );
+        drop(emitter);
+        let post_ghost_fds = settled_fd_count(pid);
+
+        // The 21st clean client proves the bus is still usable after 20 ghosts: a full
+        // AddMatch -> emit -> receive -> RemoveMatch cycle on a fresh connection.
+        let clean_emitter = DbusConnection::new_address(&address)
+            .expect("clean emitter should connect to the private bus");
+        let clean_emitter_name = clean_emitter.unique_name().to_string();
+        let mut clean = DbusSessionBusClient {
+            connection: DbusConnection::new_address(&address)
+                .expect("clean client should connect to the private bus"),
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        };
+        let rule = BusSignalMatch {
+            sender: Some(&clean_emitter_name),
+            path: Some(PATH),
+            interface: Some(IFACE),
+            member: Some(MEMBER),
+        };
+        clean
+            .add_signal_match(rule)
+            .expect("the 21st clean client's AddMatch should succeed on a live bus");
+        clean_emitter
+            .channel()
+            .send(
+                DbusMessage::new_signal(PATH, IFACE, MEMBER)
+                    .expect("valid signal")
+                    .append1(GHOSTS),
+            )
+            .expect("clean emitter should emit");
+        let received = clean
+            .process(Duration::from_secs(2))
+            .expect("bounded process should surface the clean signal")
+            .expect("the 21st clean client must still receive through the daemon");
+        assert_eq!(received.body, vec![BusValue::U32(GHOSTS)]);
+        // The clean-exit path: remove the match the way a well-behaved client does.
+        let remove_rule = DbusMatchRule::new()
+            .with_type(DbusMessageType::Signal)
+            .with_sender(clean_emitter_name)
+            .with_path(PATH)
+            .with_interface(IFACE)
+            .with_member(MEMBER)
+            .match_str();
+        let reply = clean
+            .call_method(
+                BusMethodCall::new(
+                    DBUS_SERVICE_NAME,
+                    DBUS_OBJECT_PATH,
+                    DBUS_INTERFACE,
+                    "RemoveMatch",
+                )
+                .with_body(vec![BusValue::String(remove_rule)]),
+            )
+            .expect("RemoveMatch should succeed on a live bus");
+        assert!(
+            reply.body.is_empty(),
+            "RemoveMatch takes no reply body, got {:?}",
+            reply.body
+        );
+        drop(clean);
+        drop(clean_emitter);
+        let final_fds = settled_fd_count(pid);
+
+        // Per-client fd scale (control) and the leak bound, measured before the report line.
+        let per_client = (emitter_live_fds as i64 - baseline_fds as i64).max(1);
+        let leak_bound = 3 * per_client;
+
+        // Observed evidence (also written to the increment-4g report):
+        //   baseline        — steady state, 0 clients
+        //   emitter_live    — 1 emitter client live (control: per-connection fd cost)
+        //   post_ghost      — after 20 ghost connect/disconnect + emitter dropped
+        //   final           — after the 21st clean client dropped too
+        let ghost_growth = post_ghost_fds as i64 - baseline_fds as i64;
+        let final_growth = final_fds as i64 - baseline_fds as i64;
+        eprintln!(
+            "increment-4g: fd baseline={baseline_fds} emitter_live={emitter_live_fds} \
+             post_ghost={post_ghost_fds} final={final_fds} ghost_growth={ghost_growth} \
+             final_growth={final_growth} per_client={per_client} leak_bound={leak_bound}",
+        );
+
+        // Deciding probe. `settled_fd_count` polls until the daemon finishes reaping,
+        // so the floors below are the fully-reaped steady counts. A REAPED daemon
+        // returns to the baseline (within housekeeping noise); a NOT-REAPED daemon
+        // keeps the fds of every disconnected client.
+        //
+        // `per_client` is the measured cost of ONE live client. We allow a small
+        // residual (housekeeping fds + at most a couple of stragglers, ~3 clients'
+        // worth) and still call it REAPED; a full 20-ghost leak would add ~20 *
+        // per_client, far beyond that bound. A dip *below* baseline is fine (the
+        // daemon's own steady count), so only growth is penalised.
+        //
+        // ponytail: 3x-per-client bound; a leak is ~20x per_client, so there is a wide
+        // empty band [3x, 20x] that separates the two verdicts even under load noise.
+        assert!(
+            post_ghost_fds as i64 - baseline_fds as i64 <= leak_bound,
+            "NOT-REAPED: the daemon kept the fds of the 20 disconnected (SIGKILL-model) \
+             clients — post-ghost {post_ghost_fds} grew {} over baseline {baseline_fds} \
+             (per-client ~{per_client}, bound {leak_bound})",
+            post_ghost_fds as i64 - baseline_fds as i64
+        );
+        assert!(
+            final_fds as i64 - baseline_fds as i64 <= leak_bound,
+            "NOT-REAPED: after 20 ghosts plus one clean client the fd count did not return \
+             to the steady-state baseline — final {final_fds} grew {} over {baseline_fds} \
+             (per-client ~{per_client}, bound {leak_bound})",
+            final_fds as i64 - baseline_fds as i64
         );
     }
 }
