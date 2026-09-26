@@ -27,7 +27,7 @@ function spawn(args) {
 
 export default class LgBuddyBrightness extends Extension {
     enable() {
-        this._item = new QuickSlider({iconName: 'display-brightness-symbolic'});
+        this._item = new QuickSlider({iconName: 'video-display-symbolic'});
         this._item.slider.accessible_name = 'TV Brightness';
 
         let updating = false;
