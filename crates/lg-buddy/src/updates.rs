@@ -18,9 +18,9 @@ pub use command::{UpdatesCommand, UpdatesParseError};
 mod github;
 pub use cache::UpdateCachePathError;
 pub use check_engine::{
-    check_for_updates, discover_install_candidate_for_channel, run_updates_command,
-    saved_update_channel,
+    check_for_updates, run_updates_command, UpdateCheckOutcome, UpdateCheckResult,
 };
+pub(crate) use check_engine::{discover_install_candidate_for_channel, saved_update_channel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

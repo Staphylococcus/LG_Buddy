@@ -149,11 +149,11 @@ pub fn check_for_updates() -> Result<UpdateCheckOutcome, UpdatesError> {
     )
 }
 
-pub fn saved_update_channel() -> Result<UpdateChannel, UpdatesError> {
+pub(crate) fn saved_update_channel() -> Result<UpdateChannel, UpdatesError> {
     EnvUpdateSettings::from_env()?.channel()
 }
 
-pub fn discover_install_candidate_for_channel(
+pub(crate) fn discover_install_candidate_for_channel(
     current: VersionInfo,
     channel: UpdateChannel,
 ) -> Result<ReleaseInfo, UpdatesError> {
