@@ -217,8 +217,7 @@ impl MigrationSnapshot {
         let stage = StagedConfig::new(
             &self.path,
             candidate.rendered().as_bytes(),
-            &self.owner,
-            self.config.identity.mode,
+            &self.config.identity,
             hook,
         )?;
         self.check_config()?;
@@ -368,8 +367,7 @@ impl StagedConfig {
     fn new(
         path: &Path,
         bytes: &[u8],
-        owner: &SystemUser,
-        mode: u32,
+        identity: &Identity,
         hook: &mut dyn FnMut(Point) -> io::Result<()>,
     ) -> Result<Self, MigrationStoreError> {
         let temp_path = temporary_path(path);
@@ -385,8 +383,8 @@ impl StagedConfig {
         let result = (|| {
             hook(Point::StageWrite)?;
             file.write_all(bytes)?;
-            set_owner(&file, owner)?;
-            file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
+            set_owner_ids(&file, identity.uid, identity.gid)?;
+            file.set_permissions(fs::Permissions::from_mode(identity.mode & 0o7777))?;
             hook(Point::FileSync)?;
             file.sync_all()
         })();

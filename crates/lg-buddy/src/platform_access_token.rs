@@ -272,7 +272,11 @@ impl PlatformAccessTokenStore {
     fn mutation_guard(
         &self,
     ) -> Result<crate::pairing_store::PairingLock, PlatformAccessTokenStoreError> {
-        crate::pairing_store::PairingLock::for_config(&self.config_path).map_err(|error| {
+        crate::pairing_store::PairingLock::for_config_with_owner(
+            &self.config_path,
+            Some(&self.owner),
+        )
+        .map_err(|error| {
             store_io_error(
                 PlatformAccessTokenStoreOperation::ReplaceToken,
                 &self.token_path,
@@ -310,13 +314,26 @@ impl PlatformAccessTokenStore {
     pub(crate) fn publication_snapshot(
         &self,
     ) -> Result<CredentialPublication, PlatformAccessTokenStoreError> {
-        let guard = self.mutation_guard()?;
-        self.snapshot_locked(&guard)
+        // Authentication with an existing token is read-only, including for
+        // immutable config symlinks. Only publication needs the writer lock;
+        // the captured file versions are compared again under it before saving.
+        let path = match fs::canonicalize(&self.config_path) {
+            Ok(path) => path,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.config_path.clone(),
+            Err(e) => {
+                return Err(store_io_error(
+                    PlatformAccessTokenStoreOperation::ReadToken,
+                    &self.config_path,
+                    e,
+                ))
+            }
+        };
+        self.snapshot_at(&path)
     }
 
-    fn snapshot_locked(
+    fn snapshot_at(
         &self,
-        guard: &crate::pairing_store::PairingLock,
+        config_path: &Path,
     ) -> Result<CredentialPublication, PlatformAccessTokenStoreError> {
         let read = |path: &Path| -> Result<FileVersion, PlatformAccessTokenStoreError> {
             let mut file = match OpenOptions::new()
@@ -351,7 +368,7 @@ impl PlatformAccessTokenStore {
             )))
         };
         Ok(CredentialPublication {
-            config: read(guard.target())?,
+            config: read(config_path)?,
             token: read(&self.token_path)?,
         })
     }
@@ -397,7 +414,7 @@ impl PlatformAccessTokenStore {
         let guard = self
             .mutation_guard()
             .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
-        let now = self.snapshot_locked(&guard).map_err(|_| {
+        let now = self.snapshot_at(guard.target()).map_err(|_| {
             PlatformAccessTokenAcquisitionError::Store {
                 source: store_io_error(
                     PlatformAccessTokenStoreOperation::ReplaceToken,
@@ -933,7 +950,9 @@ mod tests {
             .persist(&token("root-written-client-key"))
             .expect("persist token for requested non-root owner");
 
+        let lock_path = dir.config_path().with_file_name(".config.env.pairing.lock");
         for path in [
+            lock_path.as_path(),
             store
                 .token_path()
                 .parent()

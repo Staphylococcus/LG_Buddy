@@ -40,6 +40,66 @@ fn token() -> PlatformAccessToken {
 }
 
 #[test]
+fn migration_preserves_config_access_metadata() {
+    use std::os::unix::process::CommandExt;
+    if current_euid() != 0 {
+        return;
+    }
+    let f = Fixture::new();
+    // Give the config a group different from the owner's passwd primary group.
+    // Exercise the actual migration as its non-root owner, not just staging.
+    set_owner_ids(&File::open(f.path()).unwrap(), 65534, 65534).unwrap();
+    let owner = crate::auth::resolve_config_owner(&f.path()).unwrap();
+    let gid = if owner.gid() == 65533 { 65532 } else { 65533 };
+    set_owner_ids(&File::open(&f.0).unwrap(), owner.uid(), gid).unwrap();
+    fs::write(f.path(), "tvs_primary_platform=lg_webos\ntv_ip=192.0.2.4\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\nscreen_backend=swayidle\n").unwrap();
+    let file = File::open(f.path()).unwrap();
+    set_owner_ids(&file, owner.uid(), gid).unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o640))
+        .unwrap();
+    let output = process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "pairing_store::migration::tests::migrate_config_child",
+            "--exact",
+        ])
+        .env("LG_BUDDY_TEST_GROUP_MIGRATION", f.path())
+        .uid(owner.uid())
+        .gid(gid)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let after = fs::metadata(f.path()).unwrap();
+    assert_eq!(
+        (after.uid(), after.gid(), after.mode() & 0o7777),
+        (owner.uid(), gid, 0o640)
+    );
+    assert!(crate::config::load_current_config(&f.path()).is_ok());
+}
+
+#[test]
+fn migrate_config_child() {
+    let Some(path) = std::env::var_os("LG_BUDDY_TEST_GROUP_MIGRATION") else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    let before = fs::metadata(&path).unwrap();
+    let snapshot = MigrationSnapshot::capture(&path).unwrap();
+    let MigrationInspection::Required(plan) = inspect_config(&path, snapshot.contents()).unwrap()
+    else {
+        panic!("fixture must require migration")
+    };
+    let candidate = plan.select(Some(MonitoringChoice::Disabled)).unwrap();
+    snapshot
+        .commit(&candidate, None, &StepCancellation::default())
+        .unwrap();
+    let after = fs::metadata(&path).unwrap();
+    assert_eq!(
+        (after.uid(), after.gid(), after.mode()),
+        (before.uid(), before.gid(), before.mode())
+    );
+}
+
+#[test]
 fn combined_commit_publishes_both_changes_and_current_loader_accepts_it() {
     let f = Fixture::new();
     let (s, c) = f.prepare();

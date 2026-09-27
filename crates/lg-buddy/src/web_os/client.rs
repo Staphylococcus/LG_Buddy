@@ -1182,6 +1182,63 @@ mod tests {
             .expect("derive test token store")
     }
 
+    #[test]
+    fn stored_token_authentication_keeps_read_only_config_and_symlink_targets_untouched() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+        for via_symlink in [false, true] {
+            let dir = TestDir::new("readonly-auth");
+            let store = token_store(&dir);
+            store.persist(&token("stored-client-key")).unwrap();
+            let token_before = fs::read(store.token_path()).unwrap();
+            let token_inode = fs::metadata(store.token_path()).unwrap().ino();
+            let marker = dir.path().join(".config.env.pairing.lock");
+            fs::remove_file(&marker).unwrap();
+            let config = dir.path().join("config.env");
+            let target_dir = if via_symlink {
+                let target_dir = dir.path().join("immutable");
+                fs::create_dir(&target_dir).unwrap();
+                fs::write(
+                    target_dir.join("config.env"),
+                    "tvs_primary_platform=lg_webos\n",
+                )
+                .unwrap();
+                symlink(target_dir.join("config.env"), &config).unwrap();
+                target_dir
+            } else {
+                fs::write(&config, "tvs_primary_platform=lg_webos\n").unwrap();
+                dir.path().to_path_buf()
+            };
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o444)).unwrap();
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o555)).unwrap();
+            let server = WebOsTestServer::for_scenario(
+                WebOsTestVersion::WebOs24Version92261,
+                WebOsTestScenario::StoredTokenReplacement,
+            );
+            let result = WebOsClient::connect_authenticated(
+                server.endpoint(),
+                CONNECT_TIMEOUT,
+                RESPONSE_TIMEOUT,
+                &store,
+                |_| {},
+            );
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let error = result.err();
+            server.finish();
+            assert!(
+                error.is_none(),
+                "read-only authentication failed: {error:?}"
+            );
+            assert!(!marker.exists());
+            assert!(!target_dir.join(".config.env.pairing.lock").exists());
+            assert_eq!(fs::read(store.token_path()).unwrap(), token_before);
+            assert_eq!(fs::metadata(store.token_path()).unwrap().ino(), token_inode);
+            assert_eq!(
+                fs::read_to_string(&config).unwrap(),
+                "tvs_primary_platform=lg_webos\n"
+            );
+        }
+    }
+
     fn pairing_error(
         result: Result<(WebOsClient, PlatformAccessToken), WebOsPairingError>,
     ) -> WebOsPairingError {

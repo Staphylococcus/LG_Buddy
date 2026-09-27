@@ -54,11 +54,21 @@ jobs:
                          and item["profile"]["test"] and item.get("executable")]
           assert len(executables) == 1, executables
           print(executables[0])')"
+          # Owner subprocesses must reach the binary even if the checkout's
+          # parent directories are private to the runner account.
+          privileged_test_dir="$(mktemp -d)"
+          trap 'rm -rf "$privileged_test_dir"' EXIT
+          chmod 755 "$privileged_test_dir"
+          install -m 755 "$test_binary" "$privileged_test_dir/lib-tests"
+          test_binary="$privileged_test_dir/lib-tests"
           for test in \
             tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root \
-            platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root; do
+            platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root \
+            pairing_store::tests::mutation_lock_is_shared_by_root_and_config_owner \
+            pairing_store::tests::mutation_lock_rejects_unsafe_existing_markers \
+            pairing_store::migration::tests::migration_preserves_config_access_metadata; do
             "$test_binary" --list --format=terse | grep -Fx "$test: test"
-            sudo "$test_binary" "$test" --exact
+            sudo env TMPDIR="$privileged_test_dir" "$test_binary" "$test" --exact
           done
 
       - name: Install GTK test prerequisites
