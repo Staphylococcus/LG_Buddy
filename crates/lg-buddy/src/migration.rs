@@ -1,13 +1,8 @@
-//! Pure migration planning: inspect an already-read config snapshot, decide
-//! what a migration requires, and render a validated candidate.
-//!
-//! This module owns no file I/O, no pairing, and no runtime gates. A produced
-//! candidate is a validated *proposal*: it validates config syntax and
-//! staleness against the same rules the runtime loader uses
-//! (`config::parse_current_config`). It is not a proof that TV pairing or
-//! capability/readiness checks passed, and not runtime authorisation. The
-//! future executor performs those checks (after acknowledgement, before
-//! publication) and owns publication.
+//! Planning and acknowledged foreground execution of a v2 migration.
+//! Candidates are proposals; only `flow::MigrationFlow` performs verification
+//! and coordinated publication. Presentation belongs to the host application.
+
+pub mod flow;
 
 use std::fmt;
 use std::net::Ipv4Addr;

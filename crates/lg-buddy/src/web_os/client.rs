@@ -241,11 +241,18 @@ impl WebOsClient {
     where
         F: FnMut(WebOsAuthenticationEvent),
     {
+        // Capture before any network work, including the rejected-token
+        // connection. A fresh fallback must not adopt a later profile/token.
+        let publication = token_store.publication_snapshot().map_err(|source| {
+            WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Store { source },
+            }
+        })?;
         let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
             .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
         let authentication = {
             let mut registration = client.registration();
-            token_store.get_or_acquire(&mut registration, &mut on_auth_event)
+            token_store.get_or_acquire(&mut registration, &publication, &mut on_auth_event)
         };
 
         match authentication {
@@ -260,7 +267,7 @@ impl WebOsClient {
                     .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
                 let mut registration = client.registration();
                 token_store
-                    .acquire_and_persist(&mut registration, &mut on_auth_event)
+                    .acquire_and_persist(&mut registration, &publication, &mut on_auth_event)
                     .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
                 Ok(client)
             }
@@ -1536,6 +1543,12 @@ mod tests {
             ),
             "cancellation after connecting must stop before sending registration"
         );
+        // The server records acceptance just after completing the handshake;
+        // the client's cancellation can return before that worker is scheduled.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.snapshot().connection_count == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
         assert!(server.snapshot().registration_tokens.is_empty());
         assert_eq!(
             server.snapshot().connection_count,
@@ -1991,6 +2004,45 @@ mod tests {
         ));
         assert!(!store.token_path().exists());
         server.finish();
+    }
+
+    #[test]
+    fn authentication_cannot_publish_over_config_or_token_changed_during_pairing() {
+        for change_token in [false, true] {
+            let dir = TestDir::new("authentication-publication-conflict");
+            let store = token_store(&dir);
+            let server = WebOsTestServer::active(
+                WebOsTestVersion::WebOs24Version92261,
+                WebOsTestInput::Hdmi3,
+            );
+            let result = WebOsClient::connect_authenticated(
+                server.endpoint(),
+                CONNECT_TIMEOUT,
+                RESPONSE_TIMEOUT,
+                &store,
+                |event| {
+                    if event == WebOsAuthenticationEvent::PairingPrompt {
+                        if change_token {
+                            store.persist(&token("external-token")).unwrap();
+                        } else {
+                            fs::write(dir.0.join("config.env"), "tv_ip=192.0.2.99\n").unwrap();
+                        }
+                    }
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(WebOsAuthenticatedClientError::Authentication {
+                    source: PlatformAccessTokenAcquisitionError::Store { .. }
+                })
+            ));
+            if change_token {
+                assert_eq!(store.load().unwrap(), Some(token("external-token")));
+            } else {
+                assert!(!store.token_path().exists());
+            }
+            server.finish();
+        }
     }
 
     #[test]

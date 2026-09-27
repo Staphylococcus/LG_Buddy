@@ -493,6 +493,21 @@ impl DbusSessionBusClient {
             signal_rules: Vec::new(),
         })
     }
+
+    /// Connect to an explicit bus address. A blocking raw-address
+    /// constructor: it hands the address verbatim to `DbusConnection::new_address`
+    /// and performs no validation of its own, so for arbitrary input libdbus
+    /// may follow the address into `autolaunch:`/`unixexec:` transports or a
+    /// semicolon-separated fallback list. The child probe enforces that policy
+    /// with its own address validator before calling this.
+    pub fn new_address(address: &str) -> Result<Self, SessionBusError> {
+        Ok(Self {
+            connection: DbusConnection::new_address(address)
+                .map_err(|err| SessionBusError::Transport(err.to_string()))?,
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        })
+    }
 }
 
 impl SessionBusClient for DbusSessionBusClient {
@@ -1508,26 +1523,35 @@ mod tests {
         }
     }
 
-    /// Increment 4g: empirically settle whether a private dbus-daemon reaps a
-    /// disconnected client's matches (no leaked fd growth) — the gating open item
-    /// from the 4f acquisition review that the child-process design (Slices A/B)
-    /// cannot be accepted without.
+    /// Increment 4g: settle, on a *private* bus, that a disconnected client
+    /// leaks no daemon-side fds and that signal delivery still crosses the
+    /// daemon — the generic connection/fd behaviour the child-process design
+    /// (Slices A/B) relies on. This test does NOT measure Mutter's idle-watch
+    /// lifetime: a killed child never runs its Rust `Drop` nor issues
+    /// `RemoveWatch`/`RemoveMatch`, so the probe's own client-side watch
+    /// cleanup cannot be exercised here. Actual Mutter cleanup is separate and
+    /// source-supported: `src/backends/meta-idle-manager.c` (lines 105–131 and
+    /// 149–160) tracks the caller's unique name and removes its watch when that
+    /// name disappears (verified on main `888a7b7d`). This test proves only
+    /// that the daemon reaps a raw connection's fds; it does not prove watch
+    /// cleanup.
     ///
-    /// Model: each "ghost" cycle is a fully independent client that connects to the
-    /// *private* bus, registers ONE signal match (AddMatch), receives one emitted
-    /// signal (proof the subscription was live), then is DROPPED without a
-    /// RemoveMatch/RemoveWatch — the Rust Drop closes the socket with no client-side
-    /// cleanup, exactly modelling a SIGKILL'd child (which never runs Drop). After
-    /// 20 ghost cycles a 21st *clean* client runs the full AddMatch -> emit ->
-    /// receive -> RemoveMatch cycle to prove the bus is still usable.
+    /// Model: each "ghost" cycle is a fully independent client that connects to
+    /// the *private* bus, registers ONE signal match (AddMatch), receives one
+    /// emitted signal (proof the subscription was live), then is DROPPED without
+    /// a RemoveMatch/RemoveWatch — the Rust Drop closes the socket with no
+    /// client-side cleanup, exactly modelling a SIGKILL'd child (which never
+    /// runs Drop). After 20 ghost cycles a 21st *clean* client runs the full
+    /// AddMatch -> emit -> receive -> RemoveMatch cycle to prove the bus is
+    /// still usable.
     ///
     /// Decision (one of, recorded to the report):
-    ///   REAPED      — all 20 cycles deliver, the 21st client works, and the daemon
-    ///                 fd count stays within a few clients' worth of the baseline
-    ///                 (a REAPED daemon returns to steady state; the SIGKILL path
-    ///                 is safe and match reaping is not required to cap fds).
-    ///   NOT-REAPED  — the 21st client fails, or the fd count grew by far more than
-    ///                 a few clients' worth (one per leaked ghost).
+    ///   REAPED      — all 20 cycles deliver, the 21st client works, and the
+    ///                 daemon fd count stays within a few clients' worth of the
+    ///                 baseline (a REAPED daemon returns to steady state; the
+    ///                 SIGKILL path leaks no fds).
+    ///   NOT-REAPED  — the 21st client fails, or the fd count grew by far more
+    ///                 than a few clients' worth (one per leaked ghost).
     ///
     /// The fd measurement is a *magnitude* probe, not an exact-zero equality: the
     /// daemon's own housekeeping fds add a handful of noise, and an un-reaped daemon

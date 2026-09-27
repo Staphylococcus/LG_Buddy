@@ -149,12 +149,18 @@ fn input_write_failure_preserves_configuration_and_selection() {
         )
         .is_err());
     assert_eq!(fs::read(config.path()).unwrap(), before);
+    let mut entries: Vec<_> = fs::read_dir(config.path().parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort();
     assert_eq!(
-        fs::read_dir(config.path().parent().unwrap())
-            .unwrap()
-            .count(),
-        1,
-        "failed saves must clean up their temporary files"
+        entries,
+        vec![
+            std::ffi::OsString::from(".config.env.pairing.lock"),
+            std::ffi::OsString::from("config.env")
+        ],
+        "failed saves retain the stable lock inode but clean up every temporary file"
     );
 }
 
@@ -230,5 +236,16 @@ fn settings_save_creates_missing_configuration_and_parent_directory() {
     let contents = "updates_channel=prerelease\n";
     ConfigEnvEditor::parse(&path, contents).save().unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), contents);
-    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    let mut entries: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec![
+            std::ffi::OsString::from(".config.env.pairing.lock"),
+            std::ffi::OsString::from("config.env")
+        ]
+    );
 }

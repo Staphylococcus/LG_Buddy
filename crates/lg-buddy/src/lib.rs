@@ -108,6 +108,22 @@ pub enum Command {
         remove_legacy_env: bool,
         json: bool,
     },
+    /// Internal GNOME readiness probe (migration 257, Slice A). A parent
+    /// process runs this as a bounded child: it checks GNOME readiness against
+    /// an EXPLICIT bus address only — no env read, no autolaunch, no platform
+    /// lookup. `bus_address` is the `--bus <address>` value; a missing or
+    /// empty address is a fast `Unavailable` (exit 1).
+    ///
+    /// Typed exit codes (the parent parses the process exit status):
+    /// `0` ready; `1` unavailable (missing/invalid `--bus`, or a
+    /// setup/transport error); `2` cancelled; `3` readiness failed
+    /// (services / subscriptions / watch / read / owner). Resource release is
+    /// the daemon reaping the owned client's matches on disconnect (verified
+    /// by the dedicated `disconnected_client_match_cycles` test — no extra
+    /// RemoveWatch/RemoveMatch required).
+    GnomeReadinessProbe {
+        bus_address: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +264,7 @@ pub enum ParseError {
     Settings(SettingsParseError),
     Updates(UpdatesParseError),
     MissingUpgradePreflightRoot,
+    MissingGnomeReadinessProbeBus,
     Setup(String),
     UnexpectedArguments {
         command: Command,
@@ -303,6 +320,9 @@ impl fmt::Display for ParseError {
             Self::MissingUpgradePreflightRoot => {
                 write!(f, "missing candidate root for `upgrade-preflight`")
             }
+            Self::MissingGnomeReadinessProbeBus => {
+                write!(f, "missing bus address for `gnome-readiness-probe --bus`")
+            }
             Self::UnexpectedArguments { command, arguments } => {
                 write!(
                     f,
@@ -333,6 +353,7 @@ pub enum RunError {
     Updates(UpdatesError),
     UpdateInstall(UpdateInstallError),
     UpgradePreflight(CompatibilityReport),
+    GnomeReadinessProbe(GnomeReadinessProbeError),
     NotificationAfterPrimary {
         primary: Box<RunError>,
         notification: NotificationError,
@@ -358,6 +379,7 @@ impl fmt::Display for RunError {
             Self::Updates(err) => write!(f, "{err}"),
             Self::UpdateInstall(err) => write!(f, "{err}"),
             Self::UpgradePreflight(report) => write!(f, "{report}"),
+            Self::GnomeReadinessProbe(err) => write!(f, "{err}"),
             Self::NotificationAfterPrimary {
                 primary,
                 notification,
@@ -388,10 +410,48 @@ impl std::error::Error for RunError {
             Self::Updates(err) => Some(err),
             Self::UpdateInstall(err) => Some(err),
             Self::UpgradePreflight(_) => None,
+            Self::GnomeReadinessProbe(err) => Some(err),
             Self::NotificationAfterPrimary { primary, .. } => Some(primary.as_ref()),
         }
     }
 }
+
+/// Fixed-stage error for the internal `gnome-readiness-probe` command. Each
+/// variant maps to a stable process exit code the parent parses. No variant
+/// embeds transport strings, owner names, or reply values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GnomeReadinessProbeError {
+    /// Missing/empty/invalid `--bus`, or a bus setup/transport error (exit 1).
+    Unavailable,
+    /// Cancellation observed at a readiness checkpoint (exit 2).
+    Cancelled,
+    /// Readiness failed: services / subscriptions / watch / read / owner (exit 3).
+    NotReady,
+}
+
+impl GnomeReadinessProbeError {
+    /// The stable process exit code for this failure stage.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Unavailable => 1,
+            Self::Cancelled => 2,
+            Self::NotReady => 3,
+        }
+    }
+}
+
+impl fmt::Display for GnomeReadinessProbeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Unavailable => "gnome readiness probe unavailable",
+            Self::Cancelled => "gnome readiness probe cancelled",
+            Self::NotReady => "gnome readiness probe not ready",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for GnomeReadinessProbeError {}
 
 /// Boundary mapping from the config module's typed loader error to the top-level
 /// application error. Stale configs surface as the distinct `MigrationRequired`
@@ -495,6 +555,7 @@ impl Command {
             Self::Settings(_) => "settings",
             Self::Updates(_) => "updates",
             Self::UpgradePreflight { .. } => "upgrade-preflight",
+            Self::GnomeReadinessProbe { .. } => "gnome-readiness-probe",
         }
     }
 
@@ -521,6 +582,7 @@ impl Command {
             Self::Settings(_) => "TODO: implemented via command handler",
             Self::Updates(_) => "TODO: implemented via command handler",
             Self::UpgradePreflight { .. } => "TODO: implemented via command handler",
+            Self::GnomeReadinessProbe { .. } => "TODO: implemented via command handler",
         }
     }
 }
@@ -862,6 +924,29 @@ where
         "monitor" => Command::Monitor,
         "lifecycle" => Command::Lifecycle,
         "detect-backend" => Command::DetectBackend,
+        "gnome-readiness-probe" => {
+            let mut bus_address: Option<String> = None;
+            let mut unexpected = Vec::new();
+            while let Some(argument) = args.next() {
+                match argument.as_ref() {
+                    "--bus" => {
+                        let Some(address) = args.next() else {
+                            return Err(ParseError::MissingGnomeReadinessProbeBus);
+                        };
+                        bus_address = Some(address.as_ref().to_string());
+                    }
+                    other => unexpected.push(other.to_string()),
+                }
+            }
+            let command = Command::GnomeReadinessProbe { bus_address };
+            if !unexpected.is_empty() {
+                return Err(ParseError::UnexpectedArguments {
+                    command,
+                    arguments: unexpected,
+                });
+            }
+            return Ok(ParseOutcome::Command(command));
+        }
         other => return Err(ParseError::UnknownCommand(other.to_string())),
     };
 
@@ -874,6 +959,178 @@ where
     }
 
     Ok(ParseOutcome::Command(command))
+}
+
+/// Map a readiness check outcome to the probe's typed exit code. Pure:
+/// consumes the caller-owned client by value so the exit mapping is testable
+/// without a real bus. Actual readiness maps to `0`; `Cancelled` to `2`; any
+/// other readiness error to `3`. (Connection failures are mapped separately
+/// to `Unavailable` by the caller, not here.)
+fn gnome_readiness_probe_exit_code(
+    bus: impl session_bus::SessionBusClient,
+    stop: &std::sync::atomic::AtomicBool,
+) -> u8 {
+    match crate::sources::desktop::gnome::readiness::check_gnome_readiness_on(bus, stop) {
+        Ok(()) => 0,
+        Err(crate::sources::desktop::gnome::readiness::GnomeReadinessError::Cancelled) => 2,
+        Err(_) => 3,
+    }
+}
+
+/// Run the internal `gnome-readiness-probe` command against an explicit bus
+/// address. Validation is pure and happens before any connector is invoked:
+/// a missing, empty, malformed, or unsupported address is a fast `Unavailable`
+/// (exit 1) with no env read, autolaunch, platform lookup, or fallback list.
+/// On a valid address the connector is invoked exactly once and, after
+/// connection, the readiness check performs D-Bus RPCs on the owned client.
+/// (A SIGKILL'd child runs neither `Drop` nor `RemoveWatch`, so the child
+/// does not itself clean up — the daemon reaps its fds and Mutter tracks the
+/// caller's unique name.)
+pub fn run_gnome_readiness_probe(bus_address: Option<&str>) -> u8 {
+    // Production path: validate the address, then connect through the real
+    // constructor. The address is validated BEFORE the connector runs, so a
+    // rejected/autolaunch/exec address never reaches libdbus.
+    run_gnome_readiness_probe_with_connector(
+        bus_address,
+        session_bus::DbusSessionBusClient::new_address,
+    )
+}
+
+/// Connector-injection variant of `run_gnome_readiness_probe` for tests.
+/// Validates the address first (exactly as the production wrapper), then hands
+/// the *unchanged* address string to a caller-supplied connector `F`. A valid
+/// address reaches the connector exactly once, byte-for-byte; a rejected
+/// address never calls `F`. Production passes `DbusSessionBusClient::new_address`;
+/// tests pass a fake connector so dangerous samples never touch a real bus.
+/// (The validation step is pure: no env read, autolaunch/exec, filesystem, or
+/// network operation. After a successful connection the readiness check
+/// performs RPCs on the owned client.)
+fn run_gnome_readiness_probe_with_connector<F, B>(bus_address: Option<&str>, connect: F) -> u8
+where
+    F: FnOnce(&str) -> Result<B, session_bus::SessionBusError>,
+    B: session_bus::SessionBusClient,
+{
+    let Some(address) = bus_address else {
+        return GnomeReadinessProbeError::Unavailable.exit_code();
+    };
+    if !is_valid_probe_address(address) {
+        return GnomeReadinessProbeError::Unavailable.exit_code();
+    }
+    let client = match connect(address) {
+        Ok(client) => client,
+        Err(_) => return GnomeReadinessProbeError::Unavailable.exit_code(),
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    gnome_readiness_probe_exit_code(client, &stop)
+}
+
+/// Pure validator for the child probe's explicit D-Bus address. Accepts
+/// exactly one local UNIX endpoint: the exact `unix:` prefix followed by a
+/// comma-separated key=value list with exactly one endpoint key (`path` or
+/// `abstract`, nonempty) and an optional `guid`. Rejects raw semicolons
+/// (fallback lists), NUL, duplicate or unknown keys (including the
+/// runtime/tmpdir/dir lookup keys), both endpoint keys, an absent endpoint,
+/// empty fields or values, and every non-UNIX transport (tcp/nonce-tcp,
+/// unixexec, autolaunch, ...).
+///
+/// Values are percent-decoded for validation only: every `%` requires two hex
+/// digits and a decoded NUL is rejected; every other byte must be a literal
+/// address character (ASCII alphanumeric plus `- _ / \ * .`) — all other
+/// bytes must be escaped. The decoded `path` must start with `/`; the
+/// decoded `abstract` may be any nonempty byte string; the decoded `guid`
+/// must be exactly 32 ASCII hex digits. No env read, no
+/// fallback/canonicalization, no filesystem or network operations.
+fn is_valid_probe_address(address: &str) -> bool {
+    let rest = match address.strip_prefix("unix:") {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => return false,
+    };
+    if rest.contains(';') || rest.contains('\0') {
+        return false;
+    }
+
+    let mut has_endpoint = false;
+    let mut has_guid = false;
+    for field in rest.split(',') {
+        let (key, value) = match field.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => return false,
+        };
+        let Some(decoded) = decode_probe_address_field(value) else {
+            return false;
+        };
+        match key {
+            "path" => {
+                if has_endpoint || decoded.first() != Some(&b'/') {
+                    return false;
+                }
+                has_endpoint = true;
+            }
+            "abstract" => {
+                if has_endpoint || decoded.is_empty() {
+                    return false;
+                }
+                has_endpoint = true;
+            }
+            "guid" => {
+                if has_guid
+                    || decoded.len() != 32
+                    || !decoded.iter().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return false;
+                }
+                has_guid = true;
+            }
+            _ => return false,
+        }
+    }
+    has_endpoint
+}
+
+/// Percent-decode one D-Bus address field for validation. Every `%` must
+/// start two hex digits (a decoded NUL is rejected); every other byte must be
+/// a literal address character — ASCII alphanumeric plus `- _ / \ * .` — all
+/// other bytes must be escaped. Returns the decoded bytes, preserving escaped
+/// non-UTF-8 values.
+fn decode_probe_address_field(value: &str) -> Option<Vec<u8>> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let high = hex_digit_value(*bytes.get(index + 1)?)?;
+            let low = hex_digit_value(*bytes.get(index + 2)?)?;
+            let decoded_byte = high * 16 + low;
+            if decoded_byte == 0 {
+                return None;
+            }
+            decoded.push(decoded_byte);
+            index += 3;
+        } else if is_probe_address_literal(byte) {
+            decoded.push(byte);
+            index += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(decoded)
+}
+
+fn is_probe_address_literal(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'-' | b'_' | b'/' | b'\\' | b'*' | b'.'
+    )
+}
+
+fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
@@ -944,6 +1201,21 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
                 Err(RunError::UpgradePreflight(report))
             }
         }
+        Command::GnomeReadinessProbe { bus_address } => {
+            let code = run_gnome_readiness_probe(bus_address.as_deref());
+            match code {
+                0 => Ok(()),
+                1 => Err(RunError::GnomeReadinessProbe(
+                    GnomeReadinessProbeError::Unavailable,
+                )),
+                2 => Err(RunError::GnomeReadinessProbe(
+                    GnomeReadinessProbeError::Cancelled,
+                )),
+                _ => Err(RunError::GnomeReadinessProbe(
+                    GnomeReadinessProbeError::NotReady,
+                )),
+            }
+        }
     }
 }
 
@@ -982,6 +1254,7 @@ fn requires_current_config(command: &Command) -> bool {
         | Command::Settings(_)
         | Command::Updates(_)
         | Command::UpgradePreflight { .. }
+        | Command::GnomeReadinessProbe { .. }
         // `prompt` opens the GUI migration host and must stay reachable.
         | Command::Brightness(BrightnessCommand::Prompt) => false,
     }
@@ -1404,13 +1677,157 @@ mod tests {
         MuteCommand, ParseError, ParseOutcome, PowerCommand, ScreenCommand, SettingsHelpTopic,
         StartupMode, UpdatesHelpTopic, VolumeCommand, WebOsControlProbeCommand,
     };
+    use crate::session_bus::{
+        BusMethodCall, BusReply, BusSignal, BusSignalMatch, BusValue, SessionBusClient,
+        SessionBusError,
+    };
     use crate::settings::{SettingsCommand, SettingsParseError};
+    use crate::sources::desktop::gnome::{
+        GNOME_IDLE_MONITOR_NAME, GNOME_SCREEN_SAVER_NAME, GNOME_SHELL_NAME,
+    };
     use crate::tv::{OledBrightness, VolumeLevel};
     use crate::updates::{UpdatesCommand, UpdatesParseError};
+    use crate::{
+        gnome_readiness_probe_exit_code, is_valid_probe_address, run_gnome_readiness_probe,
+        run_gnome_readiness_probe_with_connector, GnomeReadinessProbeError,
+    };
     use crate::{notifications::NotificationError, RunError};
     use std::error::Error;
     use std::io;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// A self-contained fake observation bus mirroring the GNOME readiness
+    /// success trace (service check, unique-owner resolution, activity watch,
+    /// screen-saver/idletime reads, and RemoveWatch). Used to prove the probe
+    /// handler actually exercises a bus rather than trivially passing.
+    struct ProbeFakeBus {
+        services: bool,
+        screen_saver_owner: Option<String>,
+        idle_monitor_owner: Option<String>,
+        watch_id: u32,
+        observation: Arc<Mutex<ProbeObservation>>,
+        dropped: Arc<Mutex<bool>>,
+    }
+
+    /// Shared observation state so a test can inspect the bus's call trace
+    /// *after* the probe consumed it by value. (The drop flag lives separately
+    /// on the bus as `Arc<Mutex<bool>>`, so it needs no field here.)
+    #[derive(Default)]
+    struct ProbeObservation {
+        calls: Vec<(String, String)>,
+    }
+
+    impl Default for ProbeFakeBus {
+        fn default() -> Self {
+            Self {
+                services: false,
+                screen_saver_owner: None,
+                idle_monitor_owner: None,
+                watch_id: 0,
+                observation: Arc::new(Mutex::new(ProbeObservation::default())),
+                dropped: Arc::new(Mutex::new(false)),
+            }
+        }
+    }
+
+    impl Drop for ProbeFakeBus {
+        fn drop(&mut self) {
+            *self.dropped.lock().unwrap() = true;
+        }
+    }
+
+    /// A fake observation bus with the happy-path configuration: all three
+    /// required service names present, unique owners resolvable, and a valid
+    /// activity watch. Returns the bus (owned, to be consumed by value)
+    /// alongside the shared state and drop flag so the caller can inspect the
+    /// bus after the probe has consumed it.
+    fn ready_probe_bus() -> (ProbeFakeBus, Arc<Mutex<ProbeObservation>>, Arc<Mutex<bool>>) {
+        let observation = Arc::new(Mutex::new(ProbeObservation::default()));
+        let dropped = Arc::new(Mutex::new(false));
+        let bus = ProbeFakeBus {
+            services: true,
+            screen_saver_owner: Some(":1.41".to_string()),
+            idle_monitor_owner: Some(":1.42".to_string()),
+            watch_id: 7,
+            observation: Arc::clone(&observation),
+            dropped: Arc::clone(&dropped),
+        };
+        (bus, observation, dropped)
+    }
+
+    impl SessionBusClient for ProbeFakeBus {
+        fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+            Ok(self.services
+                && matches!(
+                    name,
+                    GNOME_SHELL_NAME | GNOME_SCREEN_SAVER_NAME | GNOME_IDLE_MONITOR_NAME
+                ))
+        }
+
+        fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            self.observation
+                .lock()
+                .unwrap()
+                .calls
+                .push((call.member.to_string(), call.destination.to_string()));
+            match call.member {
+                "GetNameOwner" => {
+                    let [BusValue::String(name)] = call.body.as_slice() else {
+                        return Err(SessionBusError::Transport("no name".into()));
+                    };
+                    let owner = match name.as_str() {
+                        GNOME_SCREEN_SAVER_NAME => self.screen_saver_owner.clone(),
+                        GNOME_IDLE_MONITOR_NAME => self.idle_monitor_owner.clone(),
+                        _ => None,
+                    };
+                    owner
+                        .map(|owner| BusReply::new(vec![BusValue::String(owner)]))
+                        .ok_or_else(|| SessionBusError::Transport("no owner".into()))
+                }
+                "AddUserActiveWatch" => {
+                    if Some(call.destination) != self.idle_monitor_owner.as_deref() {
+                        return Err(SessionBusError::Transport("wrong owner".into()));
+                    }
+                    Ok(BusReply::new(vec![BusValue::U32(self.watch_id)]))
+                }
+                "GetActive" => Ok(BusReply::new(vec![BusValue::Bool(true)])),
+                "GetIdletime" => Ok(BusReply::new(vec![BusValue::U64(0)])),
+                "RemoveWatch" => Ok(BusReply::new(Vec::new())),
+                other => Err(SessionBusError::Transport(format!("unexpected {other}"))),
+            }
+        }
+
+        fn add_signal_match(&mut self, _rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+            Ok(())
+        }
+
+        fn process(&mut self, _timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+            panic!("readiness must not enter a monitor loop");
+        }
+    }
+
+    /// A stub that always returns success and never reads the address: the
+    /// ready-case expectation must FAIL against it, proving the handler does
+    /// real bus work (a non-trivial client cannot be passed off).
+    struct TrivialOkBus;
+
+    impl SessionBusClient for TrivialOkBus {
+        fn name_has_owner(&mut self, _name: &str) -> Result<bool, SessionBusError> {
+            Ok(true)
+        }
+        fn call_method(&mut self, _call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            Ok(BusReply::new(Vec::new()))
+        }
+        fn add_signal_match(&mut self, _rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+            Ok(())
+        }
+        fn process(&mut self, _timeout: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn no_args_opens_overview() {
@@ -2391,6 +2808,483 @@ mod tests {
             assert!(
                 !requires_current_config(command),
                 "{command:?} should not be gated"
+            );
+        }
+    }
+
+    // ---- pure UNIX address validator (migration 257, Slice A) ----
+
+    #[test]
+    fn validator_accepts_valid_unix_path_abstract_and_guid_forms() {
+        assert!(is_valid_probe_address("unix:path=/tmp/bus.sock"));
+        assert!(is_valid_probe_address("unix:path=/run/user/1000/bus"));
+        assert!(is_valid_probe_address("unix:abstract=lg-buddy-probe"));
+        // Optional guid, with and without an endpoint key order.
+        assert!(is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,guid=0123456789abcdef0123456789ABCDEF"
+        ));
+        assert!(is_valid_probe_address(
+            "unix:abstract=a,guid=ffffffffffffffffffffffffffffffff"
+        ));
+        // Escaped bytes that decode to valid values.
+        assert!(is_valid_probe_address("unix:abstract=%41%42")); // decodes to "AB"
+        assert!(is_valid_probe_address(
+            "unix:path=/tmp/bus%20file.sock" // decodes to "/tmp/bus file.sock"
+        ));
+    }
+
+    #[test]
+    fn validator_rejects_semicolon_fallback_lists() {
+        assert!(!is_valid_probe_address(
+            "unix:path=/tmp/bus.sock;tcp:127.0.0.1:1"
+        ));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock;"));
+        assert!(!is_valid_probe_address(
+            "tcp:127.0.0.1:1;unix:path=/tmp/bus.sock"
+        ));
+    }
+
+    #[test]
+    fn validator_rejects_non_unix_transports() {
+        assert!(!is_valid_probe_address("tcp:127.0.0.1:1234"));
+        assert!(!is_valid_probe_address("tcp:host=127.0.0.1,port=1234"));
+        assert!(!is_valid_probe_address("nonce-tcp:127.0.0.1:1234"));
+        assert!(!is_valid_probe_address("unixexec:/usr/bin/fake-busd"));
+        assert!(!is_valid_probe_address("autolaunch:"));
+        assert!(is_valid_probe_address("unix:path=/tmp/bus.sock")); // control: valid
+    }
+
+    #[test]
+    fn validator_rejects_wrong_or_missing_unix_prefix() {
+        assert!(!is_valid_probe_address("unix"));
+        assert!(!is_valid_probe_address("unix:"));
+        assert!(is_valid_probe_address("unix:path=/tmp/bus.sock")); // control: valid
+        assert!(!is_valid_probe_address("UNIX:path=/tmp/bus.sock"));
+        assert!(!is_valid_probe_address(" unix:path=/tmp/bus.sock"));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock "));
+    }
+
+    #[test]
+    fn validator_rejects_lookup_keys_and_unknown_keys() {
+        assert!(!is_valid_probe_address("unix:runtime-dir=/run/user/1000"));
+        assert!(!is_valid_probe_address("unix:tmpdir=/tmp"));
+        assert!(!is_valid_probe_address("unix:dir=/tmp"));
+        assert!(!is_valid_probe_address("unix:bogus=1"));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock,bogus=1"));
+    }
+
+    #[test]
+    fn validator_rejects_duplicate_endpoint_or_guid_keys() {
+        assert!(!is_valid_probe_address("unix:path=/a,path=/b"));
+        assert!(!is_valid_probe_address("unix:abstract=a,abstract=b"));
+        assert!(is_valid_probe_address(
+            "unix:path=/a,guid=0123456789abcdef0123456789abcdef"
+        )); // control: one guid ok
+        assert!(!is_valid_probe_address(
+            "unix:guid=0123456789abcdef0123456789abcdef,guid=ffffffffffffffffffffffffffff"
+        ));
+    }
+
+    #[test]
+    fn validator_rejects_both_endpoint_keys_and_absent_endpoint() {
+        assert!(!is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,abstract=x"
+        ));
+        assert!(!is_valid_probe_address(
+            "unix:abstract=x,path=/tmp/bus.sock"
+        ));
+        assert!(!is_valid_probe_address("unix:"));
+        assert!(!is_valid_probe_address(
+            "unix:guid=0123456789abcdef0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn validator_rejects_empty_fields_or_values() {
+        assert!(!is_valid_probe_address("unix:"));
+        assert!(!is_valid_probe_address("unix="));
+        assert!(!is_valid_probe_address("unix:path="));
+        assert!(!is_valid_probe_address("unix:abstract="));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock,="));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock,"));
+    }
+
+    #[test]
+    fn validator_rejects_bad_percent_escapes() {
+        assert!(!is_valid_probe_address("unix:path=/tmp/%zz")); // not hex
+        assert!(!is_valid_probe_address("unix:path=/tmp/%4")); // one hex digit
+        assert!(!is_valid_probe_address("unix:path=/tmp/%")); // bare %
+        assert!(!is_valid_probe_address("unix:path=/tmp/%2")); // short escape
+        assert!(!is_valid_probe_address("unix:abstract=%zz")); // not hex
+    }
+
+    #[test]
+    fn validator_rejects_decoded_nul() {
+        assert!(!is_valid_probe_address("unix:abstract=%00"));
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus%00.sock"));
+    }
+
+    #[test]
+    fn validator_rejects_raw_nul_and_unescaped_bytes() {
+        // Raw NUL in the input string (as &str this is the '\0' character).
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus.sock\0"));
+        assert!(!is_valid_probe_address("unix:abstract=a\0b"));
+        // A non-literal, unescaped byte (space) must be escaped.
+        assert!(!is_valid_probe_address("unix:path=/tmp/bus .sock"));
+        // Non-UTF-8 bytes are preserved only when escaped; a raw high byte
+        // (escaped as %FF) decodes fine, but the decoded value must be usable.
+        assert!(is_valid_probe_address("unix:abstract=%FF%20"));
+    }
+
+    #[test]
+    fn validator_requires_path_to_start_with_slash() {
+        assert!(!is_valid_probe_address("unix:path=relative.sock"));
+        assert!(!is_valid_probe_address("unix:path=..%2Ftmp%2Fbus.sock"));
+        assert!(is_valid_probe_address("unix:path=/tmp/bus.sock")); // control
+        assert!(is_valid_probe_address("unix:path=%2ftmp/bus.sock")); // decodes to /tmp/bus.sock
+    }
+
+    #[test]
+    fn validator_rejects_bad_guid() {
+        let good = "0123456789abcdef0123456789abcdef";
+        assert!(is_valid_probe_address(&format!(
+            "unix:path=/tmp/bus.sock,guid={good}"
+        )));
+        // Too short.
+        assert!(!is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,guid=0123456789abcdef"
+        ));
+        // Too long.
+        assert!(!is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,guid=0123456789abcdef0123456789abcdef0"
+        ));
+        // Non-hex digit.
+        assert!(!is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,guid=0123456789abcdef0123456789abcdefg"
+        ));
+        // Uppercase hex is allowed.
+        assert!(is_valid_probe_address(
+            "unix:path=/tmp/bus.sock,guid=0123456789ABCDEF0123456789ABCDEF"
+        ));
+    }
+
+    #[test]
+    fn validator_escaped_non_utf8_bytes_preserved() {
+        // %20 decodes to a space (valid in abstract); %FF decodes to 0xFF (valid byte).
+        assert!(is_valid_probe_address("unix:abstract=%20%FF"));
+        // Decoding must not be required for validation of a plain literal.
+        assert!(is_valid_probe_address("unix:abstract=a-b_c/d*e.f"));
+    }
+
+    #[test]
+    fn probe_missing_bus_is_unavailable_fast() {
+        // No env read, no autolaunch, no real bus: a missing address is a
+        // fast exit-1. This is the production wrapper (build is skipped).
+        assert_eq!(run_gnome_readiness_probe(None), 1);
+        assert_eq!(run_gnome_readiness_probe(Some("")), 1);
+    }
+
+    #[test]
+    fn probe_parse_args_missing_bus_value_errors() {
+        // `--bus` takes a value; a dangling `--bus` with no value errors.
+        assert_eq!(
+            parse_args(["gnome-readiness-probe", "--bus"]),
+            Err(ParseError::MissingGnomeReadinessProbeBus)
+        );
+    }
+
+    #[test]
+    fn probe_parse_args_defaults_bus_address_to_none() {
+        // `--bus` is optional; omitting it is a valid command with no address.
+        assert_eq!(
+            parse_args(["gnome-readiness-probe"]),
+            Ok(ParseOutcome::Command(Command::GnomeReadinessProbe {
+                bus_address: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn probe_parse_args_reads_bus_address() {
+        assert_eq!(
+            parse_args(["gnome-readiness-probe", "--bus", "unix:path=/tmp/bus.sock"]),
+            Ok(ParseOutcome::Command(Command::GnomeReadinessProbe {
+                bus_address: Some("unix:path=/tmp/bus.sock".to_string()),
+            }))
+        );
+    }
+
+    #[test]
+    fn probe_parse_args_rejects_unknown_flags() {
+        assert_eq!(
+            parse_args(["gnome-readiness-probe", "--bogus"]),
+            Err(ParseError::UnexpectedArguments {
+                command: Command::GnomeReadinessProbe { bus_address: None },
+                arguments: vec!["--bogus".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn probe_ready_bus_maps_to_exit_0_and_exercises_bus() {
+        let (bus, observation, dropped) = ready_probe_bus();
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            gnome_readiness_probe_exit_code(bus, &stop),
+            0,
+            "ready bus maps to exit 0"
+        );
+        // The handler must have driven the real readiness trace (not a stub),
+        // observed through the shared state after the client was consumed.
+        let trace = observation.lock().unwrap().calls.clone();
+        let members: Vec<_> = trace.iter().map(|(m, _)| m.as_str()).collect();
+        assert!(members.contains(&"GetNameOwner"));
+        assert!(members.contains(&"AddUserActiveWatch"));
+        assert!(members.contains(&"GetActive"));
+        assert!(members.contains(&"GetIdletime"));
+        assert!(members.contains(&"RemoveWatch"));
+        // The owned client was consumed and dropped before the mapper returned.
+        assert!(*dropped.lock().unwrap(), "owned client must be dropped");
+    }
+
+    #[test]
+    fn probe_pre_cancelled_maps_to_exit_2() {
+        let (bus, observation, dropped) = ready_probe_bus();
+        let stop = AtomicBool::new(true);
+        assert_eq!(
+            gnome_readiness_probe_exit_code(bus, &stop),
+            2,
+            "pre-cancelled maps to exit 2"
+        );
+        // Cancellation is checked before any bus call.
+        assert!(
+            observation.lock().unwrap().calls.is_empty(),
+            "no bus calls after pre-cancel"
+        );
+        assert!(*dropped.lock().unwrap(), "owned client must be dropped");
+    }
+
+    #[test]
+    fn probe_services_unavailable_maps_to_exit_3() {
+        let (mut bus, _observation, dropped) = ready_probe_bus();
+        bus.services = false;
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            gnome_readiness_probe_exit_code(bus, &stop),
+            3,
+            "services-unavailable maps to exit 3 (not-ready)"
+        );
+        assert!(*dropped.lock().unwrap(), "owned client must be dropped");
+    }
+
+    #[test]
+    fn probe_trivial_ok_client_cannot_pass_ready_case() {
+        // Negative gate: a stub that always returns Ok and never reads the
+        // address must NOT be accepted as a ready bus. The readiness check
+        // still drives the real trace, so a non-trivial client is required —
+        // a `TrivialOkBus` fails the owner-resolution step (no owner reply),
+        // so the handler reports not-ready (3), not ready (0).
+        let bus = TrivialOkBus;
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            gnome_readiness_probe_exit_code(bus, &stop),
+            3,
+            "a trivial always-Ok stub must not be treated as ready"
+        );
+    }
+
+    #[test]
+    fn probe_unsupported_address_maps_to_unavailable_via_production_wrapper() {
+        // End-to-end through the REAL production wrapper (no fake connector):
+        // an unsupported explicit address is rejected by the validator BEFORE
+        // any connector is invoked and maps to Unavailable (exit 1). No real
+        // bus is opened and no autolaunch/exec is attempted.
+        assert_eq!(run_gnome_readiness_probe(Some("not-a-dbus-address")), 1);
+    }
+
+    #[test]
+    fn probe_valid_addresses_reach_connector_once_and_exercise_readiness() {
+        // Connector-injection seam, table form: every supported address shape
+        // (guid before/after the endpoint, abstract, percent-escaped path
+        // delimiters and non-UTF8 bytes) must reach the connector exactly once,
+        // byte-for-byte, and the readiness trace is actually driven — observed
+        // through the shared handles after the probe consumed the client.
+        let cases = [
+            "unix:path=/tmp/bus.sock",
+            "unix:guid=0123456789abcdef0123456789abcdef,path=/tmp/bus.sock",
+            "unix:path=/tmp/bus.sock,guid=0123456789abcdef0123456789abcdef",
+            "unix:abstract=lg-buddy-probe",
+            "unix:abstract=lg-buddy-probe,guid=0123456789abcdef0123456789abcdef",
+            "unix:path=/tmp/a%2Cb.sock",
+            "unix:path=/tmp/a%3Bb.sock",
+            "unix:path=/tmp/a%3Db.sock",
+            "unix:path=/tmp/a%25b.sock",
+            "unix:path=%2Ftmp%2Fbus.sock",
+            "unix:path=/tmp/bus%FF.sock", // escaped non-UTF8 byte, still absolute
+        ];
+        for address in cases {
+            let call_count = Arc::new(Mutex::new(0usize));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            // The connector's bus stashes its shared handles here so the
+            // trace and drop state are inspectable after the client is gone.
+            let bus_state = Arc::new(Mutex::new(None));
+            let state = Arc::clone(&bus_state);
+            let counter = Arc::clone(&call_count);
+            let observed = Arc::clone(&seen);
+            let result = run_gnome_readiness_probe_with_connector(Some(address), move |addr| {
+                *counter.lock().unwrap() += 1;
+                observed.lock().unwrap().push(addr.to_string());
+                let (bus, observation, dropped) = ready_probe_bus();
+                *state.lock().unwrap() = Some((Arc::clone(&observation), Arc::clone(&dropped)));
+                Ok(bus)
+            });
+            assert_eq!(result, 0, "{address}: a ready connector maps to exit 0");
+            assert_eq!(
+                *call_count.lock().unwrap(),
+                1,
+                "{address}: connector invoked exactly once"
+            );
+            let seen_calls = {
+                let g = seen.lock().unwrap();
+                g.as_slice() == [address]
+            };
+            assert!(seen_calls, "{address}: address passed byte-for-byte");
+            let (observation, dropped) = bus_state
+                .lock()
+                .unwrap()
+                .take()
+                .expect("a valid address must run the connector");
+            let trace = observation.lock().unwrap().calls.clone();
+            let members: Vec<_> = trace.iter().map(|(m, _)| m.as_str()).collect();
+            assert!(members.contains(&"GetNameOwner"), "{address}");
+            assert!(members.contains(&"AddUserActiveWatch"), "{address}");
+            assert!(members.contains(&"GetActive"), "{address}");
+            assert!(members.contains(&"GetIdletime"), "{address}");
+            assert!(members.contains(&"RemoveWatch"), "{address}");
+            assert!(
+                *dropped.lock().unwrap(),
+                "{address}: owned client must be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_rejected_addresses_never_call_connector() {
+        // Dangerous/unsupported samples (autolaunch, exec transport, TCP,
+        // fallback lists, malformed and missing/empty forms) are rejected by
+        // the validator BEFORE the connector, so a fake connector is never
+        // invoked — no real autolaunch/exec runs.
+        let call_count = Arc::new(Mutex::new(0usize));
+        let rejected = [
+            // missing / empty / malformed
+            "",
+            "unix:",
+            "unix",
+            "UNIX:path=/tmp/bus.sock",
+            " unix:path=/tmp/bus.sock",
+            // unsupported transports and fallback lists
+            "autolaunch:",
+            "unixexec:/usr/bin/fake-busd",
+            "tcp:127.0.0.1:1",
+            "nonce-tcp:127.0.0.1:1",
+            "unix:path=/tmp/bus.sock;tcp:127.0.0.1:1",
+            // runtime/tmpdir/dir lookup keys and unknown keys
+            "unix:runtime-dir=/run/user/1000",
+            "unix:tmpdir=/tmp",
+            "unix:dir=/tmp",
+            "unix:bogus=1",
+            "unix:path=/tmp/bus.sock,bogus=1",
+            // both endpoint kinds, duplicate endpoint keys, relative path
+            "unix:path=/tmp/bus.sock,abstract=probe",
+            "unix:path=/tmp/bus.sock,path=/tmp/other.sock",
+            "unix:abstract=a,abstract=b",
+            "unix:path=relative.sock",
+            // empty fields
+            "unix:path=",
+            "unix:abstract=",
+            "unix:path=/tmp/bus.sock,",
+            "unix:path=/tmp/bus.sock,=",
+            // bad percent escapes, decoded NUL, bad guid
+            "unix:path=/tmp/%zz",
+            "unix:path=/tmp/%4",
+            "unix:path=/tmp/bus%00.sock",
+            "unix:guid=0123456789abcdef0123456789abc,path=/tmp/bus.sock", // 31 hex
+            // duplicate GUID with a VALID endpoint and TWO individually
+            // valid 32-hex GUIDs: proves duplicate-key rejection on its own.
+            "unix:guid=0123456789abcdef0123456789abcdef,guid=abcdefabcdefabcdefabcdefabcdefab,path=/tmp/bus.sock",
+        ];
+        for addr in rejected {
+            assert_eq!(
+                run_gnome_readiness_probe_with_connector(Some(addr), |_| {
+                    *call_count.lock().unwrap() += 1;
+                    Err::<TrivialOkBus, _>(SessionBusError::Transport(
+                        "rejected address must not reach the connector".into(),
+                    ))
+                }),
+                1,
+                "{addr:?} is rejected as Unavailable (exit 1)"
+            );
+        }
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            0,
+            "no rejected sample may reach the connector"
+        );
+    }
+
+    #[test]
+    fn probe_connector_error_maps_to_unavailable() {
+        // A VALID address whose connector fails acquisition still maps to
+        // Unavailable (exit 1): the seam connects exactly once, the client is
+        // never produced, and readiness is never driven.
+        let call_count = Arc::new(Mutex::new(0usize));
+        let counter = Arc::clone(&call_count);
+        let result = run_gnome_readiness_probe_with_connector(
+            Some("unix:path=/tmp/bus.sock"),
+            move |addr| {
+                *counter.lock().unwrap() += 1;
+                assert_eq!(addr, "unix:path=/tmp/bus.sock");
+                Err::<TrivialOkBus, _>(SessionBusError::Transport(
+                    "fake acquisition failure".into(),
+                ))
+            },
+        );
+        assert_eq!(
+            result, 1,
+            "acquisition failure maps to Unavailable (exit 1)"
+        );
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "connector invoked exactly once"
+        );
+    }
+
+    #[test]
+    fn probe_error_exit_codes_are_stable() {
+        assert_eq!(GnomeReadinessProbeError::Unavailable.exit_code(), 1);
+        assert_eq!(GnomeReadinessProbeError::Cancelled.exit_code(), 2);
+        assert_eq!(GnomeReadinessProbeError::NotReady.exit_code(), 3);
+    }
+
+    #[test]
+    fn probe_run_command_dispatches_missing_bus_as_unavailable() {
+        // Really dispatches the gnome-readiness-probe command with a missing
+        // `--bus` value OR an empty one: run_command takes the fast
+        // Unavailable path (exit 1) and surfaces it as the typed RunError —
+        // no config read, no runtime, no bus connection is opened.
+        for bus_address in [None, Some("".to_string())] {
+            let mut out = Vec::new();
+            let dispatched =
+                crate::run_command(Command::GnomeReadinessProbe { bus_address }, &mut out);
+            assert!(
+                matches!(
+                    dispatched,
+                    Err(RunError::GnomeReadinessProbe(
+                        GnomeReadinessProbeError::Unavailable
+                    ))
+                ),
+                "a missing or empty bus address must dispatch as Unavailable"
             );
         }
     }

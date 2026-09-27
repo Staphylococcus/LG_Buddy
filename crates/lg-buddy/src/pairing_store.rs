@@ -30,6 +30,8 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
+pub(crate) mod migration;
+
 const LOCK_FILE_SUFFIX: &str = ".pairing.lock";
 const TV_KEYS: &[&str] = &[
     "tvs_primary_ip",
@@ -175,7 +177,7 @@ impl PairingStore {
         }
 
         let token_path = self.token_store.token_path().to_path_buf();
-        if let Err(source) = self.token_store.persist(token) {
+        if let Err(source) = self.token_store.persist_locked(token, &self._lock) {
             let cleanup = self.cleanup_created_dirs();
             let error = PairingStoreError::TokenWrite {
                 path: token_path,
@@ -229,14 +231,12 @@ impl PairingStore {
     fn restore_token(&self) -> Result<(), PairingStoreError> {
         let token_path = self.token_store.token_path();
         match &self.token_before {
-            Some(before) => {
-                atomic_write_bytes(token_path, &before.contents, before.mode).map_err(|source| {
-                    PairingStoreError::TokenRollback {
-                        path: token_path.to_path_buf(),
-                        source,
-                    }
-                })
-            }
+            Some(before) => atomic_write_bytes(token_path, before).map_err(|source| {
+                PairingStoreError::TokenRollback {
+                    path: token_path.to_path_buf(),
+                    source,
+                }
+            }),
             None => {
                 match fs::symlink_metadata(token_path) {
                     Ok(metadata) if metadata.file_type().is_file() => {
@@ -282,12 +282,12 @@ impl PairingStore {
                         })
                     }
                     Some(_) => Ok(()),
-                    None => atomic_write_bytes(token_path, &before.contents, before.mode).map_err(
-                        |source| PairingStoreError::TokenRollback {
+                    None => atomic_write_bytes(token_path, before).map_err(|source| {
+                        PairingStoreError::TokenRollback {
                             path: token_path.to_path_buf(),
                             source,
-                        },
-                    ),
+                        }
+                    }),
                 }
             }
             None => match fs::symlink_metadata(token_path) {
@@ -414,22 +414,7 @@ fn prepare_transaction(
         return Err(PairingStoreError::RunningAsRoot);
     }
 
-    let parent = config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| PairingStoreError::ConfigPathHasNoParent {
-            path: config_path.to_path_buf(),
-        })?;
-
-    let lock_path = config_path.with_file_name(format!(
-        ".{}{}",
-        config_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("config.env"),
-        LOCK_FILE_SUFFIX
-    ));
-    let lock = PairingLock::acquire(lock_path, parent.to_path_buf())?;
+    let lock = PairingLock::for_config(config_path)?;
 
     let snapshot = read_config_snapshot(config_path)?;
     let config_contents =
@@ -587,7 +572,12 @@ fn read_existing_token(path: &Path) -> Result<Option<TokenBefore>, PairingStoreE
     let mode = metadata.mode();
     #[cfg(not(unix))]
     let mode = 0;
-    Ok(Some(TokenBefore { contents, mode }))
+    Ok(Some(TokenBefore {
+        contents,
+        mode,
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    }))
 }
 
 fn same_token_snapshot(before: Option<&TokenBefore>, current: Option<&TokenBefore>) -> bool {
@@ -969,7 +959,9 @@ fn atomic_write_config(
     result
 }
 
-fn atomic_write_bytes(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+fn atomic_write_bytes(path: &Path, before: &TokenBefore) -> io::Result<()> {
+    let contents = &before.contents;
+    let mode = before.mode;
     let temp = temporary_path(path);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -981,6 +973,7 @@ fn atomic_write_bytes(path: &Path, contents: &[u8], mode: u32) -> io::Result<()>
         file.flush()?;
         #[cfg(unix)]
         {
+            set_owner_ids(&file, before.uid, before.gid)?;
             file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
         }
         file.sync_all()?;
@@ -1020,20 +1013,57 @@ fn set_owner_ids(file: &File, uid: u32, gid: u32) -> io::Result<()> {
 struct TokenBefore {
     contents: Vec<u8>,
     mode: u32,
+    uid: u32,
+    gid: u32,
 }
 
 #[derive(Debug)]
-struct PairingLock {
+pub(crate) struct PairingLock {
     file: File,
+    config_path: PathBuf,
 }
 
 impl PairingLock {
+    /// All config and primary-token writers use this stable inode. Resolve
+    /// aliases before deriving the lock so a settings symlink shares it.
+    pub(crate) fn for_config(config: &Path) -> Result<Self, PairingStoreError> {
+        let parent = config
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| PairingStoreError::ConfigPathHasNoParent {
+                path: config.into(),
+            })?;
+        ensure_lock_parent(parent)?;
+        let target = if config.exists() {
+            fs::canonicalize(config)
+        } else {
+            fs::canonicalize(parent).map(|p| p.join(config.file_name().unwrap()))
+        }
+        .map_err(|source| PairingStoreError::Lock {
+            path: config.into(),
+            source,
+        })?;
+        let mut name = std::ffi::OsString::from(".");
+        name.push(target.file_name().unwrap());
+        name.push(LOCK_FILE_SUFFIX);
+        let mut guard =
+            Self::acquire(target.with_file_name(name), target.parent().unwrap().into())?;
+        guard.config_path = target;
+        Ok(guard)
+    }
+
+    pub(crate) fn target(&self) -> &Path {
+        &self.config_path
+    }
+
     fn acquire(path: PathBuf, parent: PathBuf) -> Result<Self, PairingStoreError> {
         let created_parents = ensure_lock_parent(&parent)?;
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         let mut file = match options.open(&path) {
             Ok(file) => file,
             Err(source) => {
@@ -1053,8 +1083,24 @@ impl PairingLock {
                 return Err(PairingStoreError::Lock { path, source });
             }
         }
+        let metadata = file.metadata().map_err(|source| PairingStoreError::Lock {
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.is_file() || metadata.uid() != current_euid() || metadata.mode() & 0o077 != 0 {
+            return Err(PairingStoreError::Lock {
+                path,
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unsafe config mutation lock",
+                ),
+            });
+        }
         let _ = writeln!(file, "pid={}", process::id());
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            config_path: PathBuf::new(),
+        })
     }
 }
 

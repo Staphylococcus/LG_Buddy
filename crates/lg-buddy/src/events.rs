@@ -115,6 +115,7 @@ impl RuntimeEventKind {
             | Command::Settings(_)
             | Command::Updates(_)
             | Command::UpgradePreflight { .. }
+            | Command::GnomeReadinessProbe { .. }
             | Command::KWinBridge(_) => None,
         }
     }

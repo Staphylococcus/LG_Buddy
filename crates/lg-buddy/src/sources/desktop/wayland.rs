@@ -1965,7 +1965,7 @@ mod tests {
         // accept would block (WouldBlock) if no connection had been made.
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         assert_eq!(
-            check_foreground_wayland_readiness(None, Some(&path.as_os_str()), None, &stop),
+            check_foreground_wayland_readiness(None, Some(path.as_os_str()), None, &stop),
             Err(WaylandProviderError::Cancelled)
         );
         listener.set_nonblocking(true).unwrap();
@@ -1999,7 +1999,7 @@ mod tests {
         assert_eq!(
             check_foreground_wayland_readiness(
                 Some(inherited_fd),
-                Some(&alt_path.as_os_str()),
+                Some(alt_path.as_os_str()),
                 None,
                 &stop
             ),

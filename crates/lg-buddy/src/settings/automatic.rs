@@ -1,7 +1,9 @@
 //! Explicit GUI transition from a saved legacy override to portable discovery.
 //! Ordinary CLI mutations retain their persist-then-apply compatibility contract.
 
-use std::{fs, path::Path};
+#[cfg(test)]
+use std::fs;
+use std::path::Path;
 
 use crate::backend::{resolve_backend_with_probe, BackendProbe, SystemBackendProbe};
 use crate::config::ScreenBackend;
@@ -50,14 +52,9 @@ fn transition_with_probe<C: ServiceController>(
         resolve_backend_with_probe(probe, ScreenBackend::Auto)
             .map_err(|error| failure(format!("Automatic integration was not enabled: {error}. Your previous settings are unchanged.")))?;
     }
-    let original = fs::read(path).map_err(|error| {
-        failure(format!(
-            "Could not read the existing configuration: {error}"
-        ))
-    })?;
     let outcome = execute_settings_mutation(path, mutation, applier, progress)?;
     if let Err(error) = outcome.apply() {
-        super::store::atomic_write_config(path, &original)
+        outcome.change().rollback_if_unchanged()
             .map_err(|rollback| failure(format!("Automatic integration could not be applied ({error}) and the previous configuration could not be restored ({rollback}). Check the saved desktop integration before retrying.")))?;
         // A failed restart may have stopped the old process. Restore its config
         // before requesting recovery; a second failure does not undo rollback.

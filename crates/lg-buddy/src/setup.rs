@@ -110,6 +110,11 @@ impl StepCancellation {
         self.0.store(FINISHED, Ordering::Release);
     }
 
+    /// Atomically seal a preparation result against a concurrent cancel.
+    pub(crate) fn finish_and_was_cancelled(&self) -> bool {
+        self.0.swap(FINISHED, Ordering::AcqRel) == CANCELLED
+    }
+
     pub(crate) fn same_attempt(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
