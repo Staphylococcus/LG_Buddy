@@ -28,6 +28,34 @@ If a control fails, follow the error message beside it and retry.
 
 ![Overview showing a connected TV with brightness and volume sliders](screenshots/overview.png)
 
+<a id="gnome-quick-settings"></a>
+### Add a brightness slider to GNOME Quick Settings
+
+On GNOME 46 or newer, an optional GNOME Shell extension adds a TV brightness
+slider to Quick Settings, below the volume sliders. It adds no top-bar icon.
+The slider reads the TV's brightness each time you open Quick Settings. It
+hides itself when the TV cannot be reached or a change fails, and tries again
+the next time you open Quick Settings.
+
+From the extracted release archive, copy the extension into your user
+extensions folder:
+
+```bash
+mkdir -p ~/.local/share/gnome-shell/extensions
+cp -r docs/gnome-shell/lg-buddy-brightness@staphylococcus.github.io \
+  ~/.local/share/gnome-shell/extensions/
+```
+
+Log out and back in so GNOME finds it, then enable it:
+
+```bash
+gnome-extensions enable lg-buddy-brightness@staphylococcus.github.io
+```
+
+To remove it, run
+`gnome-extensions uninstall lg-buddy-brightness@staphylococcus.github.io`.
+Updating or uninstalling LG Buddy does not change the extension.
+
 <a id="tvs"></a>
 ## Pair or fix a TV connection
 

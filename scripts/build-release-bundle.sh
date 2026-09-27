@@ -111,6 +111,10 @@ fi
 find "$BUNDLE_DIR/docs/kwin" -type d -exec chmod 755 {} +
 find "$BUNDLE_DIR/docs/kwin" -type f -exec chmod 644 {} +
 chmod 755 "$BUNDLE_DIR/docs/kwin/setup.sh" "$BUNDLE_DIR/docs/kwin/build.sh"
+install -d "$BUNDLE_DIR/docs/gnome-shell"
+cp -R "$REPO_ROOT/data/gnome-shell/." "$BUNDLE_DIR/docs/gnome-shell/"
+find "$BUNDLE_DIR/docs/gnome-shell" -type d -exec chmod 755 {} +
+find "$BUNDLE_DIR/docs/gnome-shell" -type f -exec chmod 644 {} +
 install -m 755 "$GUI_BINARY_PATH" "$BUNDLE_DIR/$GUI_BUNDLE_PATH"
 install -m 644 "$APP_ICON_SOURCE" "$BUNDLE_DIR/$APP_ICON_BUNDLE_PATH"
 # Documentation uses the source-tree icon path; older updaters require bundled
