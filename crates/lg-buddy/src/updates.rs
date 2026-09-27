@@ -1,12 +1,12 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -18,168 +18,13 @@ use crate::session_notifications::{
 use crate::settings::{SettingsError, SettingsStore};
 use crate::version::{ReleaseChannel, VersionInfo};
 
-const GITHUB_RELEASES_API_BASE: &str =
-    "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases";
-const GITHUB_API_VERSION: &str = "2026-03-10";
-const GITHUB_ACCEPT: &str = "application/vnd.github+json";
-const GITHUB_CONNECT_TIMEOUT_SECONDS: u64 = 5;
-const GITHUB_REQUEST_TIMEOUT_SECONDS: u64 = 20;
-const MAX_GITHUB_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_GITHUB_ERROR_BYTES: u64 = 16 * 1024;
 const CACHE_DIR_NAME: &str = "lg-buddy";
 const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdatesCommand {
-    Check { notify: bool },
-    Install,
-    BackgroundCheck,
-}
+mod command;
 
-impl UpdatesCommand {
-    pub fn parse<I, S>(args: I) -> Result<Self, UpdatesParseError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut args = args.into_iter();
-        let Some(subcommand) = args.next() else {
-            return Err(UpdatesParseError::MissingSubcommand);
-        };
-
-        match subcommand.as_ref() {
-            "check" => parse_check_args(args),
-            "install" => parse_no_args("install", UpdatesCommand::Install, args),
-            "background-check" => parse_background_check_args(args),
-            other => Err(UpdatesParseError::UnknownSubcommand(other.to_string())),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Check { .. } => "check",
-            Self::Install => "install",
-            Self::BackgroundCheck => "background-check",
-        }
-    }
-
-    fn notify(&self) -> bool {
-        match self {
-            Self::Check { notify } => *notify,
-            Self::Install => false,
-            Self::BackgroundCheck => true,
-        }
-    }
-}
-
-fn parse_no_args<I, S>(
-    subcommand: &'static str,
-    command: UpdatesCommand,
-    args: I,
-) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let arguments = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>();
-    if arguments.is_empty() {
-        Ok(command)
-    } else {
-        Err(UpdatesParseError::UnexpectedArguments {
-            subcommand,
-            arguments,
-        })
-    }
-}
-
-fn parse_background_check_args<I, S>(args: I) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let extra_args: Vec<String> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect();
-    if extra_args.is_empty() {
-        Ok(UpdatesCommand::BackgroundCheck)
-    } else {
-        Err(UpdatesParseError::UnexpectedArguments {
-            subcommand: "background-check",
-            arguments: extra_args,
-        })
-    }
-}
-
-fn parse_check_args<I, S>(args: I) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut args = args.into_iter();
-    let mut notify = false;
-
-    while let Some(arg) = args.next() {
-        match arg.as_ref() {
-            "--notify" => {
-                if notify {
-                    return Err(UpdatesParseError::DuplicateNotify);
-                }
-
-                notify = true;
-            }
-            other => {
-                let mut unexpected = vec![other.to_string()];
-                unexpected.extend(args.map(|arg| arg.as_ref().to_string()));
-                return Err(UpdatesParseError::UnexpectedArguments {
-                    subcommand: "check",
-                    arguments: unexpected,
-                });
-            }
-        }
-    }
-
-    Ok(UpdatesCommand::Check { notify })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdatesParseError {
-    MissingSubcommand,
-    UnknownSubcommand(String),
-    DuplicateNotify,
-    UnexpectedArguments {
-        subcommand: &'static str,
-        arguments: Vec<String>,
-    },
-}
-
-impl fmt::Display for UpdatesParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingSubcommand => write!(
-                f,
-                "missing updates command; expected `updates check [--notify]` or `updates install`"
-            ),
-            Self::UnknownSubcommand(subcommand) => {
-                write!(f, "unknown updates command `{subcommand}`")
-            }
-            Self::DuplicateNotify => write!(f, "duplicate `--notify` option"),
-            Self::UnexpectedArguments {
-                subcommand,
-                arguments,
-            } => write!(
-                f,
-                "unexpected arguments for `updates {subcommand}`: {}",
-                arguments.join(" ")
-            ),
-        }
-    }
-}
-
-impl Error for UpdatesParseError {}
+pub use command::{UpdatesCommand, UpdatesParseError};
+mod github;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -918,139 +763,6 @@ impl UpdateCheckOutcome {
     }
 }
 
-trait GitHubReleasesClient {
-    fn get(
-        &self,
-        endpoint: ReleaseEndpoint,
-        user_agent: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<GitHubReleaseResponse, UpdatesError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum GitHubReleaseResponse {
-    Ok { body: String, etag: Option<String> },
-    NotModified,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ReleaseEndpoint {
-    LatestStable,
-    LatestPublished,
-}
-
-impl ReleaseEndpoint {
-    fn url(self, base: &str) -> String {
-        match self {
-            Self::LatestStable => format!("{base}/latest"),
-            Self::LatestPublished => format!("{base}?per_page=1"),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::LatestStable => "latest",
-            Self::LatestPublished => "releases",
-        }
-    }
-}
-
-struct UreqGitHubReleasesClient {
-    base_url: &'static str,
-    agent: ureq::Agent,
-}
-
-impl Default for UreqGitHubReleasesClient {
-    fn default() -> Self {
-        Self {
-            base_url: GITHUB_RELEASES_API_BASE,
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECONDS))
-                .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECONDS))
-                .https_only(true)
-                .try_proxy_from_env(false)
-                .redirects(0)
-                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
-                .build(),
-        }
-    }
-}
-
-impl GitHubReleasesClient for UreqGitHubReleasesClient {
-    fn get(
-        &self,
-        endpoint: ReleaseEndpoint,
-        user_agent: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<GitHubReleaseResponse, UpdatesError> {
-        let url = endpoint.url(self.base_url);
-        let mut request = self
-            .agent
-            .get(&url)
-            .set("Accept", GITHUB_ACCEPT)
-            .set("User-Agent", user_agent)
-            .set("X-GitHub-Api-Version", GITHUB_API_VERSION);
-
-        if let Some(etag) = if_none_match {
-            request = request.set("If-None-Match", etag);
-        }
-
-        #[cfg(feature = "gui-test-fixtures")]
-        let request = crate::gui_test_fixtures::request(request);
-        let result = request.call();
-
-        match result {
-            Ok(response) if response.status() == 200 => {
-                let etag = response.header("ETag").map(str::to_string);
-                read_ureq_response_body(response, &url, MAX_GITHUB_RESPONSE_BYTES)
-                    .map(|body| GitHubReleaseResponse::Ok { body, etag })
-            }
-            Ok(response) if response.status() == 304 => Ok(GitHubReleaseResponse::NotModified),
-            Ok(response) => {
-                let status = response.status();
-                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
-                Err(UpdatesError::ApiStatus { url, status, body })
-            }
-            Err(ureq::Error::Status(304, _)) => Ok(GitHubReleaseResponse::NotModified),
-            Err(ureq::Error::Status(status, response)) => {
-                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
-                Err(UpdatesError::ApiStatus { url, status, body })
-            }
-            Err(ureq::Error::Transport(err)) => Err(UpdatesError::Http {
-                url,
-                message: err.to_string(),
-            }),
-        }
-    }
-}
-
-fn read_ureq_response_body(
-    response: ureq::Response,
-    url: &str,
-    max_bytes: u64,
-) -> Result<String, UpdatesError> {
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|err| UpdatesError::Http {
-            url: url.to_string(),
-            message: err.to_string(),
-        })?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(UpdatesError::ResponseTooLarge {
-            url: url.to_string(),
-            max_bytes,
-        });
-    }
-
-    String::from_utf8(bytes).map_err(|err| UpdatesError::Http {
-        url: url.to_string(),
-        message: format!("response was not valid UTF-8: {err}"),
-    })
-}
-
 trait UpdateCacheStore {
     fn load(&self) -> Result<UpdateCheckCache, UpdatesError>;
     fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError>;
@@ -1216,27 +928,6 @@ fn atomic_temp_path(path: &Path, attempt: u8) -> PathBuf {
     path.with_file_name(format!(".{file_name}.{}.{}.tmp", process::id(), attempt))
 }
 
-#[derive(Debug, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    html_url: String,
-    draft: bool,
-    prerelease: bool,
-    #[serde(default)]
-    assets: Vec<GitHubReleaseAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubReleaseAsset {
-    id: u64,
-    name: String,
-    state: String,
-    size: u64,
-    digest: Option<String>,
-    url: String,
-    browser_download_url: String,
-}
-
 pub fn run_updates_command<W: io::Write>(
     command: UpdatesCommand,
     writer: &mut W,
@@ -1246,7 +937,7 @@ pub fn run_updates_command<W: io::Write>(
             "updates install must use the install orchestrator".to_string(),
         ));
     }
-    let client = UreqGitHubReleasesClient::default();
+    let client = github::UreqGitHubReleasesClient::default();
     let version = VersionInfo::current();
     let notification_handoff = SessionBusUpdateNotificationHandoff;
     let cache_store = DefaultUpdateCacheStore::from_env();
@@ -1264,7 +955,7 @@ pub fn run_updates_command<W: io::Write>(
 }
 
 pub fn check_for_updates() -> Result<UpdateCheckOutcome, UpdatesError> {
-    let client = UreqGitHubReleasesClient::default();
+    let client = github::UreqGitHubReleasesClient::default();
     let cache_store = DefaultUpdateCacheStore::from_env();
     let update_settings = EnvUpdateSettings::from_env()?;
 
@@ -1285,12 +976,12 @@ pub(crate) fn discover_install_candidate_for_channel(
     current: VersionInfo,
     channel: UpdateChannel,
 ) -> Result<ReleaseInfo, UpdatesError> {
-    let client = UreqGitHubReleasesClient::default();
+    let client = github::UreqGitHubReleasesClient::default();
     check_updates(channel, current, &client).map(|result| result.latest)
 }
 
 #[cfg(test)]
-fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
+fn discover_install_candidate_with<C: github::GitHubReleasesClient, U: UpdateSettings>(
     current: VersionInfo,
     client: &C,
     settings: &U,
@@ -1302,7 +993,7 @@ fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
 #[cfg(test)]
 fn run_updates_command_with<
     W: io::Write,
-    C: GitHubReleasesClient,
+    C: github::GitHubReleasesClient,
     N: UpdateNotificationHandoff,
     S: UpdateCacheStore,
 >(
@@ -1341,7 +1032,7 @@ struct PreparedUpdateCheck {
     deferred_failures: Vec<UpdatesDeferredFailure>,
 }
 
-fn prepare_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
+fn prepare_update_check<C: github::GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
     version: VersionInfo,
     client: &C,
     cache_store: &S,
@@ -1366,7 +1057,7 @@ fn prepare_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateS
     })
 }
 
-fn run_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
+fn run_update_check<C: github::GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
     version: VersionInfo,
     client: &C,
     cache_store: &S,
@@ -1394,7 +1085,7 @@ fn run_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSetti
 
 fn run_updates_command_with_update_settings<
     W: io::Write,
-    C: GitHubReleasesClient,
+    C: github::GitHubReleasesClient,
     N: UpdateNotificationHandoff,
     S: UpdateCacheStore,
     U: UpdateSettings,
@@ -1473,7 +1164,7 @@ fn run_updates_command_with_update_settings<
     Ok(())
 }
 
-fn check_updates<C: GitHubReleasesClient>(
+fn check_updates<C: github::GitHubReleasesClient>(
     channel: UpdateChannel,
     current: VersionInfo,
     client: &C,
@@ -1482,7 +1173,7 @@ fn check_updates<C: GitHubReleasesClient>(
     check_updates_with_cache(channel, current, client, &mut cache, current_unix_seconds())
 }
 
-fn check_updates_with_cache<C: GitHubReleasesClient>(
+fn check_updates_with_cache<C: github::GitHubReleasesClient>(
     channel: UpdateChannel,
     current: VersionInfo,
     client: &C,
@@ -1494,7 +1185,7 @@ fn check_updates_with_cache<C: GitHubReleasesClient>(
             version: current.version().to_string(),
             source,
         })?;
-    let latest = fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
+    let latest = github::fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
 
     Ok(UpdateCheckResult {
         check_channel: channel,
@@ -1502,142 +1193,6 @@ fn check_updates_with_cache<C: GitHubReleasesClient>(
         current_channel: current.channel(),
         latest,
     })
-}
-
-fn fetch_latest_release<C: GitHubReleasesClient>(
-    channel: UpdateChannel,
-    current: VersionInfo,
-    client: &C,
-    cache: &mut UpdateCheckCache,
-    now_unix_seconds: u64,
-) -> Result<ReleaseInfo, UpdatesError> {
-    let user_agent = format!("lg-buddy/{}", current.version());
-    let cached_etag = cache.entry(channel).and_then(|entry| entry.etag.as_deref());
-
-    match channel {
-        UpdateChannel::Stable => {
-            let endpoint = ReleaseEndpoint::LatestStable;
-            let response = client.get(endpoint, &user_agent, cached_etag)?;
-
-            latest_from_response(channel, response, cache, now_unix_seconds, |body| {
-                let release: GitHubRelease =
-                    serde_json::from_str(body).map_err(|source| UpdatesError::ApiShape {
-                        endpoint: endpoint.label(),
-                        source,
-                    })?;
-
-                release_info_from_api_release(release, channel)
-                    .ok_or(UpdatesError::NoMatchingRelease { channel })
-            })
-        }
-        UpdateChannel::Prerelease => {
-            let endpoint = ReleaseEndpoint::LatestPublished;
-            let response = client.get(endpoint, &user_agent, cached_etag)?;
-
-            latest_from_response(channel, response, cache, now_unix_seconds, |body| {
-                let releases: Vec<GitHubRelease> =
-                    serde_json::from_str(body).map_err(|source| UpdatesError::ApiShape {
-                        endpoint: endpoint.label(),
-                        source,
-                    })?;
-
-                releases
-                    .into_iter()
-                    .next()
-                    .and_then(|release| release_info_from_api_release(release, channel))
-                    .ok_or(UpdatesError::NoMatchingRelease { channel })
-            })
-        }
-    }
-}
-
-fn latest_from_response<F>(
-    channel: UpdateChannel,
-    response: GitHubReleaseResponse,
-    cache: &mut UpdateCheckCache,
-    now_unix_seconds: u64,
-    parse_latest: F,
-) -> Result<ReleaseInfo, UpdatesError>
-where
-    F: FnOnce(&str) -> Result<ReleaseInfo, UpdatesError>,
-{
-    match response {
-        GitHubReleaseResponse::Ok { body, etag } => {
-            let latest = parse_latest(&body)?;
-            let last_notification = cache
-                .entry(channel)
-                .and_then(|entry| entry.last_notification.clone());
-            cache.set_entry(
-                channel,
-                CachedUpdateCheck {
-                    etag,
-                    last_checked_at_unix_seconds: now_unix_seconds,
-                    latest: latest.to_cached(),
-                    last_notification,
-                },
-            );
-            Ok(latest)
-        }
-        GitHubReleaseResponse::NotModified => {
-            let mut entry = cache
-                .entry(channel)
-                .cloned()
-                .ok_or(UpdatesError::NotModifiedWithoutCache { channel })?;
-            let latest = ReleaseInfo::from_cached(&entry.latest)
-                .ok_or(UpdatesError::NotModifiedWithoutCache { channel })?;
-            entry.last_checked_at_unix_seconds = now_unix_seconds;
-            cache.set_entry(channel, entry);
-            Ok(latest)
-        }
-    }
-}
-
-fn release_info_from_api_release(
-    release: GitHubRelease,
-    channel: UpdateChannel,
-) -> Option<ReleaseInfo> {
-    if release.draft {
-        return None;
-    }
-
-    match channel {
-        UpdateChannel::Stable if release.prerelease => return None,
-        UpdateChannel::Stable | UpdateChannel::Prerelease => {}
-    }
-
-    let release_channel = if release.prerelease {
-        UpdateChannel::Prerelease
-    } else {
-        UpdateChannel::Stable
-    };
-
-    parse_release_version(&release.tag_name).map(|version| {
-        ReleaseInfo::from_github(
-            version,
-            release_channel,
-            release.html_url,
-            release.tag_name,
-            release
-                .assets
-                .into_iter()
-                .map(|asset| {
-                    ReleaseAsset::from_github(
-                        asset.id,
-                        asset.name,
-                        asset.state,
-                        asset.size,
-                        asset.digest,
-                        asset.url,
-                        asset.browser_download_url,
-                    )
-                })
-                .collect(),
-        )
-    })
-}
-
-fn parse_release_version(tag_name: &str) -> Option<Version> {
-    Version::parse(tag_name.strip_prefix('v').unwrap_or(tag_name)).ok()
 }
 
 fn current_unix_seconds() -> u64 {
@@ -1649,18 +1204,21 @@ fn current_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::github::{
+        parse_release_version, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
+        UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
+    };
     use super::{
         atomic_write_file, check_updates, check_updates_with_cache,
         discover_install_candidate_with, evaluate_update_notification_policy,
-        parse_release_version, resolve_update_cache_path, run_update_check,
-        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
-        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
-        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset,
-        ReleaseEndpoint, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
+        resolve_update_cache_path, run_update_check, run_updates_command_with,
+        run_updates_command_with_update_settings, CachedReleaseInfo, CachedUpdateCheck,
+        CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings, FileUpdateCacheStore,
+        ReleaseAsset, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
         UpdateCachePathSources, UpdateCacheStore, UpdateChannel, UpdateCheckCache,
         UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
         UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand, UpdatesDeferredFailure,
-        UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
+        UpdatesError, UpdatesRunContext,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
