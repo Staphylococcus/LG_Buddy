@@ -309,3 +309,129 @@ struct GitHubReleaseAsset {
     url: String,
     browser_download_url: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::UpdatesError;
+    use super::{
+        parse_release_version, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
+        UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn ureq_client_maps_not_modified_status_to_cached_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut buffer = [0; 2048];
+            let length = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..length]);
+
+            assert!(request.starts_with("GET /releases?per_page=1 "));
+            assert!(request.contains("If-None-Match: \"cached-etag\""));
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 304 Not Modified\r\nETag: \"cached-etag\"\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write response");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+
+        let response = client
+            .get(
+                ReleaseEndpoint::LatestPublished,
+                "lg-buddy/1.1.0-alpha.0",
+                Some("\"cached-etag\""),
+            )
+            .expect("304 response should succeed");
+
+        assert_eq!(response, GitHubReleaseResponse::NotModified);
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn ureq_client_refuses_release_discovery_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/untrusted\r\nContent-Length: 0\r\n\r\n",
+                )
+                .expect("write redirect");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .try_proxy_from_env(false)
+                .redirects(0)
+                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
+                .build(),
+        };
+
+        assert!(matches!(
+            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
+            Err(UpdatesError::ApiStatus { status: 302, .. })
+        ));
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn ureq_client_rejects_oversized_release_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("read local test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client connection");
+            let mut request = [0; 2048];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = vec![b' '; MAX_GITHUB_RESPONSE_BYTES as usize + 1];
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                )
+                .expect("write response header");
+            stream.write_all(&body).expect("write response body");
+        });
+        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
+        let client = UreqGitHubReleasesClient {
+            base_url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+
+        assert!(matches!(
+            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
+            Err(UpdatesError::ResponseTooLarge { .. })
+        ));
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn release_version_parser_accepts_leading_v_and_rejects_legacy_tags() {
+        assert_eq!(
+            parse_release_version("v1.1.0")
+                .expect("leading-v version should parse")
+                .to_string(),
+            "1.1.0"
+        );
+        assert!(parse_release_version("release-0.6").is_none());
+    }
+}

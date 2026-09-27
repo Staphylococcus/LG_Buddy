@@ -537,28 +537,17 @@ impl CachedReleaseInfo {
 #[cfg(test)]
 mod tests {
     use super::cache::{
-        atomic_write_file, resolve_update_cache_path, resolve_update_cache_path_from_env,
-        DefaultUpdateCacheStore, FileUpdateCacheStore, UpdateCachePathError,
-        UpdateCachePathSources, UpdateCacheStore,
+        DefaultUpdateCacheStore, FileUpdateCacheStore, UpdateCachePathError, UpdateCacheStore,
     };
     use super::check_engine::{
         check_updates, check_updates_with_cache, discover_install_candidate_with, run_update_check,
         run_updates_command_with, run_updates_command_with_update_settings, UpdatesRunContext,
     };
-    use super::github::{
-        parse_release_version, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
-        UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
-    };
-    use super::notification::{
-        evaluate_update_notification_policy, render_update_notification_failure,
-        render_update_notification_sent, render_update_notification_skip,
-        UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
-        UpdateNotificationSkipReason,
-    };
+    use super::github::{GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint};
     use super::{
         CachedReleaseInfo, CachedUpdateCheck, CachedUpdateNotification, EnvUpdateSettings,
-        ReleaseAsset, ReleaseInfo, StaticUpdateSettings, UpdateChannel, UpdateCheckCache,
-        UpdateSettings, UpdatesCommand, UpdatesDeferredFailure, UpdatesError,
+        ReleaseInfo, StaticUpdateSettings, UpdateChannel, UpdateCheckCache, UpdateSettings,
+        UpdatesCommand, UpdatesDeferredFailure, UpdatesError,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -569,20 +558,15 @@ mod tests {
     use semver::Version;
     use std::cell::{Cell, RefCell};
     use std::fs;
-    use std::io::{self, Read, Write};
-    use std::net::TcpListener;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::io;
     use std::path::PathBuf;
     use std::process;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
     };
-    use std::thread;
-    use std::time::Duration;
 
-    const TEST_NOW: u64 = 1_778_234_400;
+    pub(super) const TEST_NOW: u64 = 1_778_234_400;
 
     #[derive(Debug)]
     struct MockGitHubReleasesClient {
@@ -811,7 +795,7 @@ mod tests {
         )
     }
 
-    fn release_info(version: &str, channel: UpdateChannel, url: &str) -> ReleaseInfo {
+    pub(super) fn release_info(version: &str, channel: UpdateChannel, url: &str) -> ReleaseInfo {
         let version = Version::parse(version).expect("test version should parse");
         ReleaseInfo {
             tag_name: format!("v{version}"),
@@ -829,7 +813,7 @@ mod tests {
         }
     }
 
-    fn cached_entry(
+    pub(super) fn cached_entry(
         etag: Option<&str>,
         version: &str,
         channel: UpdateChannel,
@@ -850,7 +834,7 @@ mod tests {
         }
     }
 
-    fn cached_notification(
+    pub(super) fn cached_notification(
         version: &str,
         channel: UpdateChannel,
         url: &str,
@@ -868,7 +852,7 @@ mod tests {
         }
     }
 
-    fn cached_entry_with_notification(
+    pub(super) fn cached_entry_with_notification(
         etag: Option<&str>,
         version: &str,
         channel: UpdateChannel,
@@ -902,113 +886,9 @@ mod tests {
         UpdatesCommand::BackgroundCheck
     }
 
-    #[test]
-    fn notification_policy_skips_when_notification_was_not_requested() {
-        let latest = release_info(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: false,
-            update_available: true,
-            latest: &latest,
-            last_notification: None,
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::NotRequested
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_skips_when_no_update_is_available() {
-        let latest = release_info(
-            "1.1.0",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.0",
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: false,
-            latest: &latest,
-            last_notification: None,
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::NoUpdateAvailable
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_skips_when_latest_release_was_already_shown() {
-        let latest = release_info(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-        );
-        let last_notification = cached_notification(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-            TEST_NOW - 1,
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: true,
-            latest: &latest,
-            last_notification: Some(&last_notification),
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::AlreadyShownForRelease
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_notifies_when_latest_release_has_not_been_shown() {
-        let latest = release_info(
-            "1.1.2",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.2",
-        );
-        let last_notification = cached_notification(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-            TEST_NOW - 1,
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: true,
-            latest: &latest,
-            last_notification: Some(&last_notification),
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Notify {
-                reason: UpdateNotificationReason::NewRelease
-            }
-        );
-    }
-
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
+    pub(super) fn unique_temp_dir(label: &str) -> PathBuf {
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "lg-buddy-updates-{label}-{}-{counter}",
@@ -1018,19 +898,19 @@ mod tests {
         path
     }
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(super) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[cfg(unix)]
-    struct UmaskGuard {
+    pub(super) struct UmaskGuard {
         previous: libc::mode_t,
     }
 
     #[cfg(unix)]
     impl UmaskGuard {
-        fn set(mask: libc::mode_t) -> Self {
+        pub(super) fn set(mask: libc::mode_t) -> Self {
             Self {
                 previous: unsafe { libc::umask(mask) },
             }
@@ -1042,255 +922,6 @@ mod tests {
         fn drop(&mut self) {
             unsafe { libc::umask(self.previous) };
         }
-    }
-
-    #[test]
-    fn cache_path_resolver_prefers_xdg_cache_home() {
-        let xdg_cache_home = PathBuf::from("/tmp/xdg-cache");
-        let home = PathBuf::from("/home/test-user");
-
-        let path = resolve_update_cache_path(UpdateCachePathSources {
-            xdg_cache_home: Some(&xdg_cache_home),
-            home: Some(&home),
-        })
-        .expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/xdg-cache/lg-buddy/update-check.json")
-        );
-    }
-
-    #[test]
-    fn cache_path_resolver_falls_back_to_home_cache() {
-        let home = PathBuf::from("/home/test-user");
-
-        let path = resolve_update_cache_path(UpdateCachePathSources {
-            xdg_cache_home: None,
-            home: Some(&home),
-        })
-        .expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/test-user/.cache/lg-buddy/update-check.json")
-        );
-    }
-
-    #[test]
-    fn empty_env_paths_are_treated_as_unset_for_cache_resolution() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let original_xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
-        let original_home = std::env::var_os("HOME");
-
-        std::env::set_var("XDG_CACHE_HOME", "");
-        std::env::set_var("HOME", "/home/test-user");
-
-        let path = resolve_update_cache_path_from_env().expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/test-user/.cache/lg-buddy/update-check.json")
-        );
-
-        match original_xdg_cache_home {
-            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
-            None => std::env::remove_var("XDG_CACHE_HOME"),
-        }
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    #[test]
-    fn missing_cache_loads_as_empty_and_malformed_cache_reports_decode_error() {
-        let dir = unique_temp_dir("malformed-cache");
-        let path = dir.join("lg-buddy").join("update-check.json");
-        let store = FileUpdateCacheStore::new(path.clone());
-
-        assert_eq!(
-            store.load().expect("missing cache should load"),
-            UpdateCheckCache::default()
-        );
-
-        fs::create_dir_all(path.parent().expect("cache path parent")).expect("create cache dir");
-        fs::write(&path, "{").expect("write malformed cache");
-
-        let err = store
-            .load()
-            .expect_err("malformed cache should report decode error");
-
-        assert!(
-            matches!(err, UpdatesError::CacheDecode { path: error_path, .. } if error_path == path)
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[test]
-    fn file_cache_round_trips_entries_and_preserves_other_channel() {
-        let dir = unique_temp_dir("cache-roundtrip");
-        let path = dir.join("lg-buddy").join("update-check.json");
-        let store = FileUpdateCacheStore::new(path);
-
-        let mut cache = UpdateCheckCache::default();
-        let mut stable_entry = cached_entry_with_notification(
-            Some("\"stable-etag\""),
-            "1.1.0",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.0",
-            TEST_NOW,
-            TEST_NOW + 1,
-        );
-        stable_entry.latest.tag_name = Some("v1.1.0".to_string());
-        stable_entry.latest.assets = vec![ReleaseAsset::from_github(
-            42,
-            "lg-buddy-1.1.0-x86_64-unknown-linux-musl.tar.gz".to_string(),
-            "uploaded".to_string(),
-            1234,
-            Some(format!("sha256:{}", "a".repeat(64))),
-            "https://api.github.test/releases/assets/42".to_string(),
-            "https://github.test/releases/download/v1.1.0/bundle.tar.gz".to_string(),
-        )];
-        cache.set_entry(UpdateChannel::Stable, stable_entry);
-        cache.set_entry(
-            UpdateChannel::Prerelease,
-            cached_entry(
-                Some("\"prerelease-etag\""),
-                "1.2.0-beta.1",
-                UpdateChannel::Prerelease,
-                "https://github.test/releases/tag/v1.2.0-beta.1",
-                TEST_NOW + 1,
-            ),
-        );
-
-        store.save(&cache).expect("save cache");
-        assert_eq!(store.load().expect("load cache"), cache);
-
-        let mut updated = store.load().expect("load cache for update");
-        updated.set_entry(
-            UpdateChannel::Stable,
-            cached_entry(
-                Some("\"stable-etag-2\""),
-                "1.1.1",
-                UpdateChannel::Stable,
-                "https://github.test/releases/tag/v1.1.1",
-                TEST_NOW + 2,
-            ),
-        );
-        store.save(&updated).expect("save updated cache");
-
-        let loaded = store.load().expect("load updated cache");
-        assert_eq!(
-            loaded.entry(UpdateChannel::Stable),
-            updated.entry(UpdateChannel::Stable)
-        );
-        assert_eq!(
-            loaded.entry(UpdateChannel::Prerelease),
-            cache.entry(UpdateChannel::Prerelease)
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_cache_creates_private_path_and_file_under_group_writable_umask() {
-        const CHILD_ENV: &str = "LG_BUDDY_TEST_CACHE_PERMISSIONS_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(
-                std::env::current_exe().expect("resolve current test executable"),
-            )
-            .arg("file_cache_creates_private_path_and_file_under_group_writable_umask")
-            .arg("--nocapture")
-            .env(CHILD_ENV, "1")
-            .status()
-            .expect("run isolated cache-permissions regression");
-            assert!(status.success(), "isolated cache-permissions test failed");
-            return;
-        }
-
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = unique_temp_dir("cache-permissions");
-        let home = dir.join("home");
-        fs::create_dir(&home).expect("create test home");
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o750))
-            .expect("set test home permissions");
-        let path = home
-            .join(".cache")
-            .join("lg-buddy")
-            .join("update-check.json");
-
-        let _umask = UmaskGuard::set(0o002);
-        FileUpdateCacheStore::new(path.clone())
-            .save(&UpdateCheckCache::default())
-            .expect("save cache");
-
-        for directory in [home.join(".cache"), home.join(".cache").join("lg-buddy")] {
-            assert_eq!(
-                fs::symlink_metadata(directory)
-                    .expect("cache directory metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        }
-        assert_eq!(
-            fs::symlink_metadata(path)
-                .expect("cache file metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[test]
-    fn cache_without_notification_state_loads_with_absent_notification() {
-        let cache: UpdateCheckCache = serde_json::from_str(
-            r#"{
-              "stable": {
-                "etag": "\"stable-etag\"",
-                "last_checked_at_unix_seconds": 1778234400,
-                "latest": {
-                  "version": "1.1.0",
-                  "channel": "stable",
-                  "url": "https://github.test/releases/tag/v1.1.0"
-                }
-              }
-            }"#,
-        )
-        .expect("legacy cache should decode");
-
-        assert_eq!(
-            cache
-                .entry(UpdateChannel::Stable)
-                .expect("stable cache entry")
-                .last_notification,
-            None
-        );
-    }
-
-    #[test]
-    fn failed_atomic_write_does_not_replace_existing_target() {
-        let dir = unique_temp_dir("atomic-write-failure");
-        let path = dir.join("update-check.json");
-        fs::create_dir_all(&path).expect("create directory at target path");
-
-        let err = atomic_write_file(&path, b"{}").expect_err("rename over directory should fail");
-
-        assert!(err.kind() != io::ErrorKind::NotFound);
-        assert!(path.is_dir());
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
     }
 
     #[test]
@@ -1335,77 +966,6 @@ mod tests {
         assert_eq!(entry.etag.as_deref(), Some("\"next-etag\""));
         assert_eq!(entry.last_checked_at_unix_seconds, TEST_NOW);
         assert_eq!(entry.latest.version, "1.2.0");
-    }
-
-    #[test]
-    fn ureq_client_maps_not_modified_status_to_cached_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut buffer = [0; 2048];
-            let length = stream.read(&mut buffer).expect("read request");
-            let request = String::from_utf8_lossy(&buffer[..length]);
-
-            assert!(request.starts_with("GET /releases?per_page=1 "));
-            assert!(request.contains("If-None-Match: \"cached-etag\""));
-
-            stream
-                .write_all(
-                    b"HTTP/1.1 304 Not Modified\r\nETag: \"cached-etag\"\r\nContent-Length: 0\r\n\r\n",
-                )
-                .expect("write response");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
-        };
-
-        let response = client
-            .get(
-                ReleaseEndpoint::LatestPublished,
-                "lg-buddy/1.1.0-alpha.0",
-                Some("\"cached-etag\""),
-            )
-            .expect("304 response should succeed");
-
-        assert_eq!(response, GitHubReleaseResponse::NotModified);
-        server.join().expect("server thread should finish");
-    }
-
-    #[test]
-    fn ureq_client_refuses_release_discovery_redirects() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut request = [0; 2048];
-            let _ = stream.read(&mut request).expect("read request");
-            stream
-                .write_all(
-                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/untrusted\r\nContent-Length: 0\r\n\r\n",
-                )
-                .expect("write redirect");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .try_proxy_from_env(false)
-                .redirects(0)
-                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
-                .build(),
-        };
-
-        assert!(matches!(
-            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
-            Err(UpdatesError::ApiStatus { status: 302, .. })
-        ));
-        server.join().expect("server thread should finish");
     }
 
     #[test]
@@ -1481,37 +1041,6 @@ mod tests {
         assert_eq!(checksums.id(), 539980872);
         assert_eq!(checksums.name(), "sha256sums.txt");
         assert_eq!(checksums.size(), 123);
-    }
-
-    #[test]
-    fn ureq_client_rejects_oversized_release_metadata() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut request = [0; 2048];
-            let _ = stream.read(&mut request).expect("read request");
-            let body = vec![b' '; MAX_GITHUB_RESPONSE_BYTES as usize + 1];
-            stream
-                .write_all(
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
-                )
-                .expect("write response header");
-            stream.write_all(&body).expect("write response body");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
-        };
-
-        assert!(matches!(
-            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
-            Err(UpdatesError::ResponseTooLarge { .. })
-        ));
-        server.join().expect("server thread should finish");
     }
 
     #[test]
@@ -3101,16 +2630,5 @@ mod tests {
 
         assert!(matches!(err, UpdatesError::InvalidLocalVersion { .. }));
         assert!(client.requests().is_empty());
-    }
-
-    #[test]
-    fn release_version_parser_accepts_leading_v_and_rejects_legacy_tags() {
-        assert_eq!(
-            parse_release_version("v1.1.0")
-                .expect("leading-v version should parse")
-                .to_string(),
-            "1.1.0"
-        );
-        assert!(parse_release_version("release-0.6").is_none());
     }
 }

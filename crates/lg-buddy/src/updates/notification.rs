@@ -92,3 +92,117 @@ pub(super) fn render_update_notification_skip(
 
     format!("notification: skipped ({reason})\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{cached_notification, release_info, TEST_NOW};
+    use super::super::UpdateChannel;
+    use super::{
+        evaluate_update_notification_policy, UpdateNotificationDecision,
+        UpdateNotificationPolicyInput, UpdateNotificationReason, UpdateNotificationSkipReason,
+    };
+
+    #[test]
+    fn notification_policy_skips_when_notification_was_not_requested() {
+        let latest = release_info(
+            "1.1.1",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.1",
+        );
+
+        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
+            notify_requested: false,
+            update_available: true,
+            latest: &latest,
+            last_notification: None,
+        });
+
+        assert_eq!(
+            decision,
+            UpdateNotificationDecision::Skip {
+                reason: UpdateNotificationSkipReason::NotRequested
+            }
+        );
+    }
+
+    #[test]
+    fn notification_policy_skips_when_no_update_is_available() {
+        let latest = release_info(
+            "1.1.0",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.0",
+        );
+
+        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
+            notify_requested: true,
+            update_available: false,
+            latest: &latest,
+            last_notification: None,
+        });
+
+        assert_eq!(
+            decision,
+            UpdateNotificationDecision::Skip {
+                reason: UpdateNotificationSkipReason::NoUpdateAvailable
+            }
+        );
+    }
+
+    #[test]
+    fn notification_policy_skips_when_latest_release_was_already_shown() {
+        let latest = release_info(
+            "1.1.1",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.1",
+        );
+        let last_notification = cached_notification(
+            "1.1.1",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.1",
+            TEST_NOW - 1,
+        );
+
+        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
+            notify_requested: true,
+            update_available: true,
+            latest: &latest,
+            last_notification: Some(&last_notification),
+        });
+
+        assert_eq!(
+            decision,
+            UpdateNotificationDecision::Skip {
+                reason: UpdateNotificationSkipReason::AlreadyShownForRelease
+            }
+        );
+    }
+
+    #[test]
+    fn notification_policy_notifies_when_latest_release_has_not_been_shown() {
+        let latest = release_info(
+            "1.1.2",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.2",
+        );
+        let last_notification = cached_notification(
+            "1.1.1",
+            UpdateChannel::Stable,
+            "https://github.test/releases/tag/v1.1.1",
+            TEST_NOW - 1,
+        );
+
+        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
+            notify_requested: true,
+            update_available: true,
+            latest: &latest,
+            last_notification: Some(&last_notification),
+        });
+
+        assert_eq!(
+            decision,
+            UpdateNotificationDecision::Notify {
+                reason: UpdateNotificationReason::NewRelease
+            }
+        );
+    }
+}
