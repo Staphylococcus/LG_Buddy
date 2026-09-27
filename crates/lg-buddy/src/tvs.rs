@@ -442,14 +442,16 @@ fn config_load_error(error: &crate::config::ConfigLoadError) -> TvsReadError {
     TvsReadError::new(failure, error.to_string())
 }
 
+/// Raw profile presence shared with first-run configuration conversion.
+pub(crate) fn has_tv_profile_fields(has_key: impl Fn(&str) -> bool) -> bool {
+    TV_STORAGE_KEYS.iter().any(|key| has_key(key))
+}
+
 pub(crate) fn read_profiles_from_store(
     config_path: &std::path::Path,
     store: &SettingsStore,
 ) -> Result<Vec<TvProfile>, TvsReadError> {
-    if !TV_STORAGE_KEYS
-        .iter()
-        .any(|key| store.raw_storage_value(key).is_some())
-    {
+    if !has_tv_profile_fields(|key| store.raw_storage_value(key).is_some()) {
         return Ok(Vec::new());
     }
 

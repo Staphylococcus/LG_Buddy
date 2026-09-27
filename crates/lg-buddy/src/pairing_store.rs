@@ -30,6 +30,7 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
+pub(crate) mod config;
 pub(crate) mod migration;
 
 const LOCK_FILE_SUFFIX: &str = ".pairing.lock";
