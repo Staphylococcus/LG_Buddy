@@ -18,6 +18,24 @@ use lg_buddy::settings_view::{
 use support::{ExecutableScript, TestConfigFile, TestEnv};
 
 #[test]
+fn settings_cli_accepts_a_bare_relative_config_path() {
+    let config = TestConfigFile::new("relative-settings");
+    config.write_contents("updates_channel=stable\n");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .args(["settings", "set", "updates.channel", "prerelease"])
+        .current_dir(config.path().parent().unwrap())
+        .env("LG_BUDDY_CONFIG", "config.env")
+        .env("LG_BUDDY_SKIP_SYSTEMD_ACTIONS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(config.path()).unwrap(),
+        "updates_channel=prerelease\n"
+    );
+}
+
+#[test]
 fn inhibition_preference_follows_persisted_settings_and_existing_restart_application() {
     let config = TestConfigFile::new("inhibition-preference-settings");
     config.write_contents("tv_ip=192.168.1.42\ntv_mac=aa:bb:cc:dd:ee:ff\ninput=HDMI_1\n");

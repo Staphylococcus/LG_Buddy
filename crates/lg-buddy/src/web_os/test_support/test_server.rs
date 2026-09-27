@@ -1145,6 +1145,7 @@ fn serve_connection<S>(
 
         let keep_open = match scenario {
             WebOsTestScenario::StatefulTv
+            | WebOsTestScenario::StoredTokenReplacement
             | WebOsTestScenario::StoredTokenPairingPrompt
             | WebOsTestScenario::PowerStatePermissionDenied
             | WebOsTestScenario::SetAudioMuteRejected

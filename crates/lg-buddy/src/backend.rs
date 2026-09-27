@@ -13,6 +13,8 @@ use crate::sources::desktop::gnome::{
 };
 use crate::sources::desktop::wayland::{WaylandProviderCapabilities, WaylandSource};
 
+pub mod readiness;
+
 pub const SWAYIDLE_DEPRECATION_NOTICE: &str =
     "swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland";
 

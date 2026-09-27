@@ -23,7 +23,7 @@ pub(crate) use client::WebOsClientRegistration;
 pub use client::{
     WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
     WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
-    WebOsPairingReadError,
+    WebOsPairingReadError, WebOsTokenAuthenticationError,
 };
 pub use control::WebOsControlError;
 pub use input::{WebOsForegroundApp, WebOsForegroundAppError, WebOsInputId, WebOsInputIdError};

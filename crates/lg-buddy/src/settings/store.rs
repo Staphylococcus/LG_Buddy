@@ -23,13 +23,19 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct ConfigEnvEditor {
     path: PathBuf,
     lines: Vec<String>,
+    original: Option<Vec<u8>>,
+    allow_missing: bool,
 }
 
 impl ConfigEnvEditor {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
         let path = path.as_ref().to_path_buf();
         match fs::read_to_string(&path) {
-            Ok(contents) => Ok(Self::parse(path, &contents)),
+            Ok(contents) => {
+                let mut editor = Self::parse(path, &contents);
+                editor.allow_missing = false;
+                Ok(editor)
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::empty(path)),
             Err(err) => Err(SettingsError::ReadConfig {
                 path,
@@ -42,6 +48,8 @@ impl ConfigEnvEditor {
     pub fn parse(path: impl Into<PathBuf>, contents: &str) -> Self {
         Self {
             path: path.into(),
+            original: Some(contents.as_bytes().to_vec()),
+            allow_missing: true,
             lines: contents.lines().map(str::to_string).collect(),
         }
     }
@@ -50,6 +58,8 @@ impl ConfigEnvEditor {
         Self {
             path: path.into(),
             lines: Vec::new(),
+            original: None,
+            allow_missing: false,
         }
     }
 
@@ -79,20 +89,23 @@ impl ConfigEnvEditor {
     }
 
     pub fn save(&self) -> Result<(), SettingsError> {
-        if let Some(parent) = self.path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|err| SettingsError::WriteConfig {
-                    path: parent.to_path_buf(),
-                    message: err.to_string(),
-                })?;
-            }
-        }
+        let guard = settings_guard(&self.path)?;
+        self.save_locked(&guard)
+    }
 
-        atomic_write_config(&self.path, self.render().as_bytes()).map_err(|err| {
-            SettingsError::WriteConfig {
-                path: self.path.clone(),
-                message: err.to_string(),
+    fn save_locked(&self, guard: &crate::pairing_store::PairingLock) -> Result<(), SettingsError> {
+        let result = (|| {
+            let current = read_optional(guard.target())?;
+            if current != self.original && !(self.allow_missing && current.is_none()) {
+                return Err(io::Error::other(
+                    "configuration changed since it was read; reload and retry",
+                ));
             }
+            atomic_write_config(guard.target(), self.render().as_bytes())
+        })();
+        result.map_err(|err| SettingsError::WriteConfig {
+            path: self.path.clone(),
+            message: err.to_string(),
         })
     }
 
@@ -111,6 +124,23 @@ impl ConfigEnvEditor {
             .rev()
             .find(|(_, line)| config_line_key(line) == Some(storage_key))
             .map(|(index, _)| index)
+    }
+}
+
+fn settings_guard(path: &Path) -> Result<crate::pairing_store::PairingLock, SettingsError> {
+    crate::pairing_store::PairingLock::for_config(path).map_err(|error| {
+        SettingsError::WriteConfig {
+            path: path.into(),
+            message: error.to_string(),
+        }
+    })
+}
+
+fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -251,15 +281,47 @@ impl SettingsMutation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SettingsChange {
     mutation: SettingsMutation,
     path: PathBuf,
     file_changed: bool,
     effective: EffectiveSetting,
+    original: Option<Vec<u8>>,
+    published: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for SettingsChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsChange")
+            .field("mutation", &self.mutation)
+            .field("path", &self.path)
+            .field("file_changed", &self.file_changed)
+            .field("effective", &self.effective)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SettingsChange {
+    pub(super) fn rollback_if_unchanged(&self) -> Result<(), SettingsError> {
+        let guard = settings_guard(&self.path)?;
+        let result = (|| {
+            if read_optional(guard.target())? != self.published {
+                return Err(io::Error::other(
+                    "configuration changed after activation; refusing to overwrite it",
+                ));
+            }
+            match &self.original {
+                Some(bytes) => atomic_write_config(guard.target(), bytes),
+                None => fs::remove_file(guard.target()),
+            }
+        })();
+        result.map_err(|e| SettingsError::WriteConfig {
+            path: self.path.clone(),
+            message: e.to_string(),
+        })
+    }
+
     pub fn effective_setting(&self) -> &EffectiveSetting {
         &self.effective
     }
@@ -272,6 +334,8 @@ impl SettingsChange {
             mutation,
             path: store.path().to_path_buf(),
             file_changed: false,
+            original: None,
+            published: None,
             effective,
         })
     }
@@ -293,7 +357,8 @@ pub(crate) fn persist_settings_mutation(
     path: &Path,
     mutation: SettingsMutation,
 ) -> Result<SettingsChange, SettingsError> {
-    let mut editor = ConfigEnvEditor::load(path)?;
+    let guard = settings_guard(path)?;
+    let mut editor = ConfigEnvEditor::load(guard.target())?;
     let file_changed = match mutation.action() {
         SettingsMutationAction::Set => {
             let mut changed = editor.set(mutation.storage_key(), mutation.new_value()?);
@@ -312,13 +377,15 @@ pub(crate) fn persist_settings_mutation(
     };
 
     if file_changed {
-        editor.save()?;
+        editor.save_locked(&guard)?;
     }
 
     Ok(SettingsChange {
         mutation,
         path: editor.path().to_path_buf(),
         file_changed,
+        original: editor.original.clone(),
+        published: Some(editor.render().into_bytes()),
         effective: EffectiveSetting {
             definition: mutation.definition(),
             value: mutation.new_value,
@@ -613,4 +680,26 @@ fn config_value_suffix(value: &str) -> &str {
         .unwrap_or(0);
 
     &value[suffix_start..]
+}
+
+#[cfg(test)]
+mod mutation_guard_tests {
+    use super::super::tests::unique_test_path;
+    use super::*;
+    #[test]
+    fn automatic_rollback_restores_only_its_own_publication() {
+        let root = unique_test_path("rollback-conflict");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("config.env");
+        fs::write(&path, "screen_backend=swayidle\n").unwrap();
+        let settings = SettingsStore::load(&path).unwrap();
+        let mutation = SettingsMutation::set(&settings, "screen.backend", "auto").unwrap();
+        let change = persist_settings_mutation(&path, mutation).unwrap();
+        fs::write(&path, "screen_backend=auto\nscreen_idle_blank=disabled\n").unwrap();
+        assert!(change.rollback_if_unchanged().is_err());
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("screen_idle_blank=disabled"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

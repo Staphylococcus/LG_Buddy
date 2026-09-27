@@ -157,7 +157,7 @@ impl WebOsClient {
 
         let token = client
             .registration()
-            .register_for_pairing(pairing_deadline, cancelled, on_event)
+            .register_for_pairing(None, pairing_deadline, cancelled, on_event)
             .map_err(pairing_registration_error)?;
 
         if cancelled() {
@@ -165,6 +165,44 @@ impl WebOsClient {
         }
 
         Ok((client, token))
+    }
+
+    /// Authenticates a fresh in-memory client with an existing native token.
+    ///
+    /// The caller already owns the verified input token: this method never
+    /// reads or writes a token store, never falls back to fresh pairing, and
+    /// performs no TV capability checks. A registration pairing prompt stops
+    /// the call with `PairingRequired` instead of waiting or emitting a
+    /// fresh-pairing progress event.
+    pub fn authenticate_in_memory(
+        endpoint: WebOsEndpoint,
+        connect_timeout: Duration,
+        response_timeout: Duration,
+        token: &PlatformAccessToken,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, WebOsTokenAuthenticationError> {
+        ensure_pairing_uid_not_root(effective_uid())
+            .map_err(|_error| WebOsTokenAuthenticationError::Failed)?;
+        if cancelled() {
+            return Err(WebOsTokenAuthenticationError::Cancelled);
+        }
+
+        let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
+            .map_err(|_source| WebOsTokenAuthenticationError::Failed)?;
+        let authentication_deadline = Instant::now()
+            .checked_add(response_timeout)
+            .ok_or(WebOsTokenAuthenticationError::Failed)?;
+
+        client
+            .registration()
+            .register_for_pairing(Some(token), authentication_deadline, cancelled, &mut |_| {})
+            .map_err(token_registration_error)?;
+
+        if cancelled() {
+            return Err(WebOsTokenAuthenticationError::Cancelled);
+        }
+
+        Ok(client)
     }
 
     /// Connects and authenticates using the stored token only.
@@ -203,11 +241,18 @@ impl WebOsClient {
     where
         F: FnMut(WebOsAuthenticationEvent),
     {
+        // Capture before any network work, including the rejected-token
+        // connection. A fresh fallback must not adopt a later profile/token.
+        let publication = token_store.publication_snapshot().map_err(|source| {
+            WebOsAuthenticatedClientError::Authentication {
+                source: PlatformAccessTokenAcquisitionError::Store { source },
+            }
+        })?;
         let mut client = Self::connect(endpoint, connect_timeout, response_timeout)
             .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
         let authentication = {
             let mut registration = client.registration();
-            token_store.get_or_acquire(&mut registration, &mut on_auth_event)
+            token_store.get_or_acquire(&mut registration, &publication, &mut on_auth_event)
         };
 
         match authentication {
@@ -222,7 +267,7 @@ impl WebOsClient {
                     .map_err(|source| WebOsAuthenticatedClientError::Connect { source })?;
                 let mut registration = client.registration();
                 token_store
-                    .acquire_and_persist(&mut registration, &mut on_auth_event)
+                    .acquire_and_persist(&mut registration, &publication, &mut on_auth_event)
                     .map_err(|source| WebOsAuthenticatedClientError::Authentication { source })?;
                 Ok(client)
             }
@@ -626,6 +671,7 @@ pub(crate) struct WebOsClientRegistration<'client> {
 impl WebOsClientRegistration<'_> {
     fn register_for_pairing(
         &mut self,
+        access_token: Option<&PlatformAccessToken>,
         deadline: Instant,
         cancelled: &dyn Fn() -> bool,
         on_event: &mut dyn FnMut(WebOsPairingEvent),
@@ -637,7 +683,7 @@ impl WebOsClientRegistration<'_> {
             .client
             .next_request_id()
             .map_err(|_source| PairingRegistrationError::Failed)?;
-        let request = WebOsRegistrationRequest::new(&request_id, None)
+        let request = WebOsRegistrationRequest::new(&request_id, access_token)
             .map_err(|_source| PairingRegistrationError::Failed)?;
         self.client
             .send_message(request.to_json_value())
@@ -662,6 +708,9 @@ impl WebOsClientRegistration<'_> {
             )?;
 
             match event {
+                WebOsRegistrationEvent::PairingPrompt if access_token.is_some() => {
+                    return Err(PairingRegistrationError::PairingRequired);
+                }
                 WebOsRegistrationEvent::PairingPrompt => {
                     on_event(WebOsPairingEvent::WaitingForConfirmation);
                 }
@@ -719,6 +768,7 @@ enum PairingRegistrationError {
     Rejected,
     Timeout,
     Failed,
+    PairingRequired,
 }
 
 fn pairing_registration_error(error: PairingRegistrationError) -> WebOsPairingError {
@@ -726,7 +776,51 @@ fn pairing_registration_error(error: PairingRegistrationError) -> WebOsPairingEr
         PairingRegistrationError::Cancelled => WebOsPairingError::Cancelled,
         PairingRegistrationError::Rejected => WebOsPairingError::Rejected,
         PairingRegistrationError::Timeout => WebOsPairingError::Timeout,
-        PairingRegistrationError::Failed => WebOsPairingError::Failed,
+        // Fresh pairing treats a prompt as a progress event, so a
+        // PairingRequired outcome is unreachable through this path.
+        PairingRegistrationError::Failed | PairingRegistrationError::PairingRequired => {
+            WebOsPairingError::Failed
+        }
+    }
+}
+
+/// Failure while authenticating an in-memory client with an existing token.
+///
+/// `PairingRequired` means the TV rejected the supplied credential and asked
+/// for a fresh pairing prompt; connection, malformed-response, and timeout
+/// failures surface as `Failed` or `Timeout` instead. The variants carry no
+/// protocol frames or credential values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebOsTokenAuthenticationError {
+    PairingRequired,
+    Cancelled,
+    Timeout,
+    Failed,
+}
+
+impl fmt::Display for WebOsTokenAuthenticationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PairingRequired => {
+                write!(f, "webOS token authentication requires pairing")
+            }
+            Self::Cancelled => write!(f, "webOS token authentication was cancelled"),
+            Self::Timeout => write!(f, "webOS token authentication timed out"),
+            Self::Failed => write!(f, "webOS token authentication failed"),
+        }
+    }
+}
+
+impl Error for WebOsTokenAuthenticationError {}
+
+fn token_registration_error(error: PairingRegistrationError) -> WebOsTokenAuthenticationError {
+    match error {
+        PairingRegistrationError::PairingRequired => WebOsTokenAuthenticationError::PairingRequired,
+        PairingRegistrationError::Cancelled => WebOsTokenAuthenticationError::Cancelled,
+        PairingRegistrationError::Timeout => WebOsTokenAuthenticationError::Timeout,
+        PairingRegistrationError::Rejected | PairingRegistrationError::Failed => {
+            WebOsTokenAuthenticationError::Failed
+        }
     }
 }
 
@@ -1021,7 +1115,7 @@ mod tests {
     use super::{
         WebOsAuthenticatedClientError, WebOsAuthenticationEvent, WebOsClient, WebOsClientError,
         WebOsClientRegistrationError, WebOsEndpoint, WebOsPairingError, WebOsPairingEvent,
-        WebOsPairingReadError,
+        WebOsPairingReadError, WebOsTokenAuthenticationError,
     };
     use crate::auth::SystemUser;
     use crate::platform_access_token::{
@@ -1088,11 +1182,77 @@ mod tests {
             .expect("derive test token store")
     }
 
+    #[test]
+    fn stored_token_authentication_keeps_read_only_config_and_symlink_targets_untouched() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+        for via_symlink in [false, true] {
+            let dir = TestDir::new("readonly-auth");
+            let store = token_store(&dir);
+            store.persist(&token("stored-client-key")).unwrap();
+            let token_before = fs::read(store.token_path()).unwrap();
+            let token_inode = fs::metadata(store.token_path()).unwrap().ino();
+            let marker = dir.path().join(".config.env.pairing.lock");
+            fs::remove_file(&marker).unwrap();
+            let config = dir.path().join("config.env");
+            let target_dir = if via_symlink {
+                let target_dir = dir.path().join("immutable");
+                fs::create_dir(&target_dir).unwrap();
+                fs::write(
+                    target_dir.join("config.env"),
+                    "tvs_primary_platform=lg_webos\n",
+                )
+                .unwrap();
+                symlink(target_dir.join("config.env"), &config).unwrap();
+                target_dir
+            } else {
+                fs::write(&config, "tvs_primary_platform=lg_webos\n").unwrap();
+                dir.path().to_path_buf()
+            };
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o444)).unwrap();
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o555)).unwrap();
+            let server = WebOsTestServer::for_scenario(
+                WebOsTestVersion::WebOs24Version92261,
+                WebOsTestScenario::StoredTokenReplacement,
+            );
+            let result = WebOsClient::connect_authenticated(
+                server.endpoint(),
+                CONNECT_TIMEOUT,
+                RESPONSE_TIMEOUT,
+                &store,
+                |_| {},
+            );
+            fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            let error = result.err();
+            server.finish();
+            assert!(
+                error.is_none(),
+                "read-only authentication failed: {error:?}"
+            );
+            assert!(!marker.exists());
+            assert!(!target_dir.join(".config.env.pairing.lock").exists());
+            assert_eq!(fs::read(store.token_path()).unwrap(), token_before);
+            assert_eq!(fs::metadata(store.token_path()).unwrap().ino(), token_inode);
+            assert_eq!(
+                fs::read_to_string(&config).unwrap(),
+                "tvs_primary_platform=lg_webos\n"
+            );
+        }
+    }
+
     fn pairing_error(
         result: Result<(WebOsClient, PlatformAccessToken), WebOsPairingError>,
     ) -> WebOsPairingError {
         match result {
             Ok(_) => panic!("pairing unexpectedly succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    fn token_authentication_error(
+        result: Result<WebOsClient, WebOsTokenAuthenticationError>,
+    ) -> WebOsTokenAuthenticationError {
+        match result {
+            Ok(_) => panic!("token authentication unexpectedly succeeded"),
             Err(error) => error,
         }
     }
@@ -1280,6 +1440,207 @@ mod tests {
         assert_eq!(error, WebOsPairingError::Cancelled);
         assert_eq!(events, vec![WebOsPairingEvent::WaitingForConfirmation]);
         server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_accepts_existing_token_without_capability_checks() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let provided = token("webos-test-access-token");
+        let mut client = WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &provided,
+            &|| false,
+        )
+        .expect("authenticate with existing native token");
+
+        assert_eq!(
+            server.snapshot().registration_tokens,
+            vec![Some("webos-test-access-token".to_string())],
+            "authentication must register with the supplied token"
+        );
+        assert!(
+            server.snapshot().request_uris.is_empty(),
+            "no capability request may be made until a caller explicitly invokes one"
+        );
+        assert_eq!(
+            client
+                .power_state_with_cancellation(RESPONSE_TIMEOUT, &|| false)
+                .expect("returned client supports typed reads"),
+            super::super::WebOsPowerState::Active
+        );
+        drop(client);
+        server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_prompt_reports_pairing_required_without_fallback() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StoredTokenPairingPrompt,
+        );
+        let error = token_authentication_error(WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &token("stale-client-key"),
+            &|| false,
+        ));
+
+        assert_eq!(error, WebOsTokenAuthenticationError::PairingRequired);
+        assert_eq!(
+            server.snapshot().connection_count,
+            1,
+            "a single connection must be used; no fresh-pairing fallback may open another"
+        );
+        let snapshot = server.snapshot();
+        assert_eq!(snapshot.registration_tokens.len(), 1);
+        assert_eq!(
+            snapshot.pairing_prompt_count, 1,
+            "the prompt must be reported once and stop immediately"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_registration_timeout_is_distinct() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
+        let error = token_authentication_error(WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            Duration::from_millis(80),
+            &token("webos-test-access-token"),
+            &|| false,
+        ));
+
+        assert_eq!(error, WebOsTokenAuthenticationError::Timeout);
+        assert_eq!(server.snapshot().registration_tokens.len(), 1);
+        assert!(
+            server.snapshot().request_uris.is_empty(),
+            "neither outcome pairs again"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_cancellation_interrupts_registration_wait() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::RegistrationTimeout,
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = Arc::clone(&cancelled);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            cancel_after.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let error = token_authentication_error(WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            Duration::from_secs(2),
+            &token("webos-test-access-token"),
+            &|| cancelled.load(Ordering::Acquire),
+        ));
+        let elapsed = started.elapsed();
+        setter.join().expect("cancellation setter");
+
+        assert_eq!(error, WebOsTokenAuthenticationError::Cancelled);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "cancellation interrupted the registration wait within {elapsed:?}"
+        );
+        assert_eq!(server.snapshot().pairing_prompt_count, 0);
+        server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_cancels_before_or_after_connect() {
+        let server = WebOsTestServer::for_scenario(
+            WebOsTestVersion::WebOs24Version92261,
+            WebOsTestScenario::StatefulTv,
+        );
+        let pre_cancelled = WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &token("webos-test-access-token"),
+            &|| true,
+        );
+
+        assert!(
+            matches!(pre_cancelled, Err(WebOsTokenAuthenticationError::Cancelled)),
+            "pre-existing cancellation must stop before connecting"
+        );
+
+        let checks = std::cell::Cell::new(0);
+        let post_connect_cancelled = WebOsClient::authenticate_in_memory(
+            server.endpoint(),
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &token("webos-test-access-token"),
+            &|| {
+                let previous = checks.get();
+                checks.set(previous + 1);
+                previous > 0
+            },
+        );
+
+        assert!(
+            matches!(
+                post_connect_cancelled,
+                Err(WebOsTokenAuthenticationError::Cancelled)
+            ),
+            "cancellation after connecting must stop before sending registration"
+        );
+        // The server records acceptance just after completing the handshake;
+        // the client's cancellation can return before that worker is scheduled.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.snapshot().connection_count == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(server.snapshot().registration_tokens.is_empty());
+        assert_eq!(
+            server.snapshot().connection_count,
+            1,
+            "only the cancelled-after-connect attempt reached the server"
+        );
+        server.finish();
+    }
+
+    #[test]
+    fn authenticate_in_memory_transport_failure_is_failed_and_errors_stay_safe() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve address");
+        let endpoint = WebOsEndpoint::ws_at(listener.local_addr().expect("reserved address"));
+        drop(listener);
+        let provided = token("webos-test-access-token");
+        let result = WebOsClient::authenticate_in_memory(
+            endpoint,
+            CONNECT_TIMEOUT,
+            RESPONSE_TIMEOUT,
+            &provided,
+            &|| false,
+        );
+
+        let error = token_authentication_error(result);
+        assert_eq!(error, WebOsTokenAuthenticationError::Failed);
+        for variant in [
+            WebOsTokenAuthenticationError::PairingRequired,
+            WebOsTokenAuthenticationError::Cancelled,
+            WebOsTokenAuthenticationError::Timeout,
+            WebOsTokenAuthenticationError::Failed,
+        ] {
+            let display = variant.to_string();
+            assert!(!display.contains("webos-test-access-token"));
+            assert!(!format!("{variant:?}").contains("webos-test-access-token"));
+        }
     }
 
     #[test]
@@ -1700,6 +2061,45 @@ mod tests {
         ));
         assert!(!store.token_path().exists());
         server.finish();
+    }
+
+    #[test]
+    fn authentication_cannot_publish_over_config_or_token_changed_during_pairing() {
+        for change_token in [false, true] {
+            let dir = TestDir::new("authentication-publication-conflict");
+            let store = token_store(&dir);
+            let server = WebOsTestServer::active(
+                WebOsTestVersion::WebOs24Version92261,
+                WebOsTestInput::Hdmi3,
+            );
+            let result = WebOsClient::connect_authenticated(
+                server.endpoint(),
+                CONNECT_TIMEOUT,
+                RESPONSE_TIMEOUT,
+                &store,
+                |event| {
+                    if event == WebOsAuthenticationEvent::PairingPrompt {
+                        if change_token {
+                            store.persist(&token("external-token")).unwrap();
+                        } else {
+                            fs::write(dir.0.join("config.env"), "tv_ip=192.0.2.99\n").unwrap();
+                        }
+                    }
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(WebOsAuthenticatedClientError::Authentication {
+                    source: PlatformAccessTokenAcquisitionError::Store { .. }
+                })
+            ));
+            if change_token {
+                assert_eq!(store.load().unwrap(), Some(token("external-token")));
+            } else {
+                assert!(!store.token_path().exists());
+            }
+            server.finish();
+        }
     }
 
     #[test]

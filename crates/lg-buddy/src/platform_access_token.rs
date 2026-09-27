@@ -193,6 +193,7 @@ impl Error for PlatformAccessTokenAcquisitionError {
 #[derive(Debug, Clone)]
 pub struct PlatformAccessTokenStore {
     token_path: PathBuf,
+    config_path: PathBuf,
     owner: SystemUser,
 }
 
@@ -209,6 +210,7 @@ impl PlatformAccessTokenStore {
             })?;
 
         Ok(Self {
+            config_path: config_path.into(),
             token_path: config_dir
                 .join(TVS_DIR_NAME)
                 .join(PRIMARY_TV_PROFILE_NAME)
@@ -263,6 +265,33 @@ impl PlatformAccessTokenStore {
         &self,
         token: &PlatformAccessToken,
     ) -> Result<(), PlatformAccessTokenStoreError> {
+        let guard = self.mutation_guard()?;
+        self.persist_locked(token, &guard)
+    }
+
+    fn mutation_guard(
+        &self,
+    ) -> Result<crate::pairing_store::PairingLock, PlatformAccessTokenStoreError> {
+        crate::pairing_store::PairingLock::for_config_with_owner(
+            &self.config_path,
+            Some(&self.owner),
+        )
+        .map_err(|error| {
+            store_io_error(
+                PlatformAccessTokenStoreOperation::ReplaceToken,
+                &self.token_path,
+                io::Error::other(error.to_string()),
+            )
+        })
+    }
+
+    pub(crate) fn persist_locked(
+        &self,
+        token: &PlatformAccessToken,
+        guard: &crate::pairing_store::PairingLock,
+    ) -> Result<(), PlatformAccessTokenStoreError> {
+        // Reuse the caller's guard; recursively acquiring flock would fail.
+        let _ = guard;
         let mut contents = serde_json::to_vec_pretty(&StoredPlatformAccessToken {
             access_token: token.as_secret_str().to_string(),
         })
@@ -282,9 +311,72 @@ impl PlatformAccessTokenStore {
         atomic_write_token(&self.token_path, &contents, &self.owner)
     }
 
+    pub(crate) fn publication_snapshot(
+        &self,
+    ) -> Result<CredentialPublication, PlatformAccessTokenStoreError> {
+        // Authentication with an existing token is read-only, including for
+        // immutable config symlinks. Only publication needs the writer lock;
+        // the captured file versions are compared again under it before saving.
+        let path = match fs::canonicalize(&self.config_path) {
+            Ok(path) => path,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.config_path.clone(),
+            Err(e) => {
+                return Err(store_io_error(
+                    PlatformAccessTokenStoreOperation::ReadToken,
+                    &self.config_path,
+                    e,
+                ))
+            }
+        };
+        self.snapshot_at(&path)
+    }
+
+    fn snapshot_at(
+        &self,
+        config_path: &Path,
+    ) -> Result<CredentialPublication, PlatformAccessTokenStoreError> {
+        let read = |path: &Path| -> Result<FileVersion, PlatformAccessTokenStoreError> {
+            let mut file = match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+            {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => {
+                    return Err(store_io_error(
+                        PlatformAccessTokenStoreOperation::ReadToken,
+                        path,
+                        e,
+                    ))
+                }
+            };
+            let metadata = file.metadata().map_err(|e| {
+                store_io_error(PlatformAccessTokenStoreOperation::ReadToken, path, e)
+            })?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|e| {
+                store_io_error(PlatformAccessTokenStoreOperation::ReadToken, path, e)
+            })?;
+            Ok(Some((
+                bytes,
+                metadata.dev(),
+                metadata.ino(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.mode(),
+            )))
+        };
+        Ok(CredentialPublication {
+            config: read(config_path)?,
+            token: read(&self.token_path)?,
+        })
+    }
+
     pub(crate) fn get_or_acquire<F>(
         &self,
         registration: &mut WebOsClientRegistration<'_>,
+        before: &CredentialPublication,
         on_auth_event: &mut F,
     ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError>
     where
@@ -303,13 +395,14 @@ impl PlatformAccessTokenStore {
                     })?;
                 Ok(token)
             }
-            None => self.acquire_and_persist(registration, on_auth_event),
+            None => self.acquire_and_persist(registration, before, on_auth_event),
         }
     }
 
     pub(crate) fn acquire_and_persist<F>(
         &self,
         registration: &mut WebOsClientRegistration<'_>,
+        before: &CredentialPublication,
         on_auth_event: &mut F,
     ) -> Result<PlatformAccessToken, PlatformAccessTokenAcquisitionError>
     where
@@ -318,11 +411,42 @@ impl PlatformAccessTokenStore {
         let token = registration
             .register(None, on_auth_event)
             .map_err(|source| PlatformAccessTokenAcquisitionError::Registration { source })?;
-        self.persist(&token)
+        let guard = self
+            .mutation_guard()
+            .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
+        let now = self.snapshot_at(guard.target()).map_err(|_| {
+            PlatformAccessTokenAcquisitionError::Store {
+                source: store_io_error(
+                    PlatformAccessTokenStoreOperation::ReplaceToken,
+                    &self.token_path,
+                    io::Error::other("configuration or credential cannot be revalidated; retry"),
+                ),
+            }
+        })?;
+        if &now != before {
+            return Err(PlatformAccessTokenAcquisitionError::Store {
+                source: store_io_error(
+                    PlatformAccessTokenStoreOperation::ReplaceToken,
+                    &self.token_path,
+                    io::Error::other(
+                        "configuration or credential changed during authentication; retry",
+                    ),
+                ),
+            });
+        }
+        self.persist_locked(&token, &guard)
             .map_err(|source| PlatformAccessTokenAcquisitionError::Store { source })?;
         on_auth_event(WebOsAuthenticationEvent::AccessTokenPersisted);
         Ok(token)
     }
+}
+
+type FileVersion = Option<(Vec<u8>, u64, u64, u32, u32, u32)>;
+/// Captured before connecting; no credential contents are exposed by Debug.
+#[derive(PartialEq, Eq)]
+pub(crate) struct CredentialPublication {
+    config: FileVersion,
+    token: FileVersion,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -826,7 +950,9 @@ mod tests {
             .persist(&token("root-written-client-key"))
             .expect("persist token for requested non-root owner");
 
+        let lock_path = dir.config_path().with_file_name(".config.env.pairing.lock");
         for path in [
+            lock_path.as_path(),
             store
                 .token_path()
                 .parent()

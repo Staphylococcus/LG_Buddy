@@ -586,6 +586,19 @@ impl fmt::Display for ConfigLoadError {
     }
 }
 
+/// Crate-internal contents validator: run stale detection on the raw entries
+/// *before* defaults are applied, then parse. Both `load_current_config` and
+/// migration candidate validation call this so they share one code path.
+/// Missing/unreadable file handling is the caller's responsibility; this
+/// function receives an already-read snapshot.
+pub(crate) fn parse_current_config(contents: &str) -> Result<Config, ConfigLoadError> {
+    let reasons = stale_config_reasons(contents);
+    if !reasons.is_empty() {
+        return Err(ConfigLoadError::Stale(reasons));
+    }
+    parse_config(contents).map_err(ConfigLoadError::Parse)
+}
+
 impl Error for ConfigLoadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -612,11 +625,7 @@ pub fn load_current_config(path: &Path) -> Result<CurrentConfig, ConfigLoadError
             ConfigLoadError::Unreadable(err)
         }
     })?;
-    let reasons = stale_config_reasons(&contents);
-    if !reasons.is_empty() {
-        return Err(ConfigLoadError::Stale(reasons));
-    }
-    let config = parse_config(&contents).map_err(ConfigLoadError::Parse)?;
+    let config = parse_current_config(&contents)?;
     Ok(CurrentConfig {
         path: path.to_path_buf(),
         config,
