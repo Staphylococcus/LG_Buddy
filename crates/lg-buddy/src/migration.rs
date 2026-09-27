@@ -1,7 +1,8 @@
-//! Planning and acknowledged foreground execution of a v2 migration.
-//! Candidates are proposals; only `flow::MigrationFlow` performs verification
-//! and coordinated publication. Presentation belongs to the host application.
+//! Supported configuration conversions and the legacy verified migration flow.
+//! `automatic::migrate_config` converts local configuration independently of
+//! credentials and runtime readiness. Startup wiring belongs to its caller.
 
+pub mod automatic;
 pub mod flow;
 
 use std::fmt;

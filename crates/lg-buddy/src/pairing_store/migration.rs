@@ -1,6 +1,9 @@
 //! The config rename is the migration commit point. The advisory lock excludes
 //! cooperating writers, not arbitrary external editors; compare again before
 //! publication and never roll a credential back under a possibly committed config.
+use super::config::{
+    config_snapshot, ConfigSnapshot, ConfigWriteError, Identity, Point as ConfigPoint,
+};
 use super::*;
 use crate::config::{stale_config_reasons, StaleConfigReason};
 use crate::migration::MigrationCandidate;
@@ -22,31 +25,6 @@ pub(crate) struct MigrationCommit {
     pub durability_warning: bool,
 }
 
-#[derive(PartialEq, Eq)]
-struct Identity {
-    dev: u64,
-    ino: u64,
-    uid: u32,
-    gid: u32,
-    mode: u32,
-    mtime: (i64, i64),
-}
-impl Identity {
-    fn of(m: &fs::Metadata) -> Self {
-        Self {
-            dev: m.dev(),
-            ino: m.ino(),
-            uid: m.uid(),
-            gid: m.gid(),
-            mode: m.mode(),
-            mtime: (m.mtime(), m.mtime_nsec()),
-        }
-    }
-}
-struct ConfigSnapshot {
-    bytes: Vec<u8>,
-    identity: Identity,
-}
 struct CredentialSnapshot {
     file: Option<TokenBefore>,
     identity: Option<Identity>,
@@ -61,30 +39,6 @@ pub(crate) struct MigrationSnapshot {
     credential: Option<CredentialSnapshot>,
     profile_existed: bool,
     tvs_existed: bool,
-}
-
-fn config_snapshot(path: &Path, owner: &SystemUser) -> Result<ConfigSnapshot, MigrationStoreError> {
-    ensure_config_owner(path, owner).map_err(|_| MigrationStoreError::Storage)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|_| MigrationStoreError::Storage)?;
-    let metadata = file.metadata().map_err(|_| MigrationStoreError::Storage)?;
-    if !metadata.is_file() || metadata.uid() != owner.uid() || metadata.mode() & 0o200 == 0 {
-        return Err(MigrationStoreError::Storage);
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|_| MigrationStoreError::Storage)?;
-    let identity = Identity::of(&metadata);
-    if Identity::of(&fs::symlink_metadata(path).map_err(|_| MigrationStoreError::Storage)?)
-        != identity
-    {
-        return Err(MigrationStoreError::ConfigurationChanged);
-    }
-    Ok(ConfigSnapshot { bytes, identity })
 }
 
 fn credential_snapshot(
@@ -171,11 +125,9 @@ impl MigrationSnapshot {
     }
 
     fn check_config(&self) -> Result<(), MigrationStoreError> {
-        let current = config_snapshot(&self.path, &self.owner)?;
-        if current.identity != self.config.identity || current.bytes != self.config.bytes {
-            return Err(MigrationStoreError::ConfigurationChanged);
-        }
-        Ok(())
+        self.config
+            .check(&self.path, &self.owner)
+            .map_err(Into::into)
     }
 
     pub(crate) fn commit(
@@ -214,12 +166,11 @@ impl MigrationSnapshot {
             }
         }
         // Fully stage and sync config while cancellation can still win.
-        let stage = StagedConfig::new(
-            &self.path,
-            candidate.rendered().as_bytes(),
-            &self.config.identity,
-            hook,
-        )?;
+        let stage =
+            self.config
+                .stage(&self.path, candidate.rendered().as_bytes(), &mut |point| {
+                    hook(point.into())
+                })?;
         self.check_config()?;
         if !gate.begin() {
             return Err(MigrationStoreError::Cancelled);
@@ -235,7 +186,7 @@ impl MigrationSnapshot {
         token: Option<&PlatformAccessToken>,
         store: &PlatformAccessTokenStore,
         guard: &PairingLock,
-        stage: &StagedConfig,
+        stage: &super::config::StagedConfig,
         hook: &mut dyn FnMut(Point) -> io::Result<()>,
     ) -> Result<MigrationCommit, MigrationStoreError> {
         let mut written = None;
@@ -264,22 +215,12 @@ impl MigrationSnapshot {
                     return Err(MigrationStoreError::CredentialChanged);
                 }
             }
-            // The only publication of config is this full-file rename.
-            let renamed = hook(Point::ConfigRename)
-                .and_then(|_| fs::rename(&stage.0, &self.path))
-                .and_then(|_| hook(Point::RenameResult));
-            if renamed.is_err() {
-                match fs::read(&self.path) {
-                    Ok(bytes) if bytes == candidate.rendered().as_bytes() => {}
-                    Ok(bytes) if bytes == self.config.bytes => {
-                        return Err(MigrationStoreError::Storage)
-                    }
-                    _ => return Err(MigrationStoreError::CommitIndeterminate),
-                }
-            }
-            let durability_warning = hook(Point::DirectorySync)
-                .and_then(|_| File::open(self.path.parent().unwrap())?.sync_all())
-                .is_err();
+            let durability_warning = stage.publish(
+                &self.path,
+                &self.config.bytes,
+                candidate.rendered().as_bytes(),
+                &mut |point| hook(point.into()),
+            )?;
             Ok(MigrationCommit { durability_warning })
         })();
         if let Err(error) = result {
@@ -362,39 +303,26 @@ enum Point {
     DirectorySync,
     Rollback,
 }
-struct StagedConfig(PathBuf);
-impl StagedConfig {
-    fn new(
-        path: &Path,
-        bytes: &[u8],
-        identity: &Identity,
-        hook: &mut dyn FnMut(Point) -> io::Result<()>,
-    ) -> Result<Self, MigrationStoreError> {
-        let temp_path = temporary_path(path);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temp_path)
-            .map_err(|_| MigrationStoreError::Storage)?;
-        // Own cleanup only after create_new proved that this is our file.
-        let stage = Self(temp_path);
-        let result = (|| {
-            hook(Point::StageWrite)?;
-            file.write_all(bytes)?;
-            set_owner_ids(&file, identity.uid, identity.gid)?;
-            file.set_permissions(fs::Permissions::from_mode(identity.mode & 0o7777))?;
-            hook(Point::FileSync)?;
-            file.sync_all()
-        })();
-        result.map_err(|_| MigrationStoreError::Storage)?;
-        Ok(stage)
+
+impl From<ConfigWriteError> for MigrationStoreError {
+    fn from(error: ConfigWriteError) -> Self {
+        match error {
+            ConfigWriteError::Changed => Self::ConfigurationChanged,
+            ConfigWriteError::Storage => Self::Storage,
+            ConfigWriteError::Indeterminate => Self::CommitIndeterminate,
+        }
     }
 }
-impl Drop for StagedConfig {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+
+impl From<ConfigPoint> for Point {
+    fn from(point: ConfigPoint) -> Self {
+        match point {
+            ConfigPoint::StageWrite => Self::StageWrite,
+            ConfigPoint::FileSync => Self::FileSync,
+            ConfigPoint::ConfigRename => Self::ConfigRename,
+            ConfigPoint::RenameResult => Self::RenameResult,
+            ConfigPoint::DirectorySync => Self::DirectorySync,
+        }
     }
 }
 
