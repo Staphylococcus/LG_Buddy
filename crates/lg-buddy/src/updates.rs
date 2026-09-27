@@ -1,11 +1,7 @@
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
-use std::process;
+use std::io;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use semver::Version;
@@ -18,13 +14,13 @@ use crate::session_notifications::{
 use crate::settings::{SettingsError, SettingsStore};
 use crate::version::{ReleaseChannel, VersionInfo};
 
-const CACHE_DIR_NAME: &str = "lg-buddy";
-const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
-
+mod cache;
 mod command;
 
 pub use command::{UpdatesCommand, UpdatesParseError};
 mod github;
+pub use cache::UpdateCachePathError;
+use cache::{DefaultUpdateCacheStore, UpdateCacheStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,63 +125,6 @@ fn required_enum_setting(
         .ok_or_else(|| {
             UpdatesError::SettingsInvariant(format!("{key} resolved to a non-enum value"))
         })
-}
-
-#[derive(Debug, Clone, Default)]
-struct UpdateCachePathSources<'a> {
-    xdg_cache_home: Option<&'a Path>,
-    home: Option<&'a Path>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateCachePathError {
-    NotConfigured,
-}
-
-impl fmt::Display for UpdateCachePathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotConfigured => write!(
-                f,
-                "could not resolve an update cache path from XDG_CACHE_HOME or HOME"
-            ),
-        }
-    }
-}
-
-impl Error for UpdateCachePathError {}
-
-fn resolve_update_cache_path(
-    sources: UpdateCachePathSources<'_>,
-) -> Result<PathBuf, UpdateCachePathError> {
-    if let Some(path) = sources.xdg_cache_home {
-        return Ok(path.join(CACHE_DIR_NAME).join(UPDATE_CHECK_CACHE_FILE_NAME));
-    }
-
-    if let Some(path) = sources.home {
-        return Ok(path
-            .join(".cache")
-            .join(CACHE_DIR_NAME)
-            .join(UPDATE_CHECK_CACHE_FILE_NAME));
-    }
-
-    Err(UpdateCachePathError::NotConfigured)
-}
-
-fn resolve_update_cache_path_from_env() -> Result<PathBuf, UpdateCachePathError> {
-    let xdg_cache_home = non_empty_env_path("XDG_CACHE_HOME");
-    let home = non_empty_env_path("HOME");
-
-    resolve_update_cache_path(UpdateCachePathSources {
-        xdg_cache_home: xdg_cache_home.as_deref(),
-        home: home.as_deref(),
-    })
-}
-
-fn non_empty_env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
 }
 
 #[derive(Debug)]
@@ -763,171 +702,6 @@ impl UpdateCheckOutcome {
     }
 }
 
-trait UpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError>;
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError>;
-}
-
-struct FileUpdateCacheStore {
-    path: PathBuf,
-}
-
-impl FileUpdateCacheStore {
-    #[cfg(test)]
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-enum DefaultUpdateCacheStore {
-    File(FileUpdateCacheStore),
-    Unavailable(UpdateCachePathError),
-}
-
-impl DefaultUpdateCacheStore {
-    fn from_env() -> Self {
-        match resolve_update_cache_path_from_env() {
-            Ok(path) => Self::File(FileUpdateCacheStore { path }),
-            Err(err) => Self::Unavailable(err),
-        }
-    }
-}
-
-impl UpdateCacheStore for DefaultUpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
-        match self {
-            Self::File(store) => store.load(),
-            Self::Unavailable(_) => Ok(UpdateCheckCache::default()),
-        }
-    }
-
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError> {
-        match self {
-            Self::File(store) => store.save(cache),
-            Self::Unavailable(err) => Err(UpdatesError::CachePath(err.clone())),
-        }
-    }
-}
-
-impl UpdateCacheStore for FileUpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
-        match fs::read_to_string(&self.path) {
-            Ok(contents) => {
-                serde_json::from_str(&contents).map_err(|source| UpdatesError::CacheDecode {
-                    path: self.path.clone(),
-                    source,
-                })
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(UpdateCheckCache::default()),
-            Err(err) => Err(UpdatesError::Io(err)),
-        }
-    }
-
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError> {
-        let contents = serde_json::to_vec_pretty(cache).map_err(UpdatesError::CacheEncode)?;
-        atomic_write_file(&self.path, &contents).map_err(UpdatesError::Io)
-    }
-}
-
-fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            ensure_cache_parent(parent)?;
-        }
-    }
-
-    let mut last_error = None;
-    for attempt in 0..100 {
-        let temp_path = atomic_temp_path(path, attempt);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-
-        let mut file = match options.open(&temp_path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                last_error = Some(err);
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-
-        let result = (|| {
-            file.write_all(contents)?;
-            file.flush()?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temp_path, path)
-        })();
-
-        if let Err(err) = result {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err);
-        }
-
-        return Ok(());
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not create unique update cache temporary file",
-        )
-    }))
-}
-
-#[cfg(unix)]
-fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
-    let mut current = PathBuf::new();
-    for component in parent.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!(
-                        "cache path component `{}` is not a directory",
-                        current.display()
-                    ),
-                ))
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                match fs::DirBuilder::new().mode(0o700).create(&current) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(err) => return Err(err),
-                }
-                if !fs::symlink_metadata(&current)?.file_type().is_dir() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotADirectory,
-                        format!(
-                            "cache path component `{}` is not a directory",
-                            current.display()
-                        ),
-                    ));
-                }
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
-    fs::create_dir_all(parent)
-}
-
-fn atomic_temp_path(path: &Path, attempt: u8) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(UPDATE_CHECK_CACHE_FILE_NAME);
-    path.with_file_name(format!(".{file_name}.{}.{}.tmp", process::id(), attempt))
-}
-
 pub fn run_updates_command<W: io::Write>(
     command: UpdatesCommand,
     writer: &mut W,
@@ -1204,21 +978,23 @@ fn current_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::cache::{
+        atomic_write_file, resolve_update_cache_path, resolve_update_cache_path_from_env,
+        DefaultUpdateCacheStore, FileUpdateCacheStore, UpdateCachePathError,
+        UpdateCachePathSources, UpdateCacheStore,
+    };
     use super::github::{
         parse_release_version, GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint,
         UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
     };
     use super::{
-        atomic_write_file, check_updates, check_updates_with_cache,
-        discover_install_candidate_with, evaluate_update_notification_policy,
-        resolve_update_cache_path, run_update_check, run_updates_command_with,
+        check_updates, check_updates_with_cache, discover_install_candidate_with,
+        evaluate_update_notification_policy, run_update_check, run_updates_command_with,
         run_updates_command_with_update_settings, CachedReleaseInfo, CachedUpdateCheck,
-        CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings, FileUpdateCacheStore,
-        ReleaseAsset, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
-        UpdateCachePathSources, UpdateCacheStore, UpdateChannel, UpdateCheckCache,
-        UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
-        UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand, UpdatesDeferredFailure,
-        UpdatesError, UpdatesRunContext,
+        CachedUpdateNotification, EnvUpdateSettings, ReleaseAsset, ReleaseInfo,
+        StaticUpdateSettings, UpdateChannel, UpdateCheckCache, UpdateNotificationDecision,
+        UpdateNotificationPolicyInput, UpdateNotificationReason, UpdateNotificationSkipReason,
+        UpdateSettings, UpdatesCommand, UpdatesDeferredFailure, UpdatesError, UpdatesRunContext,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -1748,7 +1524,7 @@ mod tests {
         std::env::set_var("XDG_CACHE_HOME", "");
         std::env::set_var("HOME", "/home/test-user");
 
-        let path = super::resolve_update_cache_path_from_env().expect("resolve cache path");
+        let path = resolve_update_cache_path_from_env().expect("resolve cache path");
 
         assert_eq!(
             path,
