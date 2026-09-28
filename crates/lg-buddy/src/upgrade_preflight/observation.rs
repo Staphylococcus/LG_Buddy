@@ -290,7 +290,9 @@ pub(super) fn observe_process() -> Result<HostPreflightFacts, ObservationFailure
 }
 
 mod tests {
-    use super::*;
+    use super::{decode_mountinfo_field, FilesystemFacts, InstalledLayout, OsFilesystemFacts};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn os_filesystem_identifies_mount_points() {
