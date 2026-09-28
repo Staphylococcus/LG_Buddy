@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::observation::{FilesystemFacts, PathFacts, PathKind, SystemdManagerObservation};
-use super::{CompatibilityReport, InstallerPathPolicy};
+use super::{CompatibilityFailure, InstallerPathPolicy};
 
 pub(super) const MAX_CONFIG_TREE_ENTRIES: usize = 256;
 
@@ -66,7 +66,7 @@ pub(super) enum AncestorPolicy {
 
 pub(super) struct Checker<'a, F> {
     filesystem: &'a F,
-    pub(super) report: CompatibilityReport,
+    pub(crate) failures: Vec<CompatibilityFailure>,
     checked_ancestors: BTreeSet<(PathBuf, Option<AncestorPolicy>)>,
 }
 
@@ -74,9 +74,26 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     pub(super) fn new(filesystem: &'a F) -> Self {
         Self {
             filesystem,
-            report: CompatibilityReport::default(),
+            failures: Vec::new(),
             checked_ancestors: BTreeSet::new(),
         }
+    }
+
+    /// Record a single refusal. The raw failure list is the judgment layer's
+    /// output; the report *view* is built downstream by the caller.
+    fn refuse(
+        &mut self,
+        check: &'static str,
+        path: Option<PathBuf>,
+        detail: impl Into<String>,
+        remedy: impl Into<String>,
+    ) {
+        self.failures.push(CompatibilityFailure {
+            check,
+            path,
+            detail: detail.into(),
+            remedy: remedy.into(),
+        });
     }
 
     pub(super) fn check_requirement(
@@ -97,7 +114,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 return;
             }
             Err(err) => {
-                self.report.refuse(
+                self.refuse(
                     check,
                     Some(path.to_path_buf()),
                     if err.kind() == io::ErrorKind::NotFound {
@@ -111,7 +128,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             }
         };
         if policy.expects_file() && facts.kind != PathKind::File {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!("expected a regular file, found {:?}", facts.kind),
@@ -120,7 +137,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return;
         }
         if policy.expects_directory() && facts.kind != PathKind::Directory {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!("expected a directory, found {:?}", facts.kind),
@@ -256,7 +273,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             }
         }
         if !found {
-            self.report.refuse(
+            self.refuse(
                 check,
                 paths.first().cloned(),
                 "no supported LG Buddy desktop entry is installed",
@@ -267,7 +284,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
 
     fn check_replace_file(&mut self, path: &Path, facts: &PathFacts, check: &'static str) {
         if facts.read_only_filesystem {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 "file is on a read-only filesystem",
@@ -275,7 +292,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
         }
         if facts.link_count != 1 {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!(
@@ -286,7 +303,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
         }
         if facts.mount_point {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 "file is a mount point",
@@ -311,7 +328,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         required_permissions: u32,
     ) {
         if facts.read_only_filesystem {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 "directory is on a read-only filesystem",
@@ -319,7 +336,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             );
         }
         if facts.mount_point {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 "directory is a mount point",
@@ -350,7 +367,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             Ok(mount_points) => {
                 for mount_point in mount_points {
                     if mount_point != path && mount_point.starts_with(path) {
-                        self.report.refuse(
+                        self.refuse(
                             check,
                             Some(mount_point),
                             "recursively cleared directory contains a nested mount point",
@@ -359,7 +376,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     }
                 }
             }
-            Err(err) => self.report.refuse(
+            Err(err) => self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!("could not inspect nested mount points: {err}"),
@@ -373,7 +390,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         match self.filesystem.read_directory(path) {
             Ok(entries) => {
                 if !entries.iter().any(|entry| entry == &expected_path) {
-                    self.report.refuse(
+                    self.refuse(
                         check,
                         Some(expected_path.clone()),
                         "required drop-in entry is missing",
@@ -382,7 +399,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                 }
                 for entry in entries {
                     if entry != expected_path {
-                        self.report.refuse(
+                        self.refuse(
                             check,
                             Some(entry),
                             "drop-in directory contains an unexpected entry",
@@ -391,7 +408,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     }
                 }
             }
-            Err(err) => self.report.refuse(
+            Err(err) => self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!("could not inspect drop-in directory: {err}"),
@@ -409,7 +426,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         detail: &'static str,
     ) {
         if facts.mode & required != required {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 detail,
@@ -420,7 +437,6 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
 
     pub(super) fn check_integration_override(&mut self, path: &Path, expected: &str) {
         if self
-            .report
             .failures
             .iter()
             .any(|failure| failure.path.as_deref() == Some(path))
@@ -436,7 +452,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     .filter(|line| line.contains("LG_BUDDY_CONFIG"))
                     .collect();
                 if directives.len() != 1 || directives[0] != expected {
-                    self.report.refuse(
+                    self.refuse(
                         "integration-config",
                         Some(path.to_path_buf()),
                         format!("integration does not reference exactly {expected}"),
@@ -444,7 +460,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     );
                 }
             }
-            Err(err) => self.report.refuse(
+            Err(err) => self.refuse(
                 "integration-config",
                 Some(path.to_path_buf()),
                 format!("could not read the integration override: {err}"),
@@ -456,13 +472,13 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     pub(super) fn check_absent(&mut self, path: &Path) {
         match self.filesystem.path_facts(path) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => self.report.refuse(
+            Err(err) => self.refuse(
                 "legacy-layout",
                 Some(path.to_path_buf()),
                 format!("could not determine whether a legacy path exists: {err}"),
                 "inspect and remove the legacy integration before upgrading",
             ),
-            Ok(_) => self.report.refuse(
+            Ok(_) => self.refuse(
                 "legacy-layout",
                 Some(path.to_path_buf()),
                 "legacy installation state is present",
@@ -485,7 +501,6 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             "config-discovery",
         );
         if self
-            .report
             .failures
             .iter()
             .any(|failure| failure.path.as_deref() == Some(path))
@@ -495,7 +510,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         let contents = match self.filesystem.read_to_string(path) {
             Ok(contents) => contents,
             Err(err) => {
-                self.report.refuse(
+                self.refuse(
                     "config-discovery",
                     Some(path.to_path_buf()),
                     format!("could not read the installed config pointer: {err}"),
@@ -509,7 +524,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             .filter(|line| !line.trim().is_empty())
             .collect();
         if lines.len() != 1 {
-            self.report.refuse(
+            self.refuse(
                 "config-discovery",
                 Some(path.to_path_buf()),
                 "config pointer must contain exactly one non-empty path",
@@ -518,7 +533,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return None;
         }
         let config_path = PathBuf::from(lines[0]);
-        if !check_normalized_absolute(&mut self.report, "config-discovery", &config_path) {
+        if !check_normalized_absolute(&mut self.failures, "config-discovery", &config_path) {
             return None;
         }
         Some(config_path)
@@ -526,7 +541,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
 
     pub(super) fn check_config_tree(&mut self, config_path: &Path, owner_uid: u32) {
         let Some(config_directory) = config_path.parent() else {
-            self.report.refuse(
+            self.refuse(
                 "config-state",
                 Some(config_path.to_path_buf()),
                 "config path has no parent directory",
@@ -550,7 +565,6 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             "config-state",
         );
         if self
-            .report
             .failures
             .iter()
             .any(|failure| failure.path.as_deref() == Some(config_directory))
@@ -564,7 +578,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             let entries = match self.filesystem.read_directory(&directory) {
                 Ok(entries) => entries,
                 Err(err) => {
-                    self.report.refuse(
+                    self.refuse(
                         "config-state",
                         Some(directory),
                         format!("could not inspect the config directory: {err}"),
@@ -576,7 +590,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             for entry in entries {
                 seen += 1;
                 if seen > MAX_CONFIG_TREE_ENTRIES {
-                    self.report.refuse(
+                    self.refuse(
                         "config-state",
                         Some(config_directory.to_path_buf()),
                         format!("config tree exceeds {MAX_CONFIG_TREE_ENTRIES} entries"),
@@ -607,7 +621,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                         "config-state",
                         "config file is not readable by its owner",
                     ),
-                    PathKind::Symlink | PathKind::Other => self.report.refuse(
+                    PathKind::Symlink | PathKind::Other => self.refuse(
                         "config-state",
                         Some(entry),
                         format!("config tree contains an unsafe {:?} entry", facts.kind),
@@ -627,12 +641,12 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         let Some(reason) = service_manager_refusal(observation) else {
             return;
         };
-        self.report.refuse(check, None, reason, remedy.to_string());
+        self.refuse(check, None, reason, remedy.to_string());
     }
 
     fn check_not_writable_by_others(&mut self, path: &Path, facts: &PathFacts) {
         if facts.mode & 0o022 != 0 {
-            self.report.refuse(
+            self.refuse(
                 "path-containment",
                 Some(path.to_path_buf()),
                 "trusted path is writable by its group or by other users",
@@ -648,7 +662,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         user_owner_uid: u32,
     ) {
         if facts.owner_uid != 0 && facts.owner_uid != user_owner_uid {
-            self.report.refuse(
+            self.refuse(
                 "path-containment",
                 Some(path.to_path_buf()),
                 format!(
@@ -660,7 +674,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
             return;
         }
         if facts.mode & 0o022 != 0 && facts.mode & 0o1000 == 0 {
-            self.report.refuse(
+            self.refuse(
                 "path-containment",
                 Some(path.to_path_buf()),
                 "candidate path ancestor is writable by its group or by other users without sticky-directory protection",
@@ -707,13 +721,13 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
                     }
                     None => {}
                 },
-                Ok(facts) => self.report.refuse(
+                Ok(facts) => self.refuse(
                     "path-containment",
                     Some(ancestor.to_path_buf()),
                     format!("path ancestor is {:?}, not a real directory", facts.kind),
                     "replace symlinked or special ancestors with ordinary directories",
                 ),
-                Err(err) => self.report.refuse(
+                Err(err) => self.refuse(
                     "path-containment",
                     Some(ancestor.to_path_buf()),
                     format!("could not inspect path ancestor: {err}"),
@@ -727,7 +741,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         match self.filesystem.path_facts(path) {
             Ok(facts) => Some(facts),
             Err(err) => {
-                self.report.refuse(
+                self.refuse(
                     check,
                     Some(path.to_path_buf()),
                     if err.kind() == io::ErrorKind::NotFound {
@@ -750,7 +764,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
         check: &'static str,
     ) {
         if facts.owner_uid != expected_uid {
-            self.report.refuse(
+            self.refuse(
                 check,
                 Some(path.to_path_buf()),
                 format!(
@@ -764,7 +778,7 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
 }
 
 pub(super) fn check_normalized_absolute(
-    report: &mut CompatibilityReport,
+    failures: &mut Vec<CompatibilityFailure>,
     check: &'static str,
     path: &Path,
 ) -> bool {
@@ -774,12 +788,12 @@ pub(super) fn check_normalized_absolute(
         .split(|byte| *byte == b'/')
         .any(|component| matches!(component, b"." | b".."));
     if !path.is_absolute() || has_dot_component {
-        report.refuse(
+        failures.push(CompatibilityFailure {
             check,
-            Some(path.to_path_buf()),
-            "path is not normalized and absolute",
-            "use an absolute path without '.' or '..' components",
-        );
+            path: Some(path.to_path_buf()),
+            detail: "path is not normalized and absolute".to_string(),
+            remedy: "use an absolute path without '.' or '..' components".to_string(),
+        });
         false
     } else {
         true
@@ -878,30 +892,33 @@ mod tests {
 
     fn detail<'a>(checker: &'a Checker<'a, FakeFacts>, check: &str) -> Option<&'a str> {
         checker
-            .report
-            .failures()
+            .failures
             .iter()
             .find(|failure| failure.check == check)
             .map(|failure| failure.detail.as_str())
     }
 
+    fn compatible(checker: &Checker<'_, FakeFacts>) -> bool {
+        checker.failures.is_empty()
+    }
+
     #[test]
     fn normalized_absolute_rejects_relative_and_dot_components() {
         for rejected in ["relative", "a/../b", "a/./b"] {
-            let mut report = CompatibilityReport::default();
+            let mut failures = Vec::new();
             assert!(!check_normalized_absolute(
-                &mut report,
+                &mut failures,
                 "c",
                 Path::new(rejected)
             ));
         }
-        let mut report = CompatibilityReport::default();
+        let mut failures = Vec::new();
         assert!(check_normalized_absolute(
-            &mut report,
+            &mut failures,
             "c",
             Path::new("/usr/bin/lg-buddy")
         ));
-        assert!(report.compatible(), "{report}");
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
@@ -946,7 +963,7 @@ mod tests {
             InstallerPathPolicy::ReplaceExecutable,
             "exec-check",
         );
-        assert!(checker.report.compatible(), "{}", checker.report.render());
+        assert!(compatible(&checker), "{}", checker.failures.len());
 
         // SystemReadableInput requires owner+group+other read (0o404); 0o600 fails.
         let fs = fake_facts(
@@ -965,7 +982,7 @@ mod tests {
             InstallerPathPolicy::SystemReadableInput,
             "perm-check",
         );
-        assert!(!checker.report.compatible());
+        assert!(!compatible(&checker));
     }
 
     #[test]
@@ -988,7 +1005,7 @@ mod tests {
             InstallerPathPolicy::ReplaceFile,
             "other-write",
         );
-        assert!(!checker.report.compatible(), "{}", checker.report.render());
+        assert!(!compatible(&checker), "{}", checker.failures.len());
     }
 
     #[test]
@@ -1008,7 +1025,7 @@ mod tests {
             InstallerPathPolicy::ReplaceFile,
             "symlink-check",
         );
-        assert!(!checker.report.compatible());
+        assert!(!compatible(&checker));
     }
 
     #[test]

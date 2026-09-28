@@ -15,7 +15,7 @@ enum InstallerPathPolicy {
 }
 
 impl InstallerPathPolicy {
-    fn expects_file(self) -> bool {
+    pub(super) fn expects_file(self) -> bool {
         matches!(
             self,
             Self::ReplaceFile
@@ -26,7 +26,7 @@ impl InstallerPathPolicy {
         )
     }
 
-    fn expects_directory(self) -> bool {
+    pub(super) fn expects_directory(self) -> bool {
         matches!(
             self,
             Self::MutateDirectory
@@ -37,250 +37,16 @@ impl InstallerPathPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InstallerPathRequirement {
-    path: &'static str,
-    policy: InstallerPathPolicy,
-}
-
-const fn requirement(path: &'static str, policy: InstallerPathPolicy) -> InstallerPathRequirement {
-    InstallerPathRequirement { path, policy }
-}
-
-const SYSTEM_DESKTOP_ENTRY_PATHS: &[&str] = &[
-    "/usr/share/applications/io.github.staphylococcus.LGBuddy.desktop",
-    "/usr/share/applications/LG_Buddy_Brightness.desktop",
-];
-
-const USER_DESKTOP_ENTRY_PATHS: &[&str] = &[
-    "Desktop/io.github.staphylococcus.LGBuddy.desktop",
-    "Desktop/LG_Buddy_Brightness.desktop",
-];
-
-const SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
-    requirement("/usr/bin/lg-buddy", InstallerPathPolicy::ReplaceExecutable),
-    requirement(
-        "/etc/systemd/system/LG_Buddy.service",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/etc/systemd/system/LG_Buddy.service.d/config.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/etc/systemd/system/LG_Buddy_lifecycle.service",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/etc/tmpfiles.d/lg_buddy.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_lifecycle",
-        InstallerPathPolicy::ReplaceExecutable,
-    ),
-    requirement("/usr/bin", InstallerPathPolicy::MutateDirectory),
-    requirement("/etc/systemd/system", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "/etc/systemd/system/LG_Buddy.service.d",
-        InstallerPathPolicy::ExactDropInDirectory {
-            expected_entry: "config.conf",
-        },
-    ),
-    requirement(
-        "/etc/systemd/system/LG_Buddy_lifecycle.service.d",
-        InstallerPathPolicy::ExactDropInDirectory {
-            expected_entry: "config.conf",
-        },
-    ),
-    requirement("/etc/tmpfiles.d", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "/etc/NetworkManager/dispatcher.d/pre-down.d",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/share/applications",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-];
-
-const OPTIONAL_SYSTEM_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
-    requirement(
-        "/usr/bin/lg-buddy-gui",
-        InstallerPathPolicy::ReplaceExecutable,
-    ),
-    requirement("/usr/share/icons", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "/usr/share/icons/hicolor",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/share/icons/hicolor/scalable",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/share/icons/hicolor/scalable/apps",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-];
-
-// Older releases do not have the setup helper yet. Its destinations must be
-// safe to create when absent and safe to replace when already installed.
-const SETUP_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
-    requirement("/usr/lib/lg-buddy", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "/usr/lib/lg-buddy/setup",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/lib/lg-buddy/setup/systemd",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/lib/lg-buddy/setup-services",
-        InstallerPathPolicy::ReplaceExecutable,
-    ),
-    requirement(
-        "/usr/lib/lg-buddy/setup/systemd/LG_Buddy.service",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/usr/lib/lg-buddy/setup/systemd/LG_Buddy_lifecycle.service",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "/usr/lib/lg-buddy/setup/systemd/lg_buddy.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement("/usr/share/polkit-1", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "/usr/share/polkit-1/actions",
-        InstallerPathPolicy::MutateDirectory,
-    ),
-    requirement(
-        "/usr/share/polkit-1/actions/io.github.staphylococcus.LGBuddy.setup.policy",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-];
-
-const LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[requirement(
-    "/usr/bin/LG_Buddy_PIP",
-    InstallerPathPolicy::RecursiveClear,
-)];
-
-const LEGACY_SYSTEM_PATHS: &[&str] = &[
-    "/usr/bin/LG_Buddy_Startup",
-    "/usr/bin/LG_Buddy_Shutdown",
-    "/usr/bin/LG_Buddy_Screen_On",
-    "/usr/bin/LG_Buddy_Screen_Off",
-    "/usr/bin/LG_Buddy_Screen_Monitor",
-    "/usr/bin/LG_Buddy_sleep_pre",
-    "/usr/bin/LG_Buddy_Brightness",
-    "/usr/lib/lg-buddy/common.sh",
-    "/usr/lib/systemd/system-sleep/LG_Buddy_sleep_hook",
-    "/etc/systemd/system/LG_Buddy_wake.service",
-    "/etc/systemd/system/LG_Buddy_wake.service.d",
-    "/etc/systemd/system/LG_Buddy_sleep.service",
-    "/etc/systemd/system/LG_Buddy_sleep.service.d",
-    "/etc/NetworkManager/dispatcher.d/pre-down.d/LG_Buddy_sleep",
-];
-
-const USER_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
-    requirement("LG_Buddy_screen.service", InstallerPathPolicy::ReplaceFile),
-    requirement(
-        "LG_Buddy_screen.service.d/config.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "LG_Buddy_update_check.service",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "LG_Buddy_update_check.service.d/config.conf",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement(
-        "LG_Buddy_update_check.timer",
-        InstallerPathPolicy::ReplaceFile,
-    ),
-    requirement("", InstallerPathPolicy::MutateDirectory),
-    requirement(
-        "LG_Buddy_screen.service.d",
-        InstallerPathPolicy::ExactDropInDirectory {
-            expected_entry: "config.conf",
-        },
-    ),
-    requirement(
-        "LG_Buddy_update_check.service.d",
-        InstallerPathPolicy::ExactDropInDirectory {
-            expected_entry: "config.conf",
-        },
-    ),
-];
-
-// These are the inputs consumed by the non-interactive `install.sh --upgrade`
-// contract. Configuration and pairing scripts are deliberately not upgrade inputs.
-const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
-    requirement("", InstallerPathPolicy::InputDirectory),
-    requirement("systemd", InstallerPathPolicy::InputDirectory),
-    requirement("release-manifest.json", InstallerPathPolicy::ReadableInput),
-    requirement("install.sh", InstallerPathPolicy::ExecutableInput),
-    requirement("lg-buddy", InstallerPathPolicy::ExecutableInput),
-    requirement("docs/setup-services.sh", InstallerPathPolicy::ReadableInput),
-    requirement(
-        "docs/io.github.staphylococcus.LGBuddy.setup.policy",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "docs/lg-buddy-gui-x86_64-unknown-linux-gnu",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "docs/io.github.staphylococcus.LGBuddy.svg",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "LG_Buddy_Brightness.desktop",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "systemd/LG_Buddy.service",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "systemd/LG_Buddy_lifecycle.service",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "systemd/LG_Buddy_screen.service",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "systemd/LG_Buddy_update_check.service",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement(
-        "systemd/LG_Buddy_update_check.timer",
-        InstallerPathPolicy::ReadableInput,
-    ),
-    requirement("systemd/lg_buddy.conf", InstallerPathPolicy::ReadableInput),
-];
 
 mod observation;
 mod path_safety;
+mod preflight;
 mod trust_placement;
 
 use observation::observe_process;
-use path_safety::{check_normalized_absolute, systemd_config_override_line, Checker, TrustedRoot};
-use trust_placement::trust_placement;
+use preflight::{
+    evaluate_candidate_preflight as candidate_preflight, evaluate_installed_state,
+};
 
 pub use observation::{
     FilesystemFacts, HostPreflightFacts, InstalledLayout, ObservationFailure, OsFilesystemFacts,
@@ -314,6 +80,11 @@ pub(crate) struct CompatibilityAdviceItem {
 }
 
 impl CompatibilityReport {
+    /// Build the downstream report view from the orchestrator's raw failures.
+    pub fn from_failures(failures: Vec<CompatibilityFailure>) -> Self {
+        Self { failures }
+    }
+
     pub(crate) fn advice(&self) -> CompatibilityAdvice {
         CompatibilityAdvice {
             compatible: self.compatible(),
@@ -372,10 +143,6 @@ impl CompatibilityReport {
             detail: detail.into(),
             remedy: remedy.into(),
         });
-    }
-
-    fn extend(&mut self, other: Self) {
-        self.failures.extend(other.failures);
     }
 }
 
@@ -478,7 +245,7 @@ fn evaluate_initial_preflight_for_process(
     executable_remedy: &'static str,
     require_gui: bool,
 ) -> CompatibilityReport {
-    evaluate_installed_state(
+    CompatibilityReport::from_failures(evaluate_installed_state(
         filesystem,
         facts,
         expected_running_executable,
@@ -486,187 +253,7 @@ fn evaluate_initial_preflight_for_process(
         executable_remedy,
         false,
         require_gui,
-    )
-}
-
-fn evaluate_installed_state(
-    filesystem: &impl FilesystemFacts,
-    facts: &HostPreflightFacts,
-    expected_running_executable: &Path,
-    executable_check: &'static str,
-    executable_remedy: &'static str,
-    remove_legacy_env: bool,
-    require_gui: bool,
-) -> CompatibilityReport {
-    let mut checker = Checker::new(filesystem);
-    let roots = trust_placement(&facts.layout, facts.system_owner_uid, facts.user_owner_uid);
-    let system_trust = roots.system_trust;
-    let user_trust = roots.user_trust;
-    let user_units_trust = roots.user_units_trust;
-
-    if facts.effective_uid == 0 {
-        checker.report.refuse(
-            "invoking-user",
-            None,
-            "the updater is running as root",
-            "run LG Buddy as the installed user; it will request sudo only for the mutation step",
-        );
-    }
-    check_normalized_absolute(
-        &mut checker.report,
-        "system-root",
-        &facts.layout.system_root,
-    );
-    check_normalized_absolute(&mut checker.report, "user-home", &facts.layout.user_home);
-    check_normalized_absolute(
-        &mut checker.report,
-        "user-config-home",
-        &facts.layout.user_config_home,
-    );
-
-    if facts.running_executable != expected_running_executable {
-        checker.report.refuse(
-            executable_check,
-            Some(facts.running_executable.clone()),
-            format!(
-                "running executable is not the expected runtime at {}",
-                expected_running_executable.display()
-            ),
-            executable_remedy,
-        );
-    }
-
-    for requirement in SYSTEM_PATH_REQUIREMENTS {
-        let check = match requirement.policy {
-            InstallerPathPolicy::MutateDirectory | InstallerPathPolicy::RecursiveClear => {
-                "mutable-installation"
-            }
-            InstallerPathPolicy::ExactDropInDirectory { .. } => "integration-config",
-            _ => "installed-layout",
-        };
-        checker.check_requirement(
-            &facts.layout.system_path(requirement.path),
-            facts.system_owner_uid,
-            Some(system_trust),
-            requirement.policy,
-            check,
-        );
-    }
-    checker.check_replace_file_alternatives(
-        &SYSTEM_DESKTOP_ENTRY_PATHS
-            .iter()
-            .map(|path| facts.layout.system_path(path))
-            .collect::<Vec<_>>(),
-        facts.system_owner_uid,
-        Some(system_trust),
-        "installed-layout",
-    );
-    for requirement in OPTIONAL_SYSTEM_PATH_REQUIREMENTS {
-        let path = facts.layout.system_path(requirement.path);
-        if require_gui && requirement.path == "/usr/bin/lg-buddy-gui" {
-            checker.check_requirement(
-                &path,
-                facts.system_owner_uid,
-                Some(system_trust),
-                requirement.policy,
-                "installed-layout",
-            );
-        } else {
-            checker.check_optional_requirement(
-                &path,
-                facts.system_owner_uid,
-                Some(system_trust),
-                requirement.policy,
-                "installed-layout",
-            );
-        }
-    }
-    for requirement in SETUP_PATH_REQUIREMENTS {
-        checker.check_install_destination(
-            &facts.layout.system_path(requirement.path),
-            facts.system_owner_uid,
-            Some(system_trust),
-            requirement.policy,
-            "setup-installation",
-        );
-    }
-    if remove_legacy_env {
-        for requirement in LEGACY_ENV_REMOVAL_PATH_REQUIREMENTS {
-            checker.check_requirement(
-                &facts.layout.system_path(requirement.path),
-                facts.system_owner_uid,
-                Some(system_trust),
-                requirement.policy,
-                "legacy-environment-removal",
-            );
-        }
-    }
-    for requirement in USER_PATH_REQUIREMENTS {
-        let check = match requirement.policy {
-            InstallerPathPolicy::MutateDirectory => "mutable-user-integration",
-            InstallerPathPolicy::ExactDropInDirectory { .. } => "integration-config",
-            _ => "user-integration",
-        };
-        checker.check_requirement(
-            &facts.layout.user_systemd_path(requirement.path),
-            facts.user_owner_uid,
-            Some(user_units_trust),
-            requirement.policy,
-            check,
-        );
-    }
-    for path in USER_DESKTOP_ENTRY_PATHS {
-        checker.check_optional_requirement(
-            &facts.layout.user_home.join(path),
-            facts.user_owner_uid,
-            Some(user_trust),
-            InstallerPathPolicy::ReplaceFile,
-            "user-desktop",
-        );
-    }
-
-    for path in LEGACY_SYSTEM_PATHS {
-        checker.check_absent(&facts.layout.system_path(path));
-    }
-
-    let config_path = checker.read_config_pointer(
-        &facts.layout.config_pointer(),
-        facts.system_owner_uid,
-        &facts.layout.system_root,
-    );
-    if let Some(config_path) = config_path {
-        let config_marker = systemd_config_override_line(&config_path);
-        for path in [
-            facts
-                .layout
-                .system_path("/etc/systemd/system/LG_Buddy.service.d/config.conf"),
-            facts
-                .layout
-                .system_path("/etc/systemd/system/LG_Buddy_lifecycle.service.d/config.conf"),
-            facts
-                .layout
-                .user_systemd_path("LG_Buddy_screen.service.d/config.conf"),
-            facts
-                .layout
-                .user_systemd_path("LG_Buddy_update_check.service.d/config.conf"),
-        ] {
-            checker.check_integration_override(&path, &config_marker);
-        }
-        checker.check_config_tree(&config_path, facts.user_owner_uid);
-    }
-
-    checker.check_capability(
-        "system-service-manager",
-        &facts.service_managers.system,
-        "make the system systemd manager available before upgrading",
-    );
-    checker.check_capability(
-        "user-service-manager",
-        &facts.service_managers.user,
-        "run the upgrade from a user session with a reachable systemd user manager",
-    );
-
-    checker.report
+    ))
 }
 
 pub fn evaluate_candidate_preflight(
@@ -674,22 +261,11 @@ pub fn evaluate_candidate_preflight(
     candidate_root: &Path,
     user_owner_uid: u32,
 ) -> CompatibilityReport {
-    let mut checker = Checker::new(filesystem);
-    if !check_normalized_absolute(&mut checker.report, "candidate-root", candidate_root) {
-        return checker.report;
-    }
-
-    let candidate_trust = TrustedRoot::candidate(candidate_root, user_owner_uid);
-    for requirement in CANDIDATE_PATH_REQUIREMENTS {
-        checker.check_requirement(
-            &candidate_root.join(requirement.path),
-            user_owner_uid,
-            Some(candidate_trust),
-            requirement.policy,
-            "candidate-layout",
-        );
-    }
-    checker.report
+    CompatibilityReport::from_failures(candidate_preflight(
+        filesystem,
+        candidate_root,
+        user_owner_uid,
+    ))
 }
 
 pub fn evaluate_candidate_host_preflight(
@@ -699,7 +275,7 @@ pub fn evaluate_candidate_host_preflight(
     remove_legacy_env: bool,
 ) -> CompatibilityReport {
     let expected_candidate_executable = candidate_root.join("lg-buddy");
-    let mut report = evaluate_installed_state(
+    let mut failures = evaluate_installed_state(
         filesystem,
         facts,
         &expected_candidate_executable,
@@ -708,18 +284,19 @@ pub fn evaluate_candidate_host_preflight(
         remove_legacy_env,
         false,
     );
-    report.extend(evaluate_candidate_preflight(
+    failures.extend(candidate_preflight(
         filesystem,
         candidate_root,
         facts.user_owner_uid,
     ));
-    report
+    CompatibilityReport::from_failures(failures)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use path_safety::service_manager_refusal;
+    use path_safety::{service_manager_refusal, Checker, TrustedRoot};
+    use preflight::fixture_ops;
     use std::env;
     use std::fs;
     use std::io;
@@ -907,26 +484,16 @@ mod tests {
         let fixture = InstalledFixture::new("setup-upgrade");
         let old = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
         assert!(old.compatible(), "{}", old.render());
-        for requirement in SETUP_PATH_REQUIREMENTS {
-            let path = fixture.facts.layout.system_path(requirement.path);
-            if requirement.policy.expects_directory() {
-                fs::create_dir_all(path).unwrap();
-            } else {
-                write_file(
-                    &path,
-                    requirement.policy == InstallerPathPolicy::ReplaceExecutable,
-                );
-            }
-        }
+        fixture_ops::materialize_setup_requirements(&fixture.facts.layout);
         let installed = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
         assert!(installed.compatible(), "{}", installed.render());
     }
 
     #[test]
     fn setup_destinations_reject_symlinks_including_dangling_ancestors() {
-        for requirement in SETUP_PATH_REQUIREMENTS {
+        for relative in fixture_ops::setup_requirement_paths() {
             let fixture = InstalledFixture::new("setup-symlink");
-            let path = fixture.facts.layout.system_path(requirement.path);
+            let path = fixture.facts.layout.system_path(relative);
             if path.is_dir() {
                 fs::remove_dir_all(&path).unwrap();
             }
@@ -1273,7 +840,13 @@ mod tests {
                 "policy-contract",
             );
 
-            assert_failure(&checker.report, "policy-contract", &path, expected_detail);
+            assert_failure_slice(
+                &checker.failures,
+                "checker",
+                "policy-contract",
+                &path,
+                expected_detail,
+            );
         }
     }
 
@@ -1539,9 +1112,9 @@ mod tests {
             "policy-contract",
         );
         assert!(
-            root_checker.report.compatible(),
-            "{}",
-            root_checker.report.render()
+            root_checker.failures.is_empty(),
+            "{:?}",
+            root_checker.failures
         );
 
         let user_owned = OverriddenFilesystem {
@@ -1559,8 +1132,9 @@ mod tests {
             InstallerPathPolicy::MutateDirectory,
             "policy-contract",
         );
-        assert_failure(
-            &user_checker.report,
+        assert_failure_slice(
+            &user_checker.failures,
+            "checker",
             "policy-contract",
             &directory,
             "not writable and searchable",
@@ -1858,14 +1432,13 @@ mod tests {
 
     #[test]
     fn candidate_preflight_refuses_each_missing_upgrade_input() {
-        for (index, requirement) in CANDIDATE_PATH_REQUIREMENTS
-            .iter()
-            .filter(|requirement| !requirement.path.is_empty())
-            .enumerate()
+        for (index, (relative, is_directory)) in
+            fixture_ops::candidate_input_paths().iter().enumerate()
         {
-            let fixture = InstalledFixture::new(&format!("missing-candidate-input-{index}"));
-            let input = fixture.candidate_root.join(requirement.path);
-            if requirement.policy.expects_directory() {
+            let fixture =
+                InstalledFixture::new(&format!("missing-candidate-input-{index}"));
+            let input = fixture.candidate_root.join(relative);
+            if *is_directory {
                 fs::remove_dir_all(&input).unwrap();
             } else {
                 fs::remove_file(&input).unwrap();
@@ -1945,11 +1518,28 @@ mod tests {
     }
 
     fn assert_failure(report: &CompatibilityReport, check: &str, path: &Path, detail: &str) {
-        let failure = report
-            .failures()
+        assert_failure_slice(
+            report.failures(),
+            "report",
+            check,
+            path,
+            detail,
+        );
+    }
+
+    /// Assert a failure against a raw `Vec<CompatibilityFailure>` (from a
+    /// `Checker`), with a human-readable context for the panic message.
+    fn assert_failure_slice(
+        failures: &[CompatibilityFailure],
+        context: &str,
+        check: &str,
+        path: &Path,
+        detail: &str,
+    ) {
+        let failure = failures
             .iter()
             .find(|failure| failure.check == check && failure.path.as_deref() == Some(path))
-            .unwrap_or_else(|| panic!("missing {check} failure for {}:\n{report}", path.display()));
+            .unwrap_or_else(|| panic!("missing {check} failure for {path:?} in {context}"));
         assert!(
             failure.detail.contains(detail),
             "expected detail {detail:?}, got {:?}",
@@ -2055,9 +1645,9 @@ mod tests {
             let config_directory = user_home.join(".config/lg-buddy");
             let config_path = config_directory.join("config.env");
 
-            create_system_requirements(&layout);
+            fixture_ops::materialize_system_requirements(&layout);
             set_directory_tree_mode(&system_root, 0o755);
-            create_relative_requirements(&layout.user_systemd_path(""), USER_PATH_REQUIREMENTS);
+            fixture_ops::materialize_user_requirements(&layout.user_systemd_path(""));
             fs::create_dir_all(config_directory.join("tvs/primary")).unwrap();
             fs::write(&config_path, "updates_channel=stable\n").unwrap();
             fs::write(
@@ -2086,7 +1676,7 @@ mod tests {
             set_directory_tree_mode(&user_home, 0o755);
 
             let candidate_root = root.join("candidate");
-            create_relative_requirements(&candidate_root, CANDIDATE_PATH_REQUIREMENTS);
+            fixture_ops::materialize_candidate_requirements(&candidate_root);
             set_directory_tree_mode(&candidate_root, 0o755);
             set_mode(&root, 0o755);
 
@@ -2112,46 +1702,6 @@ mod tests {
     impl Drop for InstalledFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-
-    fn create_system_requirements(layout: &InstalledLayout) {
-        for requirement in SYSTEM_PATH_REQUIREMENTS
-            .iter()
-            .filter(|requirement| requirement.policy.expects_directory())
-        {
-            fs::create_dir_all(layout.system_path(requirement.path)).unwrap();
-        }
-        for requirement in SYSTEM_PATH_REQUIREMENTS
-            .iter()
-            .filter(|requirement| requirement.policy.expects_file())
-        {
-            write_file(
-                &layout.system_path(requirement.path),
-                matches!(requirement.policy, InstallerPathPolicy::ReplaceExecutable),
-            );
-        }
-        write_file(
-            &layout.system_path("/usr/share/applications/LG_Buddy_Brightness.desktop"),
-            false,
-        );
-    }
-
-    fn create_relative_requirements(base: &Path, requirements: &[InstallerPathRequirement]) {
-        for requirement in requirements
-            .iter()
-            .filter(|requirement| requirement.policy.expects_directory())
-        {
-            fs::create_dir_all(base.join(requirement.path)).unwrap();
-        }
-        for requirement in requirements
-            .iter()
-            .filter(|requirement| requirement.policy.expects_file())
-        {
-            write_file(
-                &base.join(requirement.path),
-                matches!(requirement.policy, InstallerPathPolicy::ExecutableInput),
-            );
         }
     }
 
