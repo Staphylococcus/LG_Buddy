@@ -289,6 +289,7 @@ pub(super) fn observe_process() -> Result<HostPreflightFacts, ObservationFailure
     })
 }
 
+#[cfg(test)]
 mod tests {
     use super::{decode_mountinfo_field, FilesystemFacts, InstalledLayout, OsFilesystemFacts};
     use std::ffi::OsString;
