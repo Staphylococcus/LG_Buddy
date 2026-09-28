@@ -16,7 +16,7 @@ use super::{CompatibilityReport, InstallerPathPolicy};
 
 pub(super) const MAX_CONFIG_TREE_ENTRIES: usize = 256;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TrustedRoot<'a> {
     path: &'a Path,
     owner_uid: u32,

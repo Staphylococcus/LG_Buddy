@@ -277,11 +277,13 @@ const CANDIDATE_PATH_REQUIREMENTS: &[InstallerPathRequirement] = &[
 
 mod observation;
 mod path_safety;
+mod trust_placement;
 
 use path_safety::{
     check_normalized_absolute, service_manager_refusal, systemd_config_override_line, Checker,
     TrustedRoot,
 };
+use trust_placement::trust_placement;
 
 pub use observation::{
     FilesystemFacts, HostPreflightFacts, InstalledLayout, OsFilesystemFacts, PathFacts, PathKind,
@@ -528,17 +530,10 @@ fn evaluate_installed_state(
     require_gui: bool,
 ) -> CompatibilityReport {
     let mut checker = Checker::new(filesystem);
-    let system_trust = TrustedRoot::strict(&facts.layout.system_root, facts.system_owner_uid);
-    let user_trust = TrustedRoot::owned(&facts.layout.user_home, facts.user_owner_uid);
-    let user_units_trust = if facts
-        .layout
-        .user_config_home
-        .starts_with(&facts.layout.user_home)
-    {
-        user_trust
-    } else {
-        TrustedRoot::owned(&facts.layout.user_config_home, facts.user_owner_uid)
-    };
+    let roots = trust_placement(&facts.layout, facts.system_owner_uid, facts.user_owner_uid);
+    let system_trust = roots.system_trust;
+    let user_trust = roots.user_trust;
+    let user_units_trust = roots.user_units_trust;
 
     if facts.effective_uid == 0 {
         checker.report.refuse(
