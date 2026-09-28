@@ -4,6 +4,7 @@
 // the `HostPreflightFacts` snapshot. Moved verbatim from
 // upgrade_preflight.rs; `user_systemd_path` is promoted to `pub(super)`
 // for the parent coordinator.
+use std::env;
 use std::ffi::{CString, OsString};
 use std::fs;
 use std::io;
@@ -242,6 +243,50 @@ pub struct HostPreflightFacts {
     pub system_owner_uid: u32,
     pub user_owner_uid: u32,
     pub service_managers: ServiceManagerFacts,
+}
+
+/// What the process observation could not see. The observation reports the
+/// missing fact; deciding how to refuse (check name, message, remedy) is the
+/// judgment layer's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservationFailure {
+    RunningExecutable(String),
+    UserHome,
+}
+
+pub(super) fn observe_process() -> Result<HostPreflightFacts, ObservationFailure> {
+    let running_executable = match env::current_exe() {
+        Ok(path) => path,
+        Err(err) => {
+            return Err(ObservationFailure::RunningExecutable(format!(
+                "could not resolve the running executable: {err}"
+            )));
+        }
+    };
+    let user_home = match env::var_os("HOME") {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => return Err(ObservationFailure::UserHome),
+    };
+    let effective_uid = unsafe { libc::geteuid() };
+    let install_root = env::var_os("LG_BUDDY_INSTALL_ROOT")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from);
+    let sandboxed_install = install_root.is_some();
+    let system_root = install_root.unwrap_or_else(|| PathBuf::from("/"));
+    let service_managers =
+        if sandboxed_install && env::var("LG_BUDDY_SKIP_SYSTEMD_ACTIONS").as_deref() == Ok("1") {
+            ServiceManagerFacts::skipped()
+        } else {
+            ServiceManagerFacts::observe()
+        };
+    Ok(HostPreflightFacts {
+        layout: InstalledLayout::new(system_root, user_home, env::var_os("XDG_CONFIG_HOME")),
+        running_executable,
+        effective_uid,
+        system_owner_uid: if sandboxed_install { effective_uid } else { 0 },
+        user_owner_uid: effective_uid,
+        service_managers,
+    })
 }
 
 mod tests {

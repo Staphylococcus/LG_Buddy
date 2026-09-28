@@ -1,4 +1,3 @@
-use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -279,15 +278,13 @@ mod observation;
 mod path_safety;
 mod trust_placement;
 
-use path_safety::{
-    check_normalized_absolute, service_manager_refusal, systemd_config_override_line, Checker,
-    TrustedRoot,
-};
+use observation::observe_process;
+use path_safety::{check_normalized_absolute, systemd_config_override_line, Checker, TrustedRoot};
 use trust_placement::trust_placement;
 
 pub use observation::{
-    FilesystemFacts, HostPreflightFacts, InstalledLayout, OsFilesystemFacts, PathFacts, PathKind,
-    ServiceManagerFacts, SystemdManagerObservation,
+    FilesystemFacts, HostPreflightFacts, InstalledLayout, ObservationFailure, OsFilesystemFacts,
+    PathFacts, PathKind, ServiceManagerFacts, SystemdManagerObservation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,9 +386,9 @@ impl fmt::Display for CompatibilityReport {
 }
 
 pub fn current_host_preflight() -> CompatibilityReport {
-    let facts = match observe_current_process() {
+    let facts = match observe_process() {
         Ok(facts) => facts,
-        Err(report) => return report,
+        Err(failure) => return failure_report(&failure),
     };
     evaluate_initial_preflight(&OsFilesystemFacts, &facts)
 }
@@ -402,9 +399,9 @@ pub fn current_host_preflight() -> CompatibilityReport {
 /// only process-specific differences are the executable that must be running
 /// and the fact that the GUI binary is required for a GUI-led upgrade.
 pub fn current_gui_host_preflight() -> CompatibilityReport {
-    let facts = match observe_current_process() {
+    let facts = match observe_process() {
         Ok(facts) => facts,
-        Err(report) => return report,
+        Err(failure) => return failure_report(&failure),
     };
     evaluate_gui_initial_preflight(&OsFilesystemFacts, &facts)
 }
@@ -413,9 +410,9 @@ pub fn candidate_host_preflight(
     candidate_root: &Path,
     remove_legacy_env: bool,
 ) -> CompatibilityReport {
-    let facts = match observe_current_process() {
+    let facts = match observe_process() {
         Ok(facts) => facts,
-        Err(report) => return report,
+        Err(failure) => return failure_report(&failure),
     };
     evaluate_candidate_host_preflight(
         &OsFilesystemFacts,
@@ -425,52 +422,24 @@ pub fn candidate_host_preflight(
     )
 }
 
-fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> {
+fn failure_report(failure: &ObservationFailure) -> CompatibilityReport {
+    let (check, path, problem, remedy) = match failure {
+        ObservationFailure::RunningExecutable(problem) => (
+            "running-executable",
+            None,
+            problem.clone(),
+            "run the installed LG Buddy executable directly".to_string(),
+        ),
+        ObservationFailure::UserHome => (
+            "user-home",
+            None,
+            "HOME is not available".to_string(),
+            "run the updater from the installed user's normal session".to_string(),
+        ),
+    };
     let mut report = CompatibilityReport::default();
-    let running_executable = match env::current_exe() {
-        Ok(path) => path,
-        Err(err) => {
-            report.refuse(
-                "running-executable",
-                None,
-                format!("could not resolve the running executable: {err}"),
-                "run the installed LG Buddy executable directly",
-            );
-            return Err(report);
-        }
-    };
-    let user_home = match env::var_os("HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home),
-        _ => {
-            report.refuse(
-                "user-home",
-                None,
-                "HOME is not available",
-                "run the updater from the installed user's normal session",
-            );
-            return Err(report);
-        }
-    };
-    let effective_uid = unsafe { libc::geteuid() };
-    let install_root = env::var_os("LG_BUDDY_INSTALL_ROOT")
-        .filter(|root| !root.is_empty())
-        .map(PathBuf::from);
-    let sandboxed_install = install_root.is_some();
-    let system_root = install_root.unwrap_or_else(|| PathBuf::from("/"));
-    let service_managers =
-        if sandboxed_install && env::var("LG_BUDDY_SKIP_SYSTEMD_ACTIONS").as_deref() == Ok("1") {
-            ServiceManagerFacts::skipped()
-        } else {
-            ServiceManagerFacts::observe()
-        };
-    Ok(HostPreflightFacts {
-        layout: InstalledLayout::new(system_root, user_home, env::var_os("XDG_CONFIG_HOME")),
-        running_executable,
-        effective_uid,
-        system_owner_uid: if sandboxed_install { effective_uid } else { 0 },
-        user_owner_uid: effective_uid,
-        service_managers,
-    })
+    report.refuse(check, path, problem, remedy);
+    report
 }
 
 pub fn evaluate_initial_preflight(
@@ -750,6 +719,8 @@ pub fn evaluate_candidate_host_preflight(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use path_safety::service_manager_refusal;
+    use std::env;
     use std::fs;
     use std::io;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -817,7 +788,7 @@ mod tests {
     fn process_observation_uses_xdg_config_home() {
         const CHILD: &str = "LG_BUDDY_PREFLIGHT_ENV_CHILD";
         if env::var_os(CHILD).is_some() {
-            let facts = observe_current_process().unwrap();
+            let facts = super::observe_process().unwrap();
             assert_eq!(facts.layout.user_config_home, Path::new("/custom/config"));
             return;
         }
