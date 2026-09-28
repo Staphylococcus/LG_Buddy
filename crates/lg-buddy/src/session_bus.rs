@@ -1170,9 +1170,37 @@ mod tests {
     }
 
     impl PrivateDbusDaemon {
+        /// Self-contained bus config: the build sandbox (Nix) has no
+        /// `/etc/dbus-1/session.conf` and Nix's packaged session.conf is an
+        /// empty stub, so `--session` cannot start a bus there. A standalone
+        /// session-style config with an explicit unix listener works
+        /// everywhere `dbus-daemon` runs.
+        const TEST_BUS_CONFIG: &str = r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>"#;
+
         fn start() -> Result<Self, String> {
+            let config = std::env::temp_dir().join("lg-buddy-test-bus.conf");
+            std::fs::write(&config, Self::TEST_BUS_CONFIG)
+                .map_err(|err| format!("write private dbus-daemon config: {err}"))?;
             let child = Command::new("dbus-daemon")
-                .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                .args([
+                    "--config-file",
+                    config.to_str().unwrap(),
+                    "--nofork",
+                    "--nopidfile",
+                    "--print-address=1",
+                ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
