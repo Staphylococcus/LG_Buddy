@@ -405,29 +405,31 @@ fn decode_mountinfo_field(field: &[u8]) -> Vec<u8> {
     decoded
 }
 
+/// What `systemctl is-system-running` observed. Pure observation: whether a
+/// state counts as usable is decided by the preflight judgment, not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CapabilityFact {
-    Available,
-    Unavailable(String),
-}
-
-impl CapabilityFact {
-    pub fn unavailable(reason: impl Into<String>) -> Self {
-        Self::Unavailable(reason.into())
-    }
+pub enum SystemdManagerObservation {
+    /// The probe ran and reported a manager state (possibly empty).
+    Reported { state: String, stderr: String },
+    /// systemctl could not be run at all.
+    ProbeFailed(String),
+    /// The probe was deliberately not run (sandboxed execution).
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceManagerFacts {
-    pub system: CapabilityFact,
-    pub user: CapabilityFact,
+    pub system: SystemdManagerObservation,
+    pub user: SystemdManagerObservation,
 }
 
 impl ServiceManagerFacts {
-    pub fn available() -> Self {
+    /// Record that no probe was run. Sandboxed execution cannot reach a
+    /// system manager, so the judgment treats a skipped probe as passing.
+    pub fn skipped() -> Self {
         Self {
-            system: CapabilityFact::Available,
-            user: CapabilityFact::Available,
+            system: SystemdManagerObservation::Skipped,
+            user: SystemdManagerObservation::Skipped,
         }
     }
 
@@ -439,7 +441,7 @@ impl ServiceManagerFacts {
     }
 }
 
-fn observe_systemd(user: bool) -> CapabilityFact {
+fn observe_systemd(user: bool) -> SystemdManagerObservation {
     let mut command = Command::new("systemctl");
     if user {
         command.arg("--user");
@@ -447,20 +449,14 @@ fn observe_systemd(user: bool) -> CapabilityFact {
     let output = match command.arg("is-system-running").output() {
         Ok(output) => output,
         Err(err) => {
-            return CapabilityFact::unavailable(format!("could not run systemctl: {err}"));
+            return SystemdManagerObservation::ProbeFailed(format!(
+                "could not run systemctl: {err}"
+            ));
         }
     };
     let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if matches!(state.as_str(), "running" | "degraded") {
-        CapabilityFact::Available
-    } else if state.is_empty() {
-        CapabilityFact::unavailable(format!(
-            "systemctl did not report a usable manager state ({})",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    } else {
-        CapabilityFact::unavailable(format!("systemd manager state is {state}"))
-    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    SystemdManagerObservation::Reported { state, stderr }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,7 +685,7 @@ fn observe_current_process() -> Result<HostPreflightFacts, CompatibilityReport> 
     let system_root = install_root.unwrap_or_else(|| PathBuf::from("/"));
     let service_managers =
         if sandboxed_install && env::var("LG_BUDDY_SKIP_SYSTEMD_ACTIONS").as_deref() == Ok("1") {
-            ServiceManagerFacts::available()
+            ServiceManagerFacts::skipped()
         } else {
             ServiceManagerFacts::observe()
         };
@@ -1014,6 +1010,27 @@ fn systemd_config_override_line(config_path: &Path) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     format!("Environment=\"LG_BUDDY_CONFIG={escaped}\"")
+}
+
+/// Judgment: which systemd manager observations make an upgrade impossible.
+/// `Skipped` is a pass by design: sandboxed execution cannot reach a system
+/// manager, and the upgrade's mutation step will have sudo anyway.
+fn service_manager_refusal(observation: &SystemdManagerObservation) -> Option<String> {
+    match observation {
+        SystemdManagerObservation::Skipped => None,
+        SystemdManagerObservation::ProbeFailed(reason) => Some(reason.clone()),
+        SystemdManagerObservation::Reported { state, stderr } => {
+            if matches!(state.as_str(), "running" | "degraded") {
+                None
+            } else if state.is_empty() {
+                Some(format!(
+                    "systemctl did not report a usable manager state ({stderr})"
+                ))
+            } else {
+                Some(format!("systemd manager state is {state}"))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1621,13 +1638,13 @@ impl<'a, F: FilesystemFacts> Checker<'a, F> {
     fn check_capability(
         &mut self,
         check: &'static str,
-        capability: &CapabilityFact,
+        observation: &SystemdManagerObservation,
         remedy: &'static str,
     ) {
-        if let CapabilityFact::Unavailable(reason) = capability {
-            self.report
-                .refuse(check, None, reason.clone(), remedy.to_string());
-        }
+        let Some(reason) = service_manager_refusal(observation) else {
+            return;
+        };
+        self.report.refuse(check, None, reason, remedy.to_string());
     }
 
     fn check_not_writable_by_others(&mut self, path: &Path, facts: &PathFacts) {
@@ -2717,8 +2734,10 @@ mod tests {
     #[test]
     fn initial_preflight_refuses_unavailable_service_manager() {
         let mut fixture = InstalledFixture::new("no-user-manager");
-        fixture.facts.service_managers.user =
-            CapabilityFact::unavailable("user systemd manager is offline");
+        fixture.facts.service_managers.user = SystemdManagerObservation::Reported {
+            state: "offline".to_string(),
+            stderr: String::new(),
+        };
 
         let report = evaluate_initial_preflight(&OsFilesystemFacts, &fixture.facts);
 
@@ -3148,7 +3167,7 @@ mod tests {
                 effective_uid: if owner_uid == 0 { 1000 } else { owner_uid },
                 system_owner_uid: owner_uid,
                 user_owner_uid: owner_uid,
-                service_managers: ServiceManagerFacts::available(),
+                service_managers: ServiceManagerFacts::skipped(),
             };
 
             Self {
@@ -3231,5 +3250,35 @@ mod tests {
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(mode);
         fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn service_manager_refusal_decides_usability() {
+        fn reported(state: &str) -> SystemdManagerObservation {
+            SystemdManagerObservation::Reported {
+                state: state.to_string(),
+                stderr: "systemctl stderr".to_string(),
+            }
+        }
+        assert_eq!(service_manager_refusal(&reported("running")), None);
+        assert_eq!(service_manager_refusal(&reported("degraded")), None);
+        assert_eq!(
+            service_manager_refusal(&reported("")),
+            Some("systemctl did not report a usable manager state (systemctl stderr)".to_string())
+        );
+        assert_eq!(
+            service_manager_refusal(&reported("offline")),
+            Some("systemd manager state is offline".to_string())
+        );
+        assert_eq!(
+            service_manager_refusal(&SystemdManagerObservation::ProbeFailed(
+                "could not run systemctl: missing".to_string()
+            )),
+            Some("could not run systemctl: missing".to_string())
+        );
+        assert_eq!(
+            service_manager_refusal(&SystemdManagerObservation::Skipped),
+            None
+        );
     }
 }
