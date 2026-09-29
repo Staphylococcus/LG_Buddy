@@ -4,29 +4,27 @@ Feature: System sleep hook
   Scenario: sleep-pre requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_3 with brightness 100
     And sleep retry delays are disabled
     When I run the command "sleep-pre"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_input"
-    And the TV client did not receive "power_off"
+    And the native webOS TV received no requests
     And the system marker is absent
     And the TV is powered on
 
   Scenario: sleep migration gate runs before journal queries and TV work
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_3 with brightness 100
     And sleep retry delays are disabled
     And journalctl reports a pending NetworkManager sleep request
     When I run the command "sleep"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_input"
-    And the TV client did not receive "power_off"
+    And the native webOS TV received no requests
     And the system marker is absent
     And the TV is powered on
 
@@ -49,12 +47,13 @@ Feature: System sleep hook
   Scenario: sleep-pre migration gate runs before the input query fallback
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV will fail "get_input" 4 times with status 1 and stderr "offline"
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the native webOS TV powers off
     And sleep retry delays are disabled
     When I run the command "sleep-pre"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_input"
-    And the TV client did not receive "power_off"
+    And the native webOS TV received no requests
     And the system marker is absent
+    And the TV is powered off
