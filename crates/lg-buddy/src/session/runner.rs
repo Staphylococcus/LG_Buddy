@@ -367,8 +367,7 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 }
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    load_current_config(&config_path)?;
+    crate::startup::backend_start()?;
     run_monitor_with_executor(writer, RuntimeActionExecutor::default()).map_err(|err| match err {
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
@@ -377,8 +376,7 @@ pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
 }
 
 pub fn run_lifecycle_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-    load_current_config(&config_path)?;
+    let config_path = crate::startup::backend_start()?;
     run_lifecycle_monitor_with_executor(writer, RuntimeActionExecutor::default(), &config_path)
         .map_err(|err| match err {
             SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),

@@ -39,6 +39,7 @@ pub mod settings_view;
 pub mod setup;
 pub mod sources;
 pub mod state;
+pub mod startup;
 pub mod tv;
 pub mod tvs;
 pub mod update_flow;
@@ -65,6 +66,7 @@ use crate::config::{
     load_current_config, resolve_config_path_from_env, ConfigError, ConfigLoadError,
     ConfigPathError,
 };
+use crate::migration::automatic::AutomaticMigrationError;
 use crate::dev::run_dev_command;
 use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
@@ -341,6 +343,7 @@ pub enum RunError {
     Io(io::Error),
     Policy(String),
     MigrationRequired(String),
+    Migration(AutomaticMigrationError),
     TvClientBuild(TvClientBuildError),
     ConfigPath(ConfigPathError),
     Config(ConfigError),
@@ -367,6 +370,7 @@ impl fmt::Display for RunError {
             Self::Io(err) => write!(f, "{err}"),
             Self::Policy(err) => write!(f, "{err}"),
             Self::MigrationRequired(err) => write!(f, "{err}"),
+            Self::Migration(err) => write!(f, "{err}"),
             Self::TvClientBuild(err) => write!(f, "{err}"),
             Self::ConfigPath(err) => write!(f, "{err}"),
             Self::Config(err) => write!(f, "{err}"),
@@ -398,6 +402,7 @@ impl std::error::Error for RunError {
             Self::Io(err) => Some(err),
             Self::Policy(_) => None,
             Self::MigrationRequired(_) => None,
+            Self::Migration(err) => Some(err),
             Self::TvClientBuild(err) => Some(err),
             Self::ConfigPath(err) => Some(err),
             Self::Config(err) => Some(err),
@@ -464,6 +469,12 @@ impl From<ConfigLoadError> for RunError {
             ConfigLoadError::Stale(_) => RunError::MigrationRequired(err.to_string()),
             other => RunError::ConfigLoad(other),
         }
+    }
+}
+
+impl From<AutomaticMigrationError> for RunError {
+    fn from(err: AutomaticMigrationError) -> Self {
+        RunError::Migration(err)
     }
 }
 
@@ -1227,6 +1238,10 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
 ///
 /// The match is exhaustive by design: adding a `Command` or `BrightnessCommand`
 /// variant is a compile error until its config requirement is decided here.
+/// The persistent daemon entry points (`Monitor` / `Lifecycle`) are ungated:
+/// they run `startup::backend_start()`, which converts a stale config in place
+/// before any runtime work, so a user with a legacy config is migrated on the
+/// next daemon start instead of being blocked.
 fn requires_current_config(command: &Command) -> bool {
     match command {
         Command::Startup(_)
@@ -1238,14 +1253,13 @@ fn requires_current_config(command: &Command) -> bool {
         | Command::Screen(ScreenCommand::On)
         | Command::ScreenOff
         | Command::ScreenOn
-        | Command::Monitor
-        | Command::Lifecycle
         | Command::NetworkManagerPreDown
         | Command::Volume(_)
         // The TV-operating brightness variants are gated.
         | Command::Brightness(BrightnessCommand::Get)
         | Command::Brightness(BrightnessCommand::Set(_)) => true,
-        // Migration host / diagnostics / maintenance: no TV operation.
+        // Migration host / diagnostics / maintenance / persistent daemons: no
+        // TV operation at the gate (the daemons self-migrate in `backend_start`).
         Command::Overview
         | Command::DetectBackend
         | Command::Setup(_)
@@ -1253,6 +1267,8 @@ fn requires_current_config(command: &Command) -> bool {
         | Command::Dev(_)
         | Command::Settings(_)
         | Command::Updates(_)
+        | Command::Monitor
+        | Command::Lifecycle
         | Command::UpgradePreflight { .. }
         | Command::GnomeReadinessProbe { .. }
         // `prompt` opens the GUI migration host and must stay reachable.
@@ -2778,8 +2794,6 @@ mod tests {
             Command::Screen(ScreenCommand::On),
             Command::ScreenOff,
             Command::ScreenOn,
-            Command::Monitor,
-            Command::Lifecycle,
             Command::NetworkManagerPreDown,
             Command::Volume(VolumeCommand::Mute(MuteCommand::Toggle)),
             Command::Brightness(BrightnessCommand::Set(brightness(42))),
@@ -2790,9 +2804,12 @@ mod tests {
                 "{command:?} should be gated"
             );
         }
-        // The migration host and the GUI-forwarding brightness prompt stay
-        // available on a stale config.
+        // The migration host, the GUI-forwarding brightness prompt, and the
+        // persistent daemons (which self-migrate in `startup::backend_start`)
+        // stay available on a stale config.
         let ungated = [
+            Command::Monitor,
+            Command::Lifecycle,
             Command::Brightness(BrightnessCommand::Prompt),
             Command::Dev(DevCommand::WebOsAuthProbe),
             Command::DetectBackend,
