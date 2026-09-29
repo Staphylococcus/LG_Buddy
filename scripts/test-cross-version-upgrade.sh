@@ -307,6 +307,19 @@ EOF
         [ ! -e "$LG_BUDDY_TEST_LEGACY_CALL_LOG" ] || fail "Upgrade or migration-gated command contacted the legacy TV."
         cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
         find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
+        # The persistent daemon entry is the migration authority: starting the
+        # screen monitor converts the surviving legacy config in place, while
+        # the one-shot commands above stayed gated. The conversion is local
+        # config work and must not contact the TV.
+        LG_BUDDY_CONFIG="$config" \
+            LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS=0.3 \
+            timeout 30 "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" monitor \
+            >"$WORK_DIR/legacy-$platform-monitor.output" 2>&1
+        grep -q '^tvs_primary_platform=lg_webos$' "$config"
+        if cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"; then
+            fail "Daemon start left the legacy $platform configuration unconverted."
+        fi
+        [ ! -e "$LG_BUDDY_TEST_LEGACY_CALL_LOG" ] || fail "Daemon start contacted the legacy TV."
     )
 done
 
