@@ -4,26 +4,26 @@ Feature: Screen
   Scenario: Screen off requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
     When I run the command "screen off"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received no requests
     And the TV screen is visible
     And the session marker is absent
 
   Scenario: Screen on requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
-    And the TV screen is blanked
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the native webOS TV screen is blanked
     And the session marker exists
     When I run the command "screen on"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "turn_screen_on"
+    And the native webOS TV received no requests
     And the TV screen is blanked
     And the session marker exists
 
