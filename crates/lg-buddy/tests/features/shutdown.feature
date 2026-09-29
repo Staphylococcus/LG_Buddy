@@ -42,12 +42,10 @@ Feature: Shutdown
 
   Scenario: Shutdown requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_3
-    And a mock TV client
-    And the TV is on input HDMI_3
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_3 with brightness 100
     And reboot detection reports no pending reboot
     When I run the command "shutdown"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_input"
-    And the TV client did not receive "power_off"
-    And the TV is powered on
+    And the native webOS TV received no requests
