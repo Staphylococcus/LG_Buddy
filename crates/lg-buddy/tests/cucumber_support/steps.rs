@@ -666,6 +666,15 @@ fn native_webos_received_exactly(world: &mut LgBuddyWorld, expected: usize, uri:
     );
 }
 
+#[then("the native webOS TV received no requests")]
+fn native_webos_received_no_requests(world: &mut LgBuddyWorld) {
+    let uris = world.webos_snapshot().request_uris;
+    assert!(
+        uris.is_empty(),
+        "expected no webOS TV requests, saw: {uris:?}"
+    );
+}
+
 #[then("a valid native TV access token is stored")]
 fn valid_native_access_token_is_stored(world: &mut LgBuddyWorld) {
     world.assert_valid_native_access_token();

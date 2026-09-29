@@ -18,15 +18,15 @@ Feature: Brightness
 
   Scenario: An incomplete installation reports the missing GUI executable
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And the GTK brightness GUI is unavailable
     When I run the command "brightness"
     Then the command fails
     And the command exits with status 1
     And stderr contains "LG Buddy GUI is not installed"
     And stderr contains "install the matching lg-buddy-gui executable"
-    And the TV client did not receive "get_picture_settings"
-    And the TV client did not receive "set_settings"
+    And the native webOS TV received no requests
 
   Scenario: Headless brightness remains usable without the GTK GUI
     Given a temporary LG Buddy config using input HDMI_2
@@ -44,15 +44,14 @@ Feature: Brightness
 
   Scenario: Brightness get requires migration on a legacy bscpylgtv config
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
-    And the TV backlight is 58
+    And the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
     And a working GTK brightness GUI
     When I run the command "brightness get"
     Then the command fails
     And stderr contains "v2 migration required"
     And the GTK brightness GUI was not launched
-    And the TV client did not receive "get_picture_settings"
-    And the TV client did not receive "set_settings"
+    And the native webOS TV received no requests
 
   Scenario: Brightness set updates OLED brightness without opening a dialog
     Given a temporary LG Buddy config using input HDMI_2
@@ -69,16 +68,17 @@ Feature: Brightness
 
   Scenario: Brightness set rejects invalid values before touching the TV
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
-    And the TV backlight is 44
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     When I run the command "brightness set 101"
     Then the command fails
     And the command exits with status 2
     And stderr contains "invalid OLED brightness"
     And stderr contains "brightness set <0-100>"
-    And the TV client did not receive "get_picture_settings"
-    And the TV client did not receive "set_settings"
-    And the TV brightness is 44
+    And the native webOS TV received no requests
+    And the native webOS TV received no requests
+    And the TV brightness is 90
 
   Scenario: Brightness help describes the public commands
     When I run the command "brightness --help"
