@@ -3,43 +3,51 @@ Feature: Volume
 
   Background:
     Given a temporary LG Buddy config using input HDMI_2
-    And a mock TV client
 
   Scenario: Volume requires migration on a legacy bscpylgtv config
-    Given the TV volume is 37
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the TV volume is 37
     And the TV is unmuted
     When I run the command "volume"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_audio_status"
+    And the native webOS TV received no requests
 
   Scenario: Volume mute read requires migration on a legacy bscpylgtv config
-    Given the TV volume is 37
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the TV volume is 37
     And the TV is muted
     When I run the command "volume"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_audio_status"
+    And the native webOS TV received no requests
 
   Scenario: Volume unknown-level read requires migration on a legacy bscpylgtv config
-    Given the TV volume is unknown
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the TV volume is unknown
     And the TV is unmuted
     When I run the command "volume"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "get_audio_status"
+    And the native webOS TV received no requests
 
   Scenario: Setting volume requires migration on a legacy bscpylgtv config
-    Given the TV volume is 20
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the TV volume is 20
     And the TV is muted
     When I run the command "volume 42"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "set_volume"
-    And the TV client did not receive "set_mute"
+    And the native webOS TV received no requests
 
   Scenario: Stepping volume requires migration on a legacy bscpylgtv config
-    Given the TV volume is 20
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the TV volume is 20
     And the TV is muted
     When I run the command "volume up"
     Then the command fails
@@ -48,11 +56,12 @@ Feature: Volume
     When I run the command "volume down"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "volume_up"
-    And the TV client did not receive "volume_down"
+    And the native webOS TV received no requests
     And the TV volume is 20
 
   Scenario: Mute toggle requires migration on a legacy bscpylgtv config
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
     Given the TV is unmuted
     When I run the command "volume mute"
     Then the command fails
@@ -63,27 +72,29 @@ Feature: Volume
     When I run the command "volume mute on"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "set_mute"
+    And the native webOS TV received no requests
     And the TV is unmuted
 
   Scenario: Invalid volume is rejected before touching the TV
+    Given a native webOS TV on input HDMI_2 with brightness 90
     Given the TV volume is 20
     When I run the command "volume 101"
     Then the command fails
     And the command exits with status 2
     And stderr contains "invalid volume"
     And stderr contains "volume <0-100>"
-    And the TV client did not receive "set_volume"
+    And the native webOS TV received no requests
     And the TV volume is 20
 
   Scenario: Stale volume commands leave mute and volume unchanged
+    Given the existing config selects TV platform "bscpylgtv"
+    And a native webOS TV on input HDMI_2 with brightness 90
     Given the TV volume is 20
     And the TV is muted
     When I run the command "volume up"
     Then the command fails
     And stderr contains "v2 migration required"
-    And the TV client did not receive "volume_up"
-    And the TV client did not receive "set_mute"
+    And the native webOS TV received no requests
     And the TV volume is 20
     And the TV is muted
 
