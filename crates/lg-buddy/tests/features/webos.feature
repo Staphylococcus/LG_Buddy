@@ -87,14 +87,15 @@ Feature: Native webOS TV platform
     Then the command succeeds
     And stdout is "lg_webos"
 
-  Scenario: Rejected foreground pairing preserves automatic conversion and credentials
+  Scenario: Rejected foreground pairing leaves the platform and credentials unchanged
     Given a temporary LG Buddy config using input HDMI_2
     And a native webOS TV on input HDMI_2 with brightness 90
     And the native webOS TV rejects pairing
+    And the current config is remembered
     When I run the command "settings set tv.platform lg_webos"
     Then the command fails
     And stderr contains "webOS pairing was rejected: pairing denied"
-    And config.env contains "tvs_primary_platform=lg_webos"
+    And config.env is unchanged
     And no native TV access token is stored
     And the native TV connection count is 1
     And the native TV registration tokens are "none"

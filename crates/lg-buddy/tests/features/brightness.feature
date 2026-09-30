@@ -42,9 +42,10 @@ Feature: Brightness
     And the TV brightness is 66
     And the native webOS TV received exactly 1 requests to "ssap://system.notifications/createAlert"
 
-  Scenario: Brightness get converts a legacy bscpylgtv config before native control
+  Scenario: Brightness get works after daemon conversion
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And a working GTK brightness GUI
     When I run the command "brightness get"

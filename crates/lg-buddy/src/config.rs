@@ -498,7 +498,7 @@ impl StaleConfigReason {
                 "tvs_primary_platform is not set (loads as the legacy `bscpylgtv` default)"
             }
             Self::BscpylgtvPlatform => {
-                "tvs_primary_platform=bscpylgtv is retired; application startup converts it to lg_webos"
+                "tvs_primary_platform=bscpylgtv is retired; user screen daemon startup converts it to lg_webos"
             }
             Self::SwayidleBackend => {
                 "screen_backend=swayidle is a legacy override; set it to auto, gnome, or wayland"

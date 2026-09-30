@@ -242,7 +242,7 @@ install_previous() (
 )
 
 # Exercise both legacy selectors against an actual installation of the pinned
-# archive. Installation preserves the saved profile; startup converts it later.
+# archive. Installation preserves the saved profile; user daemon startup converts it later.
 for platform in explicit missing; do
     (
         export HOME="$WORK_DIR/legacy-$platform/home"

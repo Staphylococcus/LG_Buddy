@@ -1,10 +1,11 @@
 Feature: Screen
   LG Buddy should expose manual screen blanking and restoration through the public CLI.
 
-  Scenario: Screen off converts a legacy bscpylgtv config
+  Scenario: Screen off works after daemon conversion
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     When I run the command "screen off"
     Then the command succeeds
@@ -12,10 +13,11 @@ Feature: Screen
     And the TV screen is blanked
     And the session marker exists
 
-  Scenario: Screen on converts a legacy bscpylgtv config
+  Scenario: Screen on works after daemon conversion
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the native webOS TV screen is blanked
     And the session marker exists

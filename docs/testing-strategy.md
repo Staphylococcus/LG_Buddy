@@ -160,7 +160,7 @@ It is useful when we want to express scenarios like:
 - when fresh configuration accepts the default `lg_webos` platform, pairing
   stores the credential before setup completes
 - when an existing profile has no platform value, a read-only TV command is
-  gated and application startup converts the saved profile locally
+  gated and user screen daemon startup converts the saved profile locally
 - when native credentials are missing or stale, ordinary TV commands pair or
   repair them as part of the operation
 - when native credentials are missing, shutdown and suspend-related commands

@@ -13,7 +13,6 @@ use lg_buddy::audio::{AudioOperation, AudioWriteFailure};
 use lg_buddy::brightness::{BrightnessReadFailure, BrightnessWriteFailure};
 use lg_buddy::config::{load_current_config, TvPlatform};
 use lg_buddy::events::RuntimeEvent;
-use lg_buddy::migration::automatic::AutomaticMigrationError;
 use lg_buddy::overview::{
     AudioReadFailure, EnvironmentOverviewBackend, OverviewBackend, OverviewSummaryFailure,
 };
@@ -287,7 +286,7 @@ fn invalid_utf8_config_prevents_model_lookup_for_a_cached_profile() {
 }
 
 #[test]
-fn invalid_legacy_sleep_stops_before_journal_tv_or_marker_work() {
+fn stale_legacy_sleep_stops_before_journal_tv_or_marker_work() {
     let mut env = TestEnv::new();
     let config = TestConfigFile::new("migration-sleep");
     config.write_sample("HDMI_2");
@@ -301,9 +300,7 @@ fn invalid_legacy_sleep_stops_before_journal_tv_or_marker_work() {
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     assert!(matches!(
         run_command(Command::Sleep, &mut Vec::new()),
-        Err(RunError::Migration(
-            AutomaticMigrationError::InvalidConfiguration
-        ))
+        Err(RunError::MigrationRequired(_))
     ));
     assert!(!journal_log.exists());
     runtime.assert_system_marker_absent();
@@ -331,7 +328,7 @@ fn backend_detection_keeps_stale_profile_unchanged() {
 }
 
 #[test]
-fn valid_settings_edit_converts_stale_profile_after_invalid_edit_stays_read_only() {
+fn settings_edits_leave_stale_profile_for_daemon_startup() {
     let mut env = TestEnv::new();
     let config = TestConfigFile::new("migration-settings-write");
     config.write_sample("HDMI_2");
@@ -360,7 +357,7 @@ fn valid_settings_edit_converts_stale_profile_after_invalid_edit_stays_read_only
     )
     .unwrap();
     let contents = fs::read_to_string(config.path()).unwrap();
-    assert!(contents.contains("tvs_primary_platform=lg_webos"));
+    assert!(!contents.contains("tvs_primary_platform="));
     assert!(contents.contains("tvs_primary_input=HDMI_3"));
     assert_eq!(native.snapshot().connection_count, 0);
 }

@@ -109,6 +109,11 @@ fn existing_tv_platform(world: &mut LgBuddyWorld, platform: String) {
     world.select_tv_platform(&platform);
 }
 
+#[given("the user screen daemon startup check runs")]
+fn user_screen_daemon_startup(world: &mut LgBuddyWorld) {
+    world.run_user_screen_daemon_startup();
+}
+
 #[given(regex = r#"the existing config sets screen backend \"([a-z]+)\""#)]
 fn existing_screen_backend(world: &mut LgBuddyWorld, backend: String) {
     world.set_screen_backend(&backend);

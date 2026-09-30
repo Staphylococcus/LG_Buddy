@@ -40,9 +40,10 @@ Feature: Shutdown
     And the native webOS TV received exactly 0 requests to "ssap://system/turnOff"
     And the TV is powered on
 
-  Scenario: Shutdown converts a legacy config but skips without native credentials
+  Scenario: Shutdown skips without native credentials after daemon conversion
     Given a temporary LG Buddy config using input HDMI_3
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_3 with brightness 100
     And reboot detection reports no pending reboot
     When I run the command "shutdown"

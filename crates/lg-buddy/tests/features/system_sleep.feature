@@ -1,10 +1,11 @@
 Feature: System sleep hook
   LG Buddy should power off the TV before system sleep when ownership rules require it.
 
-  Scenario: sleep-pre converts a legacy config but skips without native credentials
+  Scenario: sleep-pre skips without native credentials after daemon conversion
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_3 with brightness 100
     And sleep retry delays are disabled
     When I run the command "sleep-pre"
@@ -15,10 +16,11 @@ Feature: System sleep hook
     And the system marker is absent
     And the TV is powered on
 
-  Scenario: sleep converts legacy config and skips TV work without credentials
+  Scenario: sleep skips TV work without credentials after daemon conversion
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_3 with brightness 100
     And sleep retry delays are disabled
     And journalctl reports a pending NetworkManager sleep request
@@ -46,10 +48,11 @@ Feature: System sleep hook
     And the system marker is absent
     And the TV is powered on
 
-  Scenario: sleep-pre conversion does not require an online TV
+  Scenario: Daemon conversion does not require an online TV
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the native webOS TV powers off
     And sleep retry delays are disabled

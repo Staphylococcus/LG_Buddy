@@ -69,6 +69,15 @@ impl LgBuddyWorld {
         self.config = Some(config);
     }
 
+    pub fn run_user_screen_daemon_startup(&self) {
+        let config = self
+            .config
+            .as_ref()
+            .expect("temporary config should be present");
+        let path = lg_buddy::startup::backend_start().expect("user screen daemon startup");
+        assert_eq!(path, config.path());
+    }
+
     pub fn create_empty_config_path(&mut self) {
         let config = TestConfigFile::new("cucumber-initial-config");
         self.ensure_env().set("LG_BUDDY_CONFIG", config.path());

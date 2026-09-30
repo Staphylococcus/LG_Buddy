@@ -238,25 +238,6 @@ pub fn run_settings_command<W: io::Write>(
     runner.run(command, writer)
 }
 
-/// Reject invalid CLI edits before startup conversion can change a saved
-/// legacy profile. Read-only settings commands never start conversion.
-pub(crate) fn validate_cli_mutation(command: &SettingsCommand) -> Result<bool, SettingsError> {
-    match command {
-        SettingsCommand::Set { key, value } => {
-            let store = SettingsStore::load_from_env()?;
-            let mutation = SettingsMutation::set(&store, key, value)?;
-            tv::validate_platform_mutation(&mutation)?;
-            Ok(true)
-        }
-        SettingsCommand::Unset(key) => {
-            let store = SettingsStore::load_from_env()?;
-            SettingsMutation::unset(&store, key)?;
-            Ok(true)
-        }
-        SettingsCommand::List | SettingsCommand::Describe(_) | SettingsCommand::Get(_) => Ok(false),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

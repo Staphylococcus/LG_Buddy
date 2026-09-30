@@ -4,8 +4,9 @@ Feature: Volume
   Background:
     Given a temporary LG Buddy config using input HDMI_2
 
-  Scenario: Volume read converts a legacy bscpylgtv config
+  Scenario: Volume read works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the TV volume is 37
     And the TV is unmuted
@@ -14,8 +15,9 @@ Feature: Volume
     And stdout is "37"
     And config.env contains "tvs_primary_platform=lg_webos"
 
-  Scenario: Muted volume read converts a legacy bscpylgtv config
+  Scenario: Muted volume read works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the TV volume is 37
     And the TV is muted
@@ -24,8 +26,9 @@ Feature: Volume
     And stdout is "mute"
     And config.env contains "tvs_primary_platform=lg_webos"
 
-  Scenario: Unknown-level volume read converts a legacy bscpylgtv config
+  Scenario: Unknown-level volume read works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the TV volume is unknown
     And the TV is unmuted
@@ -34,8 +37,9 @@ Feature: Volume
     And stdout is "unknown"
     And config.env contains "tvs_primary_platform=lg_webos"
 
-  Scenario: Setting volume converts a legacy bscpylgtv config
+  Scenario: Setting volume works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the TV volume is 20
     And the TV is muted
@@ -44,8 +48,9 @@ Feature: Volume
     And config.env contains "tvs_primary_platform=lg_webos"
     And the TV volume is 42
 
-  Scenario: Stepping volume converts a legacy bscpylgtv config once
+  Scenario: Stepping volume works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     And the TV volume is 20
     And the TV is muted
@@ -58,8 +63,9 @@ Feature: Volume
     Then the command succeeds
     And the TV volume is 20
 
-  Scenario: Mute toggle converts a legacy bscpylgtv config once
+  Scenario: Mute toggle works after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     Given the TV is unmuted
     When I run the command "volume mute"
@@ -82,8 +88,9 @@ Feature: Volume
     And the native webOS TV received no requests
     And the TV volume is 20
 
-  Scenario: A converted volume command applies the native write
+  Scenario: Volume command applies native write after daemon conversion
     Given the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
     And a native webOS TV on input HDMI_2 with brightness 90
     Given the TV volume is 20
     And the TV is muted

@@ -649,7 +649,7 @@ without invoking them.
 Native upgrades run a second candidate preflight for removal of the obsolete
 `/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested mounts
 before removal. Installation leaves configuration and credentials unchanged;
-application startup converts supported stale configuration locally.
+user screen daemon startup converts supported stale configuration locally.
 
 Fresh installation never provisions Python. GTK/libadwaita requirements are
 checked through the bundled GUI's internal `--check-runtime` entrypoint, which
@@ -848,7 +848,7 @@ remain inside the adapter. Wake-on-LAN keeps the configured network identity at
 `tv.platform=lg_webos` selects the native Rust TV implementation. Fresh
 profiles verify pairing before the profile is saved. A missing platform value
 or explicit `bscpylgtv` is recognized as stale 1.x configuration and gated
-until application startup converts it to `lg_webos`. Conversion does not pair.
+until user screen daemon startup converts it to `lg_webos`. Conversion does not pair.
 
 `WebOsTvClient` owns one lazily authenticated
 websocket session behind a mutex, reuses it while healthy, and discards it after
@@ -1032,7 +1032,7 @@ asymmetric:
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
-Saved `swayidle` selections are converted to `auto` at application startup.
+Saved `swayidle` selections are converted to `auto` at user screen daemon startup.
 Automatic monitoring never probes or starts `swayidle`; externally managed
 idle automation can call the public screen commands. The legacy process adapter
 remains in source until its separate removal. Native Wayland remains

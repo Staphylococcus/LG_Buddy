@@ -171,7 +171,7 @@ disable **Idle blanking** first to use automatic integration with the other
 application features. The legacy override remains visible even with idle
 blanking disabled. Existing explicit GNOME and Wayland configurations keep
 their behavior until you choose to switch. A saved `swayidle` selection is
-converted to `auto` at the next application startup.
+converted to `auto` at the next user screen daemon start.
 
 This preference applies to the native GNOME and Wayland integrations. The
 deprecated, explicitly selected `swayidle` integration always honors app
@@ -189,7 +189,7 @@ without a key. Existing scripts can still explicitly use `settings get`,
 `describe`, `set` and `unset` with `screen.backend`. The accepted values remain
 `auto`, `gnome`, `wayland` and `swayidle`; `unset` restores the `auto` default.
 Reading or listing settings never migrates a saved override. A later
-config-using startup converts a saved `swayidle` selection to `auto`.
+user screen daemon startup converts a saved `swayidle` selection to `auto`.
 
 These legacy writes keep their save-then-apply behavior: if service application
 fails, the command returns an error identifying the saved value, which remains
@@ -269,7 +269,7 @@ may remain paired when a later step is incomplete; rerunning resumes the work.
 
 The v2 installer leaves an existing TV profile unchanged and removes the
 obsolete LG Buddy environment at `/usr/bin/LG_Buddy_PIP`. At the next
-application startup, a saved profile with `bscpylgtv` or no platform key is
+user screen daemon start, a saved profile with `bscpylgtv` or no platform key is
 converted locally to `lg_webos`. Conversion does not contact the TV or pair it.
 If native credentials are missing, a later foreground TV operation may ask the
 TV to approve pairing. The installer and converter preserve `.aiopylgtv.sqlite`.

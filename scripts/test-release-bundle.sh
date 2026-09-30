@@ -642,7 +642,7 @@ sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CON
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 "$INSTALLED_BINARY" settings set screen.backend swayidle
-grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
@@ -659,7 +659,7 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings set updates.channel prerelease
 BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
 printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
-grep -q '^screen_backend=auto$' "$CONFIG_FILE"
+grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
@@ -667,12 +667,12 @@ grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=22:33:44:55:66:77$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
-grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
-# Read-only settings preserve the original text of a current profile.
-sed -i 's/^tvs_primary_platform=lg_webos$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
+# Settings own reconfiguration; they do not convert a stale profile.
+sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
 printf '%s\n' 'tvs_primary_platform = lg_webos # native' >> "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
 "$INSTALLED_BINARY" settings set tv.ip 192.168.1.11
@@ -681,7 +681,7 @@ printf '%s\n' 'tvs_primary_platform = lg_webos # native' >> "$CONFIG_FILE"
 # Normalize this controlled fixture for the following invalid-platform cases.
 sed -i '/tvs_primary_platform/d' "$CONFIG_FILE"
 printf '%s\n' tvs_primary_platform=lg_webos >> "$CONFIG_FILE"
-grep -q '^screen_backend=auto$' "$CONFIG_FILE"
+grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"

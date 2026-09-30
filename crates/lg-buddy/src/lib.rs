@@ -1145,20 +1145,8 @@ fn hex_digit_value(byte: u8) -> Option<u8> {
 }
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
-    if migrates_config_on_start(&command) {
-        startup::foreground_start()?;
-    }
-    if let Command::Settings(settings_command) = &command {
-        if settings::validate_cli_mutation(settings_command).map_err(RunError::Settings)? {
-            match startup::foreground_start() {
-                // A settings edit may be repairing an incomplete configuration.
-                Err(RunError::Migration(AutomaticMigrationError::InvalidConfiguration)) => {}
-                result => result?,
-            }
-        }
-    }
-    // The read-only current-config gate still protects TV operations if a
-    // concurrent writer restores stale contents after conversion.
+    // TV operations require the current config, including before the user
+    // daemon has had a chance to convert a stale saved profile.
     if requires_current_config(&command) {
         let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
         // Early-feedback stale gate: a stale 1.x/bscpylgtv config is a
@@ -1240,39 +1228,8 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     }
 }
 
-/// Entry points that consume application configuration. Settings commands,
-/// internal probes, GUI forwarding, and daemons retain their own boundaries;
-/// daemons convert in `backend_start` as their owner allows.
-fn migrates_config_on_start(command: &Command) -> bool {
-    match command {
-        Command::Overview
-        | Command::Brightness(BrightnessCommand::Prompt)
-        | Command::Monitor
-        | Command::Lifecycle
-        | Command::KWinBridge(_)
-        | Command::Dev(_)
-        | Command::Settings(_)
-        | Command::DetectBackend
-        | Command::UpgradePreflight { .. }
-        | Command::GnomeReadinessProbe { .. } => false,
-        Command::Setup(_)
-        | Command::Updates(_)
-        | Command::Startup(_)
-        | Command::Shutdown
-        | Command::Power(_)
-        | Command::SleepPre
-        | Command::Sleep
-        | Command::NetworkManagerPreDown
-        | Command::Volume(_)
-        | Command::Brightness(BrightnessCommand::Get | BrightnessCommand::Set(_))
-        | Command::Screen(_)
-        | Command::ScreenOff
-        | Command::ScreenOn => true,
-    }
-}
-
-/// Commands that operate a TV require a current (v2) config after startup
-/// conversion. This gate catches a concurrent stale edit before TV work.
+/// Commands that operate a TV require a current (v2) config. This gate catches
+/// a stale edit before TV work, including before the user daemon starts.
 ///
 /// The match is exhaustive by design: adding a `Command` or `BrightnessCommand`
 /// variant is a compile error until its config requirement is decided here.
@@ -2842,9 +2799,8 @@ mod tests {
                 "{command:?} should be gated"
             );
         }
-        // The migration host, the GUI-forwarding brightness prompt, and the
-        // persistent daemons (which self-migrate in `startup::backend_start`)
-        // stay available on a stale config.
+        // The GUI-forwarding brightness prompt and persistent daemons stay
+        // available on a stale config; the user daemon converts on startup.
         let ungated = [
             Command::Monitor,
             Command::Lifecycle,

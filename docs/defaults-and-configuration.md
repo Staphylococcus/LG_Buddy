@@ -124,8 +124,8 @@ choice.
 
 - fresh profiles select `lg_webos` and pair before the configuration is saved
 - a missing platform or explicit `bscpylgtv` identifies stale 1.x
-  configuration; the next application startup converts it locally to `lg_webos`
-- one-shot TV commands remain gated until startup converts the configuration;
+  configuration; the next user screen daemon start converts it locally to `lg_webos`
+- one-shot TV commands remain gated until the daemon converts the configuration;
   foreground TV operations can then pair or repair native credentials when needed
 - shutdown, suspend, resume, startup, and network-teardown handling use stored
   credentials only and skip promptly when no credential is available
