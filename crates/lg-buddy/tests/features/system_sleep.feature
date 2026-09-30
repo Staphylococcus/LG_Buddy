@@ -1,20 +1,21 @@
 Feature: System sleep hook
   LG Buddy should power off the TV before system sleep when ownership rules require it.
 
-  Scenario: sleep-pre requires migration on a legacy bscpylgtv config
+  Scenario: sleep-pre converts a legacy config but skips without native credentials
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
     And a native webOS TV on input HDMI_3 with brightness 100
     And sleep retry delays are disabled
     When I run the command "sleep-pre"
-    Then the command fails
-    And stderr contains "v2 migration required"
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And stdout contains "Stored TV authentication is unavailable"
     And the native webOS TV received no requests
     And the system marker is absent
     And the TV is powered on
 
-  Scenario: sleep migration gate runs before journal queries and TV work
+  Scenario: sleep converts legacy config and skips TV work without credentials
     Given a temporary LG Buddy config using input HDMI_3
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
@@ -22,8 +23,9 @@ Feature: System sleep hook
     And sleep retry delays are disabled
     And journalctl reports a pending NetworkManager sleep request
     When I run the command "sleep"
-    Then the command fails
-    And stderr contains "v2 migration required"
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And stdout contains "Stored TV authentication is unavailable"
     And the native webOS TV received no requests
     And the system marker is absent
     And the TV is powered on
@@ -44,7 +46,7 @@ Feature: System sleep hook
     And the system marker is absent
     And the TV is powered on
 
-  Scenario: sleep-pre migration gate runs before the input query fallback
+  Scenario: sleep-pre conversion does not require an online TV
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
     And the existing config selects TV platform "bscpylgtv"
@@ -52,8 +54,9 @@ Feature: System sleep hook
     And the native webOS TV powers off
     And sleep retry delays are disabled
     When I run the command "sleep-pre"
-    Then the command fails
-    And stderr contains "v2 migration required"
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And stdout contains "Stored TV authentication is unavailable"
     And the native webOS TV received no requests
     And the system marker is absent
     And the TV is powered off

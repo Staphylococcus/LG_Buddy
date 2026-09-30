@@ -40,12 +40,13 @@ Feature: Shutdown
     And the native webOS TV received exactly 0 requests to "ssap://system/turnOff"
     And the TV is powered on
 
-  Scenario: Shutdown requires migration on a legacy bscpylgtv config
+  Scenario: Shutdown converts a legacy config but skips without native credentials
     Given a temporary LG Buddy config using input HDMI_3
     And the existing config selects TV platform "bscpylgtv"
     And a native webOS TV on input HDMI_3 with brightness 100
     And reboot detection reports no pending reboot
     When I run the command "shutdown"
-    Then the command fails
-    And stderr contains "v2 migration required"
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And stdout contains "No stored native TV credential"
     And the native webOS TV received no requests

@@ -92,11 +92,6 @@ fn isolated_runtime(world: &mut LgBuddyWorld) {
     world.create_runtime();
 }
 
-#[given("a mock TV client")]
-fn mock_tv_client(world: &mut LgBuddyWorld) {
-    world.create_mock_tv();
-}
-
 #[given(regex = r#"a native webOS TV on input (HDMI_[23]) with brightness (\d+)"#)]
 fn native_webos_tv(world: &mut LgBuddyWorld, input: String, brightness: u8) {
     world.create_native_webos_tv(&input, brightness);
@@ -174,24 +169,9 @@ fn mock_system_logind_changes_locked_hint(world: &mut LgBuddyWorld, value: Strin
     world.queue_system_logind_lock(value == "true");
 }
 
-#[given(regex = r#"the TV auth key file override is "([^"]+)""#)]
-fn tv_auth_key_file_override(world: &mut LgBuddyWorld, path: String) {
-    world.set_auth_key_file_override(&path);
-}
-
 #[given("the inherited user environment is cleared")]
 fn inherited_user_environment_is_cleared(world: &mut LgBuddyWorld) {
     world.clear_inherited_user_env();
-}
-
-#[given(regex = r#"the TV is on input (HDMI_[1-4])"#)]
-fn tv_on_input(world: &mut LgBuddyWorld, input: String) {
-    world.tv_mut().set_input(&input);
-}
-
-#[given(regex = r#"the TV backlight is (\d+)"#)]
-fn tv_backlight(world: &mut LgBuddyWorld, value: u8) {
-    world.tv_mut().set_backlight(u64::from(value));
 }
 
 #[given(regex = r#"the TV volume is (\d+)"#)]
@@ -234,17 +214,6 @@ fn gtk_brightness_gui_not_launched(world: &mut LgBuddyWorld) {
     world.assert_brightness_gui_not_launched();
 }
 
-#[given("the TV screen is blanked")]
-fn tv_screen_blanked(world: &mut LgBuddyWorld) {
-    world.tv_mut().set_screen_on(false);
-}
-
-#[given("the TV is powered off")]
-fn tv_powered_off_given(world: &mut LgBuddyWorld) {
-    world.tv_mut().set_power_on(false);
-    world.tv_mut().set_screen_on(false);
-}
-
 #[given("the session marker exists")]
 fn session_marker_exists_given(world: &mut LgBuddyWorld) {
     world.create_session_marker();
@@ -253,24 +222,6 @@ fn session_marker_exists_given(world: &mut LgBuddyWorld) {
 #[given("the system marker exists")]
 fn system_marker_exists_given(world: &mut LgBuddyWorld) {
     world.create_system_marker();
-}
-
-#[given(regex = r#"the TV will fail "([^"]+)" with status (\d+) and stderr "([^"]+)""#)]
-fn tv_failure(world: &mut LgBuddyWorld, command: String, status: u64, stderr: String) {
-    world.tv_mut().queue_error(&command, status as i64, &stderr);
-}
-
-#[given(regex = r#"the TV will fail "([^"]+)" (\d+) times with status (\d+) and stderr "([^"]+)""#)]
-fn tv_failure_repeated(
-    world: &mut LgBuddyWorld,
-    command: String,
-    times: u64,
-    status: u64,
-    stderr: String,
-) {
-    for _ in 0..times {
-        world.tv_mut().queue_error(&command, status as i64, &stderr);
-    }
 }
 
 #[given("the executable PATH is isolated")]
@@ -383,18 +334,9 @@ fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
 
 #[given("the next input restore attempt powers the TV back on")]
 fn next_input_restore_attempt_powers_tv_on(world: &mut LgBuddyWorld) {
-    if world.has_native_tv() {
-        world
-            .webos_tv()
-            .simulate_wake(std::time::Duration::from_millis(0));
-        return;
-    }
-    world.tv_mut().queue_set_input_wake_success();
-}
-
-#[given("the next input restore attempt is acknowledged without unblanking")]
-fn next_input_restore_attempt_is_acknowledged_without_unblanking(world: &mut LgBuddyWorld) {
-    world.tv_mut().queue_set_input_ack_without_screen_on();
+    world
+        .webos_tv()
+        .simulate_wake(std::time::Duration::from_millis(0));
 }
 
 #[given(regex = r#"the backend override is "([^"]+)""#)]
@@ -630,32 +572,6 @@ fn tv_screen_is_visible(world: &mut LgBuddyWorld) {
     world.assert_tv_screen_on(true);
 }
 
-#[then(regex = r#"^the TV client received "([^"]+)"$"#)]
-fn tv_client_received(world: &mut LgBuddyWorld, command: String) {
-    let calls = world.tv_call_names();
-    assert!(
-        calls.iter().any(|call| call == &command),
-        "calls were: {calls:?}"
-    );
-}
-
-#[then(regex = r#"^the TV client received "([^"]+)" exactly (\d+) times$"#)]
-fn tv_client_received_exactly(world: &mut LgBuddyWorld, command: String, expected: usize) {
-    let calls = world.tv_call_names();
-    let actual = calls.iter().filter(|call| *call == &command).count();
-
-    assert_eq!(actual, expected, "calls were: {calls:?}");
-}
-
-#[then(regex = r#"^the TV client did not receive "([^"]+)"$"#)]
-fn tv_client_did_not_receive(world: &mut LgBuddyWorld, command: String) {
-    let calls = world.tv_call_names();
-    assert!(
-        calls.iter().all(|call| call != &command),
-        "calls were: {calls:?}"
-    );
-}
-
 #[then(regex = r#"^the native webOS TV received exactly (\d+) requests to "([^"]+)""#)]
 fn native_webos_received_exactly(world: &mut LgBuddyWorld, expected: usize, uri: String) {
     let uris = world.webos_snapshot().request_uris;
@@ -714,9 +630,4 @@ fn native_registration_tokens_are(world: &mut LgBuddyWorld, expected: String) {
             .collect::<Vec<_>>()
     };
     assert_eq!(world.webos_snapshot().registration_tokens, expected);
-}
-
-#[then("the TV helper uses the expected auth context")]
-fn tv_helper_uses_expected_auth_context(world: &mut LgBuddyWorld) {
-    world.assert_tv_calls_match_expected_auth_context();
 }

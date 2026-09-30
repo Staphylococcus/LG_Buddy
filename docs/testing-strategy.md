@@ -96,9 +96,9 @@ This is the place for integration tests and contract tests.
 
 ### Current examples
 
-- `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
+- `crates/lg-buddy/tests/cucumber_support/webos.rs`
 - `crates/lg-buddy/tests/runtime_entrypoints.rs`
-- `tools/mock_bscpylgtvcommand.py`
+- `crates/lg-buddy/src/tv/test_support.rs`
 
 ### Contract-mock rule
 
@@ -106,7 +106,7 @@ Mock the API surface we consume, not the whole system behind it.
 
 Examples:
 
-- the TV mock reproduces `bscpylgtvcommand` command line, exit status, stdout, and stderr behavior that LG Buddy cares about
+- the native TV fixture reproduces webOS requests, responses, and state changes
 - GNOME monitor/runtime tests should use the private session-bus harness for
   ScreenSaver signals and Mutter user-active watches
 - native Wayland provider tests should model registry discovery, protocol-version
@@ -159,8 +159,8 @@ It is useful when we want to express scenarios like:
 - when GNOME is available, backend detection resolves to `gnome`
 - when fresh configuration accepts the default `lg_webos` platform, pairing
   stores the credential before setup completes
-- when an existing profile has no platform value, configuration preserves and
-  materializes the `bscpylgtv` compatibility fallback
+- when an existing profile has no platform value, a read-only TV command is
+  gated and application startup converts the saved profile locally
 - when native credentials are missing or stale, ordinary TV commands pair or
   repair them as part of the operation
 - when native credentials are missing, shutdown and suspend-related commands
@@ -209,8 +209,7 @@ Primary concern:
 
 Examples:
 
-- `bscpylgtvcommand`
-- later, possibly `systemctl` and `swayidle`
+- `systemctl` and native webOS protocol boundaries
 
 ### Native webOS boundary
 
@@ -405,8 +404,7 @@ The release-bundle smoke test covers the current installed lifecycle topology:
 the logind lifecycle service remains installed, the NetworkManager pre-down hook
 remains installed, and legacy systemd sleep hooks are absent. Its upgrade phase
 proves refusal before sudo, skips configuration, preserves config and native
-credentials byte-for-byte, removes obsolete native-profile environments,
-preserves healthy legacy environments, refuses unhealthy ones before privilege,
+credentials byte-for-byte, removes obsolete app-owned Python environments,
 replaces the owned bundle assets, checks service action order, and
 verifies the installed runtime against the candidate bytes and identity.
 
@@ -415,8 +413,8 @@ missing GTK/libadwaita packages are installed and the runtime probe succeeds
 before candidate identity validation. The real probe also runs without a display.
 Fresh native installs and native upgrades run with Python, pip, and bscpylgtv
 absent from command lookup; the outer harness retains its Python tools. The
-pinned cross-version smoke repeats healthy preservation and unhealthy refusal
-for explicit and missing-key legacy profiles, then native cleanup.
+pinned cross-version smoke checks install-first conversion for explicit and
+missing-key legacy profiles while preserving user-owned credentials.
 The installed GUI smoke verifies the desktop
 entry's no-argument `lg-buddy` launch opens the existing pairing prompt without
 navigation for an unconfigured installation, and normal Overview for a saved TV.

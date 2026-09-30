@@ -656,10 +656,9 @@ mod tests {
     use crate::presentation::brightness::{
         BrightnessFrontendUpdate, BrightnessIntent, BrightnessStatus,
     };
-    use crate::tv::{BscpylgtvCommandClient, OledBrightness, TvErrorKind};
+    use crate::tv::{test_support::FakeTvClient, OledBrightness, TvErrorKind};
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
-    use support::MockBscpylgtv;
 
     #[derive(Default)]
     struct RecordingNotifier {
@@ -1064,7 +1063,7 @@ mod tests {
     #[test]
     fn current_read_uses_the_tv_picture_capability() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-read");
+        let mock = FakeTvClient::new("gui-brightness-read");
         mock.set_backlight(67);
         let client = client_for_mock(&mock, config.tv_ip);
 
@@ -1077,14 +1076,14 @@ mod tests {
                 .into_iter()
                 .map(|call| call.command)
                 .collect::<Vec<_>>(),
-            vec!["get_picture_settings"]
+            vec!["oled_brightness"]
         );
     }
 
     #[test]
     fn successful_write_uses_the_tv_picture_capability_and_notifies() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-write");
+        let mock = FakeTvClient::new("gui-brightness-write");
         let client = client_for_mock(&mock, config.tv_ip);
         let notifier = RecordingNotifier::default();
         let brightness = OledBrightness::new(65).expect("valid brightness");
@@ -1099,7 +1098,7 @@ mod tests {
                 .into_iter()
                 .map(|call| call.command)
                 .collect::<Vec<_>>(),
-            vec!["set_settings"]
+            vec!["set_oled_brightness"]
         );
         assert_eq!(
             notifier.messages(),
@@ -1110,10 +1109,8 @@ mod tests {
     #[test]
     fn failed_write_is_typed_and_does_not_send_a_success_notification() {
         let config = sample_config();
-        let client = BscpylgtvCommandClient::new(
-            config.tv_ip,
-            "/definitely/missing/lg-buddy-bscpylgtvcommand",
-        );
+        let client = FakeTvClient::new("failed-brightness-write");
+        client.queue_error("set_oled_brightness", 1, "TV unreachable");
         let notifier = RecordingNotifier::default();
 
         let error = write_brightness_and_notify_with(
@@ -1131,7 +1128,7 @@ mod tests {
     #[test]
     fn notification_failure_preserves_the_successful_tv_write() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-notification-failure");
+        let mock = FakeTvClient::new("gui-brightness-notification-failure");
         let client = client_for_mock(&mock, config.tv_ip);
         let notifier = RecordingNotifier::failing("bus unavailable");
 
@@ -1154,7 +1151,7 @@ mod tests {
     #[test]
     fn malformed_tv_brightness_is_a_typed_invalid_response() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-invalid-brightness-read");
+        let mock = FakeTvClient::new("gui-invalid-brightness-read");
         mock.set_backlight(101);
         let client = client_for_mock(&mock, config.tv_ip);
 
@@ -1171,10 +1168,8 @@ mod tests {
     #[test]
     fn transport_failure_is_reported_as_unreachable() {
         let config = sample_config();
-        let client = BscpylgtvCommandClient::new(
-            config.tv_ip,
-            "/definitely/missing/lg-buddy-bscpylgtvcommand",
-        );
+        let client = FakeTvClient::new("failed-brightness-read");
+        client.queue_error("oled_brightness", 1, "TV unreachable");
 
         let error = read_current_brightness_with(&config, &client)
             .expect_err("missing adapter should fail");
@@ -1192,7 +1187,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("valid MAC"),
             input: HdmiInput::Hdmi2,
-            tv_platform: TvPlatform::Bscpylgtv,
+            tv_platform: TvPlatform::LgWebOs,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
@@ -1202,8 +1197,8 @@ mod tests {
         }
     }
 
-    fn client_for_mock(mock: &MockBscpylgtv, tv_ip: Ipv4Addr) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(tv_ip, mock.command_path(), mock.command_args())
+    fn client_for_mock(mock: &FakeTvClient, _tv_ip: Ipv4Addr) -> FakeTvClient {
+        mock.clone()
     }
 
     fn ready_application(value: u8) -> BrightnessApplication {

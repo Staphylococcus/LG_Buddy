@@ -1,11 +1,10 @@
 use crate::support::{
-    prime_isolated_path_dependencies, ExecutableScript, MockBscpylgtv, MockNmOnline,
-    MockPowerDevil, MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout,
-    TestConfigFile, TestEnv,
+    prime_isolated_path_dependencies, ExecutableScript, MockNmOnline, MockPowerDevil,
+    MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout, TestConfigFile,
+    TestEnv,
 };
 use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, MockWebOsVersion, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
-use lg_buddy::auth::resolve_bscpylgtv_auth_context_from_env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,6 @@ pub struct LgBuddyWorld {
     env: Option<TestEnv>,
     config: Option<TestConfigFile>,
     runtime: Option<RuntimeStateLayout>,
-    tv: Option<MockBscpylgtv>,
     webos_tv: Option<MockWebOsTv>,
     system_logind: Option<MockSystemLogind>,
     powerdevil: Option<MockPowerDevil>,
@@ -44,7 +42,6 @@ impl fmt::Debug for LgBuddyWorld {
         f.debug_struct("LgBuddyWorld")
             .field("config", &self.config.is_some())
             .field("runtime", &self.runtime.is_some())
-            .field("tv", &self.tv.is_some())
             .field("webos_tv", &self.webos_tv.is_some())
             .field("system_logind", &self.system_logind.is_some())
             .field(
@@ -206,15 +203,6 @@ exit 1\n",
         self.runtime = Some(runtime);
     }
 
-    pub fn create_mock_tv(&mut self) {
-        let tv = MockBscpylgtv::new("cucumber-tv");
-        let wrapper = tv.command_wrapper("cucumber-tv-wrapper");
-        self.ensure_env()
-            .set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
-        self.path_scripts.push(wrapper);
-        self.tv = Some(tv);
-    }
-
     pub fn create_native_webos_tv(&mut self, input: &str, backlight: u8) {
         self.create_native_webos_tv_with_version(
             MockWebOsVersion::WebOs24Version92261,
@@ -342,24 +330,12 @@ exit 1\n",
         self.webos_tv.as_ref().expect("native webOS TV configured")
     }
 
-    pub fn has_native_tv(&self) -> bool {
-        self.webos_tv.is_some()
-    }
-
     pub fn blank_native_tv_screen(&self) {
         self.webos_tv().screen_off_now();
     }
 
     pub fn webos_snapshot(&self) -> MockWebOsTvSnapshot {
         self.webos_tv().snapshot()
-    }
-
-    pub fn tv(&self) -> &MockBscpylgtv {
-        self.tv.as_ref().expect("mock TV configured")
-    }
-
-    pub fn tv_mut(&mut self) -> &mut MockBscpylgtv {
-        self.tv.as_mut().expect("mock TV configured")
     }
 
     pub fn config(&self) -> &TestConfigFile {
@@ -391,53 +367,9 @@ exit 1\n",
         self.runtime().create_system_marker();
     }
 
-    pub fn set_auth_key_file_override(&mut self, path: &str) {
-        let key_file_path = self
-            .config()
-            .path()
-            .parent()
-            .expect("config parent")
-            .join(path);
-        self.ensure_env()
-            .set("LG_BUDDY_BSCPYLGTV_KEY_FILE", &key_file_path);
-    }
-
     pub fn clear_inherited_user_env(&mut self) {
         self.ensure_env().remove("USER");
         self.ensure_env().remove("LOGNAME");
-    }
-
-    pub fn assert_tv_calls_match_expected_auth_context(&self) {
-        let expected = resolve_bscpylgtv_auth_context_from_env(self.config().path())
-            .expect("resolve expected auth context from test config");
-        let expected_key_file_path = expected
-            .key_file_path()
-            .map(|path| path.to_string_lossy().into_owned());
-        let expected_user = expected.owner_user().map(ToString::to_string);
-        let calls = self.tv().calls();
-
-        assert!(
-            !calls.is_empty(),
-            "expected at least one TV helper invocation"
-        );
-        assert!(
-            calls
-                .iter()
-                .all(|call| call.key_file_path == expected_key_file_path),
-            "TV helper key paths were: {:?}",
-            calls
-                .iter()
-                .map(|call| call.key_file_path.clone())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            calls.iter().all(|call| call.user == expected_user),
-            "TV helper users were: {:?}",
-            calls
-                .iter()
-                .map(|call| call.user.clone())
-                .collect::<Vec<_>>()
-        );
     }
 
     pub fn isolate_path(&mut self) {
@@ -745,87 +677,39 @@ exit 1\n",
     }
 
     pub fn assert_tv_input(&self, expected: &str) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().input, expected);
-        } else {
-            assert_eq!(self.tv().state_snapshot().input, expected);
-        }
+        assert_eq!(self.webos_tv().snapshot().input, expected);
     }
 
     pub fn assert_tv_brightness(&self, expected: u8) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().backlight, expected);
-        } else {
-            assert_eq!(self.tv().state_snapshot().backlight, expected);
-        }
+        assert_eq!(self.webos_tv().snapshot().backlight, expected);
     }
 
-    pub fn set_tv_volume(&self, volume: u8) {
-        if let Some(tv) = &self.webos_tv {
-            tv.set_volume(i16::from(volume));
-        } else {
-            self.tv().set_volume(i16::from(volume));
-        }
+    pub fn set_tv_volume(&mut self, volume: u8) {
+        self.webos_tv().set_volume(i16::from(volume));
     }
 
-    pub fn set_tv_volume_unknown(&self) {
-        if let Some(tv) = &self.webos_tv {
-            tv.set_volume(-1);
-        } else {
-            self.tv().set_volume(-1);
-        }
+    pub fn set_tv_volume_unknown(&mut self) {
+        self.webos_tv().set_volume(-1);
     }
 
-    pub fn set_tv_muted(&self, muted: bool) {
-        if let Some(tv) = &self.webos_tv {
-            tv.set_muted(muted);
-        } else {
-            self.tv().set_muted(muted);
-        }
+    pub fn set_tv_muted(&mut self, muted: bool) {
+        self.webos_tv().set_muted(muted);
     }
 
     pub fn assert_tv_volume(&self, expected: u8) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().volume, i16::from(expected));
-        } else {
-            assert_eq!(self.tv().state_snapshot().volume, i16::from(expected));
-        }
+        assert_eq!(self.webos_tv().snapshot().volume, i16::from(expected));
     }
 
     pub fn assert_tv_muted(&self, expected: bool) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().muted, expected);
-        } else {
-            assert_eq!(self.tv().state_snapshot().muted, expected);
-        }
+        assert_eq!(self.webos_tv().snapshot().muted, expected);
     }
 
     pub fn assert_tv_powered_on(&self, expected: bool) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().power_on, expected);
-        } else {
-            assert_eq!(self.tv().state_snapshot().power_on, expected);
-        }
+        assert_eq!(self.webos_tv().snapshot().power_on, expected);
     }
 
     pub fn assert_tv_screen_on(&self, expected: bool) {
-        if let Some(tv) = &self.webos_tv {
-            assert_eq!(tv.snapshot().screen_on, expected);
-        } else {
-            assert_eq!(self.tv().state_snapshot().screen_on, expected);
-        }
-    }
-
-    pub fn tv_call_names(&self) -> Vec<String> {
-        assert!(
-            self.webos_tv.is_none(),
-            "native Cucumber scenarios must assert product outcomes, not mock call labels"
-        );
-        self.tv()
-            .calls()
-            .into_iter()
-            .map(|call| call.command)
-            .collect()
+        assert_eq!(self.webos_tv().snapshot().screen_on, expected);
     }
 
     fn native_access_token_store(

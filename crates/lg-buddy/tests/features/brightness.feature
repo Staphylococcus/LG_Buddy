@@ -42,16 +42,16 @@ Feature: Brightness
     And the TV brightness is 66
     And the native webOS TV received exactly 1 requests to "ssap://system.notifications/createAlert"
 
-  Scenario: Brightness get requires migration on a legacy bscpylgtv config
+  Scenario: Brightness get converts a legacy bscpylgtv config before native control
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "bscpylgtv"
     And a native webOS TV on input HDMI_2 with brightness 90
     And a working GTK brightness GUI
     When I run the command "brightness get"
-    Then the command fails
-    And stderr contains "v2 migration required"
+    Then the command succeeds
+    And stdout is "90"
+    And config.env contains "tvs_primary_platform=lg_webos"
     And the GTK brightness GUI was not launched
-    And the native webOS TV received no requests
 
   Scenario: Brightness set updates OLED brightness without opening a dialog
     Given a temporary LG Buddy config using input HDMI_2

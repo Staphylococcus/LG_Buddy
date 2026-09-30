@@ -330,7 +330,7 @@ mod tests {
                 "tv.ip | storage=tvs_primary_ip | fallbacks=tv_ip | type=ipv4 | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=IPv4 address of the primary configured TV.",
                 "tv.mac | storage=tvs_primary_mac | fallbacks=tv_mac | type=mac-address | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=MAC address of the primary configured TV for Wake-on-LAN.",
                 "tv.input | storage=tvs_primary_input | fallbacks=input | type=enum values=HDMI_1,HDMI_2,HDMI_3,HDMI_4 aliases=(none) | default=required | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=HDMI input used by the primary configured TV.",
-                "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set,unset | apply=no-runtime-apply-required | description=Control platform for the primary configured TV.",
+                "tv.platform | storage=tvs_primary_platform | fallbacks=(none) | type=enum values=bscpylgtv,lg_webos aliases=(none) | default=bscpylgtv | mutability=read-write | ops=get,describe,set | apply=no-runtime-apply-required | description=Control platform for the primary configured TV. Missing or bscpylgtv values identify configuration that requires v2 migration.",
                 "screen.backend | storage=screen_backend | fallbacks=(none) | type=enum values=auto,gnome,wayland,swayidle aliases=(none) | default=auto | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Legacy CLI compatibility only. Automatic composes available native integrations. Writes save before applying; an apply failure leaves the saved value in place. Use automatic integration in Settings for a validated transition with rollback. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
                 "screen.idle_blank | storage=screen_idle_blank | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=enabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Blank the TV screen when the computer is idle or locked, and restore it when activity resumes.",
                 "screen.honor_idle_inhibitors | storage=screen_honor_idle_inhibitors | fallbacks=(none) | type=enum values=enabled,disabled aliases=(none) | default=disabled | mutability=read-write | ops=get,describe,set,unset | apply=restart-user-screen-service | description=Honor keep-awake requests from video players, presentations, and other apps.",
@@ -422,7 +422,7 @@ mod tests {
 tv.ip=<missing> (missing, read-write, ops: get,describe,set)
 tv.mac=<missing> (missing, read-write, ops: get,describe,set)
 tv.input=<missing> (missing, read-write, ops: get,describe,set)
-tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)
+tv.platform=bscpylgtv (default, read-write, ops: get,describe,set)
 screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)
 screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)
 screen.idle_timeout=300 (default, read-write, ops: get,describe,set,unset)
@@ -506,10 +506,10 @@ tv.platform
   source: default
   default: bscpylgtv
   mutability: read-write
-  supported operations: get, describe, set, unset
+  supported operations: get, describe, set
   allowed values: bscpylgtv, lg_webos
   apply: no-runtime-apply-required
-  description: Control platform for the primary configured TV.
+  description: Control platform for the primary configured TV. Missing or bscpylgtv values identify configuration that requires v2 migration.
 
 screen.idle_blank
   storage key: screen_idle_blank

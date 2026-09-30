@@ -163,14 +163,15 @@ Desktop integration is automatic. Configure behavior once; moving between
 GNOME Wayland and Plasma Wayland needs no LG Buddy setting change or repeated
 setup. The available native interfaces determine which sources contribute.
 
-If an older configuration explicitly selects `gnome`, `wayland` or `swayidle`,
+If an older configuration explicitly selects `gnome` or `wayland`,
 **Legacy desktop integration → Use automatic** offers a one-time switch.
 The confirmation keeps your behavior settings; cancellation or a failed switch
 preserves the previous configuration. If native idle support is unavailable,
 disable **Idle blanking** first to use automatic integration with the other
 application features. The legacy override remains visible even with idle
-blanking disabled. Existing explicit configurations keep their behavior until
-you choose to switch.
+blanking disabled. Existing explicit GNOME and Wayland configurations keep
+their behavior until you choose to switch. A saved `swayidle` selection is
+converted to `auto` at the next application startup.
 
 This preference applies to the native GNOME and Wayland integrations. The
 deprecated, explicitly selected `swayidle` integration always honors app
@@ -187,7 +188,8 @@ Backend selection is absent from `settings list` and `settings describe`
 without a key. Existing scripts can still explicitly use `settings get`,
 `describe`, `set` and `unset` with `screen.backend`. The accepted values remain
 `auto`, `gnome`, `wayland` and `swayidle`; `unset` restores the `auto` default.
-Reading or listing settings never migrates a saved override.
+Reading or listing settings never migrates a saved override. A later
+config-using startup converts a saved `swayidle` selection to `auto`.
 
 These legacy writes keep their save-then-apply behavior: if service application
 fails, the command returns an error identifying the saved value, which remains
@@ -220,8 +222,8 @@ You own swayidle installation, startup and timing. Leave LG Buddy's session
 service enabled. The public commands retain TV input checks, ownership and
 restore policy. This basic recipe does not provide integrated gamepad activity,
 lock-triggered blanking or delayed power-off. It is separate from the deprecated
-built-in `screen.backend=swayidle` integration, which remains available for
-existing explicit configurations until 2.0.0.
+built-in `screen.backend=swayidle` integration. Saved legacy selections are
+converted to `auto` when LG Buddy starts.
 
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad
@@ -265,15 +267,12 @@ Exit codes are 0 for verified completion, 1 for failed or blocked setup, 2 for
 invalid arguments, 3 for missing input/consent, and 130 for cancellation. A TV
 may remain paired when a later step is incomplete; rerunning resumes the work.
 
-To select native control for an existing
-profile and verify it before saving, use `lg-buddy settings set tv.platform
-lg_webos`, accepting the pairing prompt on the TV. Existing `bscpylgtv`
-profiles, including older profiles without a platform key, remain supported
-through the final 1.x compatibility window when their installed environment
-works. Support ends in v2.0.0. The installer no longer creates or repairs that
-environment; if it is unhealthy, pair and select `lg_webos` before retrying.
-Upgrading a native profile removes the obsolete LG Buddy environment at
-`/usr/bin/LG_Buddy_PIP` while retaining configuration and credentials.
+The v2 installer leaves an existing TV profile unchanged and removes the
+obsolete LG Buddy environment at `/usr/bin/LG_Buddy_PIP`. At the next
+application startup, a saved profile with `bscpylgtv` or no platform key is
+converted locally to `lg_webos`. Conversion does not contact the TV or pair it.
+If native credentials are missing, a later foreground TV operation may ask the
+TV to approve pairing. The installer and converter preserve `.aiopylgtv.sqlite`.
 
 These commands work without opening the GUI:
 

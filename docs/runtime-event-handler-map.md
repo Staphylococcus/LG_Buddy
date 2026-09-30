@@ -320,8 +320,8 @@ lifecycle policy, runtime phase guard, and source adapter namespace in place.
 Remaining work should stay scoped:
 
 1. Keep native Wayland monitoring separate from the logind lifecycle path.
-2. Keep `swayidle` working without rewriting existing configuration throughout
-   the documented 1.x compatibility window.
+2. Convert retired `swayidle` settings at application startup while preserving
+   the user's idle-blanking preference.
 3. Preserve the one-lifecycle-owner invariant in installer, release-bundle, and
    uninstall tests.
 4. Treat future platform lifecycle providers, such as a possible macOS provider,

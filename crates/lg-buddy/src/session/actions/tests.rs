@@ -2,7 +2,7 @@ use super::RuntimeActionExecutor;
 use crate::config::{load_config, HdmiInput, TvPlatform};
 use crate::session::runner::SessionEventDispatcher;
 use crate::session::SessionEvent;
-use crate::tv::{CurrentInput, SelectedTvClient, TvClient, TvClientBuildOptions, TvErrorKind};
+use crate::tv::{CurrentInput, TvClient, TvClientBuildError, TvClientBuildOptions, TvErrorKind};
 use crate::web_os::test_support::{
     WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
 };
@@ -335,10 +335,10 @@ fn runtime_owner_rebinds_when_profile_identity_or_build_options_change() {
 
     first_fixture.set_value("tvs_primary_platform", TvPlatform::Bscpylgtv.as_str());
     assert!(matches!(
-        owner
-            .tv_client(&first_fixture.config_path, &first_fixture.config(), options)
-            .expect("build legacy client"),
-        SelectedTvClient::Bscpylgtv(_)
+        owner.tv_client(&first_fixture.config_path, &first_fixture.config(), options),
+        Err(crate::RunError::TvClientBuild(
+            TvClientBuildError::StalePlatform
+        ))
     ));
     first_fixture.set_value("tvs_primary_platform", TvPlatform::LgWebOs.as_str());
     assert_input(&mut owner, &first_fixture, options);

@@ -77,16 +77,15 @@ Feature: Native webOS TV platform
     And the native TV registration tokens are "webos-test-access-token"
     And the native TV pairing prompt count is 0
 
-  Scenario: Unsetting native platform restores the missing-value compatibility default
+  Scenario: Native platform cannot be unset back to stale configuration
     Given a temporary LG Buddy config using input HDMI_2
     And the existing config selects TV platform "lg_webos"
     When I run the command "settings unset tv.platform"
-    Then the command succeeds
-    And stdout contains "tv.platform unset"
-    And config.env does not contain "tvs_primary_platform="
+    Then the command fails
+    And config.env contains "tvs_primary_platform=lg_webos"
     When I run the command "settings get tv.platform"
     Then the command succeeds
-    And stdout is "bscpylgtv"
+    And stdout is "lg_webos"
 
   Scenario: Rejected foreground pairing leaves the platform and credentials unchanged
     Given a temporary LG Buddy config using input HDMI_2

@@ -13,6 +13,7 @@ use lg_buddy::audio::{AudioOperation, AudioWriteFailure};
 use lg_buddy::brightness::{BrightnessReadFailure, BrightnessWriteFailure};
 use lg_buddy::config::{load_current_config, TvPlatform};
 use lg_buddy::events::RuntimeEvent;
+use lg_buddy::migration::automatic::AutomaticMigrationError;
 use lg_buddy::overview::{
     AudioReadFailure, EnvironmentOverviewBackend, OverviewBackend, OverviewSummaryFailure,
 };
@@ -21,7 +22,7 @@ use lg_buddy::tv::OledBrightness;
 use lg_buddy::tvs::{EnvironmentTvsBackend, TvsBackend, TvsReadFailure};
 use lg_buddy::{run_command, Command, RunError};
 use std::fs;
-use support::{ExecutableScript, MockBscpylgtv, RuntimeStateLayout, TestConfigFile, TestEnv};
+use support::{ExecutableScript, RuntimeStateLayout, TestConfigFile, TestEnv};
 
 fn native_tv(config: &TestConfigFile) -> web_os::MockWebOsTv {
     let tv =
@@ -48,10 +49,7 @@ fn assert_stale_foreground(platform: Option<&str>, backend: Option<&str>, reason
         config.set_value("screen_backend", backend);
     }
     let native = native_tv(&config);
-    let legacy = MockBscpylgtv::new("migration-legacy-tv");
-    let wrapper = legacy.command_wrapper("migration-legacy-wrapper");
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     let original = fs::read(config.path()).unwrap();
     let overview = EnvironmentOverviewBackend;
 
@@ -95,7 +93,6 @@ fn assert_stale_foreground(platform: Option<&str>, backend: Option<&str>, reason
     );
     assert_eq!(native.snapshot().connection_count, 0);
     assert!(native.snapshot().request_uris.is_empty());
-    assert!(legacy.calls().is_empty());
     assert_eq!(fs::read(config.path()).unwrap(), original);
 }
 
@@ -173,10 +170,7 @@ fn stale_cached_profile_vs_current_file_blocks_model_lookup_before_any_tv_work()
     let config = TestConfigFile::new("migration-recheck-legacy");
     config.write_sample("HDMI_2");
     config.set_value("tvs_primary_platform", "bscpylgtv");
-    let legacy = MockBscpylgtv::new("migration-recheck-legacy-tv");
-    let wrapper = legacy.command_wrapper("migration-recheck-legacy-wrapper");
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     let native = native_tv(&config);
 
     // The profile a running GUI cached while the file was still legacy.
@@ -196,7 +190,6 @@ fn stale_cached_profile_vs_current_file_blocks_model_lookup_before_any_tv_work()
     );
     assert_eq!(native.snapshot().connection_count, 0);
     assert!(native.snapshot().request_uris.is_empty());
-    assert!(legacy.calls().is_empty());
 }
 
 #[test]
@@ -270,10 +263,7 @@ fn invalid_utf8_config_prevents_model_lookup_for_a_cached_profile() {
     let config = TestConfigFile::new("migration-bad-utf8");
     config.write_sample("HDMI_2");
     config.set_value("tvs_primary_platform", "lg_webos");
-    let legacy = MockBscpylgtv::new("migration-bad-utf8-tv");
-    let wrapper = legacy.command_wrapper("migration-bad-utf8-wrapper");
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     let native = native_tv(&config);
 
     let profiles = EnvironmentTvsBackend
@@ -293,31 +283,50 @@ fn invalid_utf8_config_prevents_model_lookup_for_a_cached_profile() {
     );
     assert_eq!(native.snapshot().connection_count, 0);
     assert!(native.snapshot().request_uris.is_empty());
-    assert!(legacy.calls().is_empty());
 }
 
 #[test]
-fn stale_sleep_stops_before_journal_tv_or_marker_work() {
+fn invalid_legacy_sleep_stops_before_journal_tv_or_marker_work() {
     let mut env = TestEnv::new();
     let config = TestConfigFile::new("migration-sleep");
     config.write_sample("HDMI_2");
-    let legacy = MockBscpylgtv::new("migration-sleep-tv");
-    let wrapper = legacy.command_wrapper("migration-sleep-wrapper");
+    config.set_value("tvs_primary_ip", "invalid-address");
     let journal = ExecutableScript::new("migration-journal", "journalctl", "#!/bin/sh\nprintf called >> \"$LG_BUDDY_TEST_JOURNAL_LOG\"\nprintf '%s\\n' 'manager: sleep: sleep requested'\n");
     let journal_log = config.path().with_file_name("journal.log");
     let runtime = RuntimeStateLayout::new("migration-sleep-state");
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_JOURNALCTL", journal.path());
     env.set("LG_BUDDY_TEST_JOURNAL_LOG", &journal_log);
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     assert!(matches!(
         run_command(Command::Sleep, &mut Vec::new()),
-        Err(RunError::MigrationRequired(_))
+        Err(RunError::Migration(
+            AutomaticMigrationError::InvalidConfiguration
+        ))
     ));
     assert!(!journal_log.exists());
-    assert!(legacy.calls().is_empty());
     runtime.assert_system_marker_absent();
+}
+
+#[test]
+fn direct_cli_start_converts_stale_profile_before_backend_detection() {
+    let mut env = TestEnv::new();
+    let config = TestConfigFile::new("migration-cli-start");
+    config.write_sample("HDMI_2");
+    env.set("LG_BUDDY_CONFIG", config.path());
+    let native = native_tv(&config);
+    let token_path = config
+        .path()
+        .parent()
+        .unwrap()
+        .join("tvs/primary/access-token.json");
+    let token_before = fs::read(&token_path).unwrap();
+
+    let _ = run_command(Command::DetectBackend, &mut Vec::new());
+    let contents = fs::read_to_string(config.path()).unwrap();
+    assert!(contents.contains("tvs_primary_platform=lg_webos"));
+    assert_eq!(fs::read(token_path).unwrap(), token_before);
+    assert_eq!(native.snapshot().connection_count, 0);
 }
 
 #[test]
@@ -326,11 +335,8 @@ fn stale_reload_during_before_sleep_refuses_before_any_tv_work() {
     let config = TestConfigFile::new("migration-sleep-reload");
     config.write_sample("HDMI_2");
     config.set_value("tvs_primary_platform", "lg_webos");
-    let legacy = MockBscpylgtv::new("migration-sleep-reload-tv");
-    let wrapper = legacy.command_wrapper("migration-sleep-reload-wrapper");
     let runtime = RuntimeStateLayout::new("migration-sleep-reload-state");
     env.set("LG_BUDDY_CONFIG", config.path());
-    env.set("LG_BUDDY_BSCPYLGTV_COMMAND", wrapper.path());
     env.set("LG_BUDDY_SYSTEM_RUNTIME_DIR", runtime.system_dir());
     let native = native_tv(&config);
 
@@ -352,9 +358,8 @@ fn stale_reload_during_before_sleep_refuses_before_any_tv_work() {
         "a stale reload must refuse, not fall back to the legacy adapter"
     );
 
-    // No native connection was opened and the legacy adapter was never driven.
+    // No native connection was opened and the stale platform was never driven.
     assert_eq!(native.snapshot().connection_count, 0);
     assert!(native.snapshot().request_uris.is_empty());
-    assert!(legacy.calls().is_empty());
     runtime.assert_system_marker_absent();
 }

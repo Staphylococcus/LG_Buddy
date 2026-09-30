@@ -8,7 +8,7 @@ Feature: Settings CLI
     And stdout contains "tv.ip=192.0.2.42 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
-    And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)"
+    And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set)"
     And stdout does not contain "screen.backend"
     And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)"
@@ -140,7 +140,7 @@ Feature: Settings CLI
     Then the command succeeds
     And stdout contains "storage key: tvs_primary_platform"
     And stdout contains "default: bscpylgtv"
-    And stdout contains "supported operations: get, describe, set, unset"
+    And stdout contains "supported operations: get, describe, set"
     And stdout contains "allowed values: bscpylgtv, lg_webos"
 
   Scenario: settings rejects an invalid TV platform without altering config
@@ -149,6 +149,15 @@ Feature: Settings CLI
     When I run the command "settings set tv.platform native"
     Then the command fails
     And stderr contains "invalid value for setting `tv.platform`"
+    And config.env is unchanged
+
+  Scenario: settings cannot select the retired TV platform
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And the current config is remembered
+    When I run the command "settings set tv.platform bscpylgtv"
+    Then the command fails
+    And stderr contains "bscpylgtv requires migration"
     And config.env is unchanged
 
   Scenario: settings describe shows lifecycle policy operations

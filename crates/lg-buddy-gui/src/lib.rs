@@ -139,6 +139,10 @@ pub fn run(command: GuiCommand) -> glib::ExitCode {
 }
 
 fn run_application(command: GuiCommand, replacing: bool) -> glib::ExitCode {
+    if let Err(error) = lg_buddy::startup::foreground_start() {
+        eprintln!("LG Buddy GUI: {error}");
+        return glib::ExitCode::FAILURE;
+    }
     glib::set_application_name(APPLICATION_NAME);
     let mut flags = gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE
         | gtk::gio::ApplicationFlags::ALLOW_REPLACEMENT;

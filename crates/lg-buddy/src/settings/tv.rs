@@ -14,7 +14,7 @@ use crate::web_os::{
 use super::{
     ApplyStrategy, EnumSettingType, SettingDefinition, SettingMutability, SettingType,
     SettingValue, SettingsError, SettingsMutation, SettingsMutationAction, SettingsStore,
-    EMPTY_ALIASES, EMPTY_STORAGE_KEYS, READ_SET_OPERATIONS, READ_WRITE_OPERATIONS,
+    EMPTY_ALIASES, EMPTY_STORAGE_KEYS, READ_SET_OPERATIONS,
 };
 
 const IP_FALLBACK_STORAGE_KEYS: &[&str] = &["tv_ip"];
@@ -72,9 +72,9 @@ pub(super) const PLATFORM: SettingDefinition = SettingDefinition {
     }),
     default_value: Some(SettingValue::Enum("bscpylgtv")),
     mutability: SettingMutability::ReadWrite,
-    operations: READ_WRITE_OPERATIONS,
+    operations: READ_SET_OPERATIONS,
     apply_strategy: ApplyStrategy::NoRuntimeApplyRequired,
-    description: "Control platform for the primary configured TV.",
+    description: "Control platform for the primary configured TV. Missing or bscpylgtv values identify configuration that requires v2 migration.",
 };
 
 pub trait PlatformPreflight {
@@ -150,6 +150,17 @@ pub(super) fn preflight_if_required<W: io::Write, P: PlatformPreflight>(
     mutation: &SettingsMutation,
     writer: &mut W,
 ) -> Result<(), SettingsError> {
+    if mutation.action() == SettingsMutationAction::Set
+        && mutation.key_name() == "tv.platform"
+        && mutation.new_value()?.as_enum() == Some(TvPlatform::Bscpylgtv.as_str())
+    {
+        return Err(SettingsError::InvalidValue {
+            key: "tv.platform".to_string(),
+            value: TvPlatform::Bscpylgtv.as_str().to_string(),
+            expected: "lg_webos; bscpylgtv requires migration".to_string(),
+        });
+    }
+
     if mutation.action() != SettingsMutationAction::Set
         || mutation.key_name() != "tv.platform"
         || mutation.new_value()?.as_enum() != Some(TvPlatform::LgWebOs.as_str())
@@ -503,7 +514,7 @@ tvs_primary_ip=192.0.2.43
     }
 
     #[test]
-    fn switching_to_bscpylgtv_skips_native_preflight() {
+    fn switching_to_bscpylgtv_is_rejected_without_changing_native_configuration() {
         let path = unique_test_path("platform-legacy");
         fs::write(&path, "tv_ip=192.0.2.42\ntvs_primary_platform=lg_webos\n").unwrap();
         let store = SettingsStore::load(&path).unwrap();
@@ -516,7 +527,7 @@ tvs_primary_ip=192.0.2.43
         );
         let mut output = Vec::new();
 
-        runner
+        let error = runner
             .run(
                 SettingsCommand::Set {
                     key: "tv.platform".to_string(),
@@ -524,12 +535,13 @@ tvs_primary_ip=192.0.2.43
                 },
                 &mut output,
             )
-            .unwrap();
+            .expect_err("retired platform must not be selectable");
 
         assert_eq!(calls.get(), 0);
+        assert!(matches!(error, SettingsError::InvalidValue { .. }));
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "tv_ip=192.0.2.42\ntvs_primary_platform=bscpylgtv\n"
+            "tv_ip=192.0.2.42\ntvs_primary_platform=lg_webos\n"
         );
 
         let _ = fs::remove_file(path);

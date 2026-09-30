@@ -277,17 +277,10 @@ cp "$CONFIG_FILE" "$WORK_DIR/current-config.env"
 sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
 cp "$CONFIG_FILE" "$WORK_DIR/stale-config.env"
 start_gui enabled "" "" normal
-observe_gui_state --expected-text "saved TV configuration needs migration"
-observe_gui_state --select-page Settings
-observe_gui_state --expected-settings-state ready
+observe_gui_state --expected-state ready --expected-slider-value 50
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE" || fail "GUI startup did not convert the stale TV profile."
 send_closing_mnemonic Escape
-finish_gui "migration gate with Settings still available"
-cmp "$CONFIG_FILE" "$WORK_DIR/stale-config.env" || fail "Migration gate changed configuration."
-python3 - "$STATE_FILE" <<'PY_STALE'
-import json, sys
-state = json.load(open(sys.argv[1]))
-assert state["connection_count"] == 0 and not state["request_uris"], state
-PY_STALE
+finish_gui "automatic startup migration"
 cp "$WORK_DIR/current-config.env" "$CONFIG_FILE"
 start_gui enabled "" "" normal
 NORMAL_GUI_PID="$GUI_PID"

@@ -16,7 +16,7 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use crate::auth::{resolve_bscpylgtv_auth_context_from_env, resolve_config_owner};
+use crate::auth::resolve_config_owner;
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::pairing::{
     PairingApplication, PairingError, PairingFailure, PairingIntent, PairingOperation,
@@ -155,7 +155,7 @@ impl TvProfile {
 
     pub fn platform_label(&self) -> &'static str {
         match self.platform {
-            TvPlatform::Bscpylgtv => "bscpylgtv (compatibility)",
+            TvPlatform::Bscpylgtv => "bscpylgtv (migration required)",
             TvPlatform::LgWebOs => "Native webOS",
         }
     }
@@ -1060,13 +1060,11 @@ fn local_credentials(config_path: &std::path::Path, platform: TvPlatform) -> TvC
             }
         }
         TvPlatform::Bscpylgtv => {
-            let Ok(auth) = resolve_bscpylgtv_auth_context_from_env(config_path) else {
+            let Some(parent) = config_path.parent() else {
                 return TvCredentialState::Unknown;
             };
-            let Some(path) = auth.key_file_path() else {
-                return TvCredentialState::Unknown;
-            };
-            match fs::metadata(path) {
+            let path = parent.join(".aiopylgtv.sqlite");
+            match fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => TvCredentialState::LocalFile,
                 Ok(_) => TvCredentialState::Unknown,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

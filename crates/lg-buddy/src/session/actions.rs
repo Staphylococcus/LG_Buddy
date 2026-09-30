@@ -16,7 +16,8 @@ use crate::screen::{self, ScreenOnDeps, SystemMarkerLifecycleStatusProvider};
 use crate::state::{
     ScreenOwnershipMarker, StateScope, SystemSleepAttemptState, SystemSleepCycleState,
 };
-use crate::tv::{build_tv_client, SelectedTvClient, TvClientBuildOptions};
+use crate::tv::{build_tv_client, TvClientBuildError, TvClientBuildOptions};
+use crate::web_os::WebOsTvClient;
 use crate::wol::UdpWakeOnLanSender;
 use crate::RunError;
 
@@ -38,7 +39,7 @@ struct TvClientBinding {
 /// authentication, connection invalidation, and the no-ambiguous-write-replay rule.
 #[derive(Default)]
 pub struct RuntimeActionExecutor {
-    tv_client: Option<(TvClientBinding, SelectedTvClient)>,
+    tv_client: Option<(TvClientBinding, WebOsTvClient)>,
 }
 
 impl RuntimeActionExecutor {
@@ -63,7 +64,7 @@ impl RuntimeActionExecutor {
         config_path: &Path,
         config: &Config,
         options: TvClientBuildOptions,
-    ) -> Result<&SelectedTvClient, RunError> {
+    ) -> Result<&WebOsTvClient, RunError> {
         let binding = TvClientBinding {
             config_path: config_path.to_owned(),
             tv_ip: config.tv_ip,
@@ -230,7 +231,10 @@ impl RuntimeActionExecutor {
         let network_waiter = NmOnlineNetworkWaiter::default();
 
         let result = (|| -> Result<(), RunError> {
-            match tv_client.can_authenticate_unattended() {
+            let has_token = tv_client
+                .has_stored_access_token()
+                .map_err(TvClientBuildError::TokenStore);
+            match has_token {
                 Ok(true) => lifecycle::restore_after_system_sleep_with(
                     writer,
                     &config,
