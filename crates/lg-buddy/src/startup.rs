@@ -1,12 +1,12 @@
-//! Shared startup conversion boundary for config-using CLI, GUI, and daemon
-//! entry points.
+//! Shared startup conversion boundary for config-using CLI and daemon entry
+//! points.
 //!
 //! Runs before any config-dependent work: resolves the config path, converts a
 //! supported stale 1.x / bscpylgtv config in place, and hands the path back so
 //! the caller can read a current `CurrentConfig`.
 //!
 //! The screen daemon (`LG_Buddy_screen.service`) runs as the config's owner;
-//! it, a foreground command, or the GUI may perform the next conversion.
+//! it or a foreground command may perform the next conversion.
 //! The lifecycle daemon (`LG_Buddy_lifecycle.service`) runs as root, and
 //! `migrate_config` only ever writes as the file's non-root owner, so root
 //! skips the migration and the read path surfaces `MigrationRequired` (the base
@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use crate::migration::automatic::migrate_config;
 use crate::RunError;
 
-/// Convert supported saved configuration before a foreground CLI or GUI
-/// operation reads it. Settings editing and inspection retain their own
+/// Convert supported saved configuration before a foreground CLI operation
+/// reads it. Settings editing and inspection retain their own
 /// behavior; protocol probes stay side-effect free.
 pub fn foreground_start() -> Result<(), RunError> {
     let config_path =
