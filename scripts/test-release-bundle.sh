@@ -23,6 +23,11 @@ assert_file() {
     fi
 }
 
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
 assert_mode() {
     local path="$1"
     local expected="$2"
@@ -637,6 +642,7 @@ sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CON
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
 "$INSTALLED_BINARY" settings set screen.backend swayidle
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
@@ -653,7 +659,7 @@ grep -q '^screen_idle_timeout=86400$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings set updates.channel prerelease
 BACKGROUND_UPDATE_OUTPUT="$("$INSTALLED_BINARY" updates background-check)"
 printf '%s\n' "$BACKGROUND_UPDATE_OUTPUT" | grep -F -q 'background: skipped (automatic update checks disabled)'
-grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
+grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_blank=disabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
@@ -661,21 +667,21 @@ grep -q '^screen_restore_policy=aggressive$' "$CONFIG_FILE"
 grep -q '^tvs_primary_ip=192.168.1.12$' "$CONFIG_FILE"
 grep -q '^tvs_primary_mac=22:33:44:55:66:77$' "$CONFIG_FILE"
 grep -q '^tvs_primary_input=HDMI_4$' "$CONFIG_FILE"
-grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
-# Settings owns reconfiguration; setup must not rewrite existing behavior choices.
-sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
+# Read-only settings preserve the original text of a current profile.
+sed -i 's/^tvs_primary_platform=lg_webos$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
 printf '%s\n' 'tvs_primary_platform = lg_webos # native' >> "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
 "$INSTALLED_BINARY" settings set tv.ip 192.168.1.11
-"$INSTALLED_BINARY" settings set tv.mac 11:22:33:44:55:66
+"$INSTALLED_BINARY" settings set tv.mac 12:22:33:44:55:66
 "$INSTALLED_BINARY" settings set tv.input HDMI_3
 # Normalize this controlled fixture for the following invalid-platform cases.
 sed -i '/tvs_primary_platform/d' "$CONFIG_FILE"
 printf '%s\n' tvs_primary_platform=lg_webos >> "$CONFIG_FILE"
-grep -q '^screen_backend=swayidle$' "$CONFIG_FILE"
+grep -q '^screen_backend=auto$' "$CONFIG_FILE"
 grep -q '^screen_honor_idle_inhibitors=enabled$' "$CONFIG_FILE"
 grep -q '^screen_idle_timeout=900$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
@@ -976,7 +982,7 @@ cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || {
     exit 1
 }
 "$INSTALLED_BINARY" settings describe screen.backend \
-    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
+    | grep -F -q 'swayidle (deprecated compatibility backend)'
 cmp -s "$CONFIG_POINTER_SNAPSHOT" "$INSTALLED_POINTER" || {
     echo "Upgrade changed the installed config pointer."
     exit 1
@@ -1034,20 +1040,26 @@ EOF
         fi
     fi
     cp "$CONFIG_FILE" "$CONFIG_SNAPSHOT"
-    (
+    if ! (
         cd "$BUNDLE_DIR"
         bash ./install.sh --upgrade >"$WORK_DIR/install-first-$scenario.output" 2>&1
-    )
-    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
-    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+    ); then
+        cat "$WORK_DIR/install-first-$scenario.output" >&2
+        fail "Upgrade failed for $scenario."
+    fi
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Upgrade changed saved config for $scenario."
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || fail "Upgrade changed native credentials for $scenario."
     grep -F -q 'user-owned legacy credential' "$LEGACY_USER_CREDENTIAL"
     [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Upgrade left the obsolete app environment: $scenario"
-    [ "$("$INSTALLED_BINARY" settings get tv.platform)" = bscpylgtv ]
-    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
-    LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS=0.3 \
-        timeout 30 "$INSTALLED_BINARY" monitor >"$WORK_DIR/migration-$scenario.output" 2>&1
+    [ "$("$INSTALLED_BINARY" settings get tv.platform)" = bscpylgtv ] || fail "Settings inspection changed or misreported the legacy platform for $scenario."
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Settings inspection changed saved config for $scenario."
+    if ! LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS=0.3 \
+        timeout 30 "$INSTALLED_BINARY" monitor >"$WORK_DIR/migration-$scenario.output" 2>&1; then
+        cat "$WORK_DIR/migration-$scenario.output" >&2
+        fail "Monitor startup failed to convert $scenario."
+    fi
     grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
-    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || fail "Startup changed native credentials for $scenario."
     grep -F -q 'user-owned legacy credential' "$LEGACY_USER_CREDENTIAL"
 done
 [ ! -e "$USER_DESKTOP_ENTRY" ] || fail "Upgrade recreated a user-removed Desktop launcher."

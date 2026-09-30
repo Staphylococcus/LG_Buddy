@@ -18,6 +18,7 @@ use lg_buddy::overview::{
     AudioReadFailure, EnvironmentOverviewBackend, OverviewBackend, OverviewSummaryFailure,
 };
 use lg_buddy::session::runner::{RuntimeActionExecutor, SessionActionExecutor};
+use lg_buddy::settings::SettingsCommand;
 use lg_buddy::tv::OledBrightness;
 use lg_buddy::tvs::{EnvironmentTvsBackend, TvsBackend, TvsReadFailure};
 use lg_buddy::{run_command, Command, RunError};
@@ -309,7 +310,7 @@ fn invalid_legacy_sleep_stops_before_journal_tv_or_marker_work() {
 }
 
 #[test]
-fn direct_cli_start_converts_stale_profile_before_backend_detection() {
+fn backend_detection_keeps_stale_profile_unchanged() {
     let mut env = TestEnv::new();
     let config = TestConfigFile::new("migration-cli-start");
     config.write_sample("HDMI_2");
@@ -322,11 +323,67 @@ fn direct_cli_start_converts_stale_profile_before_backend_detection() {
         .join("tvs/primary/access-token.json");
     let token_before = fs::read(&token_path).unwrap();
 
+    let original = fs::read(config.path()).unwrap();
     let _ = run_command(Command::DetectBackend, &mut Vec::new());
-    let contents = fs::read_to_string(config.path()).unwrap();
-    assert!(contents.contains("tvs_primary_platform=lg_webos"));
+    assert_eq!(fs::read(config.path()).unwrap(), original);
     assert_eq!(fs::read(token_path).unwrap(), token_before);
     assert_eq!(native.snapshot().connection_count, 0);
+}
+
+#[test]
+fn valid_settings_edit_converts_stale_profile_after_invalid_edit_stays_read_only() {
+    let mut env = TestEnv::new();
+    let config = TestConfigFile::new("migration-settings-write");
+    config.write_sample("HDMI_2");
+    env.set("LG_BUDDY_CONFIG", config.path());
+    let native = native_tv(&config);
+    let original = fs::read(config.path()).unwrap();
+
+    assert!(matches!(
+        run_command(
+            Command::Settings(SettingsCommand::Set {
+                key: "tv.input".to_string(),
+                value: "invalid".to_string(),
+            }),
+            &mut Vec::new(),
+        ),
+        Err(RunError::Settings(_))
+    ));
+    assert_eq!(fs::read(config.path()).unwrap(), original);
+
+    run_command(
+        Command::Settings(SettingsCommand::Set {
+            key: "tv.input".to_string(),
+            value: "HDMI_3".to_string(),
+        }),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let contents = fs::read_to_string(config.path()).unwrap();
+    assert!(contents.contains("tvs_primary_platform=lg_webos"));
+    assert!(contents.contains("tvs_primary_input=HDMI_3"));
+    assert_eq!(native.snapshot().connection_count, 0);
+}
+
+#[test]
+fn settings_edit_can_repair_invalid_saved_config() {
+    let mut env = TestEnv::new();
+    let config = TestConfigFile::new("migration-settings-repair");
+    config.write_sample("HDMI_2");
+    config.set_value("tvs_primary_ip", "invalid-address");
+    env.set("LG_BUDDY_CONFIG", config.path());
+
+    run_command(
+        Command::Settings(SettingsCommand::Set {
+            key: "tv.ip".to_string(),
+            value: "192.168.1.12".to_string(),
+        }),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(fs::read_to_string(config.path())
+        .unwrap()
+        .contains("tvs_primary_ip=192.168.1.12"));
 }
 
 #[test]

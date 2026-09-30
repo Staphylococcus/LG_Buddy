@@ -1148,6 +1148,15 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     if migrates_config_on_start(&command) {
         startup::foreground_start()?;
     }
+    if let Command::Settings(settings_command) = &command {
+        if settings::validate_cli_mutation(settings_command).map_err(RunError::Settings)? {
+            match startup::foreground_start() {
+                // A settings edit may be repairing an incomplete configuration.
+                Err(RunError::Migration(AutomaticMigrationError::InvalidConfiguration)) => {}
+                result => result?,
+            }
+        }
+    }
     // The read-only current-config gate still protects TV operations if a
     // concurrent writer restores stale contents after conversion.
     if requires_current_config(&command) {
@@ -1243,10 +1252,10 @@ fn migrates_config_on_start(command: &Command) -> bool {
         | Command::KWinBridge(_)
         | Command::Dev(_)
         | Command::Settings(_)
+        | Command::DetectBackend
         | Command::UpgradePreflight { .. }
         | Command::GnomeReadinessProbe { .. } => false,
         Command::Setup(_)
-        | Command::DetectBackend
         | Command::Updates(_)
         | Command::Startup(_)
         | Command::Shutdown

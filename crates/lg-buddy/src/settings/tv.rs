@@ -150,16 +150,7 @@ pub(super) fn preflight_if_required<W: io::Write, P: PlatformPreflight>(
     mutation: &SettingsMutation,
     writer: &mut W,
 ) -> Result<(), SettingsError> {
-    if mutation.action() == SettingsMutationAction::Set
-        && mutation.key_name() == "tv.platform"
-        && mutation.new_value()?.as_enum() == Some(TvPlatform::Bscpylgtv.as_str())
-    {
-        return Err(SettingsError::InvalidValue {
-            key: "tv.platform".to_string(),
-            value: TvPlatform::Bscpylgtv.as_str().to_string(),
-            expected: "lg_webos; bscpylgtv requires migration".to_string(),
-        });
-    }
+    validate_platform_mutation(mutation)?;
 
     if mutation.action() != SettingsMutationAction::Set
         || mutation.key_name() != "tv.platform"
@@ -183,6 +174,21 @@ pub(super) fn preflight_if_required<W: io::Write, P: PlatformPreflight>(
             key: mutation.key_name().to_string(),
             message,
         })
+}
+
+pub(super) fn validate_platform_mutation(mutation: &SettingsMutation) -> Result<(), SettingsError> {
+    if mutation.action() == SettingsMutationAction::Set
+        && mutation.key_name() == "tv.platform"
+        && mutation.new_value()?.as_enum() == Some(TvPlatform::Bscpylgtv.as_str())
+    {
+        return Err(SettingsError::InvalidValue {
+            key: "tv.platform".to_string(),
+            value: TvPlatform::Bscpylgtv.as_str().to_string(),
+            expected: "lg_webos; bscpylgtv requires migration".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn write_native_auth_event(
