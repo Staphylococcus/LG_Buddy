@@ -140,7 +140,7 @@ impl SettingsFormatter {
         writeln!(writer, "{}", setting.key_name()).map_err(output_error)?;
         writeln!(writer, "  storage key: {}", setting.storage_key()).map_err(output_error)?;
         writeln!(writer, "  type: {}", definition.value_type().as_str()).map_err(output_error)?;
-        writeln!(writer, "  current: {}", format_described_value(setting)).map_err(output_error)?;
+        writeln!(writer, "  current: {}", format_effective_value(setting)).map_err(output_error)?;
         if setting.key_name() == "screen.backend" {
             writeln!(writer, "  compatibility: legacy CLI only; omitted from settings list and unqualified describe").map_err(output_error)?;
             let configured = format_effective_value(setting);
@@ -150,13 +150,7 @@ impl SettingsFormatter {
                 writeln!(writer, "  resolved backend: {resolved}").map_err(output_error)?;
                 writeln!(writer, "  fallback reason: {fallback_reason}").map_err(output_error)?;
             }
-            if let Some(notice) = screen::deprecation_notice(&configured) {
-                writeln!(writer, "  deprecation: {notice}.").map_err(output_error)?;
-            }
-            if let Some(notice) = screen::swayidle_inhibitor_notice(&configured) {
-                writeln!(writer, "  compatibility: {notice}.").map_err(output_error)?;
-            }
-            if matches!(configured.as_str(), "gnome" | "wayland" | "swayidle") {
+            if matches!(configured.as_str(), "gnome" | "wayland") {
                 writeln!(writer, "  legacy override: {configured}; activity discovery is restricted. Use automatic integration in Settings for a recoverable transition.").map_err(output_error)?;
             }
         }
@@ -177,7 +171,7 @@ impl SettingsFormatter {
                 writeln!(
                     writer,
                     "  allowed values: {}",
-                    format_described_enum_values(setting, enum_type.values())
+                    enum_type.values().join(", ")
                 )
                 .map_err(output_error)?;
                 if !enum_type.aliases().is_empty() {
@@ -221,27 +215,6 @@ pub(super) fn format_effective_value(setting: &EffectiveSetting) -> String {
         .value()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "<missing>".to_string())
-}
-
-fn format_described_value(setting: &EffectiveSetting) -> String {
-    let value = format_effective_value(setting);
-    if setting.key_name() == "screen.backend" {
-        screen::format_backend_choice(&value)
-    } else {
-        value
-    }
-}
-
-fn format_described_enum_values(setting: &EffectiveSetting, values: &[&str]) -> String {
-    if setting.key_name() != "screen.backend" {
-        return values.join(", ");
-    }
-
-    values
-        .iter()
-        .map(|value| screen::format_backend_choice(value))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn format_aliases(aliases: &[SettingAlias]) -> String {

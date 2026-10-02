@@ -467,7 +467,6 @@ mod tests {
             ScreenBackend::Auto,
             ScreenBackend::Gnome,
             ScreenBackend::Wayland,
-            ScreenBackend::Swayidle,
         ] {
             config.screen_backend = backend;
             for idle_blank in [

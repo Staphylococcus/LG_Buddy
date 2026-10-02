@@ -34,7 +34,6 @@ enum InactivityPhase {
 pub struct InactivityEngine {
     blank_after: Duration,
     blank_at: Option<Instant>,
-    provider_driven_blank: bool,
     power_off_after: Duration,
     power_off_at: Option<Instant>,
     phase: InactivityPhase,
@@ -53,28 +52,6 @@ impl InactivityEngine {
         Self::new_with_power_off_after(blank_after, Self::DEFAULT_POWER_OFF_AFTER, started_at)
     }
 
-    pub fn new_provider_driven(power_off_after: Duration, started_at: Instant) -> Self {
-        let mut engine =
-            Self::new_with_power_off_after(Duration::ZERO, power_off_after, started_at);
-        engine.blank_at = None;
-        engine.provider_driven_blank = true;
-        engine
-    }
-
-    pub fn new_provider_driven_with_restore_pending(
-        power_off_after: Duration,
-        started_at: Instant,
-    ) -> Self {
-        let mut engine = Self::new_with_restore_pending_and_power_off_after(
-            Duration::ZERO,
-            power_off_after,
-            started_at,
-        );
-        engine.blank_at = None;
-        engine.provider_driven_blank = true;
-        engine
-    }
-
     pub fn new_with_power_off_after(
         blank_after: Duration,
         power_off_after: Duration,
@@ -83,7 +60,6 @@ impl InactivityEngine {
         Self {
             blank_after,
             blank_at: Some(started_at + blank_after),
-            provider_driven_blank: false,
             power_off_after,
             power_off_at: None,
             phase: InactivityPhase::Unknown,
@@ -112,7 +88,6 @@ impl InactivityEngine {
         Self {
             blank_after,
             blank_at: Some(started_at + blank_after),
-            provider_driven_blank: false,
             power_off_after,
             power_off_at: Some(started_at + power_off_after),
             phase: InactivityPhase::Blanked,
@@ -243,15 +218,11 @@ impl InactivityEngine {
 
         self.activity_floor = Some(observed_at);
 
-        if self.provider_driven_blank {
-            self.blank_at = None;
-        } else {
-            self.blank_at = Some(
-                self.blank_at
-                    .unwrap_or(observed_at)
-                    .max(observed_at + self.blank_after),
-            );
-        }
+        self.blank_at = Some(
+            self.blank_at
+                .unwrap_or(observed_at)
+                .max(observed_at + self.blank_after),
+        );
 
         match self.phase {
             InactivityPhase::BlankRequested
@@ -562,11 +533,18 @@ mod tests {
     }
 
     #[test]
-    fn provider_driven_idle_uses_the_same_post_blank_policy() {
+    fn system_blank_before_idle_deadline_uses_the_same_post_blank_policy() {
         let started_at = Instant::now();
-        let mut engine = InactivityEngine::new_provider_driven(Duration::from_secs(5), started_at);
+        let mut engine = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            started_at,
+        );
 
-        assert_eq!(engine.time_until_action(started_at), None);
+        assert_eq!(
+            engine.time_until_action(started_at),
+            Some(Duration::from_secs(30))
+        );
         assert_eq!(
             engine.observe_provider_idle(started_at),
             InactivityDecision::BlankNow
@@ -579,9 +557,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_driven_activity_waits_for_the_next_provider_idle() {
+    fn activity_after_system_blank_rearms_the_native_idle_deadline() {
         let started_at = Instant::now();
-        let mut engine = InactivityEngine::new_provider_driven(Duration::from_secs(5), started_at);
+        let mut engine = InactivityEngine::new_with_power_off_after(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            started_at,
+        );
 
         assert_eq!(
             engine.observe_provider_idle(started_at),
@@ -599,8 +581,11 @@ mod tests {
             engine.observe_time(started_at + Duration::from_secs(30), || true),
             InactivityDecision::NoOp
         );
-        // A later provider-idle observation (after the restoring activity) arms
-        // the next blank again.
+        assert_eq!(
+            engine.time_until_action(started_at + Duration::from_secs(1)),
+            Some(Duration::from_secs(30))
+        );
+        // A later OS blank still uses the same blanking path before that deadline.
         assert_eq!(
             engine.observe_provider_idle(started_at + Duration::from_secs(2)),
             InactivityDecision::BlankNow

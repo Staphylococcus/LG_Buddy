@@ -217,15 +217,7 @@ impl SettingsPresentation {
             return false;
         }
 
-        if setting != BehaviorSetting::ScreenHonorIdleInhibitors {
-            return true;
-        }
-
-        let backend_is_swayidle = self
-            .row(BehaviorSetting::ScreenBackend)
-            .is_some_and(|row| matches!(row.editor(),
-                SettingsEditor::AutomaticIntegration { configured: Some(value) } if value == "swayidle"));
-        !backend_is_swayidle
+        true
     }
 
     pub(crate) fn row(&self, setting: BehaviorSetting) -> Option<&SettingsRow> {
@@ -669,7 +661,6 @@ fn value_label(key: &str, value: SettingValue) -> String {
         ("screen.backend", SettingValue::Enum("auto")) => "Automatic".to_string(),
         ("screen.backend", SettingValue::Enum("gnome")) => "GNOME".to_string(),
         ("screen.backend", SettingValue::Enum("wayland")) => "Wayland".to_string(),
-        ("screen.backend", SettingValue::Enum("swayidle")) => "swayidle (deprecated)".to_string(),
         (_, SettingValue::Enum("enabled")) => "Enabled".to_string(),
         (_, SettingValue::Enum("disabled")) => "Disabled".to_string(),
         ("screen.restore_policy", SettingValue::Enum("conservative")) => "Conservative".to_string(),

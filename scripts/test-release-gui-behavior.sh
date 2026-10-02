@@ -361,7 +361,7 @@ observe_gui_state --expected-settings-state ready --expected-settings-timeout 72
 [ "$("$RUNTIME_BINARY" settings get screen.idle_timeout)" = "720" ] || fail "Invalid timeout changed configuration."
 # Every saved legacy override has one explicit transition. Cancellation leaves
 # the exact file intact; disabled idle monitoring needs no native idle provider.
-for legacy_backend in gnome wayland swayidle; do
+for legacy_backend in gnome wayland; do
     observe_gui_state --select-page TVs
     cp "$WORK_DIR/before-settings.env" "$CONFIG_FILE"
     printf '%s\n' "screen_backend=$legacy_backend" 'screen_idle_blank=disabled' \

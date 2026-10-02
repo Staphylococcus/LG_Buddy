@@ -319,22 +319,9 @@ fn swayidle_installed(world: &mut LgBuddyWorld) {
     world.install_swayidle_stub();
 }
 
-#[given("swayidle will emit an idle timeout")]
-fn swayidle_will_emit_timeout(world: &mut LgBuddyWorld) {
-    world.swayidle_emits_timeout();
-}
-
-#[given("swayidle will emit a resume event")]
-fn swayidle_will_emit_resume(world: &mut LgBuddyWorld) {
-    world.swayidle_emits_resume();
-}
-
-#[given(regex = r#"swayidle stays open for ([0-9]+(?:\.[0-9]+)?) seconds"#)]
-fn swayidle_stays_open_for_seconds(world: &mut LgBuddyWorld, seconds: String) {
-    let seconds = seconds
-        .parse::<f64>()
-        .unwrap_or_else(|err| panic!("invalid swayidle linger `{seconds}`: {err}"));
-    world.swayidle_stays_open_for_secs(seconds);
+#[then("swayidle was not invoked")]
+fn swayidle_not_invoked(world: &mut LgBuddyWorld) {
+    world.assert_swayidle_not_invoked();
 }
 
 #[given("the next input restore attempt powers the TV back on")]

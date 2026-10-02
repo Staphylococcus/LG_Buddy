@@ -80,9 +80,6 @@ mod tests {
 
     struct NativeProbe(bool);
     impl BackendProbe for NativeProbe {
-        fn has_command(&self, _: &str) -> bool {
-            panic!("automatic transition must not probe swayidle")
-        }
         fn gnome_shell_available(&self) -> bool {
             self.0
         }

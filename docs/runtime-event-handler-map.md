@@ -28,7 +28,7 @@ inactivity observation layer owns the initial blank deadline and, after a
 successful automatic blank, a fixed five-minute power-off deadline. Activity
 resets or cancels the applicable deadline; each expiry is edge-triggered.
 
-GNOME, native Wayland, and `swayidle` feed the shared session path.
+GNOME and native Wayland feed the shared session path.
 
 Screen and sleep actions pass through `session::actions` for configuration and
 dependency assembly before reaching their policy handlers. Each monitor retains
@@ -105,8 +105,7 @@ Examples:
 
 ### Shared Inactivity Path
 
-GNOME and native Wayland provide activity facts while `swayidle` provides
-timeout/resume facts. All feed the same inactivity model and policy dispatcher.
+GNOME and native Wayland provide activity facts to the same inactivity model and policy dispatcher.
 
 ```text
 native desktop activity facts
@@ -136,7 +135,6 @@ Current shared-runtime inputs:
 | Linux gamepad activity | `UserActivityObserved` from `AuxiliaryInput` | Shared session runtime -> `InactivityEngine` |
 | Initial or changed logind `LockedHint=true` | `SessionEvent::Lock` from `LinuxLogind` | Shared session runtime -> `InactivityEngine` |
 | Changed logind `LockedHint=false` after lock | `SessionEvent::Unlock` from `LinuxLogind` | Clear the observed lock state without requesting screen restore |
-| `swayidle` timeout/resume | `Idle` / `DesktopActivityObserved` | `swayidle` source -> shared runner |
 
 The desktop rows are GNOME-specific source surfaces. Gamepad activity is an
 independent auxiliary source owned by the shared session runtime. The
@@ -170,22 +168,13 @@ activity can restore the TV; input mismatch clears it as lost ownership. One
 attempt is allowed per uninterrupted idle period. On process restart, an
 existing marker starts a fresh five-minute grace period.
 
-### `swayidle` Compatibility Path
+### Retired backend configuration
 
-The `swayidle` monitor is a compatibility fact source.
-
-```text
-swayidle timeout/resume
-  -> private idle/activity event transport
-  -> shared runner and InactivityEngine
-  -> screen policy and timed power-off policy
-```
-
-`sources/desktop/swayidle.rs` owns only process invocation and translation of
-timeout/resume callbacks into facts. It does not invoke public TV commands.
-
-This deprecated path remains for existing explicit selections, with the shared
-screen policy. Automatic monitoring never probes or launches swayidle.
+The built-in swayidle process path has been removed. User screen daemon startup
+converts a saved retired selection to `auto` before consuming configuration.
+The read-only stale-config gate remains on other entrypoints. External automation
+can use the public `screen off` / `screen on` commands with built-in idle blanking
+disabled; it owns its own process and timing.
 
 ## System Lifecycle Event Handling
 

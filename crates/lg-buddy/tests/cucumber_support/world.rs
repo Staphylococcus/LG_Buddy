@@ -1,7 +1,6 @@
 use crate::support::{
     prime_isolated_path_dependencies, ExecutableScript, MockNmOnline, MockPowerDevil,
-    MockSessionBusIdleMonitor, MockSwayidle, MockSystemLogind, RuntimeStateLayout, TestConfigFile,
-    TestEnv,
+    MockSessionBusIdleMonitor, MockSystemLogind, RuntimeStateLayout, TestConfigFile, TestEnv,
 };
 use crate::web_os::{MockWebOsTv, MockWebOsTvSnapshot, MockWebOsVersion, VALID_WEBOS_ACCESS_TOKEN};
 use cucumber::World;
@@ -20,7 +19,7 @@ pub struct LgBuddyWorld {
     powerdevil: Option<MockPowerDevil>,
     session_bus_idle_monitor: Option<MockSessionBusIdleMonitor>,
     nm_online: Option<MockNmOnline>,
-    swayidle: Option<MockSwayidle>,
+    swayidle_invocations_path: Option<PathBuf>,
     path_scripts: Vec<ExecutableScript>,
     brightness_gui_calls_path: Option<PathBuf>,
     config_snapshot: Option<String>,
@@ -49,7 +48,7 @@ impl fmt::Debug for LgBuddyWorld {
                 &self.session_bus_idle_monitor.is_some(),
             )
             .field("nm_online", &self.nm_online.is_some())
-            .field("swayidle", &self.swayidle.is_some())
+            .field("swayidle", &self.swayidle_invocations_path.is_some())
             .field("path_scripts", &self.path_scripts.len())
             .field("brightness_gui_calls_path", &self.brightness_gui_calls_path)
             .field("config_snapshot", &self.config_snapshot.is_some())
@@ -570,12 +569,21 @@ exit 1\n",
     }
 
     pub fn install_swayidle_stub(&mut self) {
-        if self.swayidle.is_none() {
-            let swayidle = MockSwayidle::new("cucumber-swayidle");
-            let wrapper = swayidle.command_wrapper("cucumber-swayidle-wrapper");
-            self.prepend_path_script(wrapper);
-            self.swayidle = Some(swayidle);
-        }
+        let wrapper = ExecutableScript::new(
+            "unused-swayidle",
+            "swayidle",
+            "#!/bin/sh\nprintf '%s\\n' invoked > \"$0.invoked\"\nexit 97\n",
+        );
+        self.swayidle_invocations_path = Some(wrapper.path().with_extension("invoked"));
+        self.prepend_path_script(wrapper);
+    }
+
+    pub fn assert_swayidle_not_invoked(&self) {
+        assert!(!self
+            .swayidle_invocations_path
+            .as_ref()
+            .expect("swayidle stub installed")
+            .exists());
     }
 
     pub fn install_nm_online_stub(&mut self, status: i64) {
@@ -610,30 +618,6 @@ exit 1\n",
             "nm-online invocations were: {:?}",
             invocations
         );
-    }
-
-    pub fn swayidle_emits_timeout(&mut self) {
-        self.install_swayidle_stub();
-        self.swayidle
-            .as_ref()
-            .expect("mock swayidle configured")
-            .queue_timeout_emission();
-    }
-
-    pub fn swayidle_emits_resume(&mut self) {
-        self.install_swayidle_stub();
-        self.swayidle
-            .as_ref()
-            .expect("mock swayidle configured")
-            .queue_resume_emission();
-    }
-
-    pub fn swayidle_stays_open_for_secs(&mut self, seconds: f64) {
-        self.install_swayidle_stub();
-        self.swayidle
-            .as_ref()
-            .expect("mock swayidle configured")
-            .set_linger_seconds(seconds);
     }
 
     pub fn install_systemctl_stub(&mut self, reboot_pending: bool) {

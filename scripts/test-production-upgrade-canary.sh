@@ -219,7 +219,7 @@ cmp -s "$TOKEN_SNAPSHOT" "$NATIVE_TOKEN_FILE" || fail "Production upgrade change
 [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Production native upgrade left the obsolete Python environment."
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
 "$INSTALLED_BINARY" settings describe screen.backend \
-    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
+    | grep -F -q 'current: <invalid: swayidle>'
 
 CANDIDATE_CHECK_OUTPUT="$WORK_DIR/candidate-update-check.output"
 UPDATE_CACHE_FILE="$XDG_CACHE_HOME/lg-buddy/update-check.json"

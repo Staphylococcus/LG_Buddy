@@ -274,7 +274,14 @@ Examples:
   boundary, and accepted desktop and auxiliary activity
 - logind lock monitoring rebinding and reconciling after logind changes its
   unique D-Bus owner
-- swayidle production timeout/resume process arguments
+
+The retired swayidle adapter's invocation, shell quoting and event-file tests are
+removed with that transport. Native source and runner tests retain activity,
+gamepad, ownership, restart and provider recovery behavior. Inactivity tests
+retain early system blanking and post-blank power-off, and now assert activity
+rearms LG Buddy's native deadline. `monitor_native.feature` checks that even an
+installed swayidle command is never executed, and `screen.feature` covers public
+blank/restore with built-in monitoring disabled.
 
 Source-specific tests live with their source modules. Runner tests should use
 normalized observations and focus on multiplexing or policy behavior rather
@@ -344,10 +351,12 @@ one other target compositor. Verify that explicit and automatic `wayland`
 detection and monitor startup succeed, unsupported capability or connection
 cases report a precise reason, and automatic native monitoring composes available
 sources. Verify automatic monitoring never probes or starts swayidle, even when
-it is installed, and retain explicit legacy swayidle coverage. Release-facing
+it is installed. Preserve saved legacy conversion and reject new swayidle
+settings and environment overrides. Release-facing
 changes must keep the static x86_64 musl build and release-bundle smoke test green
 on a host without swayidle, including
-preservation and deprecation reporting for an existing `swayidle` config.
+preservation of retired config through installation followed by user daemon
+startup conversion, including disabled monitoring without native capability.
 For the completed inhibition integration (#225), start real video playback
 before and after the monitor: disabled
 must still blank, enabled must remain visible past the timeout, and stopping
@@ -578,7 +587,6 @@ The most important remaining gaps are:
 - real-host validation for installer and service wiring beyond the release-bundle
   temporary-root smoke test
 - broader validation of the remaining shell setup surface
-- any future coverage needed for richer `swayidle` hooks beyond `timeout` and `resume`
 
 ## Near-Term Priorities
 

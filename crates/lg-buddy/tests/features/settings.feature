@@ -86,7 +86,7 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: gnome"
     And stdout contains "fallback reason: none; preferred backend is available"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
     When I run the command "settings get screen.backend"
     Then the command succeeds
     And stdout is "auto"
@@ -101,7 +101,7 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
 
   Scenario: settings describe remains available without a detected backend
     Given a temporary LG Buddy config using input HDMI_2
@@ -112,18 +112,18 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
 
-  Scenario: settings describe marks an explicit swayidle selection as deprecated
+  Scenario: settings cannot select the retired swayidle backend
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And systemd apply actions are skipped
     When I run the command "settings set screen.backend swayidle"
+    Then the command fails
+    And stderr contains "invalid value for setting `screen.backend`"
+    When I run the command "settings get screen.backend"
     Then the command succeeds
-    When I run the command "settings describe screen.backend"
-    Then the command succeeds
-    And stdout contains "current: swayidle (deprecated compatibility backend)"
-    And stdout contains "planned for removal in LG Buddy 2.0.0"
+    And stdout is "auto"
 
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2

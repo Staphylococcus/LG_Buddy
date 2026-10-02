@@ -173,10 +173,8 @@ blanking disabled. Existing explicit GNOME and Wayland configurations keep
 their behavior until you choose to switch. A saved `swayidle` selection is
 converted to `auto` at the next user screen daemon start.
 
-This preference applies to the native GNOME and Wayland integrations. The
-deprecated, explicitly selected `swayidle` integration always honors app
-inhibition. An existing `swayidle` override hides this preference. Automatic integration uses native
-sources only and never falls back to swayidle.
+This preference applies to the native GNOME and Wayland integrations. Automatic
+integration uses native sources only; LG Buddy does not launch swayidle.
 
 Turning off **Idle blanking** hides **Allow apps to prevent idle blanking**
 and **Idle timeout**
@@ -187,7 +185,8 @@ explicit screen-on requests.
 Backend selection is absent from `settings list` and `settings describe`
 without a key. Existing scripts can still explicitly use `settings get`,
 `describe`, `set` and `unset` with `screen.backend`. The accepted values remain
-`auto`, `gnome`, `wayland` and `swayidle`; `unset` restores the `auto` default.
+`auto`, `gnome` and `wayland`; `unset` restores the `auto` default. New
+`swayidle` selections and environment overrides are rejected.
 Reading or listing settings never migrates a saved override. A later
 user screen daemon startup converts a saved `swayidle` selection to `auto`.
 
@@ -221,17 +220,16 @@ swayidle -w timeout 300 'lg-buddy screen off' resume 'lg-buddy screen on'
 You own swayidle installation, startup and timing. Leave LG Buddy's session
 service enabled. The public commands retain TV input checks, ownership and
 restore policy. This basic recipe does not provide integrated gamepad activity,
-lock-triggered blanking or delayed power-off. It is separate from the deprecated
-built-in `screen.backend=swayidle` integration. Saved legacy selections are
-converted to `auto` when LG Buddy starts.
+lock-triggered blanking or delayed power-off. The built-in swayidle backend has
+been removed. Saved legacy selections convert to `auto` at user screen daemon
+startup before public TV commands can run; installation and settings inspection
+leave those files unchanged.
 
 <a id="gamepad-activity"></a>
 ## Keep the screen awake with a gamepad
 
 Supported controller activity counts as normal activity with the GNOME and
-native Wayland backends, so no extra setting is needed. With the deprecated
-`swayidle` backend, controller activity can restore a screen LG Buddy already
-blanked, but it does not reset swayidle's initial timeout.
+native Wayland backends, so no extra setting is needed.
 
 If a controller is ignored, check that the user running the screen service can
 read the controller's Linux input device, then see the [gamepad subsystem

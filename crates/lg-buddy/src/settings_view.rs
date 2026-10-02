@@ -1132,13 +1132,13 @@ mod tests {
     }
 
     #[test]
-    fn idle_inhibitor_preference_is_hidden_for_explicit_swayidle() {
+    fn retired_backend_does_not_hide_native_inhibitor_preference() {
         let presentation = SettingsPresentation::ready(groups(
             "screen_idle_blank=enabled\nscreen_backend=swayidle\n",
         ));
         assert!(presentation.row_visible(BehaviorSetting::ScreenBackend));
         assert!(presentation.row_visible(BehaviorSetting::ScreenIdleTimeout));
-        assert!(!presentation.row_visible(BehaviorSetting::ScreenHonorIdleInhibitors));
+        assert!(presentation.row_visible(BehaviorSetting::ScreenHonorIdleInhibitors));
     }
 
     fn update_report(channel: crate::updates::UpdateChannel) -> UpdateCheckReport {
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!(
             backend.problem(),
             Some(
-                "Invalid configured value \"not-a-backend\". Accepted values: Automatic, GNOME, Wayland, swayidle (deprecated)."
+                "Invalid configured value \"not-a-backend\". Accepted values: Automatic, GNOME, Wayland."
             )
         );
         assert_ne!(backend.value_label(), backend.default_label());
@@ -1373,7 +1373,7 @@ screen_backend=wayland\n",
                 "screen.backend",
                 "Legacy desktop integration",
                 "Automatic",
-                "Automatic, GNOME, Wayland, swayidle (deprecated)",
+                "Automatic, GNOME, Wayland",
             ),
             (
                 "screen.idle_timeout",
