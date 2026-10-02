@@ -51,7 +51,7 @@ checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
 packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
 the requirements before proceeding. The prebuilt binaries require glibc 2.39
 or newer—the Ubuntu 24.04 runtime baseline.
-Fresh and native installations do not require Python, pip, or bscpylgtv.
+The installed runtime does not require Python, pip, or bscpylgtv.
 TV Sleep & Wake activation requires `pkexec` and
 a desktop authorization agent. You can also install the prerequisites manually:
 

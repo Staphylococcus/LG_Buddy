@@ -84,12 +84,11 @@ mod tests {
         ScreenOwnershipMarker, SystemSleepAttemptLock, SystemSleepAttemptState,
         SystemSleepCycleOutcome,
     };
-    use crate::tv::BscpylgtvCommandClient;
+    use crate::tv::test_support::FakeTvClient;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::net::Ipv4Addr;
     use std::time::Duration;
-    use support::MockBscpylgtv;
 
     #[derive(Debug)]
     struct FakeBus {
@@ -238,7 +237,7 @@ mod tests {
         attempt_state
             .mark_attempted()
             .expect("create stale attempt");
-        let mock = MockBscpylgtv::new("nm-pre-down-not-sleeping-tv");
+        let mock = FakeTvClient::new("nm-pre-down-not-sleeping-tv");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
         let mut bus = FakeBus::preparing_for_sleep(false);
@@ -268,7 +267,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-logind-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-logind-failure-tv");
+        let mock = FakeTvClient::new("nm-pre-down-logind-failure-tv");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
         let mut bus = FakeBus::failing();
@@ -296,7 +295,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-sleeping");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-sleeping-tv");
+        let mock = FakeTvClient::new("nm-pre-down-sleeping-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
@@ -316,7 +315,7 @@ mod tests {
 
         assert!(marker.exists());
         assert!(!attempt_state.exists());
-        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "power_off"]);
         assert!(sleeper.durations().is_empty());
         let output = rendered(&output);
         assert!(output.contains("preparing for sleep"));
@@ -328,7 +327,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-owned-retryable");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-owned-retryable-tv");
+        let mock = FakeTvClient::new("nm-pre-down-owned-retryable-tv");
         mock.set_input("HDMI_2");
         mock.queue_error("power_off", 1, "offline");
         let client = client_for_mock(&mock);
@@ -353,7 +352,10 @@ mod tests {
         );
         assert!(marker.exists());
         assert!(!attempt_state.exists());
-        assert_call_commands(&mock, &["get_input", "power_off", "get_input", "power_off"]);
+        assert_call_commands(
+            &mock,
+            &["current_input", "power_off", "current_input", "power_off"],
+        );
         assert!(rendered(&output).contains("retrying before network teardown"));
     }
 
@@ -362,7 +364,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-owned-follow-up-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-owned-follow-up-failure-tv");
+        let mock = FakeTvClient::new("nm-pre-down-owned-follow-up-failure-tv");
         mock.set_input("HDMI_2");
         mock.queue_error("power_off", 1, "offline");
         mock.queue_error("power_off", 1, "still offline");
@@ -388,7 +390,10 @@ mod tests {
         );
         assert!(!marker.exists());
         assert!(!attempt_state.exists());
-        assert_call_commands(&mock, &["get_input", "power_off", "get_input", "power_off"]);
+        assert_call_commands(
+            &mock,
+            &["current_input", "power_off", "current_input", "power_off"],
+        );
         assert!(rendered(&output).contains("retrying before network teardown"));
     }
 
@@ -397,7 +402,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-idempotent");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-idempotent-tv");
+        let mock = FakeTvClient::new("nm-pre-down-idempotent-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
@@ -428,7 +433,7 @@ mod tests {
 
         assert!(marker.exists());
         assert!(!attempt_state.exists());
-        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "power_off"]);
         assert!(rendered(&output).contains("preparing for sleep"));
     }
 
@@ -444,7 +449,7 @@ mod tests {
         attempt_state
             .write_outcome(SystemSleepCycleOutcome::InProgress)
             .expect("write in-progress outcome");
-        let mock = MockBscpylgtv::new("nm-pre-down-waits-in-progress-tv");
+        let mock = FakeTvClient::new("nm-pre-down-waits-in-progress-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = StateWritingSleeper::new(
@@ -487,7 +492,7 @@ mod tests {
         attempt_state
             .write_outcome(SystemSleepCycleOutcome::InProgress)
             .expect("write in-progress outcome");
-        let mock = MockBscpylgtv::new("nm-pre-down-in-progress-timeout-tv");
+        let mock = FakeTvClient::new("nm-pre-down-in-progress-timeout-tv");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
         let mut bus = FakeBus::preparing_for_sleep(true);
@@ -525,7 +530,7 @@ mod tests {
         attempt_state
             .write_outcome(SystemSleepCycleOutcome::InProgress)
             .expect("write in-progress outcome");
-        let mock = MockBscpylgtv::new("nm-pre-down-in-progress-retryable-tv");
+        let mock = FakeTvClient::new("nm-pre-down-in-progress-retryable-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let sleeper = StateWritingSleeper::new(
@@ -553,7 +558,7 @@ mod tests {
             Some(SystemSleepCycleOutcome::Completed)
         );
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "power_off"]);
         assert!(rendered(&output).contains("retrying before network teardown"));
     }
 
@@ -562,7 +567,7 @@ mod tests {
         let temp_dir = TestDir::new("nm-pre-down-disabled");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         let attempt_state = SystemSleepAttemptState::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("nm-pre-down-disabled-tv");
+        let mock = FakeTvClient::new("nm-pre-down-disabled-tv");
         let client = client_for_mock(&mock);
         let sleeper = RecordingSleeper::default();
         let mut bus = FakeBus::preparing_for_sleep(true);
@@ -592,7 +597,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("parse mac"),
             input: HdmiInput::Hdmi2,
-            tv_platform: crate::config::TvPlatform::Bscpylgtv,
+            tv_platform: crate::config::TvPlatform::LgWebOs,
             screen_backend: ScreenBackend::Auto,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
@@ -602,19 +607,15 @@ mod tests {
         }
     }
 
-    fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(
-            std::net::Ipv4Addr::new(192, 0, 2, 42),
-            mock.command_path(),
-            mock.command_args(),
-        )
+    fn client_for_mock(mock: &FakeTvClient) -> FakeTvClient {
+        mock.clone()
     }
 
     fn rendered(output: &[u8]) -> String {
         String::from_utf8(output.to_vec()).expect("utf8 output")
     }
 
-    fn assert_call_commands(mock: &MockBscpylgtv, expected: &[&str]) {
+    fn assert_call_commands(mock: &FakeTvClient, expected: &[&str]) {
         let actual = mock
             .calls()
             .into_iter()

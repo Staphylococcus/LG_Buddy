@@ -183,7 +183,7 @@ impl OverviewBackend for EnvironmentOverviewBackend {
 }
 
 fn environment_client(
-) -> Result<(crate::config::Config, crate::tv::SelectedTvClient), EnvironmentClientError> {
+) -> Result<(crate::config::Config, crate::web_os::WebOsTvClient), EnvironmentClientError> {
     let path = resolve_config_path_from_env()
         .map_err(|error| EnvironmentClientError::NotConfigured(error.to_string()))?;
     let current = load_current_config(&path).map_err(|error| match &error {
@@ -1144,7 +1144,7 @@ fn summary_error(failure: OverviewSummaryFailure) -> UserFacingError {
         ),
         OverviewSummaryFailure::MigrationRequired => UserFacingError::new(
             "LG Buddy's saved TV configuration needs migration.",
-            "Review the TV platform and desktop integration in Settings before retrying.",
+            "Restart LG Buddy to convert the saved configuration, then retry.",
         ),
         OverviewSummaryFailure::Internal => UserFacingError::new(
             "LG Buddy could not load the primary TV.",
@@ -1160,7 +1160,7 @@ fn audio_error(failure: AudioReadFailure) -> UserFacingError {
         ),
         AudioReadFailure::MigrationRequired => (
             "LG Buddy's saved TV configuration needs migration.",
-            "Review the TV platform and desktop integration in Settings before retrying.",
+            "Restart LG Buddy to convert the saved configuration, then retry.",
         ),
         AudioReadFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",

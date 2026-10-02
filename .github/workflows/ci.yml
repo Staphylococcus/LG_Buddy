@@ -62,7 +62,6 @@ jobs:
           install -m 755 "$test_binary" "$privileged_test_dir/lib-tests"
           test_binary="$privileged_test_dir/lib-tests"
           for test in \
-            tv::tests::user_scoped_launcher_drops_privileges_to_sudo_user_when_running_as_root \
             platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root \
             pairing_store::tests::mutation_lock_is_shared_by_root_and_config_owner \
             pairing_store::tests::mutation_lock_rejects_unsafe_existing_markers \

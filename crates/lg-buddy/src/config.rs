@@ -484,7 +484,7 @@ pub enum StaleConfigReason {
     /// `tvs_primary_platform` was never written; 1.x configs predate the key,
     /// so it would load as the legacy `bscpylgtv` default.
     MissingTvPlatform,
-    /// The selected platform is `bscpylgtv`, which is removed in 1.9.0.
+    /// The selected platform is the retired `bscpylgtv` implementation.
     BscpylgtvPlatform,
     /// The screen backend is the legacy `swayidle` override.
     SwayidleBackend,
@@ -498,7 +498,7 @@ impl StaleConfigReason {
                 "tvs_primary_platform is not set (loads as the legacy `bscpylgtv` default)"
             }
             Self::BscpylgtvPlatform => {
-                "tvs_primary_platform=bscpylgtv is being removed in 1.9.0; set it to lg_webos"
+                "tvs_primary_platform=bscpylgtv is retired; user screen daemon startup converts it to lg_webos"
             }
             Self::SwayidleBackend => {
                 "screen_backend=swayidle is a legacy override; set it to auto, gnome, or wayland"

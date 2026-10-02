@@ -1364,7 +1364,8 @@ mod tests {
     };
     use crate::runtime_phase::{RuntimePhaseProvider, RuntimePhaseRead};
     use crate::state::ScreenOwnershipMarker;
-    use crate::tv::{BscpylgtvCommandClient, CurrentInput};
+    use crate::tv::test_support::FakeTvClient;
+    use crate::tv::CurrentInput;
     use crate::wol::{WakeOnLanError, WakeOnLanSender};
     use std::cell::RefCell;
     use std::fs;
@@ -1373,7 +1374,6 @@ mod tests {
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, UNIX_EPOCH};
-    use support::MockBscpylgtv;
 
     #[test]
     fn pure_policy_marks_session_action_ineligible_while_sleep_is_pending() {
@@ -1516,7 +1516,7 @@ mod tests {
     fn screen_off_outcome_records_blank_action_and_marker_creation() {
         let temp_dir = TestDir::new("screen-outcome-off-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-outcome-off-success-tv");
+        let mock = FakeTvClient::new("screen-outcome-off-success-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
 
@@ -1553,7 +1553,7 @@ mod tests {
     fn logind_lock_uses_the_existing_input_blank_and_marker_policy() {
         let temp_dir = TestDir::new("screen-outcome-logind-lock");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-outcome-logind-lock-tv");
+        let mock = FakeTvClient::new("screen-outcome-logind-lock-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut phase = FixedRuntimePhaseProvider::not_pending();
@@ -1580,9 +1580,9 @@ mod tests {
     fn screen_off_result_arms_escalation_only_for_an_actual_blank() {
         let temp_dir = TestDir::new("screen-off-actual-blank-result");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-off-actual-blank-result-tv");
+        let mock = FakeTvClient::new("screen-off-actual-blank-result-tv");
         mock.set_input("HDMI_2");
-        mock.queue_error("turn_screen_off", 1, "blank failed\n");
+        mock.queue_error("blank_screen", 1, "blank failed\n");
         let client = client_for_mock(&mock);
         let mut phase = FixedRuntimePhaseProvider::not_pending();
         let lifecycle_status = NoopSystemLifecycleStatusProvider;
@@ -1600,7 +1600,7 @@ mod tests {
 
         assert!(!result.blank_succeeded);
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input", "turn_screen_off", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "blank_screen", "power_off"]);
     }
 
     #[test]
@@ -1608,7 +1608,7 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-success-tv");
+        let mock = FakeTvClient::new("timed-power-off-success-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut output = Vec::new();
@@ -1631,7 +1631,7 @@ mod tests {
                 TransitionReason::new(TransitionReasonCode::ActionSelected),
             )]
         );
-        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "power_off"]);
         assert!(rendered(&output).contains("TV power-off succeeded"));
     }
 
@@ -1639,7 +1639,7 @@ mod tests {
     fn timed_power_off_requires_the_ownership_marker() {
         let temp_dir = TestDir::new("timed-power-off-marker-missing");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("timed-power-off-marker-missing-tv");
+        let mock = FakeTvClient::new("timed-power-off-marker-missing-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut output = Vec::new();
@@ -1665,7 +1665,7 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-disabled");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-disabled-tv");
+        let mock = FakeTvClient::new("timed-power-off-disabled-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut config = sample_config(HdmiInput::Hdmi2);
@@ -1688,7 +1688,7 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-input-mismatch");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-input-mismatch-tv");
+        let mock = FakeTvClient::new("timed-power-off-input-mismatch-tv");
         mock.set_input("HDMI_4");
         let client = client_for_mock(&mock);
         let mut output = Vec::new();
@@ -1702,7 +1702,7 @@ mod tests {
         .expect("input mismatch should skip safely");
 
         assert!(!marker.exists());
-        assert_call_commands(&mock, &["get_input"]);
+        assert_call_commands(&mock, &["current_input"]);
         assert!(rendered(&output).contains("ownership was lost"));
     }
 
@@ -1711,8 +1711,8 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-input-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-input-failure-tv");
-        mock.queue_error("get_input", 1, "query failed\n");
+        let mock = FakeTvClient::new("timed-power-off-input-failure-tv");
+        mock.queue_error("current_input", 1, "query failed\n");
         let client = client_for_mock(&mock);
         let mut output = Vec::new();
 
@@ -1725,7 +1725,7 @@ mod tests {
         .expect("input query failure should skip safely");
 
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input"]);
+        assert_call_commands(&mock, &["current_input"]);
         assert!(rendered(&output).contains("without a blind fallback"));
     }
 
@@ -1734,7 +1734,7 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-lifecycle-pending");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-lifecycle-pending-tv");
+        let mock = FakeTvClient::new("timed-power-off-lifecycle-pending-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut phase = FixedRuntimePhaseProvider::pending();
@@ -1765,7 +1765,7 @@ mod tests {
         let temp_dir = TestDir::new("timed-power-off-failure");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create ownership marker");
-        let mock = MockBscpylgtv::new("timed-power-off-failure-tv");
+        let mock = FakeTvClient::new("timed-power-off-failure-tv");
         mock.set_input("HDMI_2");
         mock.queue_error("power_off", 1, "power failed\n");
         let client = client_for_mock(&mock);
@@ -1780,7 +1780,7 @@ mod tests {
         .expect("power failure should remain a completed attempt");
 
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input", "power_off"]);
+        assert_call_commands(&mock, &["current_input", "power_off"]);
         assert!(rendered(&output).contains("TV power-off failed"));
     }
 
@@ -1789,7 +1789,7 @@ mod tests {
         let temp_dir = TestDir::new("screen-outcome-off-skip");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create stale marker");
-        let mock = MockBscpylgtv::new("screen-outcome-off-skip-tv");
+        let mock = FakeTvClient::new("screen-outcome-off-skip-tv");
         mock.set_input("HDMI_4");
         let client = client_for_mock(&mock);
 
@@ -1823,7 +1823,7 @@ mod tests {
         let temp_dir = TestDir::new("screen-outcome-on-success");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-outcome-on-success-tv");
+        let mock = FakeTvClient::new("screen-outcome-on-success-tv");
         mock.set_screen_on(false);
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -1861,14 +1861,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_screen_on_reconciles_input_acknowledged_while_screen_off() {
-        let temp_dir = TestDir::new("legacy-screen-on-false-success");
+    fn screen_on_recovers_when_input_requires_visible_screen() {
+        let temp_dir = TestDir::new("screen-on-recovery");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("legacy-screen-on-false-success-tv");
+        let mock = FakeTvClient::new("screen-on-recovery-tv");
         mock.set_screen_on(false);
-        mock.queue_error("turn_screen_on", 1, "unblank transport failure\n");
-        mock.queue_set_input_ack_without_screen_on();
+        mock.queue_error("unblank_screen", 1, "unblank transport failure\n");
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
@@ -1882,26 +1881,17 @@ mod tests {
             &wol,
             &sleeper,
         )
-        .expect("legacy adapter should reconcile screen visibility");
+        .expect("screen restore should recover when the input requires a visible screen");
 
         assert!(!marker.exists());
         assert!(mock.state_snapshot().screen_on);
         assert_call_commands(
             &mock,
-            &[
-                "turn_screen_on",
-                "get_power_state",
-                "set_input",
-                "get_power_state",
-                "turn_screen_on",
-                "get_power_state",
-                "set_input",
-                "get_power_state",
-            ],
+            &["unblank_screen", "set_input", "unblank_screen", "set_input"],
         );
         let output = rendered(&output);
         assert!(output.contains("LG Buddy Screen Restore Failure Context:"));
-        assert!(output.contains("direct_unblank=failed kind=screen_not_visible"));
+        assert!(output.contains("direct_unblank=failed kind=transport"));
         assert!(output.contains("input_attempt_1=failed kind=screen_not_visible"));
         assert!(output.contains("recovery_unblank_1=succeeded"));
         assert!(output.contains("input_retry_1=succeeded"));
@@ -1912,7 +1902,7 @@ mod tests {
     fn screen_on_outcome_records_marker_missing_no_action() {
         let temp_dir = TestDir::new("screen-outcome-on-missing-marker");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-outcome-on-missing-marker-tv");
+        let mock = FakeTvClient::new("screen-outcome-on-missing-marker-tv");
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
         let sleeper = RecordingSleeper::default();
@@ -1941,7 +1931,7 @@ mod tests {
     fn logind_lock_screen_off_is_ineligible_while_machine_sleep_is_pending() {
         let temp_dir = TestDir::new("screen-phase-off-pending");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-phase-off-pending-tv");
+        let mock = FakeTvClient::new("screen-phase-off-pending-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut phase = FixedRuntimePhaseProvider::pending();
@@ -1976,7 +1966,7 @@ mod tests {
         let temp_dir = TestDir::new("screen-phase-on-pending");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-phase-on-pending-tv");
+        let mock = FakeTvClient::new("screen-phase-on-pending-tv");
         mock.set_screen_on(false);
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -2019,7 +2009,7 @@ mod tests {
         let temp_dir = TestDir::new("screen-phase-on-system-restore-pending");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
         marker.create().expect("create marker");
-        let mock = MockBscpylgtv::new("screen-phase-on-system-restore-pending-tv");
+        let mock = FakeTvClient::new("screen-phase-on-system-restore-pending-tv");
         mock.set_screen_on(false);
         let client = client_for_mock(&mock);
         let wol = RecordingWakeOnLanSender::default();
@@ -2063,7 +2053,7 @@ mod tests {
     fn disabled_lifecycle_policy_does_not_block_session_screen_actions() {
         let temp_dir = TestDir::new("screen-phase-disabled");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-phase-disabled-tv");
+        let mock = FakeTvClient::new("screen-phase-disabled-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut config = sample_config(HdmiInput::Hdmi2);
@@ -2093,14 +2083,14 @@ mod tests {
         );
         assert!(outcome.no_actions.is_empty());
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input", "turn_screen_off"]);
+        assert_call_commands(&mock, &["current_input", "blank_screen"]);
     }
 
     #[test]
     fn unknown_runtime_phase_fails_open_for_session_screen_actions() {
         let temp_dir = TestDir::new("screen-phase-unknown");
         let marker = ScreenOwnershipMarker::new(temp_dir.path().to_path_buf());
-        let mock = MockBscpylgtv::new("screen-phase-unknown-tv");
+        let mock = FakeTvClient::new("screen-phase-unknown-tv");
         mock.set_input("HDMI_2");
         let client = client_for_mock(&mock);
         let mut phase = FixedRuntimePhaseProvider::unknown("system bus unavailable");
@@ -2129,7 +2119,7 @@ mod tests {
         assert_eq!(outcome.diagnostics.len(), 1);
         assert!(outcome.no_actions.is_empty());
         assert!(marker.exists());
-        assert_call_commands(&mock, &["get_input", "turn_screen_off"]);
+        assert_call_commands(&mock, &["current_input", "blank_screen"]);
     }
 
     fn sample_config(input: HdmiInput) -> Config {
@@ -2139,7 +2129,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("parse mac"),
             input,
-            tv_platform: crate::config::TvPlatform::Bscpylgtv,
+            tv_platform: crate::config::TvPlatform::LgWebOs,
             screen_backend: ScreenBackend::Auto,
             screen_idle_blank: ScreenIdleBlankPolicy::Enabled,
             screen_idle_timeout: 300,
@@ -2149,15 +2139,11 @@ mod tests {
         }
     }
 
-    fn client_for_mock(mock: &MockBscpylgtv) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(
-            std::net::Ipv4Addr::new(192, 0, 2, 42),
-            mock.command_path(),
-            mock.command_args(),
-        )
+    fn client_for_mock(mock: &FakeTvClient) -> FakeTvClient {
+        mock.clone()
     }
 
-    fn assert_call_commands(mock: &MockBscpylgtv, expected: &[&str]) {
+    fn assert_call_commands(mock: &FakeTvClient, expected: &[&str]) {
         let actual = mock
             .calls()
             .into_iter()

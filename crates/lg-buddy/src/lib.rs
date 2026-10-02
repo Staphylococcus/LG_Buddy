@@ -38,8 +38,8 @@ pub mod settings;
 pub mod settings_view;
 pub mod setup;
 pub mod sources;
-pub mod state;
 pub mod startup;
+pub mod state;
 pub mod tv;
 pub mod tvs;
 pub mod update_flow;
@@ -66,8 +66,8 @@ use crate::config::{
     load_current_config, resolve_config_path_from_env, ConfigError, ConfigLoadError,
     ConfigPathError,
 };
-use crate::migration::automatic::AutomaticMigrationError;
 use crate::dev::run_dev_command;
+use crate::migration::automatic::AutomaticMigrationError;
 use crate::notifications::NotificationError;
 use crate::session::runner::{run_lifecycle_monitor, run_monitor};
 use crate::settings::{run_settings_command, SettingsCommand, SettingsError, SettingsParseError};
@@ -1145,10 +1145,8 @@ fn hex_digit_value(byte: u8) -> Option<u8> {
 }
 
 pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), RunError> {
-    // #256: TV-operating commands require a current (v2) config. A stale
-    // bscpylgtv/1.x config is a read-only failure (MigrationRequired) — no
-    // migration is attempted here; setup/overview/detect-backend/settings/dev
-    // stay available so the migration host is still reachable.
+    // TV operations require the current config, including before the user
+    // daemon has had a chance to convert a stale saved profile.
     if requires_current_config(&command) {
         let config_path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
         // Early-feedback stale gate: a stale 1.x/bscpylgtv config is a
@@ -1230,11 +1228,8 @@ pub fn run_command<W: Write>(command: Command, writer: &mut W) -> Result<(), Run
     }
 }
 
-/// Commands that operate a TV require a current (v2) config; a stale 1.x /
-/// bscpylgtv config is a read-only `MigrationRequired` failure. The migration
-/// host (`setup` / `overview` / `detect-backend` / `settings` / `dev`) and the
-/// GUI-forwarding `brightness --prompt` stay available on a stale config so
-/// the migration flow is still reachable.
+/// Commands that operate a TV require a current (v2) config. This gate catches
+/// a stale edit before TV work, including before the user daemon starts.
 ///
 /// The match is exhaustive by design: adding a `Command` or `BrightnessCommand`
 /// variant is a compile error until its config requirement is decided here.
@@ -1258,8 +1253,8 @@ fn requires_current_config(command: &Command) -> bool {
         // The TV-operating brightness variants are gated.
         | Command::Brightness(BrightnessCommand::Get)
         | Command::Brightness(BrightnessCommand::Set(_)) => true,
-        // Migration host / diagnostics / maintenance / persistent daemons: no
-        // TV operation at the gate (the daemons self-migrate in `backend_start`).
+        // Diagnostics, maintenance, and persistent daemons perform no TV
+        // operation at this gate (daemons self-migrate in `backend_start`).
         Command::Overview
         | Command::DetectBackend
         | Command::Setup(_)
@@ -1271,7 +1266,7 @@ fn requires_current_config(command: &Command) -> bool {
         | Command::Lifecycle
         | Command::UpgradePreflight { .. }
         | Command::GnomeReadinessProbe { .. }
-        // `prompt` opens the GUI migration host and must stay reachable.
+        // `prompt` opens the GUI, which converts at its own startup boundary.
         | Command::Brightness(BrightnessCommand::Prompt) => false,
     }
 }
@@ -2804,9 +2799,8 @@ mod tests {
                 "{command:?} should be gated"
             );
         }
-        // The migration host, the GUI-forwarding brightness prompt, and the
-        // persistent daemons (which self-migrate in `startup::backend_start`)
-        // stay available on a stale config.
+        // The GUI-forwarding brightness prompt and persistent daemons stay
+        // available on a stale config; the user daemon converts on startup.
         let ungated = [
             Command::Monitor,
             Command::Lifecycle,

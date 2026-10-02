@@ -171,7 +171,6 @@ flowchart LR
     end
 
     subgraph TVBoundary["TV Control Boundary"]
-        BSCPY["bscpylgtvcommand"]
         WEBOS["native webOS session"]
         LGTV["LG TV"]
     end
@@ -251,7 +250,6 @@ flowchart LR
     SCREEN --> WOL
     LIFECYCLE --> WOL
 
-    TV -->|"tv.platform=bscpylgtv"| BSCPY --> LGTV
     TV -->|"tv.platform=lg_webos"| WEBOS --> LGTV
     WOL -->|"magic packet"| LGTV
 ```
@@ -341,9 +339,9 @@ The current split is:
   - provides separate installed-runtime and verified-candidate entrypoints
 - `tv.rs`
   - TV transport abstraction
-  - profile-bound `bscpylgtvcommand` adapter
-  - configured selection between the compatibility and native adapters
-  - adapter-neutral errors and selected-client construction
+  - profile-bound native client construction
+  - typed rejection of stale legacy profiles before TV control
+  - adapter-neutral errors
   - typed facade for input, screen, power, brightness, and audio operations
 - `web_os/adapter.rs`
   - profile-bound native webOS adapter
@@ -648,12 +646,10 @@ Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
 
-The installer reads the existing platform choice before dependency installation.
-A healthy legacy environment is preserved with a final deprecation notice; an
-unhealthy one is refused with the native pairing command before privileged
-mutation. Native upgrades run a second candidate preflight for removal of the
-obsolete `/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested
-mounts before removal. Configuration and credentials remain unchanged.
+Native upgrades run a second candidate preflight for removal of the obsolete
+`/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested mounts
+before removal. Installation leaves configuration and credentials unchanged;
+user screen daemon startup converts supported stale configuration locally.
 
 Fresh installation never provisions Python. GTK/libadwaita requirements are
 checked through the bundled GUI's internal `--check-runtime` entrypoint, which
@@ -849,30 +845,18 @@ remain inside the adapter. Wake-on-LAN keeps the configured network identity at
 
 ### TV Implementations
 
-`tv.platform` selects the production TV implementation. Fresh profiles select
-the native Rust `lg_webos` implementation and verify pairing before the profile
-is saved. Existing profiles retain their explicit choice; a missing platform
-value continues to resolve to `bscpylgtv` and is materialized as that
-compatibility choice when configuration is rewritten. `bscpylgtvcommand`
-remains available as an explicit fallback.
+`tv.platform=lg_webos` selects the native Rust TV implementation. Fresh
+profiles verify pairing before the profile is saved. A missing platform value
+or explicit `bscpylgtv` is recognized as stale 1.x configuration and gated
+until user screen daemon startup converts it to `lg_webos`. Conversion does not pair.
 
-The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
-
-- belongs to one configured TV address
-- shells out to the configured command path
-- keeps subprocess output and exit status inside the legacy adapter
-- maps reads and failures into the shared domain contract
-- privately verifies screen visibility after input restore and screen unblank
-
-`SelectedTvClient` is the internal delegation point for the configured legacy
-or native implementation. `WebOsTvClient` owns one lazily authenticated
+`WebOsTvClient` owns one lazily authenticated
 websocket session behind a mutex, reuses it while healthy, and discards it after
 transport or framing failure. Native effectful operations verify their own
 postconditions before reporting success. After an ambiguous failure the adapter
 may reconnect for safe read-only verification, but it never replays the
-effectful operation. The legacy adapter performs its equivalent power-state
-readback through `bscpylgtvcommand`; neither implementation exposes webOS power
-states to policy code.
+effectful operation. The adapter does not expose webOS power states to policy
+code.
 
 Each monitor's `RuntimeActionExecutor` retains this adapter across compatible
 events. Client construction and connection remain lazy: starting a monitor
@@ -1048,12 +1032,12 @@ asymmetric:
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
-`swayidle` remains an explicit legacy integration during the 1.x migration
-window and emits a deprecation notice. Automatic monitoring never probes or
-starts it, and fresh interactive configuration does not offer it. Removal is
-planned for 2.0.0 after native
-Wayland remains field-validated across supported compositors and unsupported
-sessions have precise diagnostics.
+Saved `swayidle` selections are converted to `auto` at user screen daemon startup.
+Automatic monitoring never probes or starts `swayidle`; externally managed
+idle automation can call the public screen commands. The legacy process adapter
+remains in source until its separate removal. Native Wayland remains
+field-validated across supported compositors and unsupported sessions have
+precise diagnostics.
 
 ## Configuration and Override Surface
 
@@ -1065,8 +1049,6 @@ Important environment overrides:
   - explicit config file path
 - `LG_BUDDY_SCREEN_BACKEND`
   - force backend selection
-- `LG_BUDDY_BSCPYLGTV_COMMAND`
-  - override TV command path
 - `LG_BUDDY_GUI`
   - override the matching `lg-buddy-gui` path for relocation and tests
 - `LG_BUDDY_SYSTEM_RUNTIME_DIR`
@@ -1083,26 +1065,24 @@ These exist mainly so the runtime can be tested without mutating real system pat
 The test strategy has three layers:
 
 - unit tests for parsing, state, backend selection, and policy
-- subprocess-backed integration tests for TV behavior
+- CLI integration tests backed by the native webOS test server
 - manual hardware probes when exact external behavior is unclear
 
-TV-facing tests exercise the production protocol boundaries instead of relying
-only on in-memory fakes. The compatibility adapter uses a stateful subprocess
-mock, while the native adapter uses a centralized stateful webOS test server.
+TV-facing tests exercise the production protocol boundary with a centralized
+stateful webOS test server. Policy tests use a platform-neutral `TvClient` fake
+to cover retries, failures, and marker transitions.
 
 Relevant test assets:
 
-- `tools/mock_bscpylgtvcommand.py`
+- `crates/lg-buddy/src/tv/test_support.rs`
 - `crates/lg-buddy/tests/support/mod.rs`
-- `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
 - `crates/lg-buddy/src/web_os/test_support/test_server.rs`
 - `crates/lg-buddy/src/web_os/observed_behavior.rs`
 - `crates/lg-buddy/tests/features/webos.feature`
 
-The legacy mock preserves the command and response shapes observed from the
-installed client. Native behavior claimed as real is linked to hardware
-evidence and modeled by the centralized server; defensive protocol faults are
-identified separately. See [Native webOS testing](webos-testing.md).
+Native behavior claimed as real is linked to hardware evidence and modeled by
+the centralized server; defensive protocol faults are identified separately.
+See [Native webOS testing](webos-testing.md).
 
 ## Current Boundary
 

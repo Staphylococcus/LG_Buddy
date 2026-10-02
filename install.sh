@@ -790,26 +790,6 @@ check_install_prerequisites() {
     fi
 }
 
-legacy_environment_healthy() {
-    [ -f "$VENV_DIR/pyvenv.cfg" ] &&
-        [ -x "$VENV_DIR/bin/python" ] &&
-        [ -x "$VENV_DIR/bin/bscpylgtvcommand" ] &&
-        "$VENV_DIR/bin/python" -I -B -c 'import bscpylgtv' >/dev/null 2>&1
-}
-
-check_legacy_environment() {
-    local migration_runtime="$RUNTIME_INSTALL_PATH"
-    [ -x "$migration_runtime" ] || migration_runtime="$RUNTIME_BINARY"
-    [ "$TV_PLATFORM" = "bscpylgtv" ] || return 0
-    if ! legacy_environment_healthy; then
-        echo "The existing bscpylgtv environment is missing or unhealthy; LG Buddy no longer installs or repairs it."
-        echo "As your regular user, run LG_BUDDY_CONFIG=\"$CONFIG_FILE\" \"$migration_runtime\" settings set tv.platform lg_webos, accept pairing on the TV, then retry this installation."
-        return 1
-    fi
-    echo "Preserving the healthy bscpylgtv environment unchanged."
-    echo "Deprecated: bscpylgtv is supported only through the final 1.x compatibility window and will be removed in v2.0.0. Pair and select lg_webos to migrate."
-}
-
 load_upgrade_configuration() {
     CONFIG_FILE="$(sed -n '/[^[:space:]]/{p;q;}' "$CONFIG_POINTER_PATH")"
     [ -n "$CONFIG_FILE" ] || {
@@ -817,7 +797,6 @@ load_upgrade_configuration() {
         exit 1
     }
 
-    TV_PLATFORM="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.platform)"
     SCREEN_IDLE_BLANK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.idle_blank)"
     SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
     UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
@@ -827,7 +806,6 @@ load_upgrade_configuration() {
 }
 
 load_existing_configuration() {
-    TV_PLATFORM="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get tv.platform)"
     SCREEN_IDLE_BLANK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get screen.idle_blank)"
     SYSTEM_SLEEP_WAKE_POLICY="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get system.sleep_wake_policy)"
     UPDATE_AUTO_CHECK="$(LG_BUDDY_CONFIG="$CONFIG_FILE" "$RUNTIME_BINARY" settings get updates.auto_check)"
@@ -906,11 +884,8 @@ if [ "$UPGRADE_MODE" -eq 1 ]; then
     resolve_gui_binary
     resolve_app_icon
     load_upgrade_configuration
-    check_legacy_environment
-    if [ "$TV_PLATFORM" = "lg_webos" ]; then
-        REMOVE_LEGACY_ENVIRONMENT=1
-        "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --remove-legacy-env
-    fi
+    REMOVE_LEGACY_ENVIRONMENT=1
+    "$RUNTIME_BINARY" upgrade-preflight "$SCRIPT_DIR" --remove-legacy-env
     check_install_prerequisites
     validate_candidate_binary_identity
 else
@@ -918,7 +893,6 @@ else
     resolve_app_icon
     if [ "$FRESH_SETUP_MODE" -eq 0 ]; then
         load_existing_configuration
-        check_legacy_environment
     fi
     check_install_prerequisites
     validate_candidate_binary_identity

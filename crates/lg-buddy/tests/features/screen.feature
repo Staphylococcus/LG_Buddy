@@ -1,31 +1,31 @@
 Feature: Screen
   LG Buddy should expose manual screen blanking and restoration through the public CLI.
 
-  Scenario: Screen off requires migration on a legacy bscpylgtv config
+  Scenario: Screen off works after daemon conversion
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
+    And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
+    And a native webOS TV on input HDMI_2 with brightness 90
     When I run the command "screen off"
-    Then the command fails
-    And stderr contains "v2 migration required"
-    And the TV client did not receive "turn_screen_off"
-    And the TV screen is visible
-    And the session marker is absent
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And the TV screen is blanked
+    And the session marker exists
 
-  Scenario: Screen on requires migration on a legacy bscpylgtv config
+  Scenario: Screen on works after daemon conversion
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
-    And the TV screen is blanked
+    And the existing config selects TV platform "bscpylgtv"
+    And the user screen daemon startup check runs
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And the native webOS TV screen is blanked
     And the session marker exists
     When I run the command "screen on"
-    Then the command fails
-    And stderr contains "v2 migration required"
-    And the TV client did not receive "turn_screen_on"
-    And the TV screen is blanked
-    And the session marker exists
+    Then the command succeeds
+    And config.env contains "tvs_primary_platform=lg_webos"
+    And the TV screen is visible
+    And the session marker is absent
 
   Scenario: Screen help describes the public commands
     When I run the command "screen --help"
