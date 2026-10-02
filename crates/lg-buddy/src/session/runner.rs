@@ -5,7 +5,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::process;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -16,7 +15,6 @@ use std::time::{Duration, Instant};
 use crate::backend::{
     configured_backend_from_env_or_config, resolve_backend_with_probe, BackendDetectionError,
     BackendProbe, BackendResolution, BackendSelectionError, SystemBackendProbe,
-    SWAYIDLE_DEPRECATION_NOTICE,
 };
 use crate::config::{
     load_config, load_current_config, normalize_idle_timeout_secs, parse_config_entries,
@@ -40,7 +38,6 @@ use crate::sources::desktop::gnome::inhibition::GnomeInhibition;
 use crate::sources::desktop::gnome::{monitor_test_timeout, GnomeSource};
 use crate::sources::desktop::kwin::KWinInhibition;
 use crate::sources::desktop::powerdevil::PowerDevilInhibition;
-use crate::sources::desktop::swayidle::{run as run_swayidle_source, SwayidleSourceError};
 use crate::sources::desktop::wayland::WaylandSource;
 use crate::sources::desktop::{ActivityAdapter, ActivityStatus};
 use crate::sources::linux::dpms::{spawn_dpms_blank_observer, DpmsBlankObserver};
@@ -682,12 +679,6 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                         writeln!(writer, "LG Buddy Monitor: fallback reason: {reason}")?;
                     }
                 }
-                if resolution.backend() == ScreenBackend::Swayidle {
-                    writeln!(
-                        writer,
-                        "LG Buddy Monitor: warning: {SWAYIDLE_DEPRECATION_NOTICE}."
-                    )?;
-                }
 
                 match resolution.backend() {
                     ScreenBackend::Gnome => {
@@ -708,12 +699,6 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                             }
                         })?;
                         return run_wayland_monitor(writer, &mut dispatcher, source, &snapshot);
-                    }
-                    ScreenBackend::Swayidle => {
-                        let mut dispatcher = SessionEventDispatcher::new(
-                            executor.take().expect("executor available"),
-                        );
-                        return run_swayidle_monitor(writer, &mut dispatcher, &snapshot);
                     }
                     ScreenBackend::Auto => {
                         let mut dispatcher = SessionEventDispatcher::new(
@@ -951,50 +936,6 @@ fn run_native_session_monitor_with_lock_monitor<W, E, S, L, D>(
     backend: ScreenBackend,
     adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
     snapshot: &MonitorDiagnostics,
-    inhibition: Option<Inhibition>,
-    spawn_monitor: S,
-    spawn_lock_monitor: L,
-    spawn_dpms_monitor: D,
-) -> Result<(), SessionRunnerError>
-where
-    W: Write,
-    E: SessionActionExecutor,
-    S: FnOnce(
-        mpsc::Sender<RunnerMessage>,
-        Arc<ActivityContributions>,
-        Arc<AtomicBool>,
-    ) -> JoinHandle<()>,
-    L: FnOnce(mpsc::Sender<RunnerMessage>) -> Option<LogindLockObserver>,
-    D: FnOnce(mpsc::Sender<RunnerMessage>) -> Option<DpmsBlankObserver>,
-{
-    run_session_monitor_with_lock_monitor(
-        writer,
-        dispatcher,
-        backend,
-        adapters,
-        snapshot,
-        InitialBlankTrigger::Deadline,
-        inhibition,
-        spawn_monitor,
-        spawn_lock_monitor,
-        spawn_dpms_monitor,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InitialBlankTrigger {
-    Deadline,
-    Provider,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_session_monitor_with_lock_monitor<W, E, S, L, D>(
-    writer: &mut W,
-    dispatcher: &mut SessionEventDispatcher<E>,
-    backend: ScreenBackend,
-    adapters: &[(ActivitySource, Arc<dyn ActivityAdapter>)],
-    snapshot: &MonitorDiagnostics,
-    initial_blank_trigger: InitialBlankTrigger,
     mut inhibition: Option<Inhibition>,
     spawn_monitor: S,
     spawn_lock_monitor: L,
@@ -1015,17 +956,12 @@ where
     let power_off_after = resolve_timed_power_off_after();
     let started_at = Instant::now();
     let marker_exists = session_screen_ownership_marker_exists(backend)?;
-    let mut inactivity = if marker_exists && initial_blank_trigger == InitialBlankTrigger::Provider
-    {
-        InactivityEngine::new_provider_driven_with_restore_pending(power_off_after, started_at)
-    } else if marker_exists {
+    let mut inactivity = if marker_exists {
         InactivityEngine::new_with_restore_pending_and_power_off_after(
             blank_after,
             power_off_after,
             started_at,
         )
-    } else if initial_blank_trigger == InitialBlankTrigger::Provider {
-        InactivityEngine::new_provider_driven(power_off_after, started_at)
     } else {
         InactivityEngine::new_with_power_off_after(blank_after, power_off_after, started_at)
     };
@@ -1047,7 +983,6 @@ where
     let _dpms_monitor = spawn_dpms_monitor(sender.clone());
     let test_timeout = monitor_test_timeout();
     let mut last_diagnostics = Vec::new();
-    let mut monitor_result = Ok(());
 
     loop {
         if test_timeout_reached(started_at, test_timeout) {
@@ -1109,10 +1044,9 @@ where
                         observed_at,
                     )?;
                 }
-                if initial_blank_trigger == InitialBlankTrigger::Provider
-                    || adapters
-                        .iter()
-                        .any(|(_, adapter)| adapter.status().is_available())
+                if adapters
+                    .iter()
+                    .any(|(_, adapter)| adapter.status().is_available())
                     || inactivity.timed_power_off_pending()
                 {
                     let now = Instant::now();
@@ -1157,23 +1091,11 @@ where
                 observation,
                 observed_at,
             )?,
+            // Desktop provider idle is observational; LG Buddy owns its deadline.
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Idle,
-                source,
-                observed_at,
-            } => {
-                if initial_blank_trigger == InitialBlankTrigger::Provider
-                    && inactivity.observe_provider_idle(observed_at) == InactivityDecision::BlankNow
-                {
-                    handle_blank_request(
-                        writer,
-                        dispatcher,
-                        &mut inactivity,
-                        source,
-                        SessionEvent::Idle,
-                    )?;
-                }
-            }
+                ..
+            } => {}
             RunnerMessage::SessionEvent {
                 event: SessionEvent::Active,
                 source,
@@ -1240,67 +1162,12 @@ where
                     inhibition.cancel();
                 }
             }
-            RunnerMessage::MonitorExited(result) => {
-                monitor_result = result;
-                break;
-            }
+            #[cfg(test)]
+            RunnerMessage::MonitorExited(result) => return result,
         }
     }
 
-    monitor_result
-}
-
-fn run_swayidle_monitor<W: Write, E: SessionActionExecutor>(
-    writer: &mut W,
-    dispatcher: &mut SessionEventDispatcher<E>,
-    snapshot: &MonitorDiagnostics,
-) -> Result<(), SessionRunnerError> {
-    let idle_timeout_secs = resolve_idle_timeout_secs();
-    let marker = ScreenOwnershipMarker::from_env(StateScope::Session).map_err(|err| {
-        SessionRunnerError::Failed {
-            backend: ScreenBackend::Swayidle,
-            message: format!("failed to resolve swayidle event path: {err}"),
-        }
-    })?;
-    let event_path = marker
-        .state_dir()
-        .join(format!("swayidle-session-events-{}", process::id()));
-
-    writeln!(
-        writer,
-        "LG Buddy Monitor: Using swayidle backend (timeout: {idle_timeout_secs}s)."
-    )?;
-
-    run_session_monitor_with_lock_monitor(
-        writer,
-        dispatcher,
-        ScreenBackend::Swayidle,
-        &[],
-        snapshot,
-        InitialBlankTrigger::Provider,
-        None,
-        move |sender, _contributions, stop| {
-            thread::spawn(move || {
-                let event_sender = sender.clone();
-                let result = run_swayidle_source(
-                    idle_timeout_secs,
-                    &event_path,
-                    &stop,
-                    move |observation| send_source_observation(&event_sender, observation),
-                )
-                .map_err(|err| match err {
-                    SwayidleSourceError::Io(err) => SessionRunnerError::Io(err.to_string()),
-                    SwayidleSourceError::Exited(_) => SessionRunnerError::Failed {
-                        backend: ScreenBackend::Swayidle,
-                        message: err.to_string(),
-                    },
-                });
-                let _ = sender.send(RunnerMessage::MonitorExited(result));
-            })
-        },
-        |sender| Some(spawn_logind_lock_monitor(sender)),
-        |_| None,
-    )
+    Ok(())
 }
 
 fn resolve_idle_timeout_secs() -> u64 {
@@ -1600,6 +1467,7 @@ enum RunnerMessage {
         observed_at: Instant,
     },
     Diagnostic(String),
+    #[cfg(test)]
     MonitorExited(Result<(), SessionRunnerError>),
 }
 
@@ -1955,10 +1823,6 @@ mod tests {
     }
 
     impl crate::backend::BackendProbe for StartingDesktop {
-        fn has_command(&self, command: &str) -> bool {
-            command == "swayidle" && self.backend == ScreenBackend::Swayidle
-        }
-
         fn gnome_shell_available(&self) -> bool {
             self.available(ScreenBackend::Gnome)
         }
@@ -2002,12 +1866,8 @@ mod tests {
     }
 
     #[test]
-    fn monitor_preserves_explicit_selection_and_no_automatic_swayidle() {
-        for backend in [
-            ScreenBackend::Gnome,
-            ScreenBackend::Wayland,
-            ScreenBackend::Swayidle,
-        ] {
+    fn monitor_preserves_explicit_native_selection() {
+        for backend in [ScreenBackend::Gnome, ScreenBackend::Wayland] {
             let probe = StartingDesktop {
                 backend,
                 probes: std::cell::Cell::new(0),
@@ -2019,9 +1879,6 @@ mod tests {
                     .backend(),
                 backend
             );
-            if backend == ScreenBackend::Swayidle {
-                assert!(super::resolve_monitor_backend(&probe, ScreenBackend::Auto).is_err());
-            }
         }
     }
 

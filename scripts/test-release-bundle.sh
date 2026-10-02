@@ -641,7 +641,9 @@ printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV creden
 sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
-"$INSTALLED_BINARY" settings set screen.backend swayidle
+# Seed raw retired data; the current settings API rejects new swayidle selections.
+sed -i '/^screen_backend=/d' "$CONFIG_FILE"
+printf '%s\n' screen_backend=swayidle >> "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
@@ -982,7 +984,7 @@ cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || {
     exit 1
 }
 "$INSTALLED_BINARY" settings describe screen.backend \
-    | grep -F -q 'swayidle (deprecated compatibility backend)'
+    | grep -F -q 'current: <invalid: swayidle>'
 cmp -s "$CONFIG_POINTER_SNAPSHOT" "$INSTALLED_POINTER" || {
     echo "Upgrade changed the installed config pointer."
     exit 1

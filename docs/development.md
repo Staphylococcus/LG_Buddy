@@ -28,7 +28,6 @@ and do not provision a Python environment.
 
 Backend-specific tools used in development and local testing:
 
-- `swayidle` only when testing the deprecated compatibility backend
 - readable `/dev/input/event*` devices for local gamepad activity testing
 - readable `/dev/hidraw*` devices when testing the Logitech G923 raw HID fallback
 
@@ -363,7 +362,6 @@ the branch contract and recovery process, see
 | `data/gnome-shell/` | Optional GNOME Shell extension with a Quick Settings brightness slider |
 | `crates/lg-buddy/src/sources/desktop/powerdevil.rs` | Independent pull inhibition through PowerDevil's effective screen policy |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
-| `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |

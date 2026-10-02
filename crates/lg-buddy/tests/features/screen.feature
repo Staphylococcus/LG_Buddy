@@ -67,3 +67,21 @@ Feature: Screen
     And the session marker is absent
     And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+
+  Scenario: External automation can blank and restore with built-in monitoring disabled
+    Given a temporary LG Buddy config using input HDMI_2
+    And LG Buddy session runtime is isolated
+    And the existing config selects TV platform "lg_webos"
+    And screen idle blanking is "disabled"
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
+    When I run the command "screen off"
+    Then the command succeeds
+    And the TV screen is blanked
+    And the session marker exists
+    When I run the command "screen on"
+    Then the command succeeds
+    And the TV screen is visible
+    And the session marker is absent
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"

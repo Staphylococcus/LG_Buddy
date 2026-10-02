@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
 use std::time::Duration;
 
 use crate::config::{load_config, resolve_config_path_from_env, ConfigPathError, ScreenBackend};
@@ -14,9 +13,6 @@ use crate::sources::desktop::gnome::{
 use crate::sources::desktop::wayland::{WaylandProviderCapabilities, WaylandSource};
 
 pub mod readiness;
-
-pub const SWAYIDLE_DEPRECATION_NOTICE: &str =
-    "swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland";
 
 const GNOME_SHELL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -30,7 +26,7 @@ impl fmt::Display for BackendSelectionError {
         match self {
             Self::InvalidOverride(value) => write!(
                 f,
-                "invalid LG_BUDDY_SCREEN_BACKEND value `{value}`; expected auto, gnome, wayland, or swayidle"
+                "invalid LG_BUDDY_SCREEN_BACKEND value `{value}`; expected auto, gnome, or wayland"
             ),
         }
     }
@@ -48,10 +44,6 @@ pub enum BackendDetectionError {
         backend: ScreenBackend,
         reason: String,
     },
-    MissingRequiredCommand {
-        backend: ScreenBackend,
-        command: &'static str,
-    },
 }
 
 impl fmt::Display for BackendDetectionError {
@@ -67,11 +59,6 @@ impl fmt::Display for BackendDetectionError {
             Self::UnavailableBackend { backend, reason } => {
                 write!(f, "backend `{}` is unavailable: {reason}", backend.as_str())
             }
-            Self::MissingRequiredCommand { backend, command } => write!(
-                f,
-                "backend `{}` requires `{command}` to be installed",
-                backend.as_str()
-            ),
         }
     }
 }
@@ -102,7 +89,6 @@ impl BackendResolution {
 }
 
 pub trait BackendProbe {
-    fn has_command(&self, command: &str) -> bool;
     fn gnome_shell_available(&self) -> bool;
     fn gnome_screen_saver_available(&self) -> bool;
     fn gnome_idle_monitor_available(&self) -> bool;
@@ -123,10 +109,6 @@ impl SystemBackendProbe {
 }
 
 impl BackendProbe for SystemBackendProbe {
-    fn has_command(&self, command: &str) -> bool {
-        command_in_path(command)
-    }
-
     fn gnome_shell_available(&self) -> bool {
         let mut bus = match new_session_bus_client() {
             Ok(bus) => bus,
@@ -268,29 +250,7 @@ pub fn resolve_backend_with_probe(
                 backend: ScreenBackend::Wayland,
                 reason,
             }),
-        ScreenBackend::Swayidle => {
-            if probe.has_command("swayidle") {
-                Ok(BackendResolution::selected(ScreenBackend::Swayidle, None))
-            } else {
-                Err(BackendDetectionError::MissingRequiredCommand {
-                    backend: ScreenBackend::Swayidle,
-                    command: "swayidle",
-                })
-            }
-        }
     }
-}
-
-fn command_in_path(command: &str) -> bool {
-    if command.contains(std::path::MAIN_SEPARATOR) {
-        return Path::new(command).is_file();
-    }
-
-    let Some(path) = env::var_os("PATH") else {
-        return false;
-    };
-
-    env::split_paths(&path).any(|dir| dir.join(command).is_file())
 }
 
 #[cfg(test)]
@@ -307,9 +267,6 @@ mod tests {
         gnome_shell_available: bool,
         gnome_screen_saver_available: bool,
         gnome_idle_monitor_available: bool,
-
-        has_swayidle: bool,
-        forbid_command_probe: bool,
         wayland_capabilities: Result<WaylandProviderCapabilities, &'static str>,
     }
 
@@ -319,26 +276,12 @@ mod tests {
                 gnome_shell_available: false,
                 gnome_screen_saver_available: false,
                 gnome_idle_monitor_available: false,
-
-                has_swayidle: false,
-                forbid_command_probe: false,
                 wayland_capabilities: Err("no Wayland compositor is available"),
             }
         }
     }
 
     impl BackendProbe for FakeProbe {
-        fn has_command(&self, command: &str) -> bool {
-            assert!(
-                !self.forbid_command_probe,
-                "automatic detection probed a command"
-            );
-            match command {
-                "swayidle" => self.has_swayidle,
-                _ => false,
-            }
-        }
-
         fn gnome_shell_available(&self) -> bool {
             self.gnome_shell_available
         }
@@ -359,10 +302,6 @@ mod tests {
     struct WaylandProbe(Result<WaylandProviderCapabilities, &'static str>);
 
     impl BackendProbe for WaylandProbe {
-        fn has_command(&self, _command: &str) -> bool {
-            false
-        }
-
         fn gnome_shell_available(&self) -> bool {
             false
         }
@@ -389,10 +328,10 @@ mod tests {
 
     #[test]
     fn env_override_wins_over_config_backend() {
-        let backend = configured_backend_from_sources(Some("swayidle"), Some(ScreenBackend::Gnome))
+        let backend = configured_backend_from_sources(Some("wayland"), Some(ScreenBackend::Gnome))
             .expect("parse override backend");
 
-        assert_eq!(backend, ScreenBackend::Swayidle);
+        assert_eq!(backend, ScreenBackend::Wayland);
     }
 
     #[test]
@@ -436,8 +375,6 @@ mod tests {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: true,
-
-            has_swayidle: true,
             ..FakeProbe::default()
         };
 
@@ -462,9 +399,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_selects_native_wayland_before_swayidle() {
+    fn auto_selects_native_wayland_when_gnome_is_absent() {
         let probe = FakeProbe {
-            has_swayidle: true,
             wayland_capabilities: Ok(native_wayland_capabilities()),
             ..FakeProbe::default()
         };
@@ -485,9 +421,7 @@ mod tests {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
-            has_swayidle: true,
             wayland_capabilities: Ok(native_wayland_capabilities()),
-            ..FakeProbe::default()
         };
 
         let resolution = resolve_backend_with_probe(&probe, ScreenBackend::Auto)
@@ -501,15 +435,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_never_probes_swayidle_even_when_it_is_installed() {
+    fn automatic_detection_requires_a_native_activity_source() {
         for gnome_available in [false, true] {
             for wayland_available in [false, true] {
                 let probe = FakeProbe {
                     gnome_shell_available: gnome_available,
                     gnome_screen_saver_available: gnome_available,
                     gnome_idle_monitor_available: gnome_available,
-                    has_swayidle: true,
-                    forbid_command_probe: true,
                     wayland_capabilities: if wayland_available {
                         Ok(native_wayland_capabilities())
                     } else {
@@ -518,7 +450,6 @@ mod tests {
                 };
                 let result = detect_backend_with_probe(&probe, ScreenBackend::Auto);
                 assert_eq!(result.is_ok(), gnome_available || wayland_available);
-                assert_ne!(result, Ok(ScreenBackend::Swayidle));
             }
         }
     }
@@ -529,7 +460,6 @@ mod tests {
             gnome_shell_available: false,
             gnome_screen_saver_available: false,
             gnome_idle_monitor_available: false,
-            has_swayidle: false,
             ..FakeProbe::default()
         };
 
@@ -551,7 +481,6 @@ mod tests {
             gnome_shell_available: false,
             gnome_screen_saver_available: false,
             gnome_idle_monitor_available: false,
-            has_swayidle: true,
             ..FakeProbe::default()
         };
 
@@ -575,7 +504,6 @@ mod tests {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
-            has_swayidle: false,
             ..FakeProbe::default()
         };
 
@@ -594,28 +522,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_swayidle_remains_available_without_native_sources() {
-        let probe = FakeProbe {
-            has_swayidle: true,
-            ..FakeProbe::default()
-        };
-        let error = detect_backend_with_probe(&probe, ScreenBackend::Auto).unwrap_err();
-        assert!(error.to_string().contains("screen.idle_blank to disabled"));
-        assert!(!error.to_string().contains("swayidle"));
-        assert_eq!(
-            detect_backend_with_probe(&probe, ScreenBackend::Swayidle),
-            Ok(ScreenBackend::Swayidle)
-        );
-    }
-
-    #[test]
-    fn incomplete_gnome_does_not_trigger_swayidle() {
+    fn incomplete_gnome_reports_native_absence() {
         let probe = FakeProbe {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
-            has_swayidle: true,
-            forbid_command_probe: true,
             ..FakeProbe::default()
         };
         let error = resolve_backend_with_probe(&probe, ScreenBackend::Auto).unwrap_err();
@@ -629,7 +540,6 @@ mod tests {
             gnome_shell_available: true,
             gnome_screen_saver_available: true,
             gnome_idle_monitor_available: false,
-            has_swayidle: true,
             ..FakeProbe::default()
         };
 
@@ -643,28 +553,6 @@ mod tests {
                 reason:
                     "GNOME Shell, org.gnome.ScreenSaver, and org.gnome.Mutter.IdleMonitor are required"
                         .to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn forced_swayidle_requires_command() {
-        let probe = FakeProbe {
-            gnome_shell_available: true,
-            gnome_screen_saver_available: true,
-            gnome_idle_monitor_available: true,
-            has_swayidle: false,
-            ..FakeProbe::default()
-        };
-
-        let err = detect_backend_with_probe(&probe, ScreenBackend::Swayidle)
-            .expect_err("forced swayidle without command should fail");
-
-        assert_eq!(
-            err,
-            BackendDetectionError::MissingRequiredCommand {
-                backend: ScreenBackend::Swayidle,
-                command: "swayidle",
             }
         );
     }
@@ -699,5 +587,13 @@ mod tests {
         .expect("forced Wayland should be available");
 
         assert_eq!(backend, ScreenBackend::Wayland);
+    }
+    #[test]
+    fn swayidle_override_is_rejected_even_with_a_native_config() {
+        assert_eq!(
+            configured_backend_from_sources(Some("swayidle"), Some(ScreenBackend::Gnome)),
+            Err(BackendSelectionError::InvalidOverride("swayidle".into()))
+        );
+        assert!("swayidle".parse::<ScreenBackend>().is_err());
     }
 }

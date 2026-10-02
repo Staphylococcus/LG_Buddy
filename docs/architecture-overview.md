@@ -46,7 +46,7 @@ main.rs
               -> linux/logind.rs
               -> linux/network_manager.rs
               -> desktop/gnome.rs
-              -> desktop/swayidle.rs
+              -> desktop/wayland.rs
            -> events.rs
            -> screen.rs
            -> lifecycle.rs
@@ -94,7 +94,7 @@ The main runtime consumers are:
 - system lifecycle and service integrations, including systemd,
   NetworkManager, and logind
 - desktop environment and session integrations, including GNOME, native
-  Wayland, `swayidle`, and Linux input activity sources
+  Wayland and Linux input activity sources
 - TTY users invoking the CLI directly
 - the installed `lg-buddy` launcher with no arguments, which opens normal
   Overview through the matching GTK executable
@@ -109,7 +109,6 @@ flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
         WAYLAND["Wayland compositor<br/>ext_idle_notifier_v1"]
-        SWAY["swayidle<br/>idle hooks"]
         INPUT["Linux input devices<br/>gamepads / wheels / device events"]
         FDO_NOTIFY["desktop notification service<br/>org.freedesktop.Notifications"]
     end
@@ -160,7 +159,6 @@ flowchart LR
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
                 GADAPTER["sources/desktop/gnome.rs<br/>GNOME bus + observation source"]
                 WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + observation source"]
-                SADAPTER["sources/desktop/swayidle.rs<br/>process fact source"]
             end
         end
 
@@ -180,7 +178,6 @@ flowchart LR
     RUNNER --> BACKEND
     BACKEND --> GADAPTER
     BACKEND --> WADAPTER
-    BACKEND --> SADAPTER
     RUNNER -->|"starts"| GADAPTER
     RUNNER -->|"starts"| WADAPTER
     RUNNER -->|"starts"| LOGINDADAPTER
@@ -226,10 +223,6 @@ flowchart LR
     SCREEN --> PHASE
     NMGATE --> LIFECYCLE
 
-    RUNNER -->|"starts"| SADAPTER
-    SADAPTER --> SWAY
-    SWAY -->|"timeout / resume facts"| SADAPTER
-    SADAPTER -->|"SessionObservation"| RUNNER
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
@@ -352,7 +345,7 @@ The current split is:
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
   - backend selection and detection
-  - `auto`, `gnome`, native `wayland`, and deprecated `swayidle` compatibility
+  - `auto`, `gnome`, and native `wayland` selection
 - `session.rs`
   - backend-neutral session event model
   - normalized source-observation boundary
@@ -416,9 +409,6 @@ The current split is:
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
-- `sources/desktop/swayidle.rs`
-  - owns the production `swayidle` process and translates timeout/resume
-    callbacks into idle/activity facts
 
 The session-facing pieces should be read as one subsystem:
 
@@ -439,13 +429,11 @@ The session-facing pieces should be read as one subsystem:
     the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
-  - consumes `swayidle` timeout/resume facts through the same inactivity policy
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
   - adapts Linux system lifecycle signals and owns observation of an eligible
     graphical session's `LockedHint`
-- `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
-  `sources/desktop/swayidle.rs`
+- `sources/desktop/gnome.rs` and `sources/desktop/wayland.rs`
   - own their provider-specific connection or process mechanics and expose
     normalized observations to the runner
 
@@ -791,9 +779,9 @@ Detection behavior:
 - `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
 - native `wayland` validates `ext_idle_notifier_v1` version 2 or newer plus at
   least one advertised seat; explicit selection does not fall back
-- `auto` prefers complete GNOME, then compatible native Wayland, then the
-  deprecated `swayidle` compatibility backend when installed
-- other forced backends validate their required services or commands
+- Compatibility detection for `auto` prefers complete GNOME, then compatible
+  native Wayland; automatic monitoring composes both native activity sources.
+- Forced native backends validate their required services or protocol support.
 
 ## TV Integration Boundary
 
@@ -1007,10 +995,6 @@ Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.
 
-`sources/desktop/swayidle.rs` is the compatibility process adapter. Its timeout
-callback publishes `Idle`; its resume callback publishes independent desktop
-activity. The adapter does not invoke TV-facing commands or own screen policy.
-
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
 
@@ -1028,14 +1012,13 @@ asymmetric:
   affect the selected desktop backend
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
-- `swayidle` timeout and resume callbacks feed the shared inactivity engine
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
 Saved `swayidle` selections are converted to `auto` at user screen daemon startup.
 Automatic monitoring never probes or starts `swayidle`; externally managed
-idle automation can call the public screen commands. The legacy process adapter
-remains in source until its separate removal. Native Wayland remains
+idle automation can call the public screen commands. New swayidle settings and
+environment overrides are rejected; the process adapter has been removed. Native Wayland remains
 field-validated across supported compositors and unsupported sessions have
 precise diagnostics.
 
@@ -1104,7 +1087,7 @@ The Rust runtime currently owns:
 - application coordination for Overview, TVs, native pairing, and Settings
 - TV profile and credential persistence, including confirmed unpairing
 - the shared settings registry, validation, persistence, and runtime apply path
-- `monitor` command with GNOME, native Wayland, and `swayidle` paths
+- `monitor` command with GNOME and native Wayland activity sources
 
 The shell layer still owns:
 

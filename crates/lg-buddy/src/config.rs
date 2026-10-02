@@ -61,7 +61,6 @@ pub enum ScreenBackend {
     Auto,
     Gnome,
     Wayland,
-    Swayidle,
 }
 
 impl ScreenBackend {
@@ -70,7 +69,6 @@ impl ScreenBackend {
             Self::Auto => "auto",
             Self::Gnome => "gnome",
             Self::Wayland => "wayland",
-            Self::Swayidle => "swayidle",
         }
     }
 }
@@ -83,7 +81,6 @@ impl FromStr for ScreenBackend {
             "auto" => Ok(Self::Auto),
             "gnome" => Ok(Self::Gnome),
             "wayland" => Ok(Self::Wayland),
-            "swayidle" => Ok(Self::Swayidle),
             _ => Err(()),
         }
     }
@@ -501,7 +498,7 @@ impl StaleConfigReason {
                 "tvs_primary_platform=bscpylgtv is retired; user screen daemon startup converts it to lg_webos"
             }
             Self::SwayidleBackend => {
-                "screen_backend=swayidle is a legacy override; set it to auto, gnome, or wayland"
+                "screen_backend=swayidle is a retired backend; user screen daemon startup converts it to auto"
             }
         }
     }

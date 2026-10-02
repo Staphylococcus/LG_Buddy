@@ -1,4 +1,4 @@
-use crate::backend::{resolve_backend_from_system, BackendResolution, SWAYIDLE_DEPRECATION_NOTICE};
+use crate::backend::{resolve_backend_from_system, BackendResolution};
 use crate::config::{ScreenBackend, DEFAULT_IDLE_TIMEOUT, MAX_IDLE_TIMEOUT};
 
 use super::{
@@ -9,7 +9,7 @@ use super::{
 };
 
 const SERVICE_NAME: &str = "LG_Buddy_screen.service";
-const BACKEND_VALUES: &[&str] = &["auto", "gnome", "wayland", "swayidle"];
+const BACKEND_VALUES: &[&str] = &["auto", "gnome", "wayland"];
 const IDLE_BLANK_VALUES: &[&str] = &["enabled", "disabled"];
 const HONOR_IDLE_INHIBITORS_VALUES: &[&str] = &["enabled", "disabled"];
 const RESTORE_POLICY_VALUES: &[&str] = &["conservative", "aggressive"];
@@ -30,7 +30,7 @@ pub(super) const BACKEND: SettingDefinition = SettingDefinition {
     mutability: SettingMutability::ReadWrite,
     operations: READ_WRITE_OPERATIONS,
     apply_strategy: ApplyStrategy::RestartUserScreenService,
-    description: "Legacy CLI compatibility only. Automatic composes available native integrations. Writes save before applying; an apply failure leaves the saved value in place. Use automatic integration in Settings for a validated transition with rollback. The idle-inhibitor preference applies only to native integrations; swayidle always honors keep-awake requests.",
+    description: "Legacy CLI compatibility only. Automatic composes available native integrations. Writes save before applying; an apply failure leaves the saved value in place. Use automatic integration in Settings for a validated transition with rollback.",
 };
 
 pub(super) const IDLE_BLANK: SettingDefinition = SettingDefinition {
@@ -120,14 +120,6 @@ pub(super) fn presentation_for_command(
     )
 }
 
-pub(super) fn format_backend_choice(value: &str) -> String {
-    if value == ScreenBackend::Swayidle.as_str() {
-        format!("{value} (deprecated compatibility backend)")
-    } else {
-        value.to_string()
-    }
-}
-
 pub(super) fn resolution_details(
     configured: &str,
     presentation: &BackendPresentation,
@@ -151,16 +143,6 @@ pub(super) fn resolution_details(
             Some(("unavailable".to_string(), reason.clone()))
         }
     }
-}
-
-pub(super) fn deprecation_notice(configured: &str) -> Option<&'static str> {
-    (configured == ScreenBackend::Swayidle.as_str()).then_some(SWAYIDLE_DEPRECATION_NOTICE)
-}
-
-pub(super) fn swayidle_inhibitor_notice(configured: &str) -> Option<&'static str> {
-    (configured == ScreenBackend::Swayidle.as_str()).then_some(
-        "swayidle always honors keep-awake requests; this preference applies only to native backends",
-    )
 }
 
 pub(super) fn apply_service_restart<C: ServiceController>(
@@ -207,7 +189,7 @@ mod tests {
 
     #[test]
     fn hiding_legacy_choices_preserves_explicit_access_and_diagnostic_values() {
-        for backend in ["auto", "gnome", "wayland", "swayidle"] {
+        for backend in ["auto", "gnome", "wayland"] {
             let store = ConfigEnvReader::parse(
                 "/fixture/config.env",
                 &format!("screen_backend={backend}\nscreen_idle_timeout=731\n"),
@@ -295,9 +277,7 @@ mod tests {
         assert!(output.contains("  current: auto\n"));
         assert!(output.contains("  resolved backend: gnome\n"));
         assert!(output.contains("  fallback reason: none; preferred backend is available\n"));
-        assert!(output.contains(
-            "  allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)\n"
-        ));
+        assert!(output.contains("  allowed values: auto, gnome, wayland\n"));
 
         let mut raw_output = Vec::new();
         runner
@@ -330,36 +310,26 @@ mod tests {
         assert!(output.contains("  current: auto\n"));
         assert!(output.contains("  resolved backend: unavailable\n"));
         assert!(output.contains("  fallback reason: native Wayland protocol is unavailable\n"));
-        assert!(output.contains(
-            "  allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)\n"
-        ));
+        assert!(output.contains("  allowed values: auto, gnome, wayland\n"));
     }
 
     #[test]
-    fn settings_runner_marks_explicit_swayidle_as_deprecated() {
-        let store =
-            ConfigEnvReader::parse("/tmp/config.env", "screen_backend=swayidle\n").into_store();
-        let runner = SettingsCommandRunner::new(store).with_screen_backend_presentation(
-            BackendPresentation::Resolved(Ok(BackendResolution::selected(
-                ScreenBackend::Swayidle,
-                None,
-            ))),
+    fn retired_swayidle_is_reported_without_runtime_resolution() {
+        let command = SettingsCommand::Describe(Some("screen.backend".into()));
+        assert_eq!(
+            presentation_for_command(&command, Some("swayidle")),
+            BackendPresentation::Raw
         );
+        let store =
+            ConfigEnvReader::parse("/fixture/config.env", "screen_backend=swayidle\n").into_store();
         let mut output = Vec::new();
-
-        runner
-            .run(
-                SettingsCommand::Describe(Some("screen.backend".to_string())),
-                &mut output,
-            )
+        SettingsCommandRunner::new(store)
+            .run(command, &mut output)
             .unwrap();
-
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("  current: swayidle (deprecated compatibility backend)\n"));
-        assert!(output.contains("  resolved backend: swayidle\n"));
-        assert!(output.contains("  fallback reason: none; explicit selection does not fall back\n"));
-        assert!(output.contains("  deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0; use auto or wayland.\n"));
-        assert!(output.contains("  compatibility: swayidle always honors keep-awake requests; this preference applies only to native backends.\n"));
+        assert!(output.contains("  current: <invalid: swayidle>\n"));
+        assert!(output.contains("  allowed values: auto, gnome, wayland\n"));
+        assert!(!output.contains("  resolved backend:"));
     }
 
     #[test]
@@ -558,10 +528,11 @@ screen_idle_timeout=300
     fn screen_backend_values_are_validated() {
         let definition = SETTINGS_REGISTRY.get_by_name("screen.backend").unwrap();
 
-        for value in ["auto", "gnome", "wayland", "swayidle"] {
+        for value in ["auto", "gnome", "wayland"] {
             assert_eq!(definition.parse_value(value), Ok(SettingValue::Enum(value)));
         }
 
+        assert!(definition.parse_value("swayidle").is_err());
         assert!(matches!(
             definition.parse_value("kde"),
             Err(SettingsError::InvalidValue { .. })

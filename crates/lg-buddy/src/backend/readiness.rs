@@ -206,12 +206,6 @@ impl<C> BackendProbe for CachingBackendProbe<'_, C>
 where
     C: NativeCheckers,
 {
-    fn has_command(&self, _command: &str) -> bool {
-        // The Auto policy never probes commands, and this foreground
-        // readiness check must never select swayidle.
-        panic!("has_command must never be invoked by native readiness");
-    }
-
     fn gnome_shell_available(&self) -> bool {
         self.gnome_available()
     }

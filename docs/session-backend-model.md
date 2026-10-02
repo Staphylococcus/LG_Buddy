@@ -8,7 +8,7 @@ For the broader map of systemd, lifecycle, desktop, and command-entrypoint
 events that consume these semantics, see
 [runtime-event-handler-map.md](runtime-event-handler-map.md).
 
-GNOME, native Wayland, `swayidle`, and future backends do not expose the same APIs or the same
+GNOME, native Wayland, and future backends do not expose the same APIs or the same
 event richness. LG Buddy should not force them to look identical at the
 transport layer. Instead, the `session` module defines:
 
@@ -100,12 +100,14 @@ Gamepad input, explicit lock and post-blank power-off
 remain independent. Reconnection itself does not count as input. Worker shutdown
 cancels quiet connections and joins their threads.
 
-`swayidle` still owns its initial timeout and publishes `Idle` and independent
-desktop activity to the shared policy. This path is available only for an
-explicit legacy selection. Automatic monitoring never probes or launches
-swayidle; it retries native discovery while
-no native activity source is available. Disabling built-in idle blanking keeps
-the passive session service and other GUI/CLI features available.
+The built-in swayidle process adapter has been removed. User screen daemon
+startup converts a saved `screen_backend=swayidle` to `auto` locally, preserving
+the idle-blanking preference and credentials. Runtime/backend overrides and new
+settings writes accept only `auto`, `gnome`, and `wayland`. Raw legacy recognition
+remains in config assessment and migration; it does not authorize runtime use.
+Disabling built-in idle blanking keeps the passive session service and other
+GUI/CLI features available. User-managed external idle automation can invoke the
+public screen commands; see the [user guide](user-guide.md#external-idle-automation).
 
 ### Independent inhibition and the blanking gate
 
@@ -164,8 +166,8 @@ the whole report at 32 KiB. Credential-bearing lines and URLs are redacted.
 ### Portable configuration and legacy overrides
 
 Fresh GUI and terminal setup use automatic discovery without a backend
-question. Existing `auto` configurations remain unchanged. Saved `gnome`,
-`wayland` and `swayidle` overrides retain their behavior and are reported as
+question. Existing `auto` configurations remain unchanged. Saved `gnome` and
+`wayland` overrides retain their behavior and are reported as
 legacy overrides. Settings offers an explicit, confirmed switch to automatic
 integration.
 Setup itself preserves existing preferences.
@@ -181,15 +183,16 @@ compatibility key does not hide an active legacy override from a support report.
 
 Explicit legacy CLI commands retain their contract: `get` returns the saved or
 default value, `describe screen.backend` identifies compatibility-only use,
-`set` accepts `auto`, `gnome`, `wayland` and `swayidle`, and `unset` removes the
+`set` accepts `auto`, `gnome` and `wayland`, and `unset` removes the
 override to restore `auto`. Mutation output, exit behavior and save-before-apply
 semantics are retained. On service-apply failure the new value stays saved and
 the command fails; repeating the same command retries application. This is a
 compatibility operation, not the validated GUI transition with rollback.
 `detect-backend` remains a hidden compatibility command with unchanged output;
 neither it nor the explicit setting description resolves the composed source set.
-Final removal of swayidle remains separate work in #87. No resolved desktop
-choice is written on login or source recovery.
+Saved retired swayidle values remain visible as invalid raw configuration until
+user daemon startup converts them. No resolved desktop choice is written on login
+or source recovery.
 
 `inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
 state, and `evaluate()` returns a Boolean permission with matching diagnostics
@@ -246,8 +249,7 @@ honoring (the existing default) returns `true`: bypass source restrictions and
 release delay. Enabled honoring returns `false`: the reconciler must evaluate
 both. This override must not be ANDed as a third source permission and never
 makes a non-idle session eligible to blank. It depends on no source availability,
-protocol I/O, activity state or release history. The legacy `swayidle` process
-still controls its own initial idle notification and honors its own inhibitors.
+protocol I/O, activity state or release history.
 
 CLI and GUI preference edits retain the existing persist-then-restart path for
 `LG_Buddy_screen.service`. A successful restart replaces the process and its
@@ -289,7 +291,6 @@ This is the current mapping for the known backends, with implementation status c
 | --- | --- | --- | --- | --- | --- | --- |
 | GNOME | Observed but not authoritative | Yes | Yes | Yes | Optional logind source | Shared runner owns the configured deadline over ScreenSaver and Mutter observations |
 | Native Wayland | Observed but not authoritative | Resumed notification | No | Yes | Optional logind source | Shared runner owns the configured deadline using `ext_idle_notifier_v1` version 2 or newer |
-| `swayidle` | Timeout becomes `Idle` | Resume becomes independent desktop activity | No | No direct equivalent | Optional logind source | Source process owns the configured initial timeout; shared runner owns policy and post-blank timing |
 
 ## Provider-Specific Mapping
 
@@ -332,7 +333,7 @@ reconciles in case an event is missed. Standard controller input is read from
 evdev. Logitech G923 wheel and pedal activity has a narrow raw HID fallback for
 hosts where those reports do not appear on the evdev node.
 
-GNOME, native Wayland, and `swayidle` use the shared session runtime. The Wayland
+GNOME and native Wayland use the shared session runtime. The Wayland
 provider owns only its connection, registry, seats, notifications, and activity
 facts; it does not acquire gamepad responsibility.
 
@@ -399,31 +400,6 @@ its connection and subscriptions while other adapters keep running. Previously
 published observations remain valid. Explicit selection does not enable another native source. Automatic
 operation attempts both native interfaces without desktop-name selection.
 
-### `swayidle`
-
-Current mapping:
-
-| Provider surface | Canonical meaning | Current Rust Status |
-| --- | --- | --- |
-| `timeout <n> <cmd>` | Publish `Idle` to the shared runner | Implemented |
-| `resume <cmd>` | Publish independent desktop activity to the shared runner | Implemented |
-
-Notes:
-
-- `swayidle` is deprecated, remains accepted for existing explicit selections,
-  and is planned for removal in 2.0.0 after the native provider remains
-  field-validated across supported compositors and the 1.x migration window.
-- `swayidle` does not provide a clear equivalent of GNOME's `WakeRequested`.
-- Its source-owned timeout always honors compositor inhibition, independently
-  of `screen.honor_idle_inhibitors`.
-  The preference is hidden for explicit `swayidle` selections; this compatibility
-  backend does not offer the native default-off behavior.
-- `swayidle` does not provide a Mutter-style early activity surface.
-- LG Buddy owns the configured timeout value for this backend.
-- The shared runner owns lock observation, screen policy, and the post-blank
-  power-off deadline. Gamepad activity can cancel that second deadline, but
-  does not reset swayidle's source-owned initial timeout.
-
 ## Module Ownership
 
 The code split is:
@@ -455,8 +431,6 @@ The code split is:
   - system lifecycle mapping plus the optional current-session lock observer,
     including bus setup, session resolution, rebinding, and `LockedHint`
     translation
-- `crates/lg-buddy/src/sources/desktop/swayidle.rs`
-  - production `swayidle` process invocation and timeout/resume fact transport
 
 This keeps backend-specific details out of runtime policy and prevents each
 backend from quietly defining its own semantics.
