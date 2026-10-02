@@ -129,11 +129,7 @@ impl MonitorDiagnostics {
             }
         }
         if state.activity.is_empty() {
-            activity.push_str(if state.configured == Some(ScreenBackend::Swayidle) {
-                "Explicit legacy swayidle supplies timeout/resume events; native activity adapters are not selected.\n"
-            } else {
-                "No native activity adapter is running.\n"
-            });
+            activity.push_str("No native activity adapter is running.\n");
         }
         activity.push_str(
             "Availability comes from the interface connection, independently of event silence.\n",
@@ -192,8 +188,6 @@ impl MonitorDiagnostics {
                     .map_or(0, |at| at.saturating_duration_since(now).as_millis())
             )
             .unwrap();
-        } else if state.configured == Some(ScreenBackend::Swayidle) {
-            inhibition.push_str("Legacy override: swayidle always honors compositor inhibition; the native preference and sections do not apply.\n");
         } else {
             inhibition.push_str("No active blanking evaluation. Checks run when the idle deadline is due; activity and lifecycle changes discard the previous evaluation.\n");
         }

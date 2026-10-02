@@ -1,4 +1,6 @@
 pub mod inhibition;
+pub(crate) mod probe;
+pub(crate) mod readiness;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

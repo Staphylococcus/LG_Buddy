@@ -16,7 +16,7 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use crate::auth::{resolve_bscpylgtv_auth_context_from_env, resolve_config_owner};
+use crate::auth::resolve_config_owner;
 use crate::config::{HdmiInput, MacAddress, TvPlatform};
 use crate::pairing::{
     PairingApplication, PairingError, PairingFailure, PairingIntent, PairingOperation,
@@ -155,7 +155,7 @@ impl TvProfile {
 
     pub fn platform_label(&self) -> &'static str {
         match self.platform {
-            TvPlatform::Bscpylgtv => "bscpylgtv (compatibility)",
+            TvPlatform::Bscpylgtv => "bscpylgtv (migration required)",
             TvPlatform::LgWebOs => "Native webOS",
         }
     }
@@ -320,6 +320,8 @@ pub enum TvsReadFailure {
     NotConfigured,
     InvalidConfiguration,
     Internal,
+    MigrationRequired,
+    ProfileChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,10 +399,24 @@ impl TvsBackend for EnvironmentTvsBackend {
     fn read_model_name(&self, profile: &TvProfile) -> Result<String, TvsReadError> {
         let path = ConfigPathResolver::resolve_from_env()
             .map_err(|error| TvsReadError::internal(error.to_string()))?;
+        let current =
+            crate::config::load_current_config(&path).map_err(|error| config_load_error(&error))?;
+        // A queued operation belongs to the profile it was created for. Do not
+        // contact either the old TV or its replacement after settings change.
+        if profile.id() != &TvId::primary()
+            || current.config.tv_platform != profile.platform()
+            || current.config.tv_ip != profile.address()
+            || current.config.tv_mac != profile.mac()
+        {
+            return Err(TvsReadError::new(
+                TvsReadFailure::ProfileChanged,
+                "the configured TV changed before model lookup; refresh the saved profile",
+            ));
+        }
         let client = build_tv_client(
-            &path,
-            profile.address(),
-            profile.platform(),
+            &current.path,
+            current.config.tv_ip,
+            current.config.tv_platform,
             TvClientBuildOptions::production()
                 .stored_token_only()
                 .with_command_timeout(MODEL_READ_TIMEOUT),
@@ -412,14 +428,30 @@ impl TvsBackend for EnvironmentTvsBackend {
     }
 }
 
+/// A configuration load failure keeps TV work out entirely: every variant is
+/// a typed error, and none of them falls through to the TV client.
+fn config_load_error(error: &crate::config::ConfigLoadError) -> TvsReadError {
+    use crate::config::ConfigLoadError;
+    let failure = match error {
+        ConfigLoadError::Missing => TvsReadFailure::NotConfigured,
+        ConfigLoadError::Stale(_) => TvsReadFailure::MigrationRequired,
+        ConfigLoadError::Unreadable(_) | ConfigLoadError::Parse(_) => {
+            TvsReadFailure::InvalidConfiguration
+        }
+    };
+    TvsReadError::new(failure, error.to_string())
+}
+
+/// Raw profile presence shared with first-run configuration conversion.
+pub(crate) fn has_tv_profile_fields(has_key: impl Fn(&str) -> bool) -> bool {
+    TV_STORAGE_KEYS.iter().any(|key| has_key(key))
+}
+
 pub(crate) fn read_profiles_from_store(
     config_path: &std::path::Path,
     store: &SettingsStore,
 ) -> Result<Vec<TvProfile>, TvsReadError> {
-    if !TV_STORAGE_KEYS
-        .iter()
-        .any(|key| store.raw_storage_value(key).is_some())
-    {
+    if !has_tv_profile_fields(|key| store.raw_storage_value(key).is_some()) {
         return Ok(Vec::new());
     }
 
@@ -1028,13 +1060,11 @@ fn local_credentials(config_path: &std::path::Path, platform: TvPlatform) -> TvC
             }
         }
         TvPlatform::Bscpylgtv => {
-            let Ok(auth) = resolve_bscpylgtv_auth_context_from_env(config_path) else {
+            let Some(parent) = config_path.parent() else {
                 return TvCredentialState::Unknown;
             };
-            let Some(path) = auth.key_file_path() else {
-                return TvCredentialState::Unknown;
-            };
-            match fs::metadata(path) {
+            let path = parent.join(".aiopylgtv.sqlite");
+            match fs::metadata(&path) {
                 Ok(metadata) if metadata.is_file() => TvCredentialState::LocalFile,
                 Ok(_) => TvCredentialState::Unknown,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1058,6 +1088,14 @@ fn tvs_error(failure: TvsReadFailure) -> UserFacingError {
         TvsReadFailure::Internal => UserFacingError::new(
             "LG Buddy could not load its TVs.",
             "Retry. If this continues, check the LG Buddy logs.",
+        ),
+        TvsReadFailure::MigrationRequired => UserFacingError::new(
+            "LG Buddy configuration needs updating.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
+        ),
+        TvsReadFailure::ProfileChanged => UserFacingError::new(
+            "The saved TV settings changed.",
+            "Refresh the TVs view, then retry.",
         ),
     }
 }

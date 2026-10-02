@@ -242,8 +242,7 @@ install_previous() (
 )
 
 # Exercise both legacy selectors against an actual installation of the pinned
-# archive. Refusal leaves the old runtime intact; a healthy environment survives
-# the upgrade byte-for-byte, with a final deprecation notice.
+# archive. Installation preserves the saved profile; user daemon startup converts it later.
 for platform in explicit missing; do
     (
         export HOME="$WORK_DIR/legacy-$platform/home"
@@ -254,44 +253,28 @@ for platform in explicit missing; do
         config="$XDG_CONFIG_HOME/lg-buddy/config.env"
         if [ "$platform" = missing ]; then sed -i '/^tvs_primary_platform=/d' "$config"; fi
         cp "$config" "$WORK_DIR/legacy-$platform-config.snapshot"
-        stubs="$WORK_DIR/legacy-$platform/stubs"
-        mkdir -p "$stubs"
-        cat >"$stubs/systemctl" <<'EOF'
-#!/bin/sh
-printf '%s\n' running
-EOF
-        cat >"$stubs/sudo-spy" <<'EOF'
-#!/bin/sh
-: >"${LG_BUDDY_LEGACY_SUDO_MARKER:?}"
-exit 97
-EOF
-        chmod 755 "$stubs/systemctl" "$stubs/sudo-spy"
-        export PATH="$stubs:$PATH"
-        export LG_BUDDY_LEGACY_SUDO_MARKER="$WORK_DIR/legacy-$platform-sudo"
-        if LG_BUDDY_SUDO_CMD="$stubs/sudo-spy" bash "$CANDIDATE_BUNDLE/install.sh" --upgrade >"$WORK_DIR/legacy-$platform-refusal.output" 2>&1; then
-            fail "Cross-version upgrade recreated an unhealthy legacy environment."
-        fi
-        grep -F -q 'settings set tv.platform lg_webos' "$WORK_DIR/legacy-$platform-refusal.output"
-        [ ! -e "$LG_BUDDY_LEGACY_SUDO_MARKER" ] || fail "Legacy refusal requested privilege."
-        cmp -s "$PREVIOUS_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
-        cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
-
         venv="$LG_BUDDY_INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
-        site_packages="$("$venv/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
-        mkdir -p "$site_packages/bscpylgtv"
-        printf '__version__ = "cross-version-smoke"\n' >"$site_packages/bscpylgtv/__init__.py"
-        cat >"$venv/bin/bscpylgtvcommand" <<'EOF'
-#!/bin/sh
-printf '%s\n' '{"backlight":72}'
-EOF
-        chmod 755 "$venv/bin/bscpylgtvcommand"
-        find "$venv" -type f -exec sha256sum {} + | sort >"$WORK_DIR/legacy-$platform-venv.snapshot"
+        [ -d "$venv" ] || fail "Historical installation did not create the legacy environment."
+        legacy_credential="$(dirname "$config")/.aiopylgtv.sqlite"
+        printf '%s\n' 'preserve user-owned legacy credentials' >"$legacy_credential"
         bash "$CANDIDATE_BUNDLE/install.sh" --upgrade >"$WORK_DIR/legacy-$platform-upgrade.output" 2>&1
-        grep -F -q 'will be removed in v2.0.0' "$WORK_DIR/legacy-$platform-upgrade.output"
         cmp -s "$CANDIDATE_BUNDLE/lg-buddy" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy"
         cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
-        find "$venv" -type f -exec sha256sum {} + | sort | cmp -s "$WORK_DIR/legacy-$platform-venv.snapshot" -
-        [ "$(LG_BUDDY_CONFIG="$config" LG_BUDDY_BSCPYLGTV_COMMAND="$venv/bin/bscpylgtvcommand" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" brightness get)" = 72 ]
+        [ ! -e "$venv" ] || fail "Upgrade retained the obsolete app environment."
+        grep -F -q 'preserve user-owned legacy credentials' "$legacy_credential"
+        # Read-only settings inspection must leave installation-time data as-is.
+        [ "$(LG_BUDDY_CONFIG="$config" "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" settings get tv.platform)" = bscpylgtv ]
+        cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"
+        # The next config-using start converts the saved profile locally.
+        LG_BUDDY_CONFIG="$config" \
+            LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS=0.3 \
+            timeout 30 "$LG_BUDDY_INSTALL_ROOT/usr/bin/lg-buddy" monitor \
+            >"$WORK_DIR/legacy-$platform-monitor.output" 2>&1
+        grep -q '^tvs_primary_platform=lg_webos$' "$config"
+        if cmp -s "$WORK_DIR/legacy-$platform-config.snapshot" "$config"; then
+            fail "Daemon start left the legacy $platform configuration unconverted."
+        fi
+        grep -F -q 'preserve user-owned legacy credentials' "$legacy_credential"
     )
 done
 
@@ -527,7 +510,7 @@ grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings describe screen.backend \
-    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
+    | grep -F -q 'current: <invalid: swayidle>'
 bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 
 python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \

@@ -720,8 +720,7 @@ mod tests {
     use super::{WebOsPairingPolicy, WebOsTvClient};
     use crate::config::HdmiInput;
     use crate::tv::{
-        CurrentInput, CurrentVolume, OledBrightness, SelectedTvClient, TvClient, TvErrorKind,
-        VolumeLevel,
+        CurrentInput, CurrentVolume, OledBrightness, TvClient, TvErrorKind, VolumeLevel,
     };
     use crate::web_os::test_support::{
         TestAccessTokenStore, WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
@@ -759,7 +758,7 @@ mod tests {
         let server =
             WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
-        let client = SelectedTvClient::WebOs(Box::new(client_for_server(&server, &token_fixture)));
+        let client = client_for_server(&server, &token_fixture);
 
         assert_eq!(client.model_name().expect("read model name"), "OLED42C2");
         assert_eq!(
@@ -872,7 +871,7 @@ mod tests {
         let server =
             WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
         let token_fixture = TestAccessTokenStore::new();
-        let client = SelectedTvClient::WebOs(Box::new(client_for_server(&server, &token_fixture)));
+        let client = client_for_server(&server, &token_fixture);
 
         assert_eq!(server.snapshot().connection_count, 0);
 

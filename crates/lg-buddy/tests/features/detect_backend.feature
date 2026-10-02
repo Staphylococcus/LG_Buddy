@@ -57,3 +57,13 @@ Feature: Detect backend
     Then the command fails
     And stderr contains "org.gnome.Mutter.IdleMonitor"
     And stderr contains "native Wayland unavailable"
+
+  Scenario: A swayidle environment override is rejected
+    Given a temporary LG Buddy config using input HDMI_2
+    And the executable PATH is isolated
+    And swayidle is installed
+    And the backend override is "swayidle"
+    When I run the command "detect-backend"
+    Then the command fails
+    And stderr contains "invalid LG_BUDDY_SCREEN_BACKEND value `swayidle`"
+    And swayidle was not invoked

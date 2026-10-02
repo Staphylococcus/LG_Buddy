@@ -123,13 +123,10 @@ choice.
 `tvs_primary_platform` selects the control platform for the active TV profile:
 
 - fresh profiles select `lg_webos` and pair before the configuration is saved
-- existing profiles keep their explicit platform; a missing platform continues
-  to resolve to `bscpylgtv` and is materialized as such when configuration is
-  rewritten
-- `bscpylgtv` remains an accepted explicit compatibility fallback
-- existing users can opt into native control with
-  `lg-buddy settings set tv.platform lg_webos`; ordinary foreground TV
-  operations can also pair or repair credentials when needed
+- a missing platform or explicit `bscpylgtv` identifies stale 1.x
+  configuration; the next user screen daemon start converts it locally to `lg_webos`
+- one-shot TV commands remain gated until the daemon converts the configuration;
+  foreground TV operations can then pair or repair native credentials when needed
 - shutdown, suspend, resume, startup, and network-teardown handling use stored
   credentials only and skip promptly when no credential is available
 - this is the only platform selector; there is no separate backend, adapter,

@@ -13,7 +13,7 @@ unset LG_BUDDY_SCREEN_BACKEND
 printf '%s\n' '# retained behavior' 'screen_idle_timeout=731' > "$LG_BUDDY_CONFIG"
 cp "$LG_BUDDY_CONFIG" "$WORK_DIR/original"
 
-for backend in auto gnome wayland swayidle; do
+for backend in auto gnome wayland; do
     "$BINARY" settings set screen.backend "$backend" > "$WORK_DIR/set"
     [ "$("$BINARY" settings get screen.backend)" = "$backend" ]
     cp "$LG_BUDDY_CONFIG" "$WORK_DIR/saved"
@@ -30,6 +30,15 @@ for backend in auto gnome wayland swayidle; do
     grep -Fq 'an apply failure leaves the saved value in place' "$WORK_DIR/legacy"
     cmp "$WORK_DIR/saved" "$LG_BUDDY_CONFIG"
 done
+
+# A new retired selection must fail before changing config or applying services.
+cp "$LG_BUDDY_CONFIG" "$WORK_DIR/before-retired-write"
+if "$BINARY" settings set screen.backend swayidle > "$WORK_DIR/retired" 2>&1; then
+    echo 'The removed swayidle backend was accepted.' >&2
+    exit 1
+fi
+grep -Fq 'invalid value for setting `screen.backend`' "$WORK_DIR/retired"
+cmp "$WORK_DIR/before-retired-write" "$LG_BUDDY_CONFIG"
 
 # Retain the old write contract, including failure and retry behavior, without
 # addressing the host's service manager.

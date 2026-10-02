@@ -1,185 +1,26 @@
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
-use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io;
+use std::path::PathBuf;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::session_notifications::{
-    SessionBusUpdateNotificationHandoff, UpdateNotificationError, UpdateNotificationHandoff,
-    UpdateNotificationRequest,
-};
+use crate::session_notifications::UpdateNotificationError;
 use crate::settings::{SettingsError, SettingsStore};
-use crate::version::{ReleaseChannel, VersionInfo};
 
-const GITHUB_RELEASES_API_BASE: &str =
-    "https://api.github.com/repos/Staphylococcus/LG_Buddy/releases";
-const GITHUB_API_VERSION: &str = "2026-03-10";
-const GITHUB_ACCEPT: &str = "application/vnd.github+json";
-const GITHUB_CONNECT_TIMEOUT_SECONDS: u64 = 5;
-const GITHUB_REQUEST_TIMEOUT_SECONDS: u64 = 20;
-const MAX_GITHUB_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_GITHUB_ERROR_BYTES: u64 = 16 * 1024;
-const CACHE_DIR_NAME: &str = "lg-buddy";
-const UPDATE_CHECK_CACHE_FILE_NAME: &str = "update-check.json";
+mod cache;
+mod check_engine;
+mod command;
+mod notification;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdatesCommand {
-    Check { notify: bool },
-    Install,
-    BackgroundCheck,
-}
-
-impl UpdatesCommand {
-    pub fn parse<I, S>(args: I) -> Result<Self, UpdatesParseError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut args = args.into_iter();
-        let Some(subcommand) = args.next() else {
-            return Err(UpdatesParseError::MissingSubcommand);
-        };
-
-        match subcommand.as_ref() {
-            "check" => parse_check_args(args),
-            "install" => parse_no_args("install", UpdatesCommand::Install, args),
-            "background-check" => parse_background_check_args(args),
-            other => Err(UpdatesParseError::UnknownSubcommand(other.to_string())),
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Check { .. } => "check",
-            Self::Install => "install",
-            Self::BackgroundCheck => "background-check",
-        }
-    }
-
-    fn notify(&self) -> bool {
-        match self {
-            Self::Check { notify } => *notify,
-            Self::Install => false,
-            Self::BackgroundCheck => true,
-        }
-    }
-}
-
-fn parse_no_args<I, S>(
-    subcommand: &'static str,
-    command: UpdatesCommand,
-    args: I,
-) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let arguments = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>();
-    if arguments.is_empty() {
-        Ok(command)
-    } else {
-        Err(UpdatesParseError::UnexpectedArguments {
-            subcommand,
-            arguments,
-        })
-    }
-}
-
-fn parse_background_check_args<I, S>(args: I) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let extra_args: Vec<String> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect();
-    if extra_args.is_empty() {
-        Ok(UpdatesCommand::BackgroundCheck)
-    } else {
-        Err(UpdatesParseError::UnexpectedArguments {
-            subcommand: "background-check",
-            arguments: extra_args,
-        })
-    }
-}
-
-fn parse_check_args<I, S>(args: I) -> Result<UpdatesCommand, UpdatesParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut args = args.into_iter();
-    let mut notify = false;
-
-    while let Some(arg) = args.next() {
-        match arg.as_ref() {
-            "--notify" => {
-                if notify {
-                    return Err(UpdatesParseError::DuplicateNotify);
-                }
-
-                notify = true;
-            }
-            other => {
-                let mut unexpected = vec![other.to_string()];
-                unexpected.extend(args.map(|arg| arg.as_ref().to_string()));
-                return Err(UpdatesParseError::UnexpectedArguments {
-                    subcommand: "check",
-                    arguments: unexpected,
-                });
-            }
-        }
-    }
-
-    Ok(UpdatesCommand::Check { notify })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdatesParseError {
-    MissingSubcommand,
-    UnknownSubcommand(String),
-    DuplicateNotify,
-    UnexpectedArguments {
-        subcommand: &'static str,
-        arguments: Vec<String>,
-    },
-}
-
-impl fmt::Display for UpdatesParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingSubcommand => write!(
-                f,
-                "missing updates command; expected `updates check [--notify]` or `updates install`"
-            ),
-            Self::UnknownSubcommand(subcommand) => {
-                write!(f, "unknown updates command `{subcommand}`")
-            }
-            Self::DuplicateNotify => write!(f, "duplicate `--notify` option"),
-            Self::UnexpectedArguments {
-                subcommand,
-                arguments,
-            } => write!(
-                f,
-                "unexpected arguments for `updates {subcommand}`: {}",
-                arguments.join(" ")
-            ),
-        }
-    }
-}
-
-impl Error for UpdatesParseError {}
+pub use command::{UpdatesCommand, UpdatesParseError};
+mod github;
+pub use cache::UpdateCachePathError;
+pub use check_engine::{
+    check_for_updates, run_updates_command, UpdateCheckOutcome, UpdateCheckResult,
+};
+pub(crate) use check_engine::{discover_install_candidate_for_channel, saved_update_channel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -203,7 +44,7 @@ trait UpdateSettings {
 }
 
 #[derive(Debug)]
-struct EnvUpdateSettings {
+pub(super) struct EnvUpdateSettings {
     store: SettingsStore,
 }
 
@@ -240,7 +81,7 @@ impl UpdateSettings for EnvUpdateSettings {
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
-struct StaticUpdateSettings {
+pub(super) struct StaticUpdateSettings {
     automatic_checks_enabled: bool,
     channel: UpdateChannel,
 }
@@ -284,63 +125,6 @@ fn required_enum_setting(
         .ok_or_else(|| {
             UpdatesError::SettingsInvariant(format!("{key} resolved to a non-enum value"))
         })
-}
-
-#[derive(Debug, Clone, Default)]
-struct UpdateCachePathSources<'a> {
-    xdg_cache_home: Option<&'a Path>,
-    home: Option<&'a Path>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateCachePathError {
-    NotConfigured,
-}
-
-impl fmt::Display for UpdateCachePathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotConfigured => write!(
-                f,
-                "could not resolve an update cache path from XDG_CACHE_HOME or HOME"
-            ),
-        }
-    }
-}
-
-impl Error for UpdateCachePathError {}
-
-fn resolve_update_cache_path(
-    sources: UpdateCachePathSources<'_>,
-) -> Result<PathBuf, UpdateCachePathError> {
-    if let Some(path) = sources.xdg_cache_home {
-        return Ok(path.join(CACHE_DIR_NAME).join(UPDATE_CHECK_CACHE_FILE_NAME));
-    }
-
-    if let Some(path) = sources.home {
-        return Ok(path
-            .join(".cache")
-            .join(CACHE_DIR_NAME)
-            .join(UPDATE_CHECK_CACHE_FILE_NAME));
-    }
-
-    Err(UpdateCachePathError::NotConfigured)
-}
-
-fn resolve_update_cache_path_from_env() -> Result<PathBuf, UpdateCachePathError> {
-    let xdg_cache_home = non_empty_env_path("XDG_CACHE_HOME");
-    let home = non_empty_env_path("HOME");
-
-    resolve_update_cache_path(UpdateCachePathSources {
-        xdg_cache_home: xdg_cache_home.as_deref(),
-        home: home.as_deref(),
-    })
-}
-
-fn non_empty_env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name)
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
 }
 
 #[derive(Debug)]
@@ -664,96 +448,6 @@ impl ReleaseInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateNotificationReason {
-    NewRelease,
-}
-
-impl UpdateNotificationReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NewRelease => "new release",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateNotificationSkipReason {
-    NotRequested,
-    NoUpdateAvailable,
-    AlreadyShownForRelease,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateNotificationDecision {
-    Notify {
-        reason: UpdateNotificationReason,
-    },
-    Skip {
-        reason: UpdateNotificationSkipReason,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-struct UpdateNotificationPolicyInput<'a> {
-    notify_requested: bool,
-    update_available: bool,
-    latest: &'a ReleaseInfo,
-    last_notification: Option<&'a CachedUpdateNotification>,
-}
-
-fn evaluate_update_notification_policy(
-    input: UpdateNotificationPolicyInput<'_>,
-) -> UpdateNotificationDecision {
-    if !input.notify_requested {
-        return UpdateNotificationDecision::Skip {
-            reason: UpdateNotificationSkipReason::NotRequested,
-        };
-    }
-
-    if !input.update_available {
-        return UpdateNotificationDecision::Skip {
-            reason: UpdateNotificationSkipReason::NoUpdateAvailable,
-        };
-    }
-
-    if input
-        .last_notification
-        .is_some_and(|notification| notification.matches_release(input.latest))
-    {
-        return UpdateNotificationDecision::Skip {
-            reason: UpdateNotificationSkipReason::AlreadyShownForRelease,
-        };
-    }
-
-    UpdateNotificationDecision::Notify {
-        reason: UpdateNotificationReason::NewRelease,
-    }
-}
-
-fn render_update_notification_sent(reason: UpdateNotificationReason) -> String {
-    format!("notification: sent ({})\n", reason.as_str())
-}
-
-fn render_update_notification_failure(reason: UpdateNotificationReason) -> String {
-    format!("notification: failed ({})\n", reason.as_str())
-}
-
-fn render_update_notification_skip(
-    reason: UpdateNotificationSkipReason,
-    latest: &ReleaseInfo,
-) -> String {
-    let reason = match reason {
-        UpdateNotificationSkipReason::NotRequested => "not requested".to_string(),
-        UpdateNotificationSkipReason::NoUpdateAvailable => "no update available".to_string(),
-        UpdateNotificationSkipReason::AlreadyShownForRelease => {
-            format!("already shown for {}", latest.version())
-        }
-    };
-
-    format!("notification: skipped ({reason})\n")
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct UpdateCheckCache {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -840,827 +534,20 @@ impl CachedReleaseInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateCheckResult {
-    check_channel: UpdateChannel,
-    current_version: Version,
-    current_channel: ReleaseChannel,
-    latest: ReleaseInfo,
-}
-
-impl UpdateCheckResult {
-    pub fn check_channel(&self) -> UpdateChannel {
-        self.check_channel
-    }
-
-    pub fn current_version(&self) -> &Version {
-        &self.current_version
-    }
-
-    pub fn current_channel(&self) -> ReleaseChannel {
-        self.current_channel
-    }
-
-    pub fn latest(&self) -> &ReleaseInfo {
-        &self.latest
-    }
-
-    pub fn update_available(&self) -> bool {
-        self.latest.version > self.current_version
-    }
-
-    pub fn render(&self) -> String {
-        let status = if self.update_available() {
-            "update available"
-        } else {
-            "up to date"
-        };
-
-        let mut output = format!(
-            "status: {status}\ncurrent: {} ({})\nlatest: {} ({})\nurl: {}\n",
-            self.current_version,
-            self.current_channel.as_str(),
-            self.latest.version(),
-            self.latest.channel().as_str(),
-            self.latest.url()
-        );
-        if self.update_available() {
-            output.push_str("install: lg-buddy updates install\n");
-        }
-        output
-    }
-
-    fn notification_request(&self) -> Result<UpdateNotificationRequest, UpdateNotificationError> {
-        UpdateNotificationRequest::new(
-            self.check_channel,
-            self.current_version.clone(),
-            self.current_channel,
-            self.latest.version().clone(),
-            self.latest.channel(),
-            self.latest.url().to_string(),
-        )
-    }
-}
-
-#[derive(Debug)]
-pub struct UpdateCheckOutcome {
-    result: UpdateCheckResult,
-    warnings: Vec<UpdatesDeferredFailure>,
-}
-
-impl UpdateCheckOutcome {
-    pub fn result(&self) -> &UpdateCheckResult {
-        &self.result
-    }
-
-    pub fn warnings(&self) -> &[UpdatesDeferredFailure] {
-        &self.warnings
-    }
-}
-
-trait GitHubReleasesClient {
-    fn get(
-        &self,
-        endpoint: ReleaseEndpoint,
-        user_agent: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<GitHubReleaseResponse, UpdatesError>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum GitHubReleaseResponse {
-    Ok { body: String, etag: Option<String> },
-    NotModified,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ReleaseEndpoint {
-    LatestStable,
-    LatestPublished,
-}
-
-impl ReleaseEndpoint {
-    fn url(self, base: &str) -> String {
-        match self {
-            Self::LatestStable => format!("{base}/latest"),
-            Self::LatestPublished => format!("{base}?per_page=1"),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::LatestStable => "latest",
-            Self::LatestPublished => "releases",
-        }
-    }
-}
-
-struct UreqGitHubReleasesClient {
-    base_url: &'static str,
-    agent: ureq::Agent,
-}
-
-impl Default for UreqGitHubReleasesClient {
-    fn default() -> Self {
-        Self {
-            base_url: GITHUB_RELEASES_API_BASE,
-            agent: ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(GITHUB_CONNECT_TIMEOUT_SECONDS))
-                .timeout(Duration::from_secs(GITHUB_REQUEST_TIMEOUT_SECONDS))
-                .https_only(true)
-                .try_proxy_from_env(false)
-                .redirects(0)
-                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
-                .build(),
-        }
-    }
-}
-
-impl GitHubReleasesClient for UreqGitHubReleasesClient {
-    fn get(
-        &self,
-        endpoint: ReleaseEndpoint,
-        user_agent: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<GitHubReleaseResponse, UpdatesError> {
-        let url = endpoint.url(self.base_url);
-        let mut request = self
-            .agent
-            .get(&url)
-            .set("Accept", GITHUB_ACCEPT)
-            .set("User-Agent", user_agent)
-            .set("X-GitHub-Api-Version", GITHUB_API_VERSION);
-
-        if let Some(etag) = if_none_match {
-            request = request.set("If-None-Match", etag);
-        }
-
-        #[cfg(feature = "gui-test-fixtures")]
-        let request = crate::gui_test_fixtures::request(request);
-        let result = request.call();
-
-        match result {
-            Ok(response) if response.status() == 200 => {
-                let etag = response.header("ETag").map(str::to_string);
-                read_ureq_response_body(response, &url, MAX_GITHUB_RESPONSE_BYTES)
-                    .map(|body| GitHubReleaseResponse::Ok { body, etag })
-            }
-            Ok(response) if response.status() == 304 => Ok(GitHubReleaseResponse::NotModified),
-            Ok(response) => {
-                let status = response.status();
-                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
-                Err(UpdatesError::ApiStatus { url, status, body })
-            }
-            Err(ureq::Error::Status(304, _)) => Ok(GitHubReleaseResponse::NotModified),
-            Err(ureq::Error::Status(status, response)) => {
-                let body = read_ureq_response_body(response, &url, MAX_GITHUB_ERROR_BYTES)?;
-                Err(UpdatesError::ApiStatus { url, status, body })
-            }
-            Err(ureq::Error::Transport(err)) => Err(UpdatesError::Http {
-                url,
-                message: err.to_string(),
-            }),
-        }
-    }
-}
-
-fn read_ureq_response_body(
-    response: ureq::Response,
-    url: &str,
-    max_bytes: u64,
-) -> Result<String, UpdatesError> {
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(max_bytes + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|err| UpdatesError::Http {
-            url: url.to_string(),
-            message: err.to_string(),
-        })?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(UpdatesError::ResponseTooLarge {
-            url: url.to_string(),
-            max_bytes,
-        });
-    }
-
-    String::from_utf8(bytes).map_err(|err| UpdatesError::Http {
-        url: url.to_string(),
-        message: format!("response was not valid UTF-8: {err}"),
-    })
-}
-
-trait UpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError>;
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError>;
-}
-
-struct FileUpdateCacheStore {
-    path: PathBuf,
-}
-
-impl FileUpdateCacheStore {
-    #[cfg(test)]
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-enum DefaultUpdateCacheStore {
-    File(FileUpdateCacheStore),
-    Unavailable(UpdateCachePathError),
-}
-
-impl DefaultUpdateCacheStore {
-    fn from_env() -> Self {
-        match resolve_update_cache_path_from_env() {
-            Ok(path) => Self::File(FileUpdateCacheStore { path }),
-            Err(err) => Self::Unavailable(err),
-        }
-    }
-}
-
-impl UpdateCacheStore for DefaultUpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
-        match self {
-            Self::File(store) => store.load(),
-            Self::Unavailable(_) => Ok(UpdateCheckCache::default()),
-        }
-    }
-
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError> {
-        match self {
-            Self::File(store) => store.save(cache),
-            Self::Unavailable(err) => Err(UpdatesError::CachePath(err.clone())),
-        }
-    }
-}
-
-impl UpdateCacheStore for FileUpdateCacheStore {
-    fn load(&self) -> Result<UpdateCheckCache, UpdatesError> {
-        match fs::read_to_string(&self.path) {
-            Ok(contents) => {
-                serde_json::from_str(&contents).map_err(|source| UpdatesError::CacheDecode {
-                    path: self.path.clone(),
-                    source,
-                })
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(UpdateCheckCache::default()),
-            Err(err) => Err(UpdatesError::Io(err)),
-        }
-    }
-
-    fn save(&self, cache: &UpdateCheckCache) -> Result<(), UpdatesError> {
-        let contents = serde_json::to_vec_pretty(cache).map_err(UpdatesError::CacheEncode)?;
-        atomic_write_file(&self.path, &contents).map_err(UpdatesError::Io)
-    }
-}
-
-fn atomic_write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            ensure_cache_parent(parent)?;
-        }
-    }
-
-    let mut last_error = None;
-    for attempt in 0..100 {
-        let temp_path = atomic_temp_path(path, attempt);
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-
-        let mut file = match options.open(&temp_path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                last_error = Some(err);
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-
-        let result = (|| {
-            file.write_all(contents)?;
-            file.flush()?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temp_path, path)
-        })();
-
-        if let Err(err) = result {
-            let _ = fs::remove_file(&temp_path);
-            return Err(err);
-        }
-
-        return Ok(());
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not create unique update cache temporary file",
-        )
-    }))
-}
-
-#[cfg(unix)]
-fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
-    let mut current = PathBuf::new();
-    for component in parent.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotADirectory,
-                    format!(
-                        "cache path component `{}` is not a directory",
-                        current.display()
-                    ),
-                ))
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                match fs::DirBuilder::new().mode(0o700).create(&current) {
-                    Ok(()) => {}
-                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(err) => return Err(err),
-                }
-                if !fs::symlink_metadata(&current)?.file_type().is_dir() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotADirectory,
-                        format!(
-                            "cache path component `{}` is not a directory",
-                            current.display()
-                        ),
-                    ));
-                }
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_cache_parent(parent: &Path) -> io::Result<()> {
-    fs::create_dir_all(parent)
-}
-
-fn atomic_temp_path(path: &Path, attempt: u8) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(UPDATE_CHECK_CACHE_FILE_NAME);
-    path.with_file_name(format!(".{file_name}.{}.{}.tmp", process::id(), attempt))
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    html_url: String,
-    draft: bool,
-    prerelease: bool,
-    #[serde(default)]
-    assets: Vec<GitHubReleaseAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubReleaseAsset {
-    id: u64,
-    name: String,
-    state: String,
-    size: u64,
-    digest: Option<String>,
-    url: String,
-    browser_download_url: String,
-}
-
-pub fn run_updates_command<W: io::Write>(
-    command: UpdatesCommand,
-    writer: &mut W,
-) -> Result<(), UpdatesError> {
-    if matches!(command, UpdatesCommand::Install) {
-        return Err(UpdatesError::CommandInvariant(
-            "updates install must use the install orchestrator".to_string(),
-        ));
-    }
-    let client = UreqGitHubReleasesClient::default();
-    let version = VersionInfo::current();
-    let notification_handoff = SessionBusUpdateNotificationHandoff;
-    let cache_store = DefaultUpdateCacheStore::from_env();
-    let update_settings = EnvUpdateSettings::from_env()?;
-    let context = UpdatesRunContext {
-        version,
-        client: &client,
-        notifier: &notification_handoff,
-        cache_store: &cache_store,
-        update_settings: &update_settings,
-        now_unix_seconds: current_unix_seconds(),
-    };
-
-    run_updates_command_with_update_settings(command, writer, context)
-}
-
-pub fn check_for_updates() -> Result<UpdateCheckOutcome, UpdatesError> {
-    let client = UreqGitHubReleasesClient::default();
-    let cache_store = DefaultUpdateCacheStore::from_env();
-    let update_settings = EnvUpdateSettings::from_env()?;
-
-    run_update_check(
-        VersionInfo::current(),
-        &client,
-        &cache_store,
-        &update_settings,
-        current_unix_seconds(),
-    )
-}
-
-pub(crate) fn saved_update_channel() -> Result<UpdateChannel, UpdatesError> {
-    EnvUpdateSettings::from_env()?.channel()
-}
-
-pub(crate) fn discover_install_candidate_for_channel(
-    current: VersionInfo,
-    channel: UpdateChannel,
-) -> Result<ReleaseInfo, UpdatesError> {
-    let client = UreqGitHubReleasesClient::default();
-    check_updates(channel, current, &client).map(|result| result.latest)
-}
-
-#[cfg(test)]
-fn discover_install_candidate_with<C: GitHubReleasesClient, U: UpdateSettings>(
-    current: VersionInfo,
-    client: &C,
-    settings: &U,
-) -> Result<ReleaseInfo, UpdatesError> {
-    let channel = settings.channel()?;
-    check_updates(channel, current, client).map(|result| result.latest)
-}
-
-#[cfg(test)]
-fn run_updates_command_with<
-    W: io::Write,
-    C: GitHubReleasesClient,
-    N: UpdateNotificationHandoff,
-    S: UpdateCacheStore,
->(
-    command: UpdatesCommand,
-    writer: &mut W,
-    version: VersionInfo,
-    client: &C,
-    notifier: &N,
-    cache_store: &S,
-    now_unix_seconds: u64,
-) -> Result<(), UpdatesError> {
-    let update_settings = StaticUpdateSettings::enabled(UpdateChannel::Stable);
-    let context = UpdatesRunContext {
-        version,
-        client,
-        notifier,
-        cache_store,
-        update_settings: &update_settings,
-        now_unix_seconds,
-    };
-    run_updates_command_with_update_settings(command, writer, context)
-}
-
-struct UpdatesRunContext<'a, C, N, S, U> {
-    version: VersionInfo,
-    client: &'a C,
-    notifier: &'a N,
-    cache_store: &'a S,
-    update_settings: &'a U,
-    now_unix_seconds: u64,
-}
-
-struct PreparedUpdateCheck {
-    result: UpdateCheckResult,
-    cache: UpdateCheckCache,
-    deferred_failures: Vec<UpdatesDeferredFailure>,
-}
-
-fn prepare_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
-    version: VersionInfo,
-    client: &C,
-    cache_store: &S,
-    update_settings: &U,
-    now_unix_seconds: u64,
-) -> Result<PreparedUpdateCheck, UpdatesError> {
-    let channel = update_settings.channel()?;
-    let mut deferred_failures = Vec::new();
-    let mut cache = match cache_store.load() {
-        Ok(cache) => cache,
-        Err(err) => {
-            deferred_failures.push(UpdatesDeferredFailure::Cache(Box::new(err)));
-            UpdateCheckCache::default()
-        }
-    };
-    let result = check_updates_with_cache(channel, version, client, &mut cache, now_unix_seconds)?;
-
-    Ok(PreparedUpdateCheck {
-        result,
-        cache,
-        deferred_failures,
-    })
-}
-
-fn run_update_check<C: GitHubReleasesClient, S: UpdateCacheStore, U: UpdateSettings>(
-    version: VersionInfo,
-    client: &C,
-    cache_store: &S,
-    update_settings: &U,
-    now_unix_seconds: u64,
-) -> Result<UpdateCheckOutcome, UpdatesError> {
-    let mut prepared = prepare_update_check(
-        version,
-        client,
-        cache_store,
-        update_settings,
-        now_unix_seconds,
-    )?;
-    if let Err(err) = cache_store.save(&prepared.cache) {
-        prepared
-            .deferred_failures
-            .push(UpdatesDeferredFailure::Cache(Box::new(err)));
-    }
-
-    Ok(UpdateCheckOutcome {
-        result: prepared.result,
-        warnings: prepared.deferred_failures,
-    })
-}
-
-fn run_updates_command_with_update_settings<
-    W: io::Write,
-    C: GitHubReleasesClient,
-    N: UpdateNotificationHandoff,
-    S: UpdateCacheStore,
-    U: UpdateSettings,
->(
-    command: UpdatesCommand,
-    writer: &mut W,
-    context: UpdatesRunContext<'_, C, N, S, U>,
-) -> Result<(), UpdatesError> {
-    if matches!(command, UpdatesCommand::BackgroundCheck)
-        && !context.update_settings.automatic_checks_enabled()?
-    {
-        writer.write_all(b"background: skipped (automatic update checks disabled)\n")?;
-        return Ok(());
-    }
-    let notify = command.notify();
-    let mut prepared = prepare_update_check(
-        context.version,
-        context.client,
-        context.cache_store,
-        context.update_settings,
-        context.now_unix_seconds,
-    )?;
-    let result = &prepared.result;
-
-    writer.write_all(result.render().as_bytes())?;
-    let notification_decision =
-        evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: notify,
-            update_available: result.update_available(),
-            latest: &result.latest,
-            last_notification: prepared
-                .cache
-                .entry(result.check_channel)
-                .and_then(|entry| entry.last_notification.as_ref()),
-        });
-    match notification_decision {
-        UpdateNotificationDecision::Notify { reason } => {
-            let notification_result = result
-                .notification_request()
-                .and_then(|request| context.notifier.show_update_notification(&request));
-            match notification_result {
-                Ok(_) => {
-                    prepared.cache.record_notification(
-                        result.check_channel,
-                        &result.latest,
-                        context.now_unix_seconds,
-                    );
-                    writer.write_all(render_update_notification_sent(reason).as_bytes())?;
-                }
-                Err(err) => {
-                    writer.write_all(render_update_notification_failure(reason).as_bytes())?;
-                    prepared
-                        .deferred_failures
-                        .push(UpdatesDeferredFailure::Notification(err));
-                }
-            }
-        }
-        UpdateNotificationDecision::Skip { reason } => {
-            if notify {
-                writer.write_all(
-                    render_update_notification_skip(reason, &result.latest).as_bytes(),
-                )?;
-            }
-        }
-    }
-    if let Err(err) = context.cache_store.save(&prepared.cache) {
-        prepared
-            .deferred_failures
-            .push(UpdatesDeferredFailure::Cache(Box::new(err)));
-    }
-
-    if !prepared.deferred_failures.is_empty() {
-        return Err(UpdatesError::DeferredFailures(prepared.deferred_failures));
-    }
-
-    Ok(())
-}
-
-fn check_updates<C: GitHubReleasesClient>(
-    channel: UpdateChannel,
-    current: VersionInfo,
-    client: &C,
-) -> Result<UpdateCheckResult, UpdatesError> {
-    let mut cache = UpdateCheckCache::default();
-    check_updates_with_cache(channel, current, client, &mut cache, current_unix_seconds())
-}
-
-fn check_updates_with_cache<C: GitHubReleasesClient>(
-    channel: UpdateChannel,
-    current: VersionInfo,
-    client: &C,
-    cache: &mut UpdateCheckCache,
-    now_unix_seconds: u64,
-) -> Result<UpdateCheckResult, UpdatesError> {
-    let current_version =
-        Version::parse(current.version()).map_err(|source| UpdatesError::InvalidLocalVersion {
-            version: current.version().to_string(),
-            source,
-        })?;
-    let latest = fetch_latest_release(channel, current, client, cache, now_unix_seconds)?;
-
-    Ok(UpdateCheckResult {
-        check_channel: channel,
-        current_version,
-        current_channel: current.channel(),
-        latest,
-    })
-}
-
-fn fetch_latest_release<C: GitHubReleasesClient>(
-    channel: UpdateChannel,
-    current: VersionInfo,
-    client: &C,
-    cache: &mut UpdateCheckCache,
-    now_unix_seconds: u64,
-) -> Result<ReleaseInfo, UpdatesError> {
-    let user_agent = format!("lg-buddy/{}", current.version());
-    let cached_etag = cache.entry(channel).and_then(|entry| entry.etag.as_deref());
-
-    match channel {
-        UpdateChannel::Stable => {
-            let endpoint = ReleaseEndpoint::LatestStable;
-            let response = client.get(endpoint, &user_agent, cached_etag)?;
-
-            latest_from_response(channel, response, cache, now_unix_seconds, |body| {
-                let release: GitHubRelease =
-                    serde_json::from_str(body).map_err(|source| UpdatesError::ApiShape {
-                        endpoint: endpoint.label(),
-                        source,
-                    })?;
-
-                release_info_from_api_release(release, channel)
-                    .ok_or(UpdatesError::NoMatchingRelease { channel })
-            })
-        }
-        UpdateChannel::Prerelease => {
-            let endpoint = ReleaseEndpoint::LatestPublished;
-            let response = client.get(endpoint, &user_agent, cached_etag)?;
-
-            latest_from_response(channel, response, cache, now_unix_seconds, |body| {
-                let releases: Vec<GitHubRelease> =
-                    serde_json::from_str(body).map_err(|source| UpdatesError::ApiShape {
-                        endpoint: endpoint.label(),
-                        source,
-                    })?;
-
-                releases
-                    .into_iter()
-                    .next()
-                    .and_then(|release| release_info_from_api_release(release, channel))
-                    .ok_or(UpdatesError::NoMatchingRelease { channel })
-            })
-        }
-    }
-}
-
-fn latest_from_response<F>(
-    channel: UpdateChannel,
-    response: GitHubReleaseResponse,
-    cache: &mut UpdateCheckCache,
-    now_unix_seconds: u64,
-    parse_latest: F,
-) -> Result<ReleaseInfo, UpdatesError>
-where
-    F: FnOnce(&str) -> Result<ReleaseInfo, UpdatesError>,
-{
-    match response {
-        GitHubReleaseResponse::Ok { body, etag } => {
-            let latest = parse_latest(&body)?;
-            let last_notification = cache
-                .entry(channel)
-                .and_then(|entry| entry.last_notification.clone());
-            cache.set_entry(
-                channel,
-                CachedUpdateCheck {
-                    etag,
-                    last_checked_at_unix_seconds: now_unix_seconds,
-                    latest: latest.to_cached(),
-                    last_notification,
-                },
-            );
-            Ok(latest)
-        }
-        GitHubReleaseResponse::NotModified => {
-            let mut entry = cache
-                .entry(channel)
-                .cloned()
-                .ok_or(UpdatesError::NotModifiedWithoutCache { channel })?;
-            let latest = ReleaseInfo::from_cached(&entry.latest)
-                .ok_or(UpdatesError::NotModifiedWithoutCache { channel })?;
-            entry.last_checked_at_unix_seconds = now_unix_seconds;
-            cache.set_entry(channel, entry);
-            Ok(latest)
-        }
-    }
-}
-
-fn release_info_from_api_release(
-    release: GitHubRelease,
-    channel: UpdateChannel,
-) -> Option<ReleaseInfo> {
-    if release.draft {
-        return None;
-    }
-
-    match channel {
-        UpdateChannel::Stable if release.prerelease => return None,
-        UpdateChannel::Stable | UpdateChannel::Prerelease => {}
-    }
-
-    let release_channel = if release.prerelease {
-        UpdateChannel::Prerelease
-    } else {
-        UpdateChannel::Stable
-    };
-
-    parse_release_version(&release.tag_name).map(|version| {
-        ReleaseInfo::from_github(
-            version,
-            release_channel,
-            release.html_url,
-            release.tag_name,
-            release
-                .assets
-                .into_iter()
-                .map(|asset| {
-                    ReleaseAsset::from_github(
-                        asset.id,
-                        asset.name,
-                        asset.state,
-                        asset.size,
-                        asset.digest,
-                        asset.url,
-                        asset.browser_download_url,
-                    )
-                })
-                .collect(),
-        )
-    })
-}
-
-fn parse_release_version(tag_name: &str) -> Option<Version> {
-    Version::parse(tag_name.strip_prefix('v').unwrap_or(tag_name)).ok()
-}
-
-fn current_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[cfg(test)]
 mod tests {
+    use super::cache::{
+        DefaultUpdateCacheStore, FileUpdateCacheStore, UpdateCachePathError, UpdateCacheStore,
+    };
+    use super::check_engine::{
+        check_updates, check_updates_with_cache, discover_install_candidate_with, run_update_check,
+        run_updates_command_with, run_updates_command_with_update_settings, UpdatesRunContext,
+    };
+    use super::github::{GitHubReleaseResponse, GitHubReleasesClient, ReleaseEndpoint};
     use super::{
-        atomic_write_file, check_updates, check_updates_with_cache,
-        discover_install_candidate_with, evaluate_update_notification_policy,
-        parse_release_version, resolve_update_cache_path, run_update_check,
-        run_updates_command_with, run_updates_command_with_update_settings, CachedReleaseInfo,
-        CachedUpdateCheck, CachedUpdateNotification, DefaultUpdateCacheStore, EnvUpdateSettings,
-        FileUpdateCacheStore, GitHubReleaseResponse, GitHubReleasesClient, ReleaseAsset,
-        ReleaseEndpoint, ReleaseInfo, StaticUpdateSettings, UpdateCachePathError,
-        UpdateCachePathSources, UpdateCacheStore, UpdateChannel, UpdateCheckCache,
-        UpdateNotificationDecision, UpdateNotificationPolicyInput, UpdateNotificationReason,
-        UpdateNotificationSkipReason, UpdateSettings, UpdatesCommand, UpdatesDeferredFailure,
-        UpdatesError, UpdatesRunContext, UreqGitHubReleasesClient, MAX_GITHUB_RESPONSE_BYTES,
+        CachedReleaseInfo, CachedUpdateCheck, CachedUpdateNotification, EnvUpdateSettings,
+        ReleaseInfo, StaticUpdateSettings, UpdateChannel, UpdateCheckCache, UpdateSettings,
+        UpdatesCommand, UpdatesDeferredFailure, UpdatesError,
     };
     use crate::session_notifications::{
         UpdateNotificationError, UpdateNotificationHandoff, UpdateNotificationOutcome,
@@ -1671,20 +558,15 @@ mod tests {
     use semver::Version;
     use std::cell::{Cell, RefCell};
     use std::fs;
-    use std::io::{self, Read, Write};
-    use std::net::TcpListener;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::io;
     use std::path::PathBuf;
     use std::process;
     use std::sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
     };
-    use std::thread;
-    use std::time::Duration;
 
-    const TEST_NOW: u64 = 1_778_234_400;
+    pub(super) const TEST_NOW: u64 = 1_778_234_400;
 
     #[derive(Debug)]
     struct MockGitHubReleasesClient {
@@ -1913,7 +795,7 @@ mod tests {
         )
     }
 
-    fn release_info(version: &str, channel: UpdateChannel, url: &str) -> ReleaseInfo {
+    pub(super) fn release_info(version: &str, channel: UpdateChannel, url: &str) -> ReleaseInfo {
         let version = Version::parse(version).expect("test version should parse");
         ReleaseInfo {
             tag_name: format!("v{version}"),
@@ -1931,7 +813,7 @@ mod tests {
         }
     }
 
-    fn cached_entry(
+    pub(super) fn cached_entry(
         etag: Option<&str>,
         version: &str,
         channel: UpdateChannel,
@@ -1952,7 +834,7 @@ mod tests {
         }
     }
 
-    fn cached_notification(
+    pub(super) fn cached_notification(
         version: &str,
         channel: UpdateChannel,
         url: &str,
@@ -1970,7 +852,7 @@ mod tests {
         }
     }
 
-    fn cached_entry_with_notification(
+    pub(super) fn cached_entry_with_notification(
         etag: Option<&str>,
         version: &str,
         channel: UpdateChannel,
@@ -2004,113 +886,9 @@ mod tests {
         UpdatesCommand::BackgroundCheck
     }
 
-    #[test]
-    fn notification_policy_skips_when_notification_was_not_requested() {
-        let latest = release_info(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: false,
-            update_available: true,
-            latest: &latest,
-            last_notification: None,
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::NotRequested
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_skips_when_no_update_is_available() {
-        let latest = release_info(
-            "1.1.0",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.0",
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: false,
-            latest: &latest,
-            last_notification: None,
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::NoUpdateAvailable
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_skips_when_latest_release_was_already_shown() {
-        let latest = release_info(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-        );
-        let last_notification = cached_notification(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-            TEST_NOW - 1,
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: true,
-            latest: &latest,
-            last_notification: Some(&last_notification),
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Skip {
-                reason: UpdateNotificationSkipReason::AlreadyShownForRelease
-            }
-        );
-    }
-
-    #[test]
-    fn notification_policy_notifies_when_latest_release_has_not_been_shown() {
-        let latest = release_info(
-            "1.1.2",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.2",
-        );
-        let last_notification = cached_notification(
-            "1.1.1",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.1",
-            TEST_NOW - 1,
-        );
-
-        let decision = evaluate_update_notification_policy(UpdateNotificationPolicyInput {
-            notify_requested: true,
-            update_available: true,
-            latest: &latest,
-            last_notification: Some(&last_notification),
-        });
-
-        assert_eq!(
-            decision,
-            UpdateNotificationDecision::Notify {
-                reason: UpdateNotificationReason::NewRelease
-            }
-        );
-    }
-
     static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
+    pub(super) fn unique_temp_dir(label: &str) -> PathBuf {
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "lg-buddy-updates-{label}-{}-{counter}",
@@ -2120,19 +898,19 @@ mod tests {
         path
     }
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(super) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[cfg(unix)]
-    struct UmaskGuard {
+    pub(super) struct UmaskGuard {
         previous: libc::mode_t,
     }
 
     #[cfg(unix)]
     impl UmaskGuard {
-        fn set(mask: libc::mode_t) -> Self {
+        pub(super) fn set(mask: libc::mode_t) -> Self {
             Self {
                 previous: unsafe { libc::umask(mask) },
             }
@@ -2144,255 +922,6 @@ mod tests {
         fn drop(&mut self) {
             unsafe { libc::umask(self.previous) };
         }
-    }
-
-    #[test]
-    fn cache_path_resolver_prefers_xdg_cache_home() {
-        let xdg_cache_home = PathBuf::from("/tmp/xdg-cache");
-        let home = PathBuf::from("/home/test-user");
-
-        let path = resolve_update_cache_path(UpdateCachePathSources {
-            xdg_cache_home: Some(&xdg_cache_home),
-            home: Some(&home),
-        })
-        .expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/tmp/xdg-cache/lg-buddy/update-check.json")
-        );
-    }
-
-    #[test]
-    fn cache_path_resolver_falls_back_to_home_cache() {
-        let home = PathBuf::from("/home/test-user");
-
-        let path = resolve_update_cache_path(UpdateCachePathSources {
-            xdg_cache_home: None,
-            home: Some(&home),
-        })
-        .expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/test-user/.cache/lg-buddy/update-check.json")
-        );
-    }
-
-    #[test]
-    fn empty_env_paths_are_treated_as_unset_for_cache_resolution() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let original_xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
-        let original_home = std::env::var_os("HOME");
-
-        std::env::set_var("XDG_CACHE_HOME", "");
-        std::env::set_var("HOME", "/home/test-user");
-
-        let path = super::resolve_update_cache_path_from_env().expect("resolve cache path");
-
-        assert_eq!(
-            path,
-            PathBuf::from("/home/test-user/.cache/lg-buddy/update-check.json")
-        );
-
-        match original_xdg_cache_home {
-            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
-            None => std::env::remove_var("XDG_CACHE_HOME"),
-        }
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-    }
-
-    #[test]
-    fn missing_cache_loads_as_empty_and_malformed_cache_reports_decode_error() {
-        let dir = unique_temp_dir("malformed-cache");
-        let path = dir.join("lg-buddy").join("update-check.json");
-        let store = FileUpdateCacheStore::new(path.clone());
-
-        assert_eq!(
-            store.load().expect("missing cache should load"),
-            UpdateCheckCache::default()
-        );
-
-        fs::create_dir_all(path.parent().expect("cache path parent")).expect("create cache dir");
-        fs::write(&path, "{").expect("write malformed cache");
-
-        let err = store
-            .load()
-            .expect_err("malformed cache should report decode error");
-
-        assert!(
-            matches!(err, UpdatesError::CacheDecode { path: error_path, .. } if error_path == path)
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[test]
-    fn file_cache_round_trips_entries_and_preserves_other_channel() {
-        let dir = unique_temp_dir("cache-roundtrip");
-        let path = dir.join("lg-buddy").join("update-check.json");
-        let store = FileUpdateCacheStore::new(path);
-
-        let mut cache = UpdateCheckCache::default();
-        let mut stable_entry = cached_entry_with_notification(
-            Some("\"stable-etag\""),
-            "1.1.0",
-            UpdateChannel::Stable,
-            "https://github.test/releases/tag/v1.1.0",
-            TEST_NOW,
-            TEST_NOW + 1,
-        );
-        stable_entry.latest.tag_name = Some("v1.1.0".to_string());
-        stable_entry.latest.assets = vec![ReleaseAsset::from_github(
-            42,
-            "lg-buddy-1.1.0-x86_64-unknown-linux-musl.tar.gz".to_string(),
-            "uploaded".to_string(),
-            1234,
-            Some(format!("sha256:{}", "a".repeat(64))),
-            "https://api.github.test/releases/assets/42".to_string(),
-            "https://github.test/releases/download/v1.1.0/bundle.tar.gz".to_string(),
-        )];
-        cache.set_entry(UpdateChannel::Stable, stable_entry);
-        cache.set_entry(
-            UpdateChannel::Prerelease,
-            cached_entry(
-                Some("\"prerelease-etag\""),
-                "1.2.0-beta.1",
-                UpdateChannel::Prerelease,
-                "https://github.test/releases/tag/v1.2.0-beta.1",
-                TEST_NOW + 1,
-            ),
-        );
-
-        store.save(&cache).expect("save cache");
-        assert_eq!(store.load().expect("load cache"), cache);
-
-        let mut updated = store.load().expect("load cache for update");
-        updated.set_entry(
-            UpdateChannel::Stable,
-            cached_entry(
-                Some("\"stable-etag-2\""),
-                "1.1.1",
-                UpdateChannel::Stable,
-                "https://github.test/releases/tag/v1.1.1",
-                TEST_NOW + 2,
-            ),
-        );
-        store.save(&updated).expect("save updated cache");
-
-        let loaded = store.load().expect("load updated cache");
-        assert_eq!(
-            loaded.entry(UpdateChannel::Stable),
-            updated.entry(UpdateChannel::Stable)
-        );
-        assert_eq!(
-            loaded.entry(UpdateChannel::Prerelease),
-            cache.entry(UpdateChannel::Prerelease)
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_cache_creates_private_path_and_file_under_group_writable_umask() {
-        const CHILD_ENV: &str = "LG_BUDDY_TEST_CACHE_PERMISSIONS_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(
-                std::env::current_exe().expect("resolve current test executable"),
-            )
-            .arg("file_cache_creates_private_path_and_file_under_group_writable_umask")
-            .arg("--nocapture")
-            .env(CHILD_ENV, "1")
-            .status()
-            .expect("run isolated cache-permissions regression");
-            assert!(status.success(), "isolated cache-permissions test failed");
-            return;
-        }
-
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = unique_temp_dir("cache-permissions");
-        let home = dir.join("home");
-        fs::create_dir(&home).expect("create test home");
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o750))
-            .expect("set test home permissions");
-        let path = home
-            .join(".cache")
-            .join("lg-buddy")
-            .join("update-check.json");
-
-        let _umask = UmaskGuard::set(0o002);
-        FileUpdateCacheStore::new(path.clone())
-            .save(&UpdateCheckCache::default())
-            .expect("save cache");
-
-        for directory in [home.join(".cache"), home.join(".cache").join("lg-buddy")] {
-            assert_eq!(
-                fs::symlink_metadata(directory)
-                    .expect("cache directory metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        }
-        assert_eq!(
-            fs::symlink_metadata(path)
-                .expect("cache file metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
-    }
-
-    #[test]
-    fn cache_without_notification_state_loads_with_absent_notification() {
-        let cache: UpdateCheckCache = serde_json::from_str(
-            r#"{
-              "stable": {
-                "etag": "\"stable-etag\"",
-                "last_checked_at_unix_seconds": 1778234400,
-                "latest": {
-                  "version": "1.1.0",
-                  "channel": "stable",
-                  "url": "https://github.test/releases/tag/v1.1.0"
-                }
-              }
-            }"#,
-        )
-        .expect("legacy cache should decode");
-
-        assert_eq!(
-            cache
-                .entry(UpdateChannel::Stable)
-                .expect("stable cache entry")
-                .last_notification,
-            None
-        );
-    }
-
-    #[test]
-    fn failed_atomic_write_does_not_replace_existing_target() {
-        let dir = unique_temp_dir("atomic-write-failure");
-        let path = dir.join("update-check.json");
-        fs::create_dir_all(&path).expect("create directory at target path");
-
-        let err = atomic_write_file(&path, b"{}").expect_err("rename over directory should fail");
-
-        assert!(err.kind() != io::ErrorKind::NotFound);
-        assert!(path.is_dir());
-
-        fs::remove_dir_all(dir).expect("remove test temp dir");
     }
 
     #[test]
@@ -2437,77 +966,6 @@ mod tests {
         assert_eq!(entry.etag.as_deref(), Some("\"next-etag\""));
         assert_eq!(entry.last_checked_at_unix_seconds, TEST_NOW);
         assert_eq!(entry.latest.version, "1.2.0");
-    }
-
-    #[test]
-    fn ureq_client_maps_not_modified_status_to_cached_response() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut buffer = [0; 2048];
-            let length = stream.read(&mut buffer).expect("read request");
-            let request = String::from_utf8_lossy(&buffer[..length]);
-
-            assert!(request.starts_with("GET /releases?per_page=1 "));
-            assert!(request.contains("If-None-Match: \"cached-etag\""));
-
-            stream
-                .write_all(
-                    b"HTTP/1.1 304 Not Modified\r\nETag: \"cached-etag\"\r\nContent-Length: 0\r\n\r\n",
-                )
-                .expect("write response");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
-        };
-
-        let response = client
-            .get(
-                ReleaseEndpoint::LatestPublished,
-                "lg-buddy/1.1.0-alpha.0",
-                Some("\"cached-etag\""),
-            )
-            .expect("304 response should succeed");
-
-        assert_eq!(response, GitHubReleaseResponse::NotModified);
-        server.join().expect("server thread should finish");
-    }
-
-    #[test]
-    fn ureq_client_refuses_release_discovery_redirects() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut request = [0; 2048];
-            let _ = stream.read(&mut request).expect("read request");
-            stream
-                .write_all(
-                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/untrusted\r\nContent-Length: 0\r\n\r\n",
-                )
-                .expect("write redirect");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .try_proxy_from_env(false)
-                .redirects(0)
-                .redirect_auth_headers(ureq::RedirectAuthHeaders::Never)
-                .build(),
-        };
-
-        assert!(matches!(
-            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
-            Err(UpdatesError::ApiStatus { status: 302, .. })
-        ));
-        server.join().expect("server thread should finish");
     }
 
     #[test]
@@ -2583,37 +1041,6 @@ mod tests {
         assert_eq!(checksums.id(), 539980872);
         assert_eq!(checksums.name(), "sha256sums.txt");
         assert_eq!(checksums.size(), 123);
-    }
-
-    #[test]
-    fn ureq_client_rejects_oversized_release_metadata() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
-        let address = listener.local_addr().expect("read local test address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client connection");
-            let mut request = [0; 2048];
-            let _ = stream.read(&mut request).expect("read request");
-            let body = vec![b' '; MAX_GITHUB_RESPONSE_BYTES as usize + 1];
-            stream
-                .write_all(
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
-                )
-                .expect("write response header");
-            stream.write_all(&body).expect("write response body");
-        });
-        let base_url = Box::leak(format!("http://{address}/releases").into_boxed_str());
-        let client = UreqGitHubReleasesClient {
-            base_url,
-            agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
-                .build(),
-        };
-
-        assert!(matches!(
-            client.get(ReleaseEndpoint::LatestStable, "lg-buddy/1.3.0", None),
-            Err(UpdatesError::ResponseTooLarge { .. })
-        ));
-        server.join().expect("server thread should finish");
     }
 
     #[test]
@@ -4203,16 +2630,5 @@ mod tests {
 
         assert!(matches!(err, UpdatesError::InvalidLocalVersion { .. }));
         assert!(client.requests().is_empty());
-    }
-
-    #[test]
-    fn release_version_parser_accepts_leading_v_and_rejects_legacy_tags() {
-        assert_eq!(
-            parse_release_version("v1.1.0")
-                .expect("leading-v version should parse")
-                .to_string(),
-            "1.1.0"
-        );
-        assert!(parse_release_version("release-0.6").is_none());
     }
 }

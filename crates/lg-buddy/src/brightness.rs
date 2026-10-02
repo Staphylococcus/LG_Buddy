@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config};
+use crate::config::{load_current_config, resolve_config_path_from_env, Config, ConfigLoadError};
 use crate::notifications::{FreedesktopNotifier, Notification, NotificationError, Notifier};
 use crate::presentation::brightness::{
     BrightnessFrontendUpdate, BrightnessIntent, BrightnessPresentation, UserFacingError,
@@ -14,6 +14,7 @@ use crate::tv::{
 pub enum BrightnessReadFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     Unreachable,
     Rejected,
@@ -57,6 +58,7 @@ pub trait BrightnessReader: Send + Sync + 'static {
 pub enum BrightnessWriteFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     Unreachable,
     Rejected,
@@ -128,12 +130,17 @@ impl BrightnessReader for EnvironmentBrightnessReader {
         let config_path = resolve_config_path_from_env().map_err(|error| {
             BrightnessReadError::new(BrightnessReadFailure::NotConfigured, error.to_string())
         })?;
-        let config = load_config(&config_path).map_err(|error| {
-            BrightnessReadError::new(
-                BrightnessReadFailure::InvalidConfiguration,
-                error.to_string(),
-            )
+        let current = load_current_config(&config_path).map_err(|error| {
+            let failure = match &error {
+                ConfigLoadError::Missing => BrightnessReadFailure::NotConfigured,
+                ConfigLoadError::Stale(_) => BrightnessReadFailure::MigrationRequired,
+                ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+                    BrightnessReadFailure::InvalidConfiguration
+                }
+            };
+            BrightnessReadError::new(failure, error.to_string())
         })?;
+        let config = &current.config;
         let client = build_tv_client(
             &config_path,
             config.tv_ip,
@@ -147,7 +154,7 @@ impl BrightnessReader for EnvironmentBrightnessReader {
             )
         })?;
 
-        read_current_brightness_with(&config, &client).map_err(BrightnessReadError::from)
+        read_current_brightness_with(&current.config, &client).map_err(BrightnessReadError::from)
     }
 }
 
@@ -159,12 +166,17 @@ impl BrightnessWriter for EnvironmentBrightnessWriter {
         let config_path = resolve_config_path_from_env().map_err(|error| {
             BrightnessWriteError::new(BrightnessWriteFailure::NotConfigured, error.to_string())
         })?;
-        let config = load_config(&config_path).map_err(|error| {
-            BrightnessWriteError::new(
-                BrightnessWriteFailure::InvalidConfiguration,
-                error.to_string(),
-            )
+        let current = load_current_config(&config_path).map_err(|error| {
+            let failure = match &error {
+                ConfigLoadError::Missing => BrightnessWriteFailure::NotConfigured,
+                ConfigLoadError::Stale(_) => BrightnessWriteFailure::MigrationRequired,
+                ConfigLoadError::Parse(_) | ConfigLoadError::Unreadable(_) => {
+                    BrightnessWriteFailure::InvalidConfiguration
+                }
+            };
+            BrightnessWriteError::new(failure, error.to_string())
         })?;
+        let config = &current.config;
         let client = build_tv_client(
             &config_path,
             config.tv_ip,
@@ -178,7 +190,7 @@ impl BrightnessWriter for EnvironmentBrightnessWriter {
             )
         })?;
 
-        write_brightness_and_notify_with(&config, &client, &FreedesktopNotifier, brightness)
+        write_brightness_and_notify_with(&current.config, &client, &FreedesktopNotifier, brightness)
     }
 }
 
@@ -553,6 +565,10 @@ pub(crate) fn user_facing_read_error(failure: BrightnessReadFailure) -> UserFaci
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV address and platform settings, then retry.",
         ),
+        BrightnessReadFailure::MigrationRequired => (
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
+        ),
         BrightnessReadFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",
             "Run `lg-buddy brightness get` in a terminal, accept a TV pairing prompt if shown, then retry.",
@@ -590,6 +606,10 @@ pub(crate) fn user_facing_write_error(failure: BrightnessWriteFailure) -> UserFa
         BrightnessWriteFailure::InvalidConfiguration => (
             "LG Buddy could not load its TV configuration.",
             "Check the saved TV address and platform settings, then retry.",
+        ),
+        BrightnessWriteFailure::MigrationRequired => (
+            "LG Buddy's saved TV configuration needs migration.",
+            "Review the TV platform and desktop integration in Settings before retrying.",
         ),
         BrightnessWriteFailure::CredentialsUnavailable => (
             "LG Buddy cannot authenticate with this TV.",
@@ -636,10 +656,9 @@ mod tests {
     use crate::presentation::brightness::{
         BrightnessFrontendUpdate, BrightnessIntent, BrightnessStatus,
     };
-    use crate::tv::{BscpylgtvCommandClient, OledBrightness, TvErrorKind};
+    use crate::tv::{test_support::FakeTvClient, OledBrightness, TvErrorKind};
     use std::cell::RefCell;
     use std::net::Ipv4Addr;
-    use support::MockBscpylgtv;
 
     #[derive(Default)]
     struct RecordingNotifier {
@@ -1044,7 +1063,7 @@ mod tests {
     #[test]
     fn current_read_uses_the_tv_picture_capability() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-read");
+        let mock = FakeTvClient::new("gui-brightness-read");
         mock.set_backlight(67);
         let client = client_for_mock(&mock, config.tv_ip);
 
@@ -1057,14 +1076,14 @@ mod tests {
                 .into_iter()
                 .map(|call| call.command)
                 .collect::<Vec<_>>(),
-            vec!["get_picture_settings"]
+            vec!["oled_brightness"]
         );
     }
 
     #[test]
     fn successful_write_uses_the_tv_picture_capability_and_notifies() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-write");
+        let mock = FakeTvClient::new("gui-brightness-write");
         let client = client_for_mock(&mock, config.tv_ip);
         let notifier = RecordingNotifier::default();
         let brightness = OledBrightness::new(65).expect("valid brightness");
@@ -1079,7 +1098,7 @@ mod tests {
                 .into_iter()
                 .map(|call| call.command)
                 .collect::<Vec<_>>(),
-            vec!["set_settings"]
+            vec!["set_oled_brightness"]
         );
         assert_eq!(
             notifier.messages(),
@@ -1090,10 +1109,8 @@ mod tests {
     #[test]
     fn failed_write_is_typed_and_does_not_send_a_success_notification() {
         let config = sample_config();
-        let client = BscpylgtvCommandClient::new(
-            config.tv_ip,
-            "/definitely/missing/lg-buddy-bscpylgtvcommand",
-        );
+        let client = FakeTvClient::new("failed-brightness-write");
+        client.queue_error("set_oled_brightness", 1, "TV unreachable");
         let notifier = RecordingNotifier::default();
 
         let error = write_brightness_and_notify_with(
@@ -1111,7 +1128,7 @@ mod tests {
     #[test]
     fn notification_failure_preserves_the_successful_tv_write() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-brightness-notification-failure");
+        let mock = FakeTvClient::new("gui-brightness-notification-failure");
         let client = client_for_mock(&mock, config.tv_ip);
         let notifier = RecordingNotifier::failing("bus unavailable");
 
@@ -1134,7 +1151,7 @@ mod tests {
     #[test]
     fn malformed_tv_brightness_is_a_typed_invalid_response() {
         let config = sample_config();
-        let mock = MockBscpylgtv::new("gui-invalid-brightness-read");
+        let mock = FakeTvClient::new("gui-invalid-brightness-read");
         mock.set_backlight(101);
         let client = client_for_mock(&mock, config.tv_ip);
 
@@ -1151,10 +1168,8 @@ mod tests {
     #[test]
     fn transport_failure_is_reported_as_unreachable() {
         let config = sample_config();
-        let client = BscpylgtvCommandClient::new(
-            config.tv_ip,
-            "/definitely/missing/lg-buddy-bscpylgtvcommand",
-        );
+        let client = FakeTvClient::new("failed-brightness-read");
+        client.queue_error("oled_brightness", 1, "TV unreachable");
 
         let error = read_current_brightness_with(&config, &client)
             .expect_err("missing adapter should fail");
@@ -1172,7 +1187,7 @@ mod tests {
                 .parse::<MacAddress>()
                 .expect("valid MAC"),
             input: HdmiInput::Hdmi2,
-            tv_platform: TvPlatform::Bscpylgtv,
+            tv_platform: TvPlatform::LgWebOs,
             screen_backend: ScreenBackend::Auto,
             screen_idle_timeout: 300,
             screen_restore_policy: ScreenRestorePolicy::MarkerOnly,
@@ -1182,8 +1197,8 @@ mod tests {
         }
     }
 
-    fn client_for_mock(mock: &MockBscpylgtv, tv_ip: Ipv4Addr) -> BscpylgtvCommandClient {
-        BscpylgtvCommandClient::with_args(tv_ip, mock.command_path(), mock.command_args())
+    fn client_for_mock(mock: &FakeTvClient, _tv_ip: Ipv4Addr) -> FakeTvClient {
+        mock.clone()
     }
 
     fn ready_application(value: u8) -> BrightnessApplication {

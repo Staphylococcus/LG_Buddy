@@ -4,6 +4,8 @@
 //! atomic `state.json` there and consumes atomically-written command files:
 //! `stateful`, `pairing-rejected`, `stall`, `interrupted`, `wake [delay-ms]`, `ready`, or `stop`.
 //! Optionally listen for WoL: `<control-dir> <bind-address> <mac> [wake-delay-ms]`.
+//! Optional `initial-state.json` in the control directory sets smoke-test values
+//! and a one-shot request fault before accepting GUI operations.
 
 use lg_buddy::config::MacAddress;
 use lg_buddy::wol::MAGIC_PACKET_LEN;
@@ -16,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::json;
 
 mod auth {
@@ -72,6 +75,23 @@ struct Fixture {
     tv: MockWebOsTv,
 }
 
+#[derive(Deserialize)]
+struct InitialState {
+    backlight: u8,
+    volume: i16,
+    muted: bool,
+    fault: Option<RequestFault>,
+}
+
+#[derive(Deserialize)]
+struct RequestFault {
+    uri: String,
+    #[serde(default)]
+    delay_ms: u64,
+    #[serde(default)]
+    reject: bool,
+}
+
 impl Fixture {
     fn start(scenario: Scenario) -> Self {
         let tv = MockWebOsTv::with_version(MockWebOsVersion::WebOs24Version92261, "HDMI_3");
@@ -111,6 +131,7 @@ impl Fixture {
                 "power_off_count": snapshot.power_off_count,
                 "pairing_prompt_count": snapshot.pairing_prompt_count,
                 "registration_tokens": snapshot.registration_tokens,
+                "request_uris": snapshot.request_uris,
             })
         )
     }
@@ -191,7 +212,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = fs::remove_file(&state_path);
 
     let mut scenario = Scenario::Stateful;
-    let mut fixture = Fixture::start(scenario);
+    let initial_state = control_dir.join("initial-state.json");
+    let mut fixture = if initial_state.exists() {
+        let initial: InitialState = serde_json::from_slice(&fs::read(initial_state)?)?;
+        // The recorded webOS 26 contract supports the native brightness write
+        // used by the GUI behavior scenarios; ordinary journey fixtures retain
+        // their webOS 24 baseline.
+        let fixture = Fixture {
+            tv: MockWebOsTv::with_version(MockWebOsVersion::WebOs26Firmware432160, "HDMI_3"),
+        };
+        fixture.tv.set_backlight(initial.backlight);
+        fixture.tv.set_volume(initial.volume);
+        fixture.tv.set_muted(initial.muted);
+        if let Some(fault) = initial.fault {
+            fixture.tv.fault_first_request(
+                &fault.uri,
+                Duration::from_millis(fault.delay_ms),
+                fault.reject,
+            );
+        }
+        fixture
+    } else {
+        Fixture::start(scenario)
+    };
     atomic_write(
         &state_path,
         &fixture.state("ready", scenario, wake_listener.as_ref()),

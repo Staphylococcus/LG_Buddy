@@ -14,6 +14,7 @@ pub enum AudioOperation {
 pub enum AudioWriteFailure {
     NotConfigured,
     InvalidConfiguration,
+    MigrationRequired,
     CredentialsUnavailable,
     SetVolume,
     UnmuteAfterVolume,

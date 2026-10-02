@@ -46,7 +46,7 @@ main.rs
               -> linux/logind.rs
               -> linux/network_manager.rs
               -> desktop/gnome.rs
-              -> desktop/swayidle.rs
+              -> desktop/wayland.rs
            -> events.rs
            -> screen.rs
            -> lifecycle.rs
@@ -94,7 +94,7 @@ The main runtime consumers are:
 - system lifecycle and service integrations, including systemd,
   NetworkManager, and logind
 - desktop environment and session integrations, including GNOME, native
-  Wayland, `swayidle`, and Linux input activity sources
+  Wayland and Linux input activity sources
 - TTY users invoking the CLI directly
 - the installed `lg-buddy` launcher with no arguments, which opens normal
   Overview through the matching GTK executable
@@ -109,7 +109,6 @@ flowchart LR
     subgraph Desktop["Desktop Session / External Tools"]
         GNOME["GNOME session bus<br/>ScreenSaver / Mutter signals"]
         WAYLAND["Wayland compositor<br/>ext_idle_notifier_v1"]
-        SWAY["swayidle<br/>idle hooks"]
         INPUT["Linux input devices<br/>gamepads / wheels / device events"]
         FDO_NOTIFY["desktop notification service<br/>org.freedesktop.Notifications"]
     end
@@ -160,7 +159,6 @@ flowchart LR
                 NMGATE["sources/linux/network_manager.rs<br/>pre-down event source"]
                 GADAPTER["sources/desktop/gnome.rs<br/>GNOME bus + observation source"]
                 WADAPTER["sources/desktop/wayland.rs<br/>Wayland registry + observation source"]
-                SADAPTER["sources/desktop/swayidle.rs<br/>process fact source"]
             end
         end
 
@@ -171,7 +169,6 @@ flowchart LR
     end
 
     subgraph TVBoundary["TV Control Boundary"]
-        BSCPY["bscpylgtvcommand"]
         WEBOS["native webOS session"]
         LGTV["LG TV"]
     end
@@ -181,7 +178,6 @@ flowchart LR
     RUNNER --> BACKEND
     BACKEND --> GADAPTER
     BACKEND --> WADAPTER
-    BACKEND --> SADAPTER
     RUNNER -->|"starts"| GADAPTER
     RUNNER -->|"starts"| WADAPTER
     RUNNER -->|"starts"| LOGINDADAPTER
@@ -227,10 +223,6 @@ flowchart LR
     SCREEN --> PHASE
     NMGATE --> LIFECYCLE
 
-    RUNNER -->|"starts"| SADAPTER
-    SADAPTER --> SWAY
-    SWAY -->|"timeout / resume facts"| SADAPTER
-    SADAPTER -->|"SessionObservation"| RUNNER
     INPUT --> GAMEPAD
     GAMEPAD -->|"UserActivity"| RUNNER
     NOTIFICATIONS --> FDO_NOTIFY
@@ -251,7 +243,6 @@ flowchart LR
     SCREEN --> WOL
     LIFECYCLE --> WOL
 
-    TV -->|"tv.platform=bscpylgtv"| BSCPY --> LGTV
     TV -->|"tv.platform=lg_webos"| WEBOS --> LGTV
     WOL -->|"magic packet"| LGTV
 ```
@@ -341,9 +332,9 @@ The current split is:
   - provides separate installed-runtime and verified-candidate entrypoints
 - `tv.rs`
   - TV transport abstraction
-  - profile-bound `bscpylgtvcommand` adapter
-  - configured selection between the compatibility and native adapters
-  - adapter-neutral errors and selected-client construction
+  - profile-bound native client construction
+  - typed rejection of stale legacy profiles before TV control
+  - adapter-neutral errors
   - typed facade for input, screen, power, brightness, and audio operations
 - `web_os/adapter.rs`
   - profile-bound native webOS adapter
@@ -354,7 +345,7 @@ The current split is:
   - native Wake-on-LAN packet generation and UDP send
 - `backend.rs`
   - backend selection and detection
-  - `auto`, `gnome`, native `wayland`, and deprecated `swayidle` compatibility
+  - `auto`, `gnome`, and native `wayland` selection
 - `session.rs`
   - backend-neutral session event model
   - normalized source-observation boundary
@@ -418,9 +409,6 @@ The current split is:
 - `sources/desktop/wayland.rs`
   - native Wayland capability probing and dynamic registry/seat ownership
   - maps zero-timeout resumed notifications into desktop activity facts
-- `sources/desktop/swayidle.rs`
-  - owns the production `swayidle` process and translates timeout/resume
-    callbacks into idle/activity facts
 
 The session-facing pieces should be read as one subsystem:
 
@@ -441,13 +429,11 @@ The session-facing pieces should be read as one subsystem:
     the inactivity deadline, and dispatches source-classified runtime policy
   - treats `screen_idle_blank=disabled` as a passive user-session mode that
     preserves update notification handoff without TV idle blank/restore actions
-  - consumes `swayidle` timeout/resume facts through the same inactivity policy
   - owns the `lifecycle` event loop for system sleep/wake handling
 - `sources/linux/logind.rs`
   - adapts Linux system lifecycle signals and owns observation of an eligible
     graphical session's `LockedHint`
-- `sources/desktop/gnome.rs`, `sources/desktop/wayland.rs`, and
-  `sources/desktop/swayidle.rs`
+- `sources/desktop/gnome.rs` and `sources/desktop/wayland.rs`
   - own their provider-specific connection or process mechanics and expose
     normalized observations to the runner
 
@@ -648,12 +634,10 @@ Configuration and pairing scripts are deliberately excluded because the
 non-interactive upgrade mode preserves existing configuration and credentials
 without invoking them.
 
-The installer reads the existing platform choice before dependency installation.
-A healthy legacy environment is preserved with a final deprecation notice; an
-unhealthy one is refused with the native pairing command before privileged
-mutation. Native upgrades run a second candidate preflight for removal of the
-obsolete `/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested
-mounts before removal. Configuration and credentials remain unchanged.
+Native upgrades run a second candidate preflight for removal of the obsolete
+`/usr/bin/LG_Buddy_PIP` directory. It rejects unsafe roots and nested mounts
+before removal. Installation leaves configuration and credentials unchanged;
+user screen daemon startup converts supported stale configuration locally.
 
 Fresh installation never provisions Python. GTK/libadwaita requirements are
 checked through the bundled GUI's internal `--check-runtime` entrypoint, which
@@ -795,9 +779,9 @@ Detection behavior:
 - `auto` prefers GNOME when the current session satisfies the full GNOME contract and the session bus is reachable
 - native `wayland` validates `ext_idle_notifier_v1` version 2 or newer plus at
   least one advertised seat; explicit selection does not fall back
-- `auto` prefers complete GNOME, then compatible native Wayland, then the
-  deprecated `swayidle` compatibility backend when installed
-- other forced backends validate their required services or commands
+- Compatibility detection for `auto` prefers complete GNOME, then compatible
+  native Wayland; automatic monitoring composes both native activity sources.
+- Forced native backends validate their required services or protocol support.
 
 ## TV Integration Boundary
 
@@ -849,30 +833,18 @@ remain inside the adapter. Wake-on-LAN keeps the configured network identity at
 
 ### TV Implementations
 
-`tv.platform` selects the production TV implementation. Fresh profiles select
-the native Rust `lg_webos` implementation and verify pairing before the profile
-is saved. Existing profiles retain their explicit choice; a missing platform
-value continues to resolve to `bscpylgtv` and is materialized as that
-compatibility choice when configuration is rewritten. `bscpylgtvcommand`
-remains available as an explicit fallback.
+`tv.platform=lg_webos` selects the native Rust TV implementation. Fresh
+profiles verify pairing before the profile is saved. A missing platform value
+or explicit `bscpylgtv` is recognized as stale 1.x configuration and gated
+until user screen daemon startup converts it to `lg_webos`. Conversion does not pair.
 
-The Rust runtime talks to it through `BscpylgtvCommandClient`, which:
-
-- belongs to one configured TV address
-- shells out to the configured command path
-- keeps subprocess output and exit status inside the legacy adapter
-- maps reads and failures into the shared domain contract
-- privately verifies screen visibility after input restore and screen unblank
-
-`SelectedTvClient` is the internal delegation point for the configured legacy
-or native implementation. `WebOsTvClient` owns one lazily authenticated
+`WebOsTvClient` owns one lazily authenticated
 websocket session behind a mutex, reuses it while healthy, and discards it after
 transport or framing failure. Native effectful operations verify their own
 postconditions before reporting success. After an ambiguous failure the adapter
 may reconnect for safe read-only verification, but it never replays the
-effectful operation. The legacy adapter performs its equivalent power-state
-readback through `bscpylgtvcommand`; neither implementation exposes webOS power
-states to policy code.
+effectful operation. The adapter does not expose webOS power states to policy
+code.
 
 Each monitor's `RuntimeActionExecutor` retains this adapter across compatible
 events. Client construction and connection remain lazy: starting a monitor
@@ -1023,10 +995,6 @@ Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
 the shared inactivity runtime; compositor idle does not directly blank the TV.
 
-`sources/desktop/swayidle.rs` is the compatibility process adapter. Its timeout
-callback publishes `Idle`; its resume callback publishes independent desktop
-activity. The adapter does not invoke TV-facing commands or own screen policy.
-
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:
 
@@ -1044,16 +1012,15 @@ asymmetric:
   affect the selected desktop backend
 - the gamepad source refreshes its device set from Linux device add, remove, and
   change events, with periodic reconciliation for missed events
-- `swayidle` timeout and resume callbacks feed the shared inactivity engine
 - system lifecycle is handled by the NetworkManager pre-down gate plus logind
   lifecycle service, while lock state is optional in the shared session runtime
 
-`swayidle` remains an explicit legacy integration during the 1.x migration
-window and emits a deprecation notice. Automatic monitoring never probes or
-starts it, and fresh interactive configuration does not offer it. Removal is
-planned for 2.0.0 after native
-Wayland remains field-validated across supported compositors and unsupported
-sessions have precise diagnostics.
+Saved `swayidle` selections are converted to `auto` at user screen daemon startup.
+Automatic monitoring never probes or starts `swayidle`; externally managed
+idle automation can call the public screen commands. New swayidle settings and
+environment overrides are rejected; the process adapter has been removed. Native Wayland remains
+field-validated across supported compositors and unsupported sessions have
+precise diagnostics.
 
 ## Configuration and Override Surface
 
@@ -1065,8 +1032,6 @@ Important environment overrides:
   - explicit config file path
 - `LG_BUDDY_SCREEN_BACKEND`
   - force backend selection
-- `LG_BUDDY_BSCPYLGTV_COMMAND`
-  - override TV command path
 - `LG_BUDDY_GUI`
   - override the matching `lg-buddy-gui` path for relocation and tests
 - `LG_BUDDY_SYSTEM_RUNTIME_DIR`
@@ -1083,26 +1048,24 @@ These exist mainly so the runtime can be tested without mutating real system pat
 The test strategy has three layers:
 
 - unit tests for parsing, state, backend selection, and policy
-- subprocess-backed integration tests for TV behavior
+- CLI integration tests backed by the native webOS test server
 - manual hardware probes when exact external behavior is unclear
 
-TV-facing tests exercise the production protocol boundaries instead of relying
-only on in-memory fakes. The compatibility adapter uses a stateful subprocess
-mock, while the native adapter uses a centralized stateful webOS test server.
+TV-facing tests exercise the production protocol boundary with a centralized
+stateful webOS test server. Policy tests use a platform-neutral `TvClient` fake
+to cover retries, failures, and marker transitions.
 
 Relevant test assets:
 
-- `tools/mock_bscpylgtvcommand.py`
+- `crates/lg-buddy/src/tv/test_support.rs`
 - `crates/lg-buddy/tests/support/mod.rs`
-- `crates/lg-buddy/tests/mock_bscpylgtvcommand.rs`
 - `crates/lg-buddy/src/web_os/test_support/test_server.rs`
 - `crates/lg-buddy/src/web_os/observed_behavior.rs`
 - `crates/lg-buddy/tests/features/webos.feature`
 
-The legacy mock preserves the command and response shapes observed from the
-installed client. Native behavior claimed as real is linked to hardware
-evidence and modeled by the centralized server; defensive protocol faults are
-identified separately. See [Native webOS testing](webos-testing.md).
+Native behavior claimed as real is linked to hardware evidence and modeled by
+the centralized server; defensive protocol faults are identified separately.
+See [Native webOS testing](webos-testing.md).
 
 ## Current Boundary
 
@@ -1124,7 +1087,7 @@ The Rust runtime currently owns:
 - application coordination for Overview, TVs, native pairing, and Settings
 - TV profile and credential persistence, including confirmed unpairing
 - the shared settings registry, validation, persistence, and runtime apply path
-- `monitor` command with GNOME, native Wayland, and `swayidle` paths
+- `monitor` command with GNOME and native Wayland activity sources
 
 The shell layer still owns:
 

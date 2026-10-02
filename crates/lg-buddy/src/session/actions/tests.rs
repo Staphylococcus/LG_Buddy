@@ -2,7 +2,7 @@ use super::RuntimeActionExecutor;
 use crate::config::{load_config, HdmiInput, TvPlatform};
 use crate::session::runner::SessionEventDispatcher;
 use crate::session::SessionEvent;
-use crate::tv::{CurrentInput, SelectedTvClient, TvClient, TvClientBuildOptions, TvErrorKind};
+use crate::tv::{CurrentInput, TvClient, TvClientBuildError, TvClientBuildOptions, TvErrorKind};
 use crate::web_os::test_support::{
     WebOsTestInput, WebOsTestScenario, WebOsTestServer, WebOsTestVersion,
 };
@@ -335,10 +335,10 @@ fn runtime_owner_rebinds_when_profile_identity_or_build_options_change() {
 
     first_fixture.set_value("tvs_primary_platform", TvPlatform::Bscpylgtv.as_str());
     assert!(matches!(
-        owner
-            .tv_client(&first_fixture.config_path, &first_fixture.config(), options)
-            .expect("build legacy client"),
-        SelectedTvClient::Bscpylgtv(_)
+        owner.tv_client(&first_fixture.config_path, &first_fixture.config(), options),
+        Err(crate::RunError::TvClientBuild(
+            TvClientBuildError::StalePlatform
+        ))
     ));
     first_fixture.set_value("tvs_primary_platform", TvPlatform::LgWebOs.as_str());
     assert_input(&mut owner, &first_fixture, options);
@@ -384,5 +384,45 @@ fn runtime_owner_discards_client_when_profile_cannot_be_loaded() {
     fs::write(&fixture.config_path, contents).expect("restore profile");
     read_input(&mut owner, &fixture.config_path, &config, options);
     assert_eq!(server.snapshot().connection_count, 2);
+    server.finish();
+}
+
+#[test]
+fn stale_reload_discards_a_connected_client_before_action_side_effects() {
+    let _lock = test_lock().lock().expect("runtime action test lock");
+    let server = server_at(7);
+    let fixture = Fixture::new(Ipv4Addr::new(127, 0, 0, 7));
+    let _env = EnvGuard::for_fixture(&fixture);
+    let mut owner = RuntimeActionExecutor::default();
+    let config = fixture.config();
+    let options = TvClientBuildOptions::production().stored_token_only();
+    let original = fs::read(&fixture.config_path).unwrap();
+
+    for (key, value) in [
+        ("tvs_primary_platform", "bscpylgtv"),
+        ("screen_backend", "swayidle"),
+    ] {
+        read_input(&mut owner, &fixture.config_path, &config, options);
+        assert!(owner.tv_client.is_some());
+        let before = server.snapshot();
+        fixture.set_value(key, value);
+        let event = crate::events::RuntimeEvent::from_command(crate::Command::SleepPre).unwrap();
+        assert!(matches!(
+            owner.run_sleep_pre(&mut Vec::new(), event),
+            Err(crate::RunError::MigrationRequired(_))
+        ));
+        assert!(owner.tv_client.is_none());
+        assert_eq!(server.snapshot().request_uris, before.request_uris);
+        assert_eq!(server.snapshot().connection_count, before.connection_count);
+        assert!(!fixture.system_dir.exists());
+        assert!(!fixture.session_dir.exists());
+
+        fs::write(&fixture.config_path, &original).unwrap();
+        read_input(&mut owner, &fixture.config_path, &config, options);
+        assert_eq!(
+            server.snapshot().connection_count,
+            before.connection_count + 1
+        );
+    }
     server.finish();
 }

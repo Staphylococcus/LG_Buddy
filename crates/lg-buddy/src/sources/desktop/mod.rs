@@ -1,7 +1,6 @@
 pub mod gnome;
 pub mod kwin;
 pub mod powerdevil;
-pub mod swayidle;
 pub mod wayland;
 
 use std::sync::{

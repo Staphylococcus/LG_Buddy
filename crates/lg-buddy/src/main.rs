@@ -21,6 +21,7 @@ fn main() -> ExitCode {
                 eprintln!("LG Buddy: {err}");
                 ExitCode::from(match err {
                     lg_buddy::RunError::Setup(error) => error.exit_code(),
+                    lg_buddy::RunError::GnomeReadinessProbe(error) => error.exit_code(),
                     _ => 1,
                 })
             }

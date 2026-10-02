@@ -8,7 +8,7 @@ Feature: Settings CLI
     And stdout contains "tv.ip=192.0.2.42 (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.mac=aa:bb:cc:dd:ee:ff (config.env, read-write, ops: get,describe,set)"
     And stdout contains "tv.input=HDMI_2 (config.env, read-write, ops: get,describe,set)"
-    And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set,unset)"
+    And stdout contains "tv.platform=bscpylgtv (default, read-write, ops: get,describe,set)"
     And stdout does not contain "screen.backend"
     And stdout contains "screen.idle_blank=enabled (default, read-write, ops: get,describe,set,unset)"
     And stdout contains "screen.honor_idle_inhibitors=disabled (default, read-write, ops: get,describe,set,unset)"
@@ -86,7 +86,7 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: gnome"
     And stdout contains "fallback reason: none; preferred backend is available"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
     When I run the command "settings get screen.backend"
     Then the command succeeds
     And stdout is "auto"
@@ -101,7 +101,7 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
 
   Scenario: settings describe remains available without a detected backend
     Given a temporary LG Buddy config using input HDMI_2
@@ -112,18 +112,18 @@ Feature: Settings CLI
     And stdout contains "current: auto"
     And stdout contains "resolved backend: unavailable"
     And stdout contains "native Wayland unavailable"
-    And stdout contains "allowed values: auto, gnome, wayland, swayidle (deprecated compatibility backend)"
+    And stdout contains "allowed values: auto, gnome, wayland"
 
-  Scenario: settings describe marks an explicit swayidle selection as deprecated
+  Scenario: settings cannot select the retired swayidle backend
     Given a temporary LG Buddy config using input HDMI_2
     And the executable PATH is isolated
     And systemd apply actions are skipped
     When I run the command "settings set screen.backend swayidle"
+    Then the command fails
+    And stderr contains "invalid value for setting `screen.backend`"
+    When I run the command "settings get screen.backend"
     Then the command succeeds
-    When I run the command "settings describe screen.backend"
-    Then the command succeeds
-    And stdout contains "current: swayidle (deprecated compatibility backend)"
-    And stdout contains "planned for removal in LG Buddy 2.0.0"
+    And stdout is "auto"
 
   Scenario: settings describe shows required TV operations
     Given a temporary LG Buddy config using input HDMI_2
@@ -140,7 +140,7 @@ Feature: Settings CLI
     Then the command succeeds
     And stdout contains "storage key: tvs_primary_platform"
     And stdout contains "default: bscpylgtv"
-    And stdout contains "supported operations: get, describe, set, unset"
+    And stdout contains "supported operations: get, describe, set"
     And stdout contains "allowed values: bscpylgtv, lg_webos"
 
   Scenario: settings rejects an invalid TV platform without altering config
@@ -149,6 +149,15 @@ Feature: Settings CLI
     When I run the command "settings set tv.platform native"
     Then the command fails
     And stderr contains "invalid value for setting `tv.platform`"
+    And config.env is unchanged
+
+  Scenario: settings cannot select the retired TV platform
+    Given a temporary LG Buddy config using input HDMI_2
+    And the existing config selects TV platform "lg_webos"
+    And the current config is remembered
+    When I run the command "settings set tv.platform bscpylgtv"
+    Then the command fails
+    And stderr contains "bscpylgtv requires migration"
     And config.env is unchanged
 
   Scenario: settings describe shows lifecycle policy operations
@@ -198,8 +207,9 @@ Feature: Settings CLI
   Scenario: settings set writes TV settings to profile-shaped storage
     Given a temporary LG Buddy config using input HDMI_2
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
     When I run the command "settings set tv.input HDMI_3"
     Then the command succeeds
     And stdout contains "tv.input=HDMI_3"
@@ -208,22 +218,23 @@ Feature: Settings CLI
     And config.env does not contain "input=HDMI_2"
     When I run the command "screen off"
     Then the command succeeds
-    And the TV client received "turn_screen_off"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
 
   Scenario: settings set writes a restore policy consumed by screen runtime
     Given a temporary LG Buddy config using input HDMI_3
     And systemd apply actions are skipped
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_3
-    And the TV screen is blanked
+    And the existing config selects TV platform "lg_webos"
+    And a native webOS TV on input HDMI_3 with brightness 100
+    And a valid native TV access token is stored
+    And the native webOS TV screen is blanked
     When I run the command "settings set screen.restore_policy aggressive"
     Then the command succeeds
     And config.env contains "screen_restore_policy=aggressive"
     When I run the command "screen on"
     Then the command succeeds
     And stdout contains "Aggressive restore policy is enabled"
-    And the TV client received "turn_screen_on"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
     And the session marker is absent
 
   Scenario: settings unset removes an override and restores the default

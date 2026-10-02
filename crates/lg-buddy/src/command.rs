@@ -1,10 +1,12 @@
-//! Bounded capture for read-only subprocesses. Mutating commands use their own lifecycle.
+//! Bounded capture for read-only subprocesses, plus a cancellable status-only
+//! runner. Mutating commands use their own lifecycle.
 
 use std::env;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,18 +21,35 @@ pub(crate) struct CommandResult {
     pub timed_out: bool,
     pub unavailable: bool,
     pub truncated: bool,
+    pub cancelled: bool,
 }
 
 impl CommandResult {
+    /// Classify a single observed stop consistently, including a stop racing
+    /// with spawn failure, timeout cleanup, or successful child reaping.
+    fn with_observed_stop(mut self, stopped: bool) -> Self {
+        self.cancelled |= stopped;
+        if self.cancelled {
+            self.timed_out = false;
+            self.unavailable = false;
+        }
+        self
+    }
+
     pub fn succeeded(&self) -> bool {
-        self.status.is_some_and(|status| status.success())
+        !self.cancelled
+            && !self.timed_out
+            && !self.unavailable
+            && self.status.is_some_and(|status| status.success())
     }
 
     pub fn stopped_at_output_limit(&self) -> bool {
         #[cfg(unix)]
         {
             use std::os::unix::process::ExitStatusExt;
-            self.truncated && self.status.and_then(|status| status.signal()) == Some(libc::SIGPIPE)
+            !self.cancelled
+                && self.truncated
+                && self.status.and_then(|status| status.signal()) == Some(libc::SIGPIPE)
         }
         #[cfg(not(unix))]
         {
@@ -52,15 +71,42 @@ pub(crate) fn run_bounded(program: &Path, args: &[&str], timeout: Duration) -> C
 }
 
 pub(crate) fn run_bounded_command(command: Command, timeout: Duration) -> CommandResult {
-    run_command(command, timeout, true)
+    run_command(command, timeout, true, None)
 }
 
 pub(crate) fn run_status_bounded(command: Command, timeout: Duration) -> CommandResult {
-    run_command(command, timeout, false)
+    run_command(command, timeout, false, None)
 }
 
-fn run_command(mut command: Command, timeout: Duration, capture_output: bool) -> CommandResult {
+/// Status-only runner with caller cancellation. stdout/stderr are discarded,
+/// so there are no capture readers to cancel. `stop` is monotonic
+/// false-to-true; an observed stop at a checkpoint wins over timeout,
+/// spawn failure, or a terminal status. On cancellation or timeout while the
+/// child is still owned, the runner kills its process group and reaps the
+/// direct child. It never reaps descendants or signals an already-reaped PID.
+pub(crate) fn run_status_bounded_cancellable(
+    command: Command,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> CommandResult {
+    run_command(command, timeout, false, Some(stop))
+}
+
+fn run_command(
+    mut command: Command,
+    timeout: Duration,
+    capture_output: bool,
+    stop: Option<&AtomicBool>,
+) -> CommandResult {
     use std::os::unix::process::CommandExt;
+    let stop_requested = || stop.is_some_and(|flag| flag.load(Ordering::SeqCst));
+    // A pre-spawn stop means zero processes were launched.
+    if stop_requested() {
+        return CommandResult {
+            cancelled: true,
+            ..CommandResult::default()
+        };
+    }
     let mut child = match command
         .process_group(0)
         .stdin(Stdio::null())
@@ -82,6 +128,7 @@ fn run_command(mut command: Command, timeout: Duration, capture_output: bool) ->
                 unavailable: true,
                 ..CommandResult::default()
             }
+            .with_observed_stop(stop_requested());
         }
     };
 
@@ -95,22 +142,24 @@ fn run_command(mut command: Command, timeout: Duration, capture_output: bool) ->
         .take()
         .map(|stderr| thread::spawn(move || read_bounded_pipe(stderr, deadline, false)));
     let mut timed_out = false;
+    let mut cancelled = false;
     let status = loop {
+        // A stop observed after spawn but before any wait still kills and
+        // reaps the child, so it is reported as a cancellation, not a
+        // normal exit.
+        if stop_requested() {
+            cancelled = true;
+            break terminate_owned_child(&mut child);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => {
                 timed_out = true;
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
-                let _ = child.kill();
-                break child.wait().ok();
+                break terminate_owned_child(&mut child);
             }
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                break terminate_owned_child(&mut child);
             }
         }
     };
@@ -133,7 +182,24 @@ fn run_command(mut command: Command, timeout: Duration, capture_output: bool) ->
         timed_out,
         unavailable: false,
         truncated,
+        cancelled,
     }
+    // Observe stop once at the return boundary. The child is already reaped,
+    // so cancellation changes the result without signalling it again.
+    .with_observed_stop(stop_requested())
+}
+
+/// Kill the owned (not yet reaped) child's dedicated process group, fall
+/// back to killing the direct child, then reap the direct child. Returns
+/// the exit status when the reap succeeds; a failed wait is `None` and the
+/// waiter is never detached.
+#[cfg(unix)]
+fn terminate_owned_child(child: &mut Child) -> Option<ExitStatus> {
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    child.wait().ok()
 }
 
 fn read_bounded_pipe(
@@ -190,6 +256,33 @@ fn read_bounded_pipe(
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    /// Unique temporary marker path, derived from the test process PID plus a
+    /// monotonic counter so parallel test cases never collide.
+    static MARKER_COUNTER: AtomicI64 = AtomicI64::new(0);
+    fn unique_marker(label: &str) -> PathBuf {
+        let n = MARKER_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        PathBuf::from(format!(
+            "/tmp/lg-buddy-cmd-test-{}-{}-{}",
+            std::process::id(),
+            n,
+            label
+        ))
+    }
+
+    /// True once a descendant PID is no longer running (its `/proc` entry is
+    /// gone, or it is a zombie awaiting init). A descendant is a grandchild of
+    /// this test process, so it is reaped by init, not by us.
+    fn descendant_stopped(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.split_whitespace().next() == Some("Z")),
+            Err(_) => true,
+        }
+    }
 
     #[test]
     fn output_limit_retains_bytes_and_the_termination_reason() {
@@ -321,5 +414,228 @@ mod tests {
         assert!(result.succeeded());
         assert_eq!(result.stdout, b"out");
         assert_eq!(result.stderr, b"err");
+    }
+
+    /// Removes a test marker even when a test assertion unwinds first.
+    struct MarkerGuard(PathBuf);
+    impl Drop for MarkerGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The helper spawns a descendant, records its own PID and the
+    /// descendant's PID, signals ready, and waits on the descendant, so a
+    /// group-level termination must stop the descendant too. The descendant's
+    /// natural lifetime (10 s) outlives the runner's 5 s timeout, so a
+    /// stubbed-out cancellation still terminates via the timeout cleanup and
+    /// reaps the group: no unbounded orphan.
+    fn running_cancel_fixture(stop_delay: Duration) -> (CommandResult, u32, u32, Instant) {
+        let ready = unique_marker("cancel-ready");
+        let pidfile = unique_marker("cancel-pids");
+        let _ready_guard = MarkerGuard(ready.clone());
+        let _pidfile_guard = MarkerGuard(pidfile.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopper = thread::spawn({
+            let ready = ready.clone();
+            let stop = stop.clone();
+            move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !ready.exists() {
+                    assert!(Instant::now() < deadline, "helper never signalled ready");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                thread::sleep(stop_delay);
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        let started = Instant::now();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "sleep 10 & p=$!; printf '%s\\n%s\\n' \"$$\" \"$p\" > {pid}; touch {ready}; wait $p",
+                pid = pidfile.display(),
+                ready = ready.display(),
+            ),
+        ]);
+        let result = run_status_bounded_cancellable(command, Duration::from_secs(5), &stop);
+        stopper.join().expect("stopper must not panic");
+        let pids: Vec<u32> = std::fs::read_to_string(&pidfile)
+            .expect("helper must publish its PIDs")
+            .lines()
+            .map(|line| line.parse().expect("each line is a PID"))
+            .collect();
+        (result, pids[0], pids[1], started)
+    }
+
+    /// Cancellation invariants for the running-helper fixture: prompt return,
+    /// killed status, the direct child already reaped (a WNOHANG waitpid on
+    /// it yields ECHILD; a fake immediate cancelled return that skipped
+    /// kill+reap leaves a live or zombie child and fails this check), and the
+    /// descendant stopped. The descendant is a grandchild of this test
+    /// process, so init reaps it; group termination is what stopped it.
+    fn assert_group_cancelled(
+        result: &CommandResult,
+        child_pid: u32,
+        desc_pid: u32,
+        started: Instant,
+    ) {
+        assert!(result.cancelled, "{result:?}");
+        assert!(!result.timed_out && !result.unavailable, "{result:?}");
+        assert!(!result.succeeded());
+        let status = result
+            .status
+            .expect("the owned child must be reaped before returning");
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{result:?}");
+        let mut code: libc::c_int = 0;
+        let waited = unsafe { libc::waitpid(child_pid as i32, &mut code, libc::WNOHANG) };
+        assert_eq!(waited, -1, "direct child must already be reaped");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !descendant_stopped(desc_pid) {
+            assert!(
+                Instant::now() < deadline,
+                "descendant survived the group termination"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pre_cancel_before_spawn_launches_nothing() {
+        let marker = unique_marker("precancel");
+        let _marker_guard = MarkerGuard(marker.clone());
+        let stop = AtomicBool::new(true);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &format!("touch {}", marker.display())]);
+        let result = run_status_bounded_cancellable(command, COMMAND_TIMEOUT, &stop);
+        assert!(result.cancelled, "{result:?}");
+        assert!(result.status.is_none());
+        assert!(!result.succeeded());
+        assert!(!result.timed_out && !result.unavailable);
+        assert!(
+            !marker.exists(),
+            "a pre-cancelled command must launch nothing"
+        );
+    }
+
+    #[test]
+    fn pre_cancel_wins_over_a_missing_command() {
+        let stop = AtomicBool::new(true);
+        let command = Command::new("/dev/null/missing-command");
+        let result = run_status_bounded_cancellable(command, COMMAND_TIMEOUT, &stop);
+        assert!(result.cancelled, "{result:?}");
+        assert!(!result.unavailable, "{result:?}");
+        assert!(result.status.is_none());
+    }
+
+    #[test]
+    fn cancel_after_spawn_kills_the_group_and_reaps_the_child() {
+        let (result, child_pid, desc_pid, started) = running_cancel_fixture(Duration::ZERO);
+        assert_group_cancelled(&result, child_pid, desc_pid, started);
+    }
+
+    #[test]
+    fn cancel_during_polling_kills_the_group_and_reaps_the_child() {
+        let (result, child_pid, desc_pid, started) =
+            running_cancel_fixture(Duration::from_millis(100));
+        assert_group_cancelled(&result, child_pid, desc_pid, started);
+    }
+
+    #[test]
+    fn stop_observed_at_return_overrides_success_timeout_and_spawn_failure() {
+        // Exercise the actual return classifier deterministically: arranging
+        // a stop with sleeps cannot establish that it raced with child reaping.
+        for (timed_out, unavailable, raw_status) in [
+            (false, false, Some(0)),
+            (true, false, Some(libc::SIGKILL)),
+            (false, true, None),
+        ] {
+            let result = CommandResult {
+                status: raw_status.map(ExitStatus::from_raw),
+                timed_out,
+                unavailable,
+                ..CommandResult::default()
+            }
+            .with_observed_stop(true);
+            assert!(result.cancelled, "{result:?}");
+            assert!(!result.timed_out && !result.unavailable, "{result:?}");
+            assert!(!result.succeeded());
+            assert_eq!(result.status.map(|status| status.into_raw()), raw_status);
+        }
+    }
+
+    #[test]
+    fn stop_false_keeps_success_failure_unavailable_and_timeout_distinct_from_cancel() {
+        let stop = AtomicBool::new(false);
+        let mut ok_command = Command::new("/bin/sh");
+        ok_command.args(["-c", "exit 0"]);
+        let ok = run_status_bounded_cancellable(ok_command, COMMAND_TIMEOUT, &stop);
+        assert!(ok.succeeded(), "{ok:?}");
+        assert!(!ok.cancelled);
+        let mut failed_command = Command::new("/bin/sh");
+        failed_command.args(["-c", "exit 7"]);
+        let failed = run_status_bounded_cancellable(failed_command, COMMAND_TIMEOUT, &stop);
+        assert_eq!(failed.status.unwrap().code(), Some(7));
+        assert!(!failed.succeeded());
+        assert!(!failed.cancelled);
+        let missing_command = Command::new("/dev/null/missing-command");
+        let missing = run_status_bounded_cancellable(missing_command, COMMAND_TIMEOUT, &stop);
+        assert!(missing.unavailable, "{missing:?}");
+        assert!(!missing.cancelled);
+        let started = Instant::now();
+        let mut late_command = Command::new("/bin/sh");
+        late_command.args(["-c", "exec sleep 30"]);
+        let late = run_status_bounded_cancellable(late_command, Duration::from_millis(100), &stop);
+        assert!(late.timed_out, "{late:?}");
+        assert!(!late.cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn exit_zero_is_never_successful_when_cancelled_timed_out_or_unavailable() {
+        let cases = [
+            CommandResult {
+                status: Some(ExitStatus::from_raw(0)),
+                ..CommandResult::default()
+            },
+            CommandResult {
+                status: Some(ExitStatus::from_raw(0)),
+                cancelled: true,
+                ..CommandResult::default()
+            },
+            CommandResult {
+                status: Some(ExitStatus::from_raw(0)),
+                timed_out: true,
+                ..CommandResult::default()
+            },
+            CommandResult {
+                status: Some(ExitStatus::from_raw(0)),
+                unavailable: true,
+                ..CommandResult::default()
+            },
+        ];
+        for (index, result) in cases.iter().enumerate() {
+            if index == 0 {
+                assert!(result.succeeded(), "{result:?}");
+                continue;
+            }
+            assert!(!result.succeeded(), "{result:?}");
+            assert!(!result.stopped_at_output_limit(), "{result:?}");
+        }
+        let mut truncated = CommandResult {
+            status: Some(ExitStatus::from_raw(libc::SIGPIPE)),
+            truncated: true,
+            ..CommandResult::default()
+        };
+        assert_eq!(truncated.status.unwrap().signal(), Some(libc::SIGPIPE));
+        assert!(truncated.stopped_at_output_limit());
+        truncated.cancelled = true;
+        assert!(!truncated.stopped_at_output_limit());
     }
 }

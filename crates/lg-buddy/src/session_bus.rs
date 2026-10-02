@@ -493,6 +493,21 @@ impl DbusSessionBusClient {
             signal_rules: Vec::new(),
         })
     }
+
+    /// Connect to an explicit bus address. A blocking raw-address
+    /// constructor: it hands the address verbatim to `DbusConnection::new_address`
+    /// and performs no validation of its own, so for arbitrary input libdbus
+    /// may follow the address into `autolaunch:`/`unixexec:` transports or a
+    /// semicolon-separated fallback list. The child probe enforces that policy
+    /// with its own address validator before calling this.
+    pub fn new_address(address: &str) -> Result<Self, SessionBusError> {
+        Ok(Self {
+            connection: DbusConnection::new_address(address)
+                .map_err(|err| SessionBusError::Transport(err.to_string()))?,
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        })
+    }
 }
 
 impl SessionBusClient for DbusSessionBusClient {
@@ -535,9 +550,16 @@ impl SessionBusClient for DbusSessionBusClient {
 
     fn add_signal_match(&mut self, rule: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
         let rule = OwnedBusSignalMatch::from(rule);
-        self.connection
-            .add_match_no_cb(&rule.as_match_rule().match_str())
-            .map_err(|err| SessionBusError::Transport(err.to_string()))?;
+        let match_rule = rule.as_match_rule().match_str();
+        self.call_method(
+            BusMethodCall::new(
+                DBUS_SERVICE_NAME,
+                DBUS_OBJECT_PATH,
+                DBUS_INTERFACE,
+                "AddMatch",
+            )
+            .with_body(vec![BusValue::String(match_rule)]),
+        )?;
         self.signal_rules.push(rule);
         Ok(())
     }
@@ -698,15 +720,22 @@ mod tests {
     use super::{
         append_dbus_message_value, bus_value_from_dbus_message_item, get_name_owner,
         parse_name_owner_changed_signal, BusMethodCall, BusReply, BusSignal, BusSignalMatch,
-        BusValue, NameOwnerChanged, SessionBusClient, SessionBusError, DBUS_INTERFACE,
-        DBUS_OBJECT_PATH, DBUS_SERVICE_NAME,
+        BusValue, DbusConnection, DbusSessionBusClient, NameOwnerChanged, SessionBusClient,
+        SessionBusError, DBUS_INTERFACE, DBUS_METHOD_CALL_TIMEOUT, DBUS_OBJECT_PATH,
+        DBUS_SERVICE_NAME,
     };
     use dbus::arg::messageitem::{MessageItem, MessageItemArray, MessageItemDict};
+    use dbus::message::{MatchRule as DbusMatchRule, MessageType as DbusMessageType};
     use dbus::strings::{Path as DbusPath, Signature as DbusSignature};
     use dbus::Message as DbusMessage;
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::fs;
+    use std::io::{BufRead, BufReader};
     use std::os::fd::AsRawFd;
-    use std::time::Duration;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     struct OwnedBusMethodCall {
@@ -1131,5 +1160,626 @@ mod tests {
 
         assert_eq!(bus.name_has_owner("org.example.Service"), Ok(true));
         assert_eq!(bus.name_has_owner("org.example.Missing"), Ok(false));
+    }
+
+    /// Owns a private test bus and reaps it before joining its address reader.
+    struct PrivateDbusDaemon {
+        address: String,
+        child: Child,
+        stdout_reader: Option<JoinHandle<()>>,
+    }
+
+    impl PrivateDbusDaemon {
+        /// Self-contained bus config: the build sandbox (Nix) has no
+        /// `/etc/dbus-1/session.conf` and Nix's packaged session.conf is an
+        /// empty stub, so `--session` cannot start a bus there. A standalone
+        /// session-style config with an explicit unix listener works
+        /// everywhere `dbus-daemon` runs.
+        const TEST_BUS_CONFIG: &str = r#"<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <policy context="default">
+    <allow user="*"/>
+    <allow own="*"/>
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow receive_sender="*"/>
+  </policy>
+</busconfig>"#;
+
+        fn start() -> Result<Self, String> {
+            let config = std::env::temp_dir().join("lg-buddy-test-bus.conf");
+            std::fs::write(&config, Self::TEST_BUS_CONFIG)
+                .map_err(|err| format!("write private dbus-daemon config: {err}"))?;
+            let child = Command::new("dbus-daemon")
+                .args([
+                    "--config-file",
+                    config.to_str().unwrap(),
+                    "--nofork",
+                    "--nopidfile",
+                    "--print-address=1",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|err| {
+                    format!(
+                        "start private dbus-daemon: {err}; run tests in the Nix shell with dbus"
+                    )
+                })?;
+            let mut daemon = Self {
+                address: String::new(),
+                child,
+                stdout_reader: None,
+            };
+            let stdout = daemon.child.stdout.take().expect("piped stdout");
+            let (tx, rx) = mpsc::channel();
+            daemon.stdout_reader = Some(thread::spawn(move || {
+                let address = BufReader::new(stdout).lines().next();
+                let _ = tx.send(address);
+            }));
+            daemon.address = rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|err| format!("private bus address did not arrive within 5s: {err}"))?
+                .ok_or("private bus closed without an address")?
+                .map_err(|err| format!("read private bus address: {err}"))?;
+            if !daemon.address.starts_with("unix:") {
+                return Err(format!(
+                    "unexpected private bus address: {:?}",
+                    daemon.address
+                ));
+            }
+            Ok(daemon)
+        }
+
+        fn address(&self) -> &str {
+            &self.address
+        }
+
+        fn child_pid(&self) -> libc::pid_t {
+            self.child.id() as libc::pid_t
+        }
+
+        fn stop_daemon(&mut self) {
+            let _ = self.child.kill();
+            self.child.wait().expect("reap private dbus-daemon");
+        }
+    }
+
+    impl Drop for PrivateDbusDaemon {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(reader) = self.stdout_reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    #[test]
+    fn private_dbus_daemon_fixture_starts_returns_address_and_reaps_cleanly() {
+        // The fixture's own runnable check: it must come up, hand back a usable explicit
+        // address, and (on drop) reap its child so no daemon leaks.
+        let daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        assert!(
+            daemon.address().starts_with("unix:"),
+            "address should be a unix transport endpoint, got {}",
+            daemon.address()
+        );
+
+        // A real client can connect to the *explicit* address — proving the daemon is actually
+        // listening, not just that a line was printed.
+        let connection = DbusConnection::new_address(daemon.address())
+            .expect("connect client to the explicit private bus address");
+        drop(connection);
+
+        let pid = daemon.child_pid();
+        drop(daemon);
+        let mut status = 0;
+        // SAFETY: the PID came from our now-reaped child; WNOHANG cannot block.
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn add_signal_match_addmatch_rpc_is_bounded_by_method_call_timeout() {
+        // Stall the owned daemon with SIGSTOP *before* the call: the in-flight AddMatch
+        // can never be answered, so the transport must surface an Err within
+        // method_call_timeout (100ms here) instead of the old fixed-5000ms hang.
+        //
+        // The daemon is stopped, not killed: the watchdog SIGCONTs it a second later so
+        // the whole test stays bounded even under the OLD implementation (whose fixed
+        // 5000ms RPC would resume and return late). The SIGCONT is only meaningful while
+        // the child is still ours, so the watchdog thread is joined on scope exit —
+        // before the fixture reaps its child — to avoid signalling a recycled PID.
+        let daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        let address = daemon.address().to_string();
+        let pid = daemon.child_pid();
+
+        let mut client = DbusSessionBusClient {
+            connection: DbusConnection::new_address(&address)
+                .expect("connect client to the explicit private bus address"),
+            method_call_timeout: Duration::from_millis(100),
+            signal_rules: Vec::new(),
+        };
+
+        // SAFETY: this PID belongs to the live child owned by the fixture.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let mut status = 0;
+            // WUNTRACED reports a stop without reaping the stopped child.
+            // SAFETY: status is writable, pid is our child, and WNOHANG bounds the call.
+            let observed =
+                unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+            if observed == pid {
+                assert!(
+                    libc::WIFSTOPPED(status),
+                    "private daemon exited instead of stopping"
+                );
+                break;
+            }
+            assert_eq!(observed, 0, "observe owned daemon stop");
+            assert!(
+                Instant::now() < deadline,
+                "private daemon did not stop within one second"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let rule = BusSignalMatch {
+            sender: Some("org.gnome.ScreenSaver"),
+            path: None,
+            interface: None,
+            member: Some("ActiveChanged"),
+        };
+
+        // Run the call inside a scope that owns a watchdog: after one second it SIGCONTs
+        // the same daemon so the old fixed-5000ms path cannot hang the test. Scoping the
+        // watchdog means scope exit joins it (also on panic) before the fixture reaps.
+        let (result, elapsed) = thread::scope(|scope| {
+            let watchdog = scope.spawn(|| {
+                thread::sleep(Duration::from_secs(1));
+                // Resume the same child so a stale fixed-timeout RPC completes late.
+                unsafe {
+                    libc::kill(pid, libc::SIGCONT);
+                }
+            });
+
+            let started = Instant::now();
+            let result = client.add_signal_match(rule);
+            // Capture the elapsed time *immediately*, before leaving the scope: the
+            // scoped watchdog must not be able to inflate the measured RPC duration.
+            let elapsed = started.elapsed();
+
+            // Join the watchdog before the fixture's Drop reaps the child, so the late
+            // SIGCONT can never land on a recycled PID.
+            watchdog.join().expect("watchdog thread panicked");
+
+            (result, elapsed)
+        });
+
+        // The scope has joined the watchdog, so it is safe to let the fixture reap the
+        // (now resumed) child; assert on the outcome once we are fully out of the scope.
+        assert!(
+            result.is_err(),
+            "AddMatch against a stopped bus must fail: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "AddMatch took {elapsed:?}, not bounded by the 100ms method_call_timeout (old path hung ~5000ms)"
+        );
+        assert!(
+            client.signal_rules.is_empty(),
+            "a failed AddMatch must not push a local rule, got {:?}",
+            client.signal_rules
+        );
+    }
+
+    #[test]
+    fn add_signal_match_transport_failure_preserves_prior_rules() {
+        // A previously successful subscription must survive a later transport failure:
+        // if AddMatch cannot reach the daemon, the client must return Err without adding a
+        // new local rule *and* without erasing the rules it already accepted.
+        let mut daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        let address = daemon.address();
+
+        let mut client = DbusSessionBusClient {
+            connection: DbusConnection::new_address(address)
+                .expect("connect client to the explicit private bus address"),
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        };
+
+        // Establish one real, retained subscription while the daemon is alive.
+        let good = BusSignalMatch {
+            sender: Some("org.example.Kept"),
+            path: None,
+            interface: None,
+            member: Some("Changed"),
+        };
+        client
+            .add_signal_match(good)
+            .expect("the first AddMatch should succeed against the live daemon");
+        let kept = client.signal_rules.clone();
+        assert_eq!(
+            client.signal_rules,
+            vec![super::OwnedBusSignalMatch::from(good)],
+            "the first rule should be retained after the successful AddMatch"
+        );
+
+        // Stop only this owned daemon; a subsequent AddMatch now has no bus to answer.
+        daemon.stop_daemon();
+
+        let failed = BusSignalMatch {
+            sender: Some("org.example.Dead"),
+            path: None,
+            interface: None,
+            member: Some("Changed"),
+        };
+        let result = client.add_signal_match(failed);
+
+        // The failed RPC must not add a new local rule, and must not erase the rule the
+        // client already accepted — the retained set is exactly the pre-failure set.
+        assert!(
+            result.is_err(),
+            "AddMatch against a dead daemon must fail: {result:?}"
+        );
+        assert_eq!(
+            client.signal_rules, kept,
+            "a failed AddMatch must neither add a rule nor erase the previously successful one"
+        );
+    }
+
+    #[test]
+    fn add_signal_match_subscribes_through_daemon_and_processes_matching_signal() {
+        let daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        let address = daemon.address();
+
+        // The producer connects first so the rule can filter on the bus-assigned sender: the
+        // daemon fills the signal's `sender` field with the producer's *unique* connection
+        // name, and the daemon's own match evaluation then enforces that filter. A local-
+        // shortcut implementation (no daemon contact) would have no bus to answer AddMatch
+        // and no sender to deliver.
+        let producer_connection = DbusConnection::new_address(address)
+            .expect("publish on the explicit private bus address");
+        let producer_sender = producer_connection.unique_name().to_string();
+
+        // The subscriber is built from the private fields against the *explicit* fixture
+        // address (never `new_session`).
+        let mut subscriber = DbusSessionBusClient {
+            connection: DbusConnection::new_address(address)
+                .expect("subscribe on the explicit private bus address"),
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        };
+        let rule = BusSignalMatch {
+            sender: Some(producer_sender.as_str()),
+            path: Some("/org/example/Thing"),
+            interface: Some("org.example.Interface"),
+            member: Some("Changed"),
+        };
+
+        // `add_signal_match` only retains the local rule after the AddMatch round-trip
+        // succeeds, so an `Ok` reply plus the retained rule proves the daemon accepted the
+        // subscription.
+        subscriber
+            .add_signal_match(rule)
+            .expect("AddMatch should round-trip through the private dbus-daemon");
+        assert_eq!(
+            subscriber.signal_rules,
+            vec![super::OwnedBusSignalMatch::from(rule)],
+            "the local rule should be retained after the successful AddMatch"
+        );
+
+        // process already filters bookkeeping signals; no matching signal exists yet.
+        assert_eq!(subscriber.process(Duration::from_millis(20)).unwrap(), None);
+
+        let message =
+            DbusMessage::new_signal("/org/example/Thing", "org.example.Interface", "Changed")
+                .expect("valid signal");
+        let message = message
+            .append1("hello from the producer")
+            .append1(7u32)
+            .append1(true);
+        producer_connection
+            .channel()
+            .send(message)
+            .expect("emit the matching signal");
+
+        let received = subscriber
+            .process(Duration::from_secs(2))
+            .expect("bounded process should surface the matching signal")
+            .expect("the matching signal should be delivered through the daemon subscription");
+
+        // The sender is the bus-assigned unique name of the producer — the daemon set it,
+        // proof the signal crossed the bus, not a local shortcut.
+        assert_eq!(received.sender, Some(producer_sender.clone()));
+        assert_eq!(received.path, "/org/example/Thing");
+        assert_eq!(received.interface, "org.example.Interface");
+        assert_eq!(received.member, "Changed");
+        assert_eq!(
+            received.body,
+            vec![
+                BusValue::String("hello from the producer".to_string()),
+                BusValue::U32(7),
+                BusValue::Bool(true),
+            ]
+        );
+        // The retained rule's sender filter is the bus-assigned name; it matches exactly the
+        // signal the daemon delivered.
+        assert_eq!(
+            subscriber.signal_rules,
+            vec![super::OwnedBusSignalMatch {
+                sender: Some(producer_sender.clone()),
+                path: Some("/org/example/Thing".to_string()),
+                interface: Some("org.example.Interface".to_string()),
+                member: Some("Changed".to_string()),
+            }],
+            "the retained rule should match exactly the signal the daemon delivered"
+        );
+    }
+
+    /// Sample the daemon's fd count over a short window and return the minimum seen.
+    ///
+    /// The Rust Drop closes a client's socket, but the daemon reaps the connection (and
+    /// frees its fds) on its next main-loop EOF service, which is asynchronous. A single
+    /// snapshot can catch the daemon mid-reap and overcount — so we poll for up to ~2s
+    /// and take the floor: the steady, fully-reaped count. With every client already
+    /// dropped the count only trends down as reaping completes, so the minimum is the
+    /// reap-completed value. (0 on non-Linux, where /proc is unavailable.)
+    fn settled_fd_count(pid: libc::pid_t) -> u64 {
+        let mut floor = u64::MAX;
+        for _ in 0..40 {
+            if let Ok(count) = fs::read_dir(format!("/proc/{pid}/fd")).map(|e| e.count() as u64) {
+                floor = floor.min(count);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if floor == u64::MAX {
+            0
+        } else {
+            floor
+        }
+    }
+
+    /// Increment 4g: settle, on a *private* bus, that a disconnected client
+    /// leaks no daemon-side fds and that signal delivery still crosses the
+    /// daemon — the generic connection/fd behaviour the child-process design
+    /// (Slices A/B) relies on. This test does NOT measure Mutter's idle-watch
+    /// lifetime: a killed child never runs its Rust `Drop` nor issues
+    /// `RemoveWatch`/`RemoveMatch`, so the probe's own client-side watch
+    /// cleanup cannot be exercised here. Actual Mutter cleanup is separate and
+    /// source-supported: `src/backends/meta-idle-manager.c` (lines 105–131 and
+    /// 149–160) tracks the caller's unique name and removes its watch when that
+    /// name disappears (verified on main `888a7b7d`). This test proves only
+    /// that the daemon reaps a raw connection's fds; it does not prove watch
+    /// cleanup.
+    ///
+    /// Model: each "ghost" cycle is a fully independent client that connects to
+    /// the *private* bus, registers ONE signal match (AddMatch), receives one
+    /// emitted signal (proof the subscription was live), then is DROPPED without
+    /// a RemoveMatch/RemoveWatch — the Rust Drop closes the socket with no
+    /// client-side cleanup, exactly modelling a SIGKILL'd child (which never
+    /// runs Drop). After 20 ghost cycles a 21st *clean* client runs the full
+    /// AddMatch -> emit -> receive -> RemoveMatch cycle to prove the bus is
+    /// still usable.
+    ///
+    /// Decision (one of, recorded to the report):
+    ///   REAPED      — all 20 cycles deliver, the 21st client works, and the
+    ///                 daemon fd count stays within a few clients' worth of the
+    ///                 baseline (a REAPED daemon returns to steady state; the
+    ///                 SIGKILL path leaks no fds).
+    ///   NOT-REAPED  — the 21st client fails, or the fd count grew by far more
+    ///                 than a few clients' worth (one per leaked ghost).
+    ///
+    /// The fd measurement is a *magnitude* probe, not an exact-zero equality: the
+    /// daemon's own housekeeping fds add a handful of noise, and an un-reaped daemon
+    /// would retain ~4 fds PER client (≈80 over 20), an order of magnitude beyond a
+    /// 3x-per-client bound — so the bound is noise-robust yet still separates the
+    /// two verdicts. The delivery assertions count ACTUAL signals delivered (a local
+    /// shortcut / stub that never crosses the daemon would deliver 0 and fail).
+    #[test]
+    fn disconnected_client_match_cycles_leave_daemon_fd_count_bounded() {
+        let daemon = PrivateDbusDaemon::start().expect("start private dbus-daemon");
+        let address = daemon.address().to_string();
+        let pid = daemon.child_pid();
+
+        // Baseline at steady state, no client live: the steady, fully-reaped count.
+        let baseline_fds = settled_fd_count(pid);
+
+        // One persistent emitter supplies the signal every cycle; it is dropped before
+        // each fd measurement so only the ghost/clean clients (the reaping subjects)
+        // are ever live when we read the daemon's fd table.
+        let emitter = DbusConnection::new_address(&address)
+            .expect("emitter should connect to the private bus");
+        let emitter_name = emitter.unique_name().to_string();
+        // Control reading: one *live* client's cost in daemon fds (the per-connection
+        // floor that must be released when the client disconnects).
+        let emitter_live_fds = settled_fd_count(pid);
+
+        const GHOSTS: u32 = 20;
+        const PATH: &str = "/org/lgbuddy/reap";
+        const IFACE: &str = "org.lgbuddy.Reap";
+        const MEMBER: &str = "Ticked";
+
+        let mut delivered = 0u32;
+        for cycle in 0..GHOSTS {
+            // A fresh ghost subscriber, built against the explicit fixture address.
+            let mut ghost = DbusSessionBusClient {
+                connection: DbusConnection::new_address(&address)
+                    .expect("ghost should connect to the private bus"),
+                method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+                signal_rules: Vec::new(),
+            };
+            let rule = BusSignalMatch {
+                sender: Some(&emitter_name),
+                path: Some(PATH),
+                interface: Some(IFACE),
+                member: Some(MEMBER),
+            };
+            ghost
+                .add_signal_match(rule)
+                .expect("ghost AddMatch should round-trip through the daemon");
+            assert_eq!(
+                ghost.signal_rules.len(),
+                1,
+                "ghost {cycle} should retain exactly one local rule"
+            );
+
+            // Emit once; the cycle index rides in the body so a real delivery is
+            // distinguishable from a coincidental/looped signal.
+            let message = DbusMessage::new_signal(PATH, IFACE, MEMBER)
+                .expect("valid signal")
+                .append1(cycle);
+            emitter
+                .channel()
+                .send(message)
+                .expect("emitter should emit the signal");
+
+            let received = ghost
+                .process(Duration::from_secs(2))
+                .expect("bounded process should surface the ghost's signal")
+                .unwrap_or_else(|| panic!("ghost {cycle} signal should be delivered"));
+            assert_eq!(
+                received.member, MEMBER,
+                "ghost {cycle} must receive the expected signal member"
+            );
+            assert_eq!(
+                received.sender.as_deref(),
+                Some(emitter_name.as_str()),
+                "the delivered signal's sender is the bus-assigned emitter name (proof it crossed the daemon)"
+            );
+            assert_eq!(
+                received.body,
+                vec![BusValue::U32(cycle)],
+                "the delivered body carries this cycle's index (real, not a stub delivery)"
+            );
+            delivered += 1;
+
+            // Drop the ghost WITHOUT RemoveMatch: its Rust Drop closes the socket with
+            // no client-side match/watch cleanup — the SIGKILL'd-child model.
+            drop(ghost);
+        }
+        assert_eq!(
+            delivered, GHOSTS,
+            "every ghost cycle must deliver exactly one signal"
+        );
+        drop(emitter);
+        let post_ghost_fds = settled_fd_count(pid);
+
+        // The 21st clean client proves the bus is still usable after 20 ghosts: a full
+        // AddMatch -> emit -> receive -> RemoveMatch cycle on a fresh connection.
+        let clean_emitter = DbusConnection::new_address(&address)
+            .expect("clean emitter should connect to the private bus");
+        let clean_emitter_name = clean_emitter.unique_name().to_string();
+        let mut clean = DbusSessionBusClient {
+            connection: DbusConnection::new_address(&address)
+                .expect("clean client should connect to the private bus"),
+            method_call_timeout: DBUS_METHOD_CALL_TIMEOUT,
+            signal_rules: Vec::new(),
+        };
+        let rule = BusSignalMatch {
+            sender: Some(&clean_emitter_name),
+            path: Some(PATH),
+            interface: Some(IFACE),
+            member: Some(MEMBER),
+        };
+        clean
+            .add_signal_match(rule)
+            .expect("the 21st clean client's AddMatch should succeed on a live bus");
+        clean_emitter
+            .channel()
+            .send(
+                DbusMessage::new_signal(PATH, IFACE, MEMBER)
+                    .expect("valid signal")
+                    .append1(GHOSTS),
+            )
+            .expect("clean emitter should emit");
+        let received = clean
+            .process(Duration::from_secs(2))
+            .expect("bounded process should surface the clean signal")
+            .expect("the 21st clean client must still receive through the daemon");
+        assert_eq!(received.body, vec![BusValue::U32(GHOSTS)]);
+        // The clean-exit path: remove the match the way a well-behaved client does.
+        let remove_rule = DbusMatchRule::new()
+            .with_type(DbusMessageType::Signal)
+            .with_sender(clean_emitter_name)
+            .with_path(PATH)
+            .with_interface(IFACE)
+            .with_member(MEMBER)
+            .match_str();
+        let reply = clean
+            .call_method(
+                BusMethodCall::new(
+                    DBUS_SERVICE_NAME,
+                    DBUS_OBJECT_PATH,
+                    DBUS_INTERFACE,
+                    "RemoveMatch",
+                )
+                .with_body(vec![BusValue::String(remove_rule)]),
+            )
+            .expect("RemoveMatch should succeed on a live bus");
+        assert!(
+            reply.body.is_empty(),
+            "RemoveMatch takes no reply body, got {:?}",
+            reply.body
+        );
+        drop(clean);
+        drop(clean_emitter);
+        let final_fds = settled_fd_count(pid);
+
+        // Per-client fd scale (control) and the leak bound, measured before the report line.
+        let per_client = (emitter_live_fds as i64 - baseline_fds as i64).max(1);
+        let leak_bound = 3 * per_client;
+
+        // Observed evidence (also written to the increment-4g report):
+        //   baseline        — steady state, 0 clients
+        //   emitter_live    — 1 emitter client live (control: per-connection fd cost)
+        //   post_ghost      — after 20 ghost connect/disconnect + emitter dropped
+        //   final           — after the 21st clean client dropped too
+        let ghost_growth = post_ghost_fds as i64 - baseline_fds as i64;
+        let final_growth = final_fds as i64 - baseline_fds as i64;
+        eprintln!(
+            "increment-4g: fd baseline={baseline_fds} emitter_live={emitter_live_fds} \
+             post_ghost={post_ghost_fds} final={final_fds} ghost_growth={ghost_growth} \
+             final_growth={final_growth} per_client={per_client} leak_bound={leak_bound}",
+        );
+
+        // Deciding probe. `settled_fd_count` polls until the daemon finishes reaping,
+        // so the floors below are the fully-reaped steady counts. A REAPED daemon
+        // returns to the baseline (within housekeeping noise); a NOT-REAPED daemon
+        // keeps the fds of every disconnected client.
+        //
+        // `per_client` is the measured cost of ONE live client. We allow a small
+        // residual (housekeeping fds + at most a couple of stragglers, ~3 clients'
+        // worth) and still call it REAPED; a full 20-ghost leak would add ~20 *
+        // per_client, far beyond that bound. A dip *below* baseline is fine (the
+        // daemon's own steady count), so only growth is penalised.
+        //
+        // ponytail: 3x-per-client bound; a leak is ~20x per_client, so there is a wide
+        // empty band [3x, 20x] that separates the two verdicts even under load noise.
+        assert!(
+            post_ghost_fds as i64 - baseline_fds as i64 <= leak_bound,
+            "NOT-REAPED: the daemon kept the fds of the 20 disconnected (SIGKILL-model) \
+             clients — post-ghost {post_ghost_fds} grew {} over baseline {baseline_fds} \
+             (per-client ~{per_client}, bound {leak_bound})",
+            post_ghost_fds as i64 - baseline_fds as i64
+        );
+        assert!(
+            final_fds as i64 - baseline_fds as i64 <= leak_bound,
+            "NOT-REAPED: after 20 ghosts plus one clean client the fd count did not return \
+             to the steady-state baseline — final {final_fds} grew {} over {baseline_fds} \
+             (per-client ~{per_client}, bound {leak_bound})",
+            final_fds as i64 - baseline_fds as i64
+        );
     }
 }

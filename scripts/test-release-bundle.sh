@@ -23,6 +23,11 @@ assert_file() {
     fi
 }
 
+fail() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
 assert_mode() {
     local path="$1"
     local expected="$2"
@@ -382,6 +387,10 @@ assert_file "$BUNDLE_DIR/docs/kwin/LG_Buddy_kwin.service"
 assert_file "$BUNDLE_DIR/docs/kwin/source/CMakeLists.txt"
 assert_file "$BUNDLE_DIR/docs/kwin/source/main.cpp"
 assert_file "$BUNDLE_DIR/docs/kwin/source/metadata.json"
+GNOME_EXTENSION_DIR="$BUNDLE_DIR/docs/gnome-shell/lg-buddy-brightness@staphylococcus.github.io"
+assert_file "$GNOME_EXTENSION_DIR/metadata.json"
+assert_file "$GNOME_EXTENSION_DIR/extension.js"
+assert_file "$GNOME_EXTENSION_DIR/brightness.js"
 KWIN_SOURCE_ID="$(cd "$BUNDLE_DIR/docs/kwin/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum | cut -d ' ' -f1)"
 KWIN_PREBUILT_COUNT=0
 while IFS= read -r -d '' metadata; do
@@ -629,10 +638,13 @@ printf '%s\n' tvs_primary_platform=lg_webos >> "$CONFIG_FILE"
 NATIVE_PLATFORM_OUTPUT="$("$INSTALLED_BINARY" shutdown 2>&1)"
 printf '%s\n' "$NATIVE_PLATFORM_OUTPUT" | grep -F -q 'No stored native TV credential; skipping unattended TV control.'
 
-"$INSTALLED_BINARY" settings set tv.platform bscpylgtv
+sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
 grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 
-"$INSTALLED_BINARY" settings set screen.backend swayidle
+# Seed raw retired data; the current settings API rejects new swayidle selections.
+sed -i '/^screen_backend=/d' "$CONFIG_FILE"
+printf '%s\n' screen_backend=swayidle >> "$CONFIG_FILE"
+grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 bash "$SCRIPT_DIR/test-settings-compatibility.sh" "$INSTALLED_BINARY"
 "$INSTALLED_BINARY" settings set screen.honor_idle_inhibitors enabled
 "$INSTALLED_BINARY" settings set screen.idle_timeout 900
@@ -661,12 +673,12 @@ grep -q '^tvs_primary_platform=bscpylgtv$' "$CONFIG_FILE"
 grep -q '^updates_auto_check=disabled$' "$CONFIG_FILE"
 grep -q '^updates_channel=prerelease$' "$CONFIG_FILE"
 
-# Settings owns reconfiguration; setup must not rewrite existing behavior choices.
+# Settings own reconfiguration; they do not convert a stale profile.
 sed -i 's/^tvs_primary_platform=bscpylgtv$/  tvs_primary_platform = bscpylgtv # legacy/' "$CONFIG_FILE"
 printf '%s\n' 'tvs_primary_platform = lg_webos # native' >> "$CONFIG_FILE"
 "$INSTALLED_BINARY" settings get tv.platform | grep -q '^lg_webos$'
 "$INSTALLED_BINARY" settings set tv.ip 192.168.1.11
-"$INSTALLED_BINARY" settings set tv.mac 11:22:33:44:55:66
+"$INSTALLED_BINARY" settings set tv.mac 12:22:33:44:55:66
 "$INSTALLED_BINARY" settings set tv.input HDMI_3
 # Normalize this controlled fixture for the following invalid-platform cases.
 sed -i '/tvs_primary_platform/d' "$CONFIG_FILE"
@@ -972,7 +984,7 @@ cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || {
     exit 1
 }
 "$INSTALLED_BINARY" settings describe screen.backend \
-    | grep -F -q 'deprecation: swayidle is a deprecated compatibility backend planned for removal in LG Buddy 2.0.0'
+    | grep -F -q 'current: <invalid: swayidle>'
 cmp -s "$CONFIG_POINTER_SNAPSHOT" "$INSTALLED_POINTER" || {
     echo "Upgrade changed the installed config pointer."
     exit 1
@@ -1007,62 +1019,53 @@ cmp -s "$BUNDLE_DIR/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_CHECK_TIM
 assert_lifecycle_topology_installed
 "$INSTALLED_BINARY" settings get updates.channel | grep -q '^prerelease$'
 
-# Only an existing, importable legacy environment is retained. The fixture
-# supplies a module without downloading packages; production never creates it.
-"$INSTALLED_BINARY" settings set tv.platform bscpylgtv
-python3 -m venv --without-pip "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
-VENV_PYTHON="$INSTALL_ROOT/usr/bin/LG_Buddy_PIP/bin/python"
-VENV_SITE_PACKAGES="$("$VENV_PYTHON" -c 'import site; print(site.getsitepackages()[0])')"
-mkdir -p "$VENV_SITE_PACKAGES/bscpylgtv"
-printf '__version__ = "smoke"\n' >"$VENV_SITE_PACKAGES/bscpylgtv/__init__.py"
-cat >"$INSTALLED_BSCPYLGTV" <<'EOF'
-#!/bin/sh
-printf '%s\n' '{"backlight":72}'
-EOF
-chmod 755 "$INSTALLED_BSCPYLGTV"
+# An installed v2 upgrade accepts stale 1.x configuration and removes only
+# the obsolete LG Buddy-owned environment. The monitor then converts the
+# configuration locally, without changing native or legacy credentials.
 rm -f "$USER_DESKTOP_ENTRY"
-HEALTHY_VENV_SNAPSHOT="$WORK_DIR/healthy-venv.snapshot"
-find "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" -type f -exec sha256sum {} + | sort >"$HEALTHY_VENV_SNAPSHOT"
-for platform in explicit missing; do
-    if [ "$platform" = missing ]; then sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"; fi
+LEGACY_USER_CREDENTIAL="$(dirname "$CONFIG_FILE")/.aiopylgtv.sqlite"
+printf 'user-owned legacy credential\n' >"$LEGACY_USER_CREDENTIAL"
+for scenario in explicit-healthy explicit-broken missing-absent; do
+    sed -i '/^tvs_primary_platform=/d' "$CONFIG_FILE"
+    if [ "$scenario" != missing-absent ]; then
+        printf '%s\n' 'tvs_primary_platform=bscpylgtv' >>"$CONFIG_FILE"
+    fi
+    rm -rf -- "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+    if [ "$scenario" != missing-absent ]; then
+        python3 -m venv --without-pip "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP"
+        if [ "$scenario" = explicit-healthy ]; then
+            cat >"$INSTALLED_BSCPYLGTV" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+            chmod 755 "$INSTALLED_BSCPYLGTV"
+        fi
+    fi
     cp "$CONFIG_FILE" "$CONFIG_SNAPSHOT"
-    (
+    if ! (
         cd "$BUNDLE_DIR"
-        bash ./install.sh --upgrade >"$WORK_DIR/healthy-$platform.output" 2>&1
-    )
-    grep -F -q 'will be removed in v2.0.0' "$WORK_DIR/healthy-$platform.output"
-    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
-    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
-    find "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" -type f -exec sha256sum {} + | sort | cmp -s "$HEALTHY_VENV_SNAPSHOT" -
+        bash ./install.sh --upgrade >"$WORK_DIR/install-first-$scenario.output" 2>&1
+    ); then
+        cat "$WORK_DIR/install-first-$scenario.output" >&2
+        fail "Upgrade failed for $scenario."
+    fi
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Upgrade changed saved config for $scenario."
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || fail "Upgrade changed native credentials for $scenario."
+    grep -F -q 'user-owned legacy credential' "$LEGACY_USER_CREDENTIAL"
+    [ ! -e "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ] || fail "Upgrade left the obsolete app environment: $scenario"
+    [ "$("$INSTALLED_BINARY" settings get tv.platform)" = bscpylgtv ] || fail "Settings inspection changed or misreported the legacy platform for $scenario."
+    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || fail "Settings inspection changed saved config for $scenario."
+    if ! LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS=0.3 \
+        timeout 30 "$INSTALLED_BINARY" monitor >"$WORK_DIR/migration-$scenario.output" 2>&1; then
+        cat "$WORK_DIR/migration-$scenario.output" >&2
+        fail "Monitor startup failed to convert $scenario."
+    fi
+    grep -q '^tvs_primary_platform=lg_webos$' "$CONFIG_FILE"
+    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE" || fail "Startup changed native credentials for $scenario."
+    grep -F -q 'user-owned legacy credential' "$LEGACY_USER_CREDENTIAL"
 done
 [ ! -e "$USER_DESKTOP_ENTRY" ] || fail "Upgrade recreated a user-removed Desktop launcher."
 [ ! -e "$LEGACY_USER_DESKTOP_ENTRY" ] || fail "Upgrade recreated the legacy user Desktop launcher."
-
-for broken in missing-command broken-import missing-environment; do
-    case "$broken" in
-        missing-command) chmod -x "$INSTALLED_BSCPYLGTV" ;;
-        broken-import)
-            chmod +x "$INSTALLED_BSCPYLGTV"
-            printf 'raise ImportError("broken legacy dependency")\n' >"$VENV_SITE_PACKAGES/bscpylgtv/__init__.py"
-            ;;
-        missing-environment) rm -rf "$INSTALL_ROOT/usr/bin/LG_Buddy_PIP" ;;
-    esac
-    rm -f "$SUDO_MARKER"
-    if (
-        export LG_BUDDY_SUDO_CMD="$SUDO_SPY"
-        export LG_BUDDY_SUDO_MARKER="$SUDO_MARKER"
-        cd "$BUNDLE_DIR"
-        bash ./install.sh --upgrade >"$WORK_DIR/unhealthy-$broken.output" 2>&1
-    ); then
-        fail "Upgrade unexpectedly repaired an unhealthy legacy environment: $broken"
-    fi
-    grep -F -q 'no longer installs or repairs it' "$WORK_DIR/unhealthy-$broken.output"
-    grep -F -q 'settings set tv.platform lg_webos' "$WORK_DIR/unhealthy-$broken.output"
-    [ ! -e "$SUDO_MARKER" ] || fail "Unhealthy legacy upgrade requested privilege."
-    cmp -s "$CONFIG_SNAPSHOT" "$CONFIG_FILE"
-    cmp -s "$NATIVE_ACCESS_TOKEN_SNAPSHOT" "$NATIVE_ACCESS_TOKEN_FILE"
-    cmp -s "$BUNDLE_DIR/lg-buddy" "$INSTALLED_BINARY"
-done
 
 assert_file "$CONFIG_FILE"
 assert_file "$NATIVE_ACCESS_TOKEN_FILE"

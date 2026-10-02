@@ -17,10 +17,19 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(super) struct FlowLock(Arc<File>);
+pub(crate) struct FlowLock(Arc<File>);
 
 impl FlowLock {
-    pub(super) fn acquire(path: &Path) -> Result<Self, StepFailure> {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, StepFailure> {
+        Self::try_acquire(path).map_err(|error| StepFailure {
+            presentation: UserFacingError::new("Setup unavailable", if error.kind() == io::ErrorKind::WouldBlock {
+                "Another LG Buddy setup is already open. Finish or close it before starting another."
+            } else { "The setup lock could not be acquired. Run LG Buddy in your user session." }),
+            diagnostic: error.to_string(), retryable: true,
+        })
+    }
+
+    pub(crate) fn try_acquire(path: &Path) -> io::Result<Self> {
         let open = || -> io::Result<File> {
             let parent = path
                 .parent()
@@ -54,13 +63,9 @@ impl FlowLock {
             }
             Ok(file)
         };
-        open().map(|file| Self(Arc::new(file))).map_err(|error| StepFailure {
-            presentation: UserFacingError::new("Setup unavailable", if error.kind() == io::ErrorKind::WouldBlock {
-                "Another LG Buddy setup is already open. Finish or close it before starting another."
-            } else { "The setup lock could not be acquired. Run LG Buddy in your user session." }),
-            diagnostic: error.to_string(), retryable: true,
-        })
+        open().map(|file| Self(Arc::new(file)))
     }
+
     pub(super) fn file(&self) -> Arc<File> {
         self.0.clone()
     }

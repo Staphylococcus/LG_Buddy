@@ -188,11 +188,11 @@ The extracted candidate exposes this second pass through the hidden
 `upgrade-preflight` installer entrypoint. `install.sh --upgrade` invokes it
 before sudo or installation writes, loads the existing config pointer and
 settings without rewriting them, and never runs configuration, discovery, or
-pairing. Native upgrades remove the obsolete LG Buddy Python environment after
-additional directory and mount checks. Healthy legacy environments are preserved
-through the final 1.x window; unhealthy ones are refused before privileged
-mutation with instructions to pair and select `lg_webos`. Fresh installations
-never create an environment. After replacing owned runtime and
+pairing. Upgrades remove the obsolete LG Buddy Python environment after
+additional directory and mount checks, regardless of whether the saved profile
+is native or stale. Installation leaves per-user configuration and credentials
+untouched; the installed v2 application starts migration for stale profiles.
+Fresh installations never create a Python environment. After replacing owned runtime and
 integration files, the installer reloads system integrations before user
 integrations and verifies that the installed binary matches the candidate.
 

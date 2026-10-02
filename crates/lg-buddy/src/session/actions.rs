@@ -6,7 +6,9 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{load_config, resolve_config_path_from_env, Config, MacAddress, TvPlatform};
+use crate::config::{
+    load_current_config, resolve_config_path_from_env, Config, MacAddress, TvPlatform,
+};
 use crate::events::RuntimeEvent;
 use crate::lifecycle::{self, NmOnlineNetworkWaiter};
 use crate::runtime_phase::LogindRuntimePhaseProvider;
@@ -14,7 +16,8 @@ use crate::screen::{self, ScreenOnDeps, SystemMarkerLifecycleStatusProvider};
 use crate::state::{
     ScreenOwnershipMarker, StateScope, SystemSleepAttemptState, SystemSleepCycleState,
 };
-use crate::tv::{build_tv_client, SelectedTvClient, TvClientBuildOptions};
+use crate::tv::{build_tv_client, TvClientBuildError, TvClientBuildOptions};
+use crate::web_os::WebOsTvClient;
 use crate::wol::UdpWakeOnLanSender;
 use crate::RunError;
 
@@ -36,18 +39,20 @@ struct TvClientBinding {
 /// authentication, connection invalidation, and the no-ambiguous-write-replay rule.
 #[derive(Default)]
 pub struct RuntimeActionExecutor {
-    tv_client: Option<(TvClientBinding, SelectedTvClient)>,
+    tv_client: Option<(TvClientBinding, WebOsTvClient)>,
 }
 
 impl RuntimeActionExecutor {
     fn load_config(&mut self) -> Result<(PathBuf, Config), RunError> {
         let result = (|| {
             let path = resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
-            let config = load_config(&path).map_err(RunError::Config)?;
-            Ok((path, config))
+            let current = load_current_config(&path)?;
+            Ok((current.path, current.config))
         })();
-        // An unpaired or unreadable profile must not leave an old TV connection
-        // available for reuse if configuration later becomes valid again.
+        // An unpaired, unreadable, or stale config must not leave an old TV
+        // connection available for reuse if configuration later becomes valid
+        // again. A stale reload invalidates the retained client so the legacy
+        // TV adapter is not driven off the legacy target.
         if result.is_err() {
             self.tv_client = None;
         }
@@ -59,7 +64,7 @@ impl RuntimeActionExecutor {
         config_path: &Path,
         config: &Config,
         options: TvClientBuildOptions,
-    ) -> Result<&SelectedTvClient, RunError> {
+    ) -> Result<&WebOsTvClient, RunError> {
         let binding = TvClientBinding {
             config_path: config_path.to_owned(),
             tv_ip: config.tv_ip,
@@ -226,7 +231,10 @@ impl RuntimeActionExecutor {
         let network_waiter = NmOnlineNetworkWaiter::default();
 
         let result = (|| -> Result<(), RunError> {
-            match tv_client.can_authenticate_unattended() {
+            let has_token = tv_client
+                .has_stored_access_token()
+                .map_err(TvClientBuildError::TokenStore);
+            match has_token {
                 Ok(true) => lifecycle::restore_after_system_sleep_with(
                     writer,
                     &config,

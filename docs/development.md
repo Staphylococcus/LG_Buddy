@@ -28,7 +28,6 @@ and do not provision a Python environment.
 
 Backend-specific tools used in development and local testing:
 
-- `swayidle` only when testing the deprecated compatibility backend
 - readable `/dev/input/event*` devices for local gamepad activity testing
 - readable `/dev/hidraw*` devices when testing the Logitech G923 raw HID fallback
 
@@ -159,7 +158,8 @@ cargo test -p lg-buddy --lib
 cargo test -p lg-buddy --test cucumber
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy-gui
 dbus-run-session -- xvfb-run -a bash ./scripts/test-gui-launch.sh ./target/debug/lg-buddy
-dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh ./target/debug/lg-buddy ./target/debug/lg-buddy-gui
+cargo build --locked -p lg-buddy --example gui_journey_tv
+dbus-run-session -- xvfb-run -a bash ./scripts/test-installed-gui.sh ./target/debug/lg-buddy ./target/debug/lg-buddy-gui ./target/debug/examples/gui_journey_tv
 dbus-run-session -- xvfb-run -a env ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 cargo test -p lg-buddy-gui -- --test-threads=1
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 bash -n install.sh uninstall.sh configure.sh bin/LG_Buddy_Common scripts/build-release-bundle.sh scripts/test-gui-launch.sh scripts/test-installed-gui.sh scripts/test-release-bundle.sh scripts/test-cross-version-upgrade.sh scripts/test-production-upgrade-canary.sh scripts/publish-release-assets.sh
@@ -359,9 +359,9 @@ the branch contract and recovery process, see
 | `crates/lg-buddy/src/sources/desktop/gnome/inhibition.rs` | Independent SessionManager inhibition capability |
 | `crates/lg-buddy/src/sources/desktop/kwin.rs` | Optional pull inhibition through the native KWin plugin |
 | `data/kwin/` | Plugin source, compatible artifact selection and optional setup |
+| `data/gnome-shell/` | Optional GNOME Shell extension with a Quick Settings brightness slider |
 | `crates/lg-buddy/src/sources/desktop/powerdevil.rs` | Independent pull inhibition through PowerDevil's effective screen policy |
 | `crates/lg-buddy/src/sources/desktop/wayland.rs` | Native Wayland idle/activity provider |
-| `crates/lg-buddy/src/sources/desktop/swayidle.rs` | `swayidle` backend integration |
 | `crates/lg-buddy/src/tv.rs` | TV transport boundary and facade |
 | `crates/lg-buddy/src/web_os/` | Native webOS client, profile-bound TV adapter, domain operations, and test support |
 | `crates/lg-buddy/src/wol.rs` | Native Wake-on-LAN support |
@@ -377,6 +377,7 @@ the branch contract and recovery process, see
 | `scripts/xwd_mean.py` | Standard-library XWD luminance probe for release theme smoke tests |
 | `scripts/test-release-linkage.sh` | Static runtime and GNU GUI linkage baseline check |
 | `scripts/test-release-bundle.sh` | Release bundle smoke test |
+| `scripts/test-gnome-extension.sh` | GNOME Shell extension metadata, syntax and gjs behavior tests (`scripts/test_gnome_extension.js`) |
 | `scripts/test-cross-version-upgrade.sh` | Pinned previous-to-candidate archive upgrade smoke test |
 | `scripts/test-production-upgrade-canary.sh` | Post-publication production GitHub upgrade canary |
 | `scripts/record_github_release_responses.py` | Sanitized production response recorder for offline mocks |

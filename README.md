@@ -27,16 +27,16 @@ Screenshots use sample TV data.
 
 ## Desktop Compatibility
 
-| What you can do | GNOME | Compatible native Wayland | Explicit legacy `swayidle` | Other Linux sessions |
-| --- | --- | --- | --- | --- |
-| Turn the TV on and off with your PC | ✅ | ✅ | ✅ | ✅ |
-| Blank the panel while away and restore it on return | ✅ | ✅ | ✅ | ❌ |
-| Keep the panel awake while using a gamepad | ✅ | ✅ | ❌ | ❌ |
-| Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ | ✅ |
-| Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ | ✅ |
+| What you can do | GNOME | Compatible native Wayland | Other Linux sessions |
+| --- | --- | --- | --- |
+| Turn the TV on and off with your PC | ✅ | ✅ | ✅ |
+| Blank the panel while away and restore it on return | ✅ | ✅ | ❌ |
+| Keep the panel awake while using a gamepad | ✅ | ✅ | ❌ |
+| Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ |
+| Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ |
 
 Automatic monitoring uses the available native GNOME and Wayland sources.
-The normal path does not probe or require swayidle. If the TV does not blank or restore as expected, follow
+LG Buddy does not launch or require swayidle. If the TV does not blank or restore as expected, follow
 the [screen behavior and troubleshooting guide](docs/user-guide.md#automatic-screen-blanking).
 
 ## Before You Install
@@ -51,7 +51,7 @@ checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
 packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
 the requirements before proceeding. The prebuilt binaries require glibc 2.39
 or newer—the Ubuntu 24.04 runtime baseline.
-Fresh and native installations do not require Python, pip, or bscpylgtv.
+The installed runtime does not require Python, pip, or bscpylgtv.
 TV Sleep & Wake activation requires `pkexec` and
 a desktop authorization agent. You can also install the prerequisites manually:
 
@@ -78,8 +78,8 @@ sudo pacman -S gtk4 libadwaita polkit
 
 </details>
 
-Existing explicit `swayidle` configurations remain supported until 2.0.0 and
-require a separately installed command. Automatic monitoring never selects it.
+The built-in `swayidle` backend has been removed. Saved selections convert to
+`auto` at user screen daemon startup, preserving the idle-blanking preference.
 Without native idle support, disable **Idle blanking** to keep other LG Buddy
 features available, or use [external idle automation](docs/user-guide.md#external-idle-automation).
 

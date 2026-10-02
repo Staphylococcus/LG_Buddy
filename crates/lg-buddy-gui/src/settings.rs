@@ -1193,16 +1193,17 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     );
     view.render(&swayidle);
     assert!(
-        !rows[1].is_visible(),
-        "native inhibitor setting is hidden for swayidle"
+        rows[1].is_visible(),
+        "a retired backend does not hide the native inhibitor setting"
     );
     assert!(
         rows[2].is_visible(),
-        "the selected swayidle backend remains visible"
+        "the retired backend remains visible for recovery"
     );
+    assert!(view.rows.borrow()[2].problem.is_visible());
     assert!(
         rows[3].is_visible(),
-        "idle timeout remains visible for swayidle"
+        "idle timeout remains visible with retired configuration"
     );
     let disabled = SettingsPresentation::from_store(
         &ConfigEnvReader::parse(

@@ -45,6 +45,7 @@ pub struct MockWebOsTvSnapshot {
     pub power_off_count: u64,
     pub pairing_prompt_count: u64,
     pub registration_tokens: Vec<Option<String>>,
+    pub request_uris: Vec<String>,
 }
 
 pub struct MockWebOsTv {
@@ -61,6 +62,19 @@ impl MockWebOsTv {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, WEBOS_WSS_PORT));
         Self {
             server: WebOsTestServer::active_tls_at(version.test_version(), input, address),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_version_screen_off(version: MockWebOsVersion, input: &str) -> Self {
+        let input = match input {
+            "HDMI_2" => WebOsTestInput::Hdmi2,
+            "HDMI_3" => WebOsTestInput::Hdmi3,
+            other => panic!("no hardware-backed native WebOS fixture exists for `{other}`"),
+        };
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, WEBOS_WSS_PORT));
+        Self {
+            server: WebOsTestServer::screen_off_tls_at(version.test_version(), input, address),
         }
     }
 
@@ -83,9 +97,36 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
     }
 
+    #[allow(dead_code)] // Used by the foreground integration tests.
+    pub fn reject_request(&self, uri: Option<&str>) {
+        self.server.reject_request(uri);
+    }
+
+    #[allow(dead_code)] // Used by the installed GUI process fixture.
+    pub fn fault_first_request(&self, uri: &str, delay: Duration, reject: bool) {
+        self.server.fault_first_request(uri, delay, reject);
+    }
+
+    #[allow(dead_code)] // Used by the installed GUI process fixture.
+    pub fn set_backlight(&self, backlight: u8) {
+        self.server.set_backlight(backlight);
+    }
+
     pub fn reject_set_mute(&self) {
         self.server
             .set_scenario(WebOsTestScenario::SetAudioMuteRejected);
+    }
+
+    /// Power the TV off as if unplugged: live sessions drop and new connections
+    /// are refused, so the TV is unreachable until an external wake.
+    #[allow(dead_code)] // Used by the process fixture, which shares this adapter.
+    pub fn power_off_now(&self) {
+        self.server.power_off_now();
+    }
+
+    /// Blank the native TV screen while it stays powered on and reachable.
+    pub fn screen_off_now(&self) {
+        self.server.screen_off_now();
     }
 
     pub fn set_volume(&self, volume: i16) {
@@ -123,6 +164,7 @@ impl MockWebOsTv {
             power_off_count: snapshot.power_off_count,
             pairing_prompt_count: snapshot.pairing_prompt_count,
             registration_tokens: snapshot.registration_tokens,
+            request_uris: snapshot.request_uris,
         }
     }
 

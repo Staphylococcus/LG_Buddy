@@ -51,7 +51,7 @@ affect:
 - Wake-on-LAN targeting, networking assumptions, or cross-subnet behavior
 - installer prompts, config file shape, defaults, or migration behavior
 - systemd units, shutdown/sleep/wake ordering, or privilege boundaries
-- GNOME, `swayidle`, or other desktop-session backend semantics
+- GNOME, Wayland, or other desktop-session backend semantics
 - release packaging, installed file layout, or dependency policy
 - broad architecture, large refactors, or new external dependencies
 

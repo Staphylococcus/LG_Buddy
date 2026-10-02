@@ -5,9 +5,10 @@ Feature: Applications can prevent automatic idle blanking
   Background:
     Given a temporary LG Buddy config using input HDMI_2
     And the idle timeout is 1 seconds
+    And the existing config selects TV platform "lg_webos"
     And LG Buddy session runtime is isolated
-    And a mock TV client
-    And the TV is on input HDMI_2
+    And a native webOS TV on input HDMI_2 with brightness 90
+    And a valid native TV access token is stored
     And the executable PATH is isolated
     And GNOME Shell is available
     And GNOME emits no ScreenSaver signals
@@ -18,7 +19,7 @@ Feature: Applications can prevent automatic idle blanking
     Given GNOME monitor stays open for 1.3 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off" exactly 1 times
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the TV screen is blanked
 
   Scenario: Playback already running prevents blanking when honoring is enabled
@@ -26,7 +27,7 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.3 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the TV screen is visible
 
   Scenario: Playback started after monitoring prevents blanking
@@ -36,7 +37,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is visible
 
   Scenario: Missing inhibition support does not remove GNOME activity support
     Given honoring app keep-awake requests is "enabled"
@@ -44,7 +46,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off" exactly 1 times
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is blanked
 
   Scenario: Ending one of two playback inhibitors keeps the screen visible
     Given honoring app keep-awake requests is "enabled"
@@ -53,7 +56,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is visible
 
   Scenario: The last release waits a full timeout without requiring user input
     Given honoring app keep-awake requests is "enabled"
@@ -61,7 +65,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is visible
 
   Scenario: Blanking resumes after the release delay
     Given honoring app keep-awake requests is "enabled"
@@ -69,8 +74,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 2.5 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off" exactly 1 times
-    And the TV client did not receive "turn_screen_on"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
     And the TV screen is blanked
 
   Scenario: A PowerDevil inhibitor blocks even when GNOME is clear
@@ -80,7 +85,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is visible
 
   Scenario: A failed PowerDevil check contributes no inhibitor
     Given honoring app keep-awake requests is "enabled"
@@ -90,7 +96,8 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off" exactly 1 times
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is blanked
 
   Scenario: Input cancels a delayed clear answer before it can blank
     Given honoring app keep-awake requests is "enabled"
@@ -101,46 +108,47 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 1.9 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the TV screen is visible
 
   Scenario: Gamepad input restores independently of desktop inhibition
     Given honoring app keep-awake requests is "enabled"
-    And the TV screen is blanked
+    And the native webOS TV screen is blanked
     And the session marker exists
     And gamepad activity is observed after 0.2 seconds
     And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_on" exactly 1 times
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the TV screen is visible
     And the session marker is absent
 
   Scenario: Genuine desktop input restores the screen during inhibition
     Given honoring app keep-awake requests is "enabled"
-    And the TV screen is blanked
+    And the native webOS TV screen is blanked
     And the session marker exists
     And genuine desktop input occurs after 0.2 seconds
     And GNOME monitor stays open for 0.8 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_on" exactly 1 times
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the TV screen is visible
     And the session marker is absent
 
   Scenario: Repeated desktop input rearms the activity watch beyond the idle timeout
     Given honoring app keep-awake requests is "enabled"
     And GNOME has 0 idle inhibitors
-    And the TV screen is blanked
+    And the native webOS TV screen is blanked
     And the session marker exists
     And genuine desktop input occurs after 0.2 seconds
     And genuine desktop input occurs after 1.0 seconds
     And GNOME monitor stays open for 1.6 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_on" exactly 1 times
-    And the TV client did not receive "turn_screen_off"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
     And the TV screen is visible
     And the session marker is absent
 
@@ -150,6 +158,6 @@ Feature: Applications can prevent automatic idle blanking
     And GNOME monitor stays open for 0.4 seconds
     When I run the command "monitor"
     Then the command succeeds
-    And the TV client received "turn_screen_off" exactly 1 times
-    And the TV client did not receive "turn_screen_on"
+    And the native webOS TV received exactly 1 requests to "ssap://com.webos.service.tvpower/power/turnOffScreen"
+    And the native webOS TV received exactly 0 requests to "ssap://com.webos.service.tvpower/power/turnOnScreen"
     And the TV screen is blanked
