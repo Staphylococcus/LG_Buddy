@@ -142,7 +142,8 @@ Open **Settings** to adapt the TV to your routine:
 
 ![The Settings tab with screen, sleep and wake, and update behavior controls](screenshots/settings.png)
 
-After blanking the panel for inactivity or a locked session, LG Buddy powers
+After successfully blanking the panel for inactivity, desktop display-off, or
+a locked session, LG Buddy powers
 the TV off after five more minutes without activity. Returning before then
 restores the panel.
 
@@ -201,6 +202,57 @@ Use the application's diagnostics for current activity and inhibition sources.
 See the [session backend model](session-backend-model.md).
 
 <a id="external-idle-automation"></a>
+### Desktop screen blanking and the idle timer
+
+**Does LG Buddy follow KDE Plasma's screen-off setting?** Yes, since 1.9.0,
+when Linux exposes the actual display-off transition. With **Idle blanking**
+enabled and the native monitor running, either of two paths can blank the TV:
+
+- **Desktop display-off:** KDE Plasma, GNOME, or another desktop turns a
+  connected display off, and Linux reports a readable DRM DPMS On → Off
+  transition. LG Buddy requests TV blanking without waiting for its own timer.
+- **Additional idle protection:** LG Buddy's **Idle timeout** expires without
+  observed activity. This can blank the panel before the desktop turns the
+  display off. **Allow apps to prevent idle blanking** controls whether app
+  inhibition delays this timer-based action.
+
+For example, if Plasma turns the screen off after ten minutes and LG Buddy's
+idle timeout is thirty minutes, a detected desktop display-off requests TV
+blanking at about ten minutes. If LG Buddy's timeout is five minutes, its own
+timer can blank the TV first, unless honored app inhibition prevents it.
+LG Buddy does not change or synchronize your desktop's timeout setting.
+
+Both paths use the same TV input checks and ownership policy. After a successful
+blank, five more minutes without activity lead to power-off; returning restores
+the panel under the selected restore policy. Automatic blanking and delayed
+power-off check that the TV is still on the configured PC input before acting.
+System display-on alone is not a restore trigger; restoration follows accepted
+desktop or gamepad activity and the existing wake policy.
+
+Detection depends on the compositor and graphics driver exposing readable DPMS
+state. An already-off display at monitor startup, unplugging a cable, or an
+unreadable state does not count as a display-off transition. The observer watches
+all connected displays: it does not match a connector to the configured TV, so
+turning off another connected display can also request TV blanking. App inhibition
+gates LG Buddy's idle timer, not an actual system display-off event. Turning off
+**Idle blanking** disables both automatic paths and automatic session lock
+blanking; separately configured PC sleep/wake automation remains available.
+
+### KDE Plasma integration
+
+KDE Plasma Wayland uses native activity monitoring, supported gamepad activity,
+and the same blank-then-power-off policy as GNOME. Automatic integration discovers
+the available sources without a desktop backend setting.
+
+For playback and presentations, enable **Allow apps to prevent idle blanking**.
+LG Buddy checks PowerDevil's effective screen policy and, when available, a KWin
+plugin for native Wayland idle inhibitors. Setup tries a compatible bundled
+plugin before offering a local build. If that source is unavailable, other
+sources remain usable, with reduced inhibition coverage; complete applicable
+setup requirements before relying on automatic operation. See
+[KWin integration](kwin-integration.md) for requirements and
+[desktop validation](desktop-session-validation.md) for tested coverage.
+
 ## External idle automation
 
 When native idle monitoring is unavailable, disable **Idle blanking** to keep

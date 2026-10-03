@@ -993,7 +993,13 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 `sources/desktop/wayland.rs` is the native Wayland adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
-the shared inactivity runtime; compositor idle does not directly blank the TV.
+the shared inactivity runtime; Wayland idle-notifier `idled` does not directly
+blank the TV. Actual system display-off is a separate source:
+`sources/linux/dpms.rs` observes connected Linux DRM DPMS On → Off transitions,
+and the runner routes them through the existing TV blanking, ownership, and
+delayed power-off policy without waiting for the inactivity deadline. See
+[System display blanking](session-backend-model.md#system-display-blanking-linux-dpms)
+for source requirements and multi-display limits.
 
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:

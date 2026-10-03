@@ -13,6 +13,9 @@ Use your LG webOS TV as a Linux PC display with less reaching for the remote.
 
 - **Start and stop with your PC.** Turn the TV on at boot and wake, and off at
   shutdown and before system sleep.
+- **Follow desktop screen blanking.** Since 1.9.0, blank the TV when Linux
+  reports a connected display turning off, including KDE Plasma screen-off
+  behavior where the driver exposes it.
 - **Give the panel a break.** Blank it when you step away, restore it when you
   return, and power off after five more minutes without activity.
 - **Keep playing.** Supported gamepad activity keeps the panel awake on GNOME
@@ -27,13 +30,26 @@ Screenshots use sample TV data.
 
 ## Desktop Compatibility
 
-| What you can do | GNOME | Compatible native Wayland | Other Linux sessions |
+| What you can do | GNOME | KDE Plasma Wayland / other compatible native Wayland | Other Linux sessions |
 | --- | --- | --- | --- |
 | Turn the TV on and off with your PC | ✅ | ✅ | ✅ |
 | Blank the panel while away and restore it on return | ✅ | ✅ | ❌ |
 | Keep the panel awake while using a gamepad | ✅ | ✅ | ❌ |
 | Adjust brightness and sound in the desktop app | ✅ | ✅ | ✅ |
 | Control the TV, change settings, and update from a terminal | ✅ | ✅ | ✅ |
+
+KDE Plasma Wayland uses native activity monitoring, supported gamepad activity,
+and the same blank-then-power-off policy as GNOME. Optional playback inhibition
+integrates with PowerDevil and KWin; setup handles the Plasma integration.
+Other native Wayland sessions require `ext_idle_notifier_v1` version 2 or newer
+and an advertised seat.
+
+System display blanking requires **Idle blanking** enabled, a running native
+monitor, and readable Linux DRM DPMS state. Detection depends on the compositor
+and graphics driver. Any connected display's On → Off transition can trigger
+TV blanking; connectors are not matched to the TV. See
+[desktop screen blanking](docs/user-guide.md#desktop-screen-blanking-and-the-idle-timer)
+for timing and detection limits.
 
 Automatic monitoring uses the available native GNOME and Wayland sources.
 LG Buddy does not launch or require swayidle. If the TV does not blank or restore as expected, follow
