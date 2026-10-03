@@ -36,6 +36,8 @@ use crate::settings::{
 use crate::updates::UpdateChannel;
 use crate::version::ReleaseChannel;
 
+mod setup;
+
 pub(crate) const SESSION_BUS_NAME: &str = "io.github.Staphylococcus.LGBuddy";
 pub(crate) const SESSION_OBJECT_PATH: &str = "/io/github/Staphylococcus/LGBuddy/Session";
 pub(crate) const SESSION_INTERFACE: &str = "io.github.Staphylococcus.LGBuddy.Session1";
@@ -527,6 +529,7 @@ where
         signal: NotificationSignal,
     ) -> Result<Option<SessionNotificationEvent>, UpdateNotificationError> {
         match signal {
+            NotificationSignal::ActivationToken { .. } => Ok(None),
             NotificationSignal::ActionInvoked { id, action_key } => {
                 let Some(request) = self.take_action_request(id) else {
                     return Ok(None);
@@ -784,6 +787,7 @@ where
         diagnostics,
         assessment.published.clone(),
     )?;
+    let _attention_worker = setup::spawn(assessment.published.clone(), stop.clone());
     if session_service_startup_stopped(&stop) {
         return Ok(());
     }
@@ -1111,6 +1115,9 @@ fn notification_signal_sender_is_trusted(
 
 fn describe_notification_signal(signal: &NotificationSignal) -> String {
     match signal {
+        NotificationSignal::ActivationToken { id, .. } => {
+            format!("notification activation token for notification {}", id.0)
+        }
         NotificationSignal::ActionInvoked { id, action_key } => {
             format!(
                 "notification action `{action_key}` for notification {}",

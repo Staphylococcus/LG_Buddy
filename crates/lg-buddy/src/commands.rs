@@ -75,6 +75,14 @@ impl InstalledGui {
     }
 
     fn launch(&self, arguments: &[&str]) -> Result<(), RunError> {
+        self.launch_with_activation_token(arguments, None)
+    }
+
+    fn launch_with_activation_token(
+        &self,
+        arguments: &[&str],
+        token: Option<&str>,
+    ) -> Result<(), RunError> {
         match fs::symlink_metadata(&self.command_path) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -117,15 +125,19 @@ impl InstalledGui {
             ));
         }
 
-        let output = ProcessCommand::new(&self.command_path)
-            .args(arguments)
-            .output()
-            .map_err(|error| {
-                RunError::Policy(format!(
-                    "could not launch installed LG Buddy GUI at `{}`: {error}",
-                    self.command_path.display()
-                ))
-            })?;
+        let mut command = ProcessCommand::new(&self.command_path);
+        command.args(arguments);
+        if let Some(token) = token {
+            command
+                .env("XDG_ACTIVATION_TOKEN", token)
+                .env("DESKTOP_STARTUP_ID", token);
+        }
+        let output = command.output().map_err(|error| {
+            RunError::Policy(format!(
+                "could not launch installed LG Buddy GUI at `{}`: {error}",
+                self.command_path.display()
+            ))
+        })?;
 
         if output.status.success() {
             Ok(())
@@ -266,6 +278,10 @@ pub fn run_nm_pre_down<W: Write>(writer: &mut W) -> Result<(), RunError> {
 
 pub fn run_overview() -> Result<(), RunError> {
     InstalledGui::from_env()?.launch(&[])
+}
+
+pub(crate) fn run_overview_with_activation_token(token: Option<&str>) -> Result<(), RunError> {
+    InstalledGui::from_env()?.launch_with_activation_token(&[], token)
 }
 
 pub fn run_brightness<W: Write>(
@@ -1325,6 +1341,15 @@ mod tests {
         launcher
             .launch(&["brightness"])
             .expect("GUI launch should succeed");
+    }
+
+    #[test]
+    fn ordinary_gui_activation_forwards_literal_token_without_arguments() {
+        let script = ExecutableScript::new("gui-activation-token", "lg-buddy-gui", "#!/bin/sh\ntest \"$#\" = 0 && test \"$XDG_ACTIVATION_TOKEN\" = 'token with spaces;$()' && test \"$DESKTOP_STARTUP_ID\" = 'token with spaces;$()'\n");
+        let launcher = InstalledGui::new(env::current_exe().unwrap(), script.path());
+        launcher
+            .launch_with_activation_token(&[], Some("token with spaces;$()"))
+            .unwrap();
     }
 
     #[test]
