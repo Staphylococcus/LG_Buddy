@@ -234,6 +234,7 @@ run as the desktop user.
 | --- | --- |
 | GNOME | Missing required common services makes setup incomplete. Satisfying those requirements restores completeness; absent KWin integration adds no requirement. |
 | Plasma Wayland | Missing required common services or applicable KWin integration makes setup incomplete, including an incompatible or unloaded bridge. Repair must verify current readiness. |
+| NixOS | Loaded service state and configuration bindings verify declarative services without requiring the imperative installer's unit files. Already-ready services and compatible live KWin bridges are complete; missing requirements remain blocked from imperative repair. The package supplies the setup helper alongside its executable. |
 | Headless setup followed by graphical login, or a desktop change | Requirements are recomputed in the current session. An earlier result does not permanently suppress a newly applicable integration. Login itself does not provision it or request authorization. |
 
 ## Installation and terminal entry points

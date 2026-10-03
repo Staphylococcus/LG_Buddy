@@ -192,6 +192,9 @@ mkdir -p "$payload_dir/source"
 for source in CMakeLists.txt main.cpp metadata.json; do printf '%s\n' "$source" > "$payload_dir/source/$source"; done
 source_id="$(cd "$payload_dir/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum | cut -d ' ' -f1)"
 printf '%s\t%s\t%s\t%s\n' "$kwin_version" "$qt_version" "$plugin_root" :1.42 > "$fixture/info"
+touch "$fixture/ready"
+main --status
+rm "$fixture/ready"
 status=0
 main --status || status=$?
 if [ -e /etc/NIXOS ] || [ -e /run/ostree-booted ]; then

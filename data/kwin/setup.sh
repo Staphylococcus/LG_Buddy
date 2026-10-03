@@ -264,13 +264,15 @@ inspect_session() {
     info="$("$runtime" kwin-bridge info)" || return 1
     [ -n "$info" ] || return 2
     IFS=$'\t' read -r kwin_version qt_version plugin_root kwin_owner <<< "$info"
-    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 4
-    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 4
     source_id="$(cd -- "$payload_dir/source" && sha256sum CMakeLists.txt main.cpp metadata.json | sha256sum)" || return 1
     source_id="${source_id%% *}"
     arch="$(uname -m)"
-    existing="$("$runtime" kwin-bridge check 2>/dev/null)" || return 3
-    [ "$existing" = "$kwin_version"$'\t'"$source_id" ] || return 3
+    # Already installed bridges can be ready even where imperative repair is unsupported.
+    existing="$("$runtime" kwin-bridge check 2>/dev/null)" \
+        && [ "$existing" = "$kwin_version"$'\t'"$source_id" ] && return 0
+    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 4
+    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 4
+    return 3
 }
 
 # Login may load an already installed artifact, but never installs or compiles.

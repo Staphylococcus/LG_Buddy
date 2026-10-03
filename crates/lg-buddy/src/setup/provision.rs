@@ -49,17 +49,18 @@ fn file(path: PathBuf, contents: impl Into<String>, mode: u32) -> FileSpec {
 
 impl<C: ServiceController> ServiceInstallation<'_, C> {
     pub(crate) fn inspect(&self) -> StepResponse {
-        if self.system_root.join("etc/NIXOS").exists()
-            || self.system_root.join("run/ostree-booted").exists()
-        {
-            return StepResponse::Blocked(failure(
-                "This installation does not support automatic service setup.",
-                "declaratively managed or immutable system",
-                false,
-            ));
-        }
         match self.ready() {
             Ok(true) => StepResponse::Complete,
+            Ok(false)
+                if self.declarative_installation()
+                    || self.system_root.join("run/ostree-booted").exists() =>
+            {
+                StepResponse::Blocked(failure(
+                    "This installation does not support automatic service setup.",
+                    "declaratively managed or immutable system",
+                    false,
+                ))
+            }
             Ok(false) if self.controller.systemd_actions_disabled() => {
                 StepResponse::Blocked(failure(
                     "Service changes are disabled.",
@@ -141,6 +142,9 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             .effective_by_name("updates.auto_check")?
             .required_value()?
             == SettingValue::Enum("enabled"))
+    }
+    fn declarative_installation(&self) -> bool {
+        self.system_root.join("etc/NIXOS").exists()
     }
     fn override_contents(&self) -> Result<String, SettingsError> {
         let config = fs::canonicalize(self.config).map_err(io_error)?;
@@ -253,16 +257,22 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                 Err(error) => return Err(io_error(error)),
             }
         }
-        Ok(files_match(&self.system_files()?)?
-            && self.controller.system_unit_is_enabled(STARTUP)?
-            && self.controller.system_unit_is_enabled(LIFECYCLE)?
-            && self.controller.system_lifecycle_is_active()?
-            && self.binding_matches(self.controller.system_service_config_path(STARTUP))?
-            && self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?)
+        // Declarative units need not match the imperative installer's files.
+        // Their loaded configuration bindings and service states still must match.
+        Ok(
+            (self.declarative_installation() || files_match(&self.system_files()?)?)
+                && self.controller.system_unit_is_enabled(STARTUP)?
+                && self.controller.system_unit_is_enabled(LIFECYCLE)?
+                && self.controller.system_lifecycle_is_active()?
+                && self.binding_matches(self.controller.system_service_config_path(STARTUP))?
+                && self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?,
+        )
     }
     fn ready(&self) -> Result<bool, SettingsError> {
         let timer = self.desired_timer()?;
-        if !files_match(&self.user_files()?)? || !self.system_ready()? {
+        if (!self.declarative_installation() && !files_match(&self.user_files()?)?)
+            || !self.system_ready()?
+        {
             return Ok(false);
         }
         if !self.binding_matches(self.controller.user_service_config_path(SCREEN))?
