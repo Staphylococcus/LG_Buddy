@@ -620,12 +620,16 @@ fn native_steps(fixture: Fixture, plasma: bool) -> crate::setup::environment::Na
     fs::write(
         &helper,
         r#"#!/bin/bash
-cd -- "$(dirname -- "$0")"
-[ "$1" != --status ] || exit "$(cat kwin-status)"
+_fixture_dir="$(dirname -- "${BASH_SOURCE[0]}")"
+main() {
+cd -- "$_fixture_dir"
+[ "$1" != --status ] || return "$(cat kwin-status)"
 printf '%s\n' "$*" >> kwin-actions
-[[ "$*" == *--noninteractive* ]] || exit 1
-[[ "$*" == *--allow-dependencies* ]] || exit 77
+[[ "$*" == *--noninteractive* ]] || return 1
+[[ "$*" == *--allow-dependencies* ]] || return 77
 echo 0 > kwin-status
+}
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
 "#,
     )
     .unwrap();
@@ -637,7 +641,11 @@ echo 0 > kwin-status
         kwin_helper: helper,
         lock_path: lock_path.clone(),
         authorization: AuthorizationMode::Noninteractive,
-        authorization_session: std::sync::Arc::default(),
+        authorization_session: std::sync::Arc::new(
+            crate::setup::authorization::AuthorizationSession::new(
+                AuthorizationMode::Noninteractive,
+            ),
+        ),
     };
     NativeSteps {
         context,

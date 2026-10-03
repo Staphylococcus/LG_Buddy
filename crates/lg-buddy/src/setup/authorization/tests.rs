@@ -39,14 +39,31 @@ fi
         fixture.script(
             "sudo",
             r#"
-[ "$1" = -n ] || exit 127
-shift
+noninteractive=0
+if [ "$1" = -n ]; then noninteractive=1; shift; fi
+printf '%s\n' "$PPID" >> "$root/sudo-callers"
+printf '%s\n' "$noninteractive" >> "$root/sudo-modes"
+has_grant() {
+    [ -f "$root/sudo-grant" ] || return 1
+    grant="$(cat "$root/sudo-grant")"
+    [ "$grant" = grant ] || [ "$grant" = "$PPID" ]
+}
 if [ "${1:-}" = /usr/bin/true ]; then
     printf 'probe\n' >> "$root/sudo-probes"
-    [ -f "$root/sudo-grant" ]
+    has_grant
     exit $?
 fi
-[ -f "$root/sudo-grant" ] || exit 127
+if ! has_grant; then
+    [ "$noninteractive" = 0 ] || exit 1
+    [ ! -f "$root/sudo-denied" ] || exit 1
+    if [ -f "$root/terminal-input-required" ]; then
+        printf 'Fixture authorization: ' > /dev/tty
+        read -r password < /dev/tty || exit 1
+        [ "$password" = fixture-password ] || exit 1
+    fi
+    printf '%s\n' "$PPID" >> "$root/sudo-prompts"
+    printf '%s' "$PPID" > "$root/sudo-grant"
+fi
 printf '%s\n' "$PPID" >> "$root/sudo-executors"
 printf '%s\0' "$@" >> "$root/sudo-arguments"
 printf 'sudo helper diagnostic' >&2
@@ -89,7 +106,16 @@ main() {{
     exec 9>'{root}/plasma.lock'
     flock -n 9 || return 1
     [ "$1" = --foreground ] || return 1
-    if [ "${{2:-}}" = --allow-dependencies ]; then
+    printf '%s\n' "$*" >> '{root}/plasma-options'
+    for option in "${{@:2}}"; do
+        case "$option" in
+            --terminal) terminal=1 ;;
+            --noninteractive) noninteractive=1 ;;
+            --allow-dependencies) allow_dependencies=1 ;;
+            *) return 1 ;;
+        esac
+    done
+    if [ "$allow_dependencies" = 1 ]; then
         privileged --system-dependencies 6.1.0 || return $?
     fi
     privileged --system-remove 1000 root id || return $?
@@ -117,12 +143,22 @@ main() {{
         RUNNER
             .replace("/usr/bin/pkcheck", self.0.join("pkcheck").to_str().unwrap())
             .replace("/usr/bin/pkexec", self.0.join("pkexec").to_str().unwrap())
+            .replace("/usr/bin/sudo", self.0.join("sudo").to_str().unwrap())
     }
 
     fn session(&self, lock: Option<&Arc<File>>) -> AuthorizationSession {
+        self.session_for_mode(AuthorizationMode::Interactive, lock)
+    }
+
+    fn session_for_mode(
+        &self,
+        mode: AuthorizationMode,
+        lock: Option<&Arc<File>>,
+    ) -> AuthorizationSession {
         AuthorizationSession(Mutex::new(SessionState {
-            process: Some(SessionProcess::start(&self.runner(), lock).unwrap()),
+            process: Some(SessionProcess::start(&self.runner(), mode, lock).unwrap()),
             closed: false,
+            mode,
         }))
     }
 
@@ -139,6 +175,227 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
     }
+}
+
+#[test]
+fn terminal_services_and_plasma_share_parent_scoped_sudo_permission() {
+    let fixture = Fixture::new();
+    let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
+    assert!(!fixture.0.join("sudo-prompts").exists());
+    let config = Path::new("a path with ' quotes, $(literal) and\na newline");
+    assert!(session.services(config, None).unwrap().status.success());
+    let plasma = fixture.0.join("plasma.sh");
+    assert!(session
+        .plasma(&plasma, false, None)
+        .unwrap()
+        .status
+        .success());
+    assert!(!fs::read(fixture.0.join("sudo-arguments"))
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .any(|arg| arg == b"--system-dependencies"));
+    assert!(session
+        .plasma(&plasma, true, None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("sudo-prompts").len(), 1);
+    let callers = fixture.lines("sudo-callers");
+    assert!(callers.iter().all(|pid| pid == &callers[0]));
+    assert_eq!(fixture.lines("sudo-executors").len(), 6);
+    assert!(fs::read(fixture.0.join("sudo-arguments"))
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .any(|arg| arg == config.as_os_str().as_bytes()));
+    assert_eq!(
+        fixture.lines("plasma-options"),
+        [
+            "--foreground --terminal",
+            "--foreground --terminal --allow-dependencies"
+        ]
+    );
+    assert!(!fixture.0.join("checks").exists());
+    assert!(!fixture.0.join("executors").exists());
+    session.close();
+    // Closing our owner must not invalidate the user's native sudo cache.
+    assert!(fixture.0.join("sudo-grant").exists());
+}
+
+#[test]
+fn terminal_prompt_child() {
+    let Some(root) = std::env::var_os("LG_BUDDY_TERMINAL_AUTHORIZATION_ROOT") else {
+        return;
+    };
+    let fixture = Fixture(root.into());
+    let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
+    assert!(session
+        .services(Path::new("config"), None)
+        .unwrap()
+        .status
+        .success());
+    assert!(session
+        .plasma(&fixture.0.join("plasma.sh"), false, None)
+        .unwrap()
+        .status
+        .success());
+    session.close();
+    std::mem::forget(fixture);
+}
+
+#[test]
+fn terminal_authentication_can_read_the_controlling_tty_without_consuming_protocol_input() {
+    use std::{
+        os::{fd::FromRawFd, unix::process::CommandExt},
+        time::{Duration, Instant},
+    };
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("terminal-input-required"), "").unwrap();
+    let (mut master_fd, mut slave_fd) = (-1, -1);
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let slave = unsafe { File::from_raw_fd(slave_fd) };
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "setup::authorization::tests::terminal_prompt_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("LG_BUDDY_TERMINAL_AUTHORIZATION_ROOT", &fixture.0)
+        .stdin(slave);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    master.write_all(b"fixture-password\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.wait();
+            panic!("terminal authorization did not finish");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(status.success());
+    assert_eq!(fixture.lines("sudo-prompts").len(), 1);
+    assert_eq!(fixture.lines("sudo-executors").len(), 3);
+}
+
+#[test]
+fn terminal_sudo_preserves_grants_after_helper_failure_and_observes_expiry() {
+    let fixture = Fixture::new();
+    let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
+    fs::write(fixture.0.join("sudo-helper-result"), "1").unwrap();
+    let output = session.services(Path::new("config"), None).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stderr, b"sudo helper diagnostic");
+    assert_eq!(fixture.lines("sudo-executors").len(), 1);
+    fs::remove_file(fixture.0.join("sudo-helper-result")).unwrap();
+    assert!(session
+        .services(Path::new("retry"), None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("sudo-prompts").len(), 1);
+    fs::remove_file(fixture.0.join("sudo-grant")).unwrap();
+    assert!(session
+        .plasma(&fixture.0.join("plasma.sh"), false, None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("sudo-prompts").len(), 2);
+    let prompts = fixture.lines("sudo-prompts");
+    assert_eq!(prompts[0], prompts[1]);
+    assert!(!fixture.0.join("checks").exists());
+}
+
+#[test]
+fn terminal_sudo_denial_does_not_execute_or_fall_back_to_polkit() {
+    let fixture = Fixture::new();
+    let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
+    fs::write(fixture.0.join("sudo-denied"), "").unwrap();
+    assert_eq!(
+        session
+            .services(Path::new("config"), None)
+            .unwrap()
+            .status
+            .code(),
+        Some(1)
+    );
+    assert_eq!(fixture.lines("sudo-callers").len(), 1);
+    assert!(!fixture.0.join("sudo-executors").exists());
+    assert!(!fixture.0.join("checks").exists());
+    fs::remove_file(fixture.0.join("sudo-denied")).unwrap();
+    assert!(session
+        .services(Path::new("explicit retry"), None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("sudo-prompts").len(), 1);
+}
+
+#[test]
+fn noninteractive_sudo_never_prompts_and_reuses_only_existing_permission() {
+    let fixture = Fixture::new();
+    let session = fixture.session_for_mode(AuthorizationMode::Noninteractive, None);
+    let plasma = fixture.0.join("plasma.sh");
+    assert_eq!(
+        session
+            .services(Path::new("config"), None)
+            .unwrap()
+            .status
+            .code(),
+        Some(1)
+    );
+    assert_eq!(
+        session.plasma(&plasma, true, None).unwrap().status.code(),
+        Some(127)
+    );
+    assert!(!fixture.0.join("sudo-prompts").exists());
+    assert!(!fixture.0.join("sudo-executors").exists());
+    let callers = fixture.lines("sudo-callers");
+    fs::write(fixture.0.join("sudo-grant"), &callers[0]).unwrap();
+    assert!(session
+        .services(Path::new("config"), None)
+        .unwrap()
+        .status
+        .success());
+    assert!(session
+        .plasma(&plasma, true, None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("sudo-executors").len(), 4);
+    assert!(fixture.lines("sudo-modes").iter().all(|mode| mode == "1"));
+    assert!(fixture
+        .lines("sudo-callers")
+        .iter()
+        .all(|pid| pid == &callers[0]));
+    assert!(!fixture.0.join("checks").exists());
+    assert!(!fixture.0.join("sudo-prompts").exists());
 }
 
 #[test]

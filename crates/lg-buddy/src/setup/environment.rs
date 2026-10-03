@@ -46,7 +46,9 @@ impl SetupContext {
             // bypass another GUI/CLI flow for this user.
             lock_path: PathBuf::from(format!("/run/user/{uid}/lg-buddy-onboarding.lock")),
             authorization,
-            authorization_session: Arc::default(),
+            authorization_session: Arc::new(super::authorization::AuthorizationSession::new(
+                authorization,
+            )),
         })
     }
 }

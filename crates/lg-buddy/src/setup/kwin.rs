@@ -62,11 +62,6 @@ impl KWinSetup<'_> {
             if allow_dependencies {
                 args.push("--allow-dependencies");
             }
-            match self.authorization {
-                super::flow::AuthorizationMode::Noninteractive => args.push("--noninteractive"),
-                super::flow::AuthorizationMode::Terminal => args.push("--terminal"),
-                super::flow::AuthorizationMode::Interactive => {}
-            }
             match self.invoke(&args) {
                 Ok(output) => match output.status.code() {
                     Some(0) => match self.inspect() {
@@ -108,21 +103,13 @@ impl KWinSetup<'_> {
                 })
                 .ok_or_else(|| std::io::Error::other("Plasma inspection could not run"));
         }
-        if self.authorization == super::flow::AuthorizationMode::Interactive {
-            let local_session = super::authorization::AuthorizationSession::default();
-            let session = self.authorization_session.unwrap_or(&local_session);
-            return session.plasma(
-                self.helper,
-                args.contains(&"--allow-dependencies"),
-                self.command_lock.as_ref(),
-            );
-        }
-        // Never inherit interactive terminal input into background workers.
-        super::lock::command_with_lock("bash", self.command_lock.as_ref())
-            .arg(self.helper)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let local_session = super::authorization::AuthorizationSession::new(self.authorization);
+        let session = self.authorization_session.unwrap_or(&local_session);
+        session.plasma(
+            self.helper,
+            args.contains(&"--allow-dependencies"),
+            self.command_lock.as_ref(),
+        )
     }
 }
 fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {

@@ -1,17 +1,24 @@
-# One unprivileged shell owns the retained Polkit grant and the flow lease.
+# One unprivileged shell owns the native authorization subject and flow lease.
 # Requests and responses are framed, never interpreted as shell code.
 # shellcheck source-path=SCRIPTDIR
 set -uo pipefail
+_lg_buddy_mode="$1"
 umask 077
 _lg_buddy_output=$(mktemp -d "${TMPDIR:-/tmp}/lg-buddy-authorization.XXXXXX") || exit 1
 trap 'rm -rf -- "$_lg_buddy_output"' EXIT
-# A vanished GUI closes the response pipe, but only after the helper finishes.
+# A vanished frontend closes the response pipe after the helper finishes.
 trap 'exit 0' PIPE
 _lg_buddy_stat=$(<"/proc/$$/stat")
 read -r -a _lg_buddy_fields <<< "${_lg_buddy_stat##*) }"
 _lg_buddy_subject="$$,${_lg_buddy_fields[19]},$UID"
 
 _lg_buddy_privileged() {
+    case "$_lg_buddy_mode" in
+        terminal) /usr/bin/sudo "$@"; return $? ;;
+        noninteractive) /usr/bin/sudo -n "$@"; return $? ;;
+        interactive) ;;
+        *) return 1 ;;
+    esac
     # Polkit checks the real grant on every use, including its expiry. Never
     # retry a dismissed/denied challenge or fall back to another authenticator.
     if /usr/bin/pkcheck --action-id io.github.staphylococcus.LGBuddy.setup \
@@ -31,14 +38,18 @@ _lg_buddy_run() {
             ;;
         plasma)
             # The existing helper is sourceable. Running main in this shell
-            # keeps every privileged call attached to the same Polkit subject.
+            # keeps every privileged call attached to the same native subject.
             # shellcheck source=../../../../data/kwin/setup.sh
             source "$_lg_buddy_path" || return 1
-            if [ "$_lg_buddy_option" = 1 ]; then
-                main --foreground --allow-dependencies
-            else
-                main --foreground
-            fi
+            local -a args=(--foreground)
+            case "$_lg_buddy_mode" in
+                terminal) args+=(--terminal) ;;
+                noninteractive) args+=(--noninteractive) ;;
+                interactive) ;;
+                *) return 1 ;;
+            esac
+            [ "$_lg_buddy_option" != 1 ] || args+=(--allow-dependencies)
+            main "${args[@]}"
             ;;
         *) return 1 ;;
     esac

@@ -1,5 +1,6 @@
-//! A flow-scoped, unprivileged owner for native Polkit temporary authorization.
+//! A flow-scoped, unprivileged owner for native Polkit or sudo authorization.
 //! No passwords or transferable authorization tokens are stored by LG Buddy.
+use super::flow::AuthorizationMode;
 use std::{
     ffi::OsStr,
     fs::File,
@@ -13,17 +14,35 @@ use std::{
 const RUNNER: &str = include_str!("authorization.sh");
 
 /// Shared only by an explicit setup flow; permission is acquired lazily by
-/// Polkit when an operation actually needs administrator privileges.
+/// the native authenticator when an operation needs administrator privileges.
 #[derive(Debug, Default)]
 pub struct AuthorizationSession(Mutex<SessionState>);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SessionState {
     process: Option<SessionProcess>,
     closed: bool,
+    mode: AuthorizationMode,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            process: None,
+            closed: false,
+            mode: AuthorizationMode::Interactive,
+        }
+    }
 }
 
 impl AuthorizationSession {
+    pub(crate) fn new(mode: AuthorizationMode) -> Self {
+        Self(Mutex::new(SessionState {
+            mode,
+            ..SessionState::default()
+        }))
+    }
+
     pub(crate) fn services(&self, config: &Path, lock: Option<&Arc<File>>) -> io::Result<Output> {
         self.run("services", config, false, lock)
     }
@@ -49,7 +68,7 @@ impl AuthorizationSession {
             return Err(io::Error::other("setup authorization session is closed"));
         }
         if state.process.is_none() {
-            state.process = Some(SessionProcess::start(RUNNER, lock)?);
+            state.process = Some(SessionProcess::start(RUNNER, state.mode, lock)?);
         }
         let result = state.process.as_mut().unwrap().run(operation, path, option);
         if result.is_err() {
@@ -75,10 +94,15 @@ struct SessionProcess {
 }
 
 impl SessionProcess {
-    fn start(script: &str, lock: Option<&Arc<File>>) -> io::Result<Self> {
+    fn start(script: &str, mode: AuthorizationMode, lock: Option<&Arc<File>>) -> io::Result<Self> {
         let mut command = Command::new("bash");
         command
             .args(["-c", script, "lg-buddy-setup-authorization"])
+            .arg(match mode {
+                AuthorizationMode::Interactive => "interactive",
+                AuthorizationMode::Terminal => "terminal",
+                AuthorizationMode::Noninteractive => "noninteractive",
+            })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         super::lock::inherit_command_lock(&mut command, lock);
@@ -142,7 +166,7 @@ impl SessionProcess {
 impl Drop for SessionProcess {
     fn drop(&mut self) {
         self.input.take();
-        // EOF closes an idle owner. If the GUI dies during a mutation, the
+        // EOF closes an idle owner. If the frontend dies during a mutation, the
         // shell finishes the helper first, retaining the flow lock throughout.
         let _ = self.child.wait();
     }

@@ -320,32 +320,24 @@ impl ServiceController for SystemdUserServiceController {
         config: &Path,
         authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
-        if authorization == crate::setup::flow::AuthorizationMode::Interactive {
-            let local_session = crate::setup::authorization::AuthorizationSession::default();
-            let session = self
-                .authorization_session
-                .as_deref()
-                .unwrap_or(&local_session);
-            let output = session
-                .services(config, self.command_lock.as_ref())
-                .map_err(|error| SettingsError::Activation {
-                    message: error.to_string(),
-                })?;
-            return activation_result("pkexec", &output);
-        }
-        let mut command =
-            crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
-        if authorization == crate::setup::flow::AuthorizationMode::Noninteractive {
-            command.arg("-n");
-        }
-        let output = command
-            .arg("/usr/lib/lg-buddy/setup-services")
-            .arg(config)
-            .output()
+        let local_session = crate::setup::authorization::AuthorizationSession::new(authorization);
+        let session = self
+            .authorization_session
+            .as_deref()
+            .unwrap_or(&local_session);
+        let output = session
+            .services(config, self.command_lock.as_ref())
             .map_err(|error| SettingsError::Activation {
                 message: error.to_string(),
             })?;
-        activation_result("sudo", &output)
+        activation_result(
+            if authorization == crate::setup::flow::AuthorizationMode::Interactive {
+                "pkexec"
+            } else {
+                "sudo"
+            },
+            &output,
+        )
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
