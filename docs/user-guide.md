@@ -13,7 +13,8 @@ up LG Buddy for the first time, start with the [installation instructions](../RE
 
 Open **LG Buddy** from your application launcher, or run `lg-buddy`. A complete
 installation opens **Overview**. Missing pairing, services or applicable
-integration opens **Complete setup** instead. Normal pages become available
+integration opens **Setup required** instead. Select **Complete setup** to open the setup dialog and start
+the setup/repair flow. Normal pages become available
 only after the session service verifies completion. For a keyboard shortcut straight to
 brightness, bind `lg-buddy brightness` to your preferred key combination.
 
