@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-settings-timeout")
     parser.add_argument("--expected-integration", choices=("automatic", "legacy"))
     parser.add_argument("--edit-settings-timeout", help="type a timeout draft through native keyboard input")
-    parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "pairing", "pairing-invalid", "unpair"))
+    parser.add_argument("--expected-tvs-state", choices=("empty", "configured", "setup-required", "pairing", "pairing-invalid", "unpair"))
     parser.add_argument("--expected-tv-address")
     parser.add_argument("--expected-tv-name", default="Primary TV")
     parser.add_argument("--edit-pairing-address", help="type a TV address into the pairing form")
@@ -254,10 +254,20 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
             continue
     names = {normalized_name(item) for item in visible}
     dialogs = [item for item in visible if role(item) == pyatspi.ROLE_DIALOG]
+    if expected_state == "setup-required":
+        if dialogs or not {"Setup required", "Complete setup", "Close", "Main Menu"} <= names:
+            return None
+        if {"TV address", "MAC address", "HDMI input", "Pair"} & names:
+            return None
+        if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible):
+            return None
+        actions = [item for item in visible
+                   if name(item) == "Complete setup" and role(item) == pyatspi.ROLE_PUSH_BUTTON]
+        return (accessibles, None) if len(actions) == 1 and is_sensitive(actions[0]) else None
     if expected_state == "unpair":
         return (accessibles, None) if {"Unpair TV?", "Cancel", "Unpair"} <= names else None
     if expected_state in ("pairing", "pairing-invalid"):
-        if dialogs or not {"Complete setup", "TV address", "MAC address", "HDMI input", "Close", "Pair"} <= names:
+        if not dialogs or not {"Pair a TV", "TV address", "MAC address", "HDMI input", "Cancel", "Pair"} <= names:
             return None
         pair = next(
             (
@@ -270,14 +280,14 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
         cancel = next(
             (
                 item for item in visible
-                if name(item) == "Close"
+                if name(item) == "Cancel"
                 and role(item) == pyatspi.ROLE_PUSH_BUTTON
             ),
             None,
         )
         if pair is None or cancel is None or not is_sensitive(cancel):
             return None
-        if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible) or "Main Menu" in names:
+        if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible):
             # AT-SPI reads are not atomic across the normal-to-setup transition.
             # Require navigation to disappear within the same bounded wait.
             return None

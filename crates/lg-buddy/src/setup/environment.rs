@@ -12,6 +12,7 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub(super) struct SetupContext {
@@ -21,6 +22,7 @@ pub(super) struct SetupContext {
     pub kwin_helper: PathBuf,
     pub lock_path: PathBuf,
     pub authorization: AuthorizationMode,
+    pub authorization_session: Arc<super::authorization::AuthorizationSession>,
 }
 
 impl SetupContext {
@@ -44,6 +46,9 @@ impl SetupContext {
             // bypass another GUI/CLI flow for this user.
             lock_path: PathBuf::from(format!("/run/user/{uid}/lg-buddy-onboarding.lock")),
             authorization,
+            authorization_session: Arc::new(super::authorization::AuthorizationSession::new(
+                authorization,
+            )),
         })
     }
 }
@@ -95,11 +100,16 @@ impl<C: ServiceController> NativeSteps<C> {
             helper: &self.context.kwin_helper,
             authorization: self.context.authorization,
             command_lock: None,
+            authorization_session: Some(&self.context.authorization_session),
         }
     }
 }
 
 impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
+    fn authorization_session(&self) -> Option<Arc<super::authorization::AuthorizationSession>> {
+        Some(self.context.authorization_session.clone())
+    }
+
     fn inspect(&self, step: SetupStep) -> StepResponse {
         match step {
             SetupStep::Pairing => super::pairing::inspect(&self.context.config),
@@ -120,8 +130,10 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                 super::pairing::execute(&self.context.config, Some(request), cancellation, progress)
             }
             (SetupStep::Services, StepAnswer::Continue) => {
-                self.controller
-                    .with_command_lock(lease.file(), |controller| {
+                self.controller.with_setup_authorization(
+                    lease.file(),
+                    self.context.authorization_session.clone(),
+                    |controller| {
                         super::provision::ServiceInstallation {
                             config: &self.context.config,
                             user_units: &self.context.user_units,
@@ -130,7 +142,8 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                             authorization: self.context.authorization,
                         }
                         .execute(cancellation, progress)
-                    })
+                    },
+                )
             }
             (SetupStep::Plasma, StepAnswer::Continue) => {
                 let mut step = self.plasma();

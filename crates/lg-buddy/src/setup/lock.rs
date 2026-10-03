@@ -97,9 +97,17 @@ pub(crate) fn command_with_lock(program: impl AsRef<OsStr>, lock: Option<&Arc<Fi
     command
         .args(["-c", "\"$@\" &\nwait \"$!\"", "lg-buddy-setup"])
         .arg(program);
+    inherit_command_lock(&mut command, Some(lock));
+    command
+}
+
+/// Also used by the persistent, unprivileged authorization owner.
+pub(super) fn inherit_command_lock(command: &mut Command, lock: Option<&Arc<File>>) {
+    let Some(lock) = lock else { return };
     let lock = lock.clone();
     // Duplicate only in the child, after stdio setup. The supervisor inherits a
-    // descriptor >= 3; unrelated processes spawned by other threads do not.
+    // descriptor >= 10 (KWin uses 9); unrelated processes spawned by other
+    // threads do not inherit it.
     unsafe {
         command.pre_exec(move || {
             // Mutating steps reject terminal cancellation; the owner handles
@@ -107,11 +115,10 @@ pub(crate) fn command_with_lock(program: impl AsRef<OsStr>, lock: Option<&Arc<Fi
             if libc::signal(libc::SIGINT, libc::SIG_IGN) == libc::SIG_ERR {
                 return Err(io::Error::last_os_error());
             }
-            if libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 3) == -1 {
+            if libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 10) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    command
 }

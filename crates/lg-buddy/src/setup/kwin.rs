@@ -14,6 +14,7 @@ pub(crate) struct KWinSetup<'a> {
     pub helper: &'a Path,
     pub authorization: crate::setup::flow::AuthorizationMode,
     pub command_lock: Option<Arc<File>>,
+    pub authorization_session: Option<&'a super::authorization::AuthorizationSession>,
 }
 impl KWinSetup<'_> {
     pub(crate) fn inspect(&self) -> StepResponse {
@@ -61,11 +62,6 @@ impl KWinSetup<'_> {
             if allow_dependencies {
                 args.push("--allow-dependencies");
             }
-            match self.authorization {
-                super::flow::AuthorizationMode::Noninteractive => args.push("--noninteractive"),
-                super::flow::AuthorizationMode::Terminal => args.push("--terminal"),
-                super::flow::AuthorizationMode::Interactive => {}
-            }
             match self.invoke(&args) {
                 Ok(output) => match output.status.code() {
                     Some(0) => match self.inspect() {
@@ -107,12 +103,13 @@ impl KWinSetup<'_> {
                 })
                 .ok_or_else(|| std::io::Error::other("Plasma inspection could not run"));
         }
-        // Never inherit interactive terminal input into background workers.
-        super::lock::command_with_lock("bash", self.command_lock.as_ref())
-            .arg(self.helper)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let local_session = super::authorization::AuthorizationSession::new(self.authorization);
+        let session = self.authorization_session.unwrap_or(&local_session);
+        session.plasma(
+            self.helper,
+            args.contains(&"--allow-dependencies"),
+            self.command_lock.as_ref(),
+        )
     }
 }
 fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {
@@ -162,12 +159,16 @@ mod tests {
             fs::write(
                 root.join("helper.sh"),
                 r#"#!/bin/bash
-cd -- "$(dirname -- "$0")"
-[ "$1" != --status ] || exit "$(cat status)"
+_fixture_dir="$(dirname -- "${BASH_SOURCE[0]}")"
+main() {
+cd -- "$_fixture_dir"
+[ "$1" != --status ] || return "$(cat status)"
 printf '%s\n' "$*" >> actions
 result="$(cat result)"
 if [ "$result" = 0 ] && [ ! -f fail-verification ]; then echo 0 > status; fi
-exit "$result"
+return "$result"
+}
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
 "#,
             )
             .unwrap();
@@ -181,6 +182,7 @@ exit "$result"
                 helper: &self.helper(),
                 authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: None,
+                authorization_session: None,
             }
             .execute(allow, &StepCancellation::default(), &mut |_| {})
         }
@@ -202,6 +204,7 @@ exit "$result"
             helper: &f.helper(),
             authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
             command_lock: None,
+            authorization_session: None,
         }
         .inspect();
         let StepResponse::Failed(error) = response else {
@@ -223,6 +226,7 @@ exit "$result"
             helper: &helper,
             authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
+            authorization_session: None,
         };
         assert!(matches!(
             step.inspect(),
@@ -309,6 +313,7 @@ exit "$result"
             helper: &helper,
             authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
+            authorization_session: None,
         };
         let cancellation = StepCancellation::default();
         assert!(cancellation.cancel());

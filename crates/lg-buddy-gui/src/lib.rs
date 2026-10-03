@@ -1508,6 +1508,17 @@ pub(crate) mod controller_test_support {
     }
 
     fn widget_contains_text(widget: &gtk::Widget, expected: &str) -> bool {
+        widget_contains_text_matching(widget, expected, false)
+    }
+
+    fn widget_contains_visible_text(widget: &gtk::Widget, expected: &str) -> bool {
+        widget_contains_text_matching(widget, expected, true)
+    }
+
+    fn widget_contains_text_matching(widget: &gtk::Widget, expected: &str, visible: bool) -> bool {
+        if visible && !widget.is_mapped() {
+            return false;
+        }
         if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
             if label.label().contains(expected) {
                 return true;
@@ -1529,7 +1540,7 @@ pub(crate) mod controller_test_support {
         }
         let mut child = widget.first_child();
         while let Some(current) = child {
-            if widget_contains_text(&current, expected) {
+            if widget_contains_text_matching(&current, expected, visible) {
                 return true;
             }
             child = current.next_sibling();
@@ -2616,6 +2627,17 @@ pub(crate) mod controller_test_support {
             assert!(!controller.window.window().is_visible());
             ApplicationController::apply_transition(&controller, opening);
             pump_until(|| controller.window.setup_visible());
+            pump_until(|| {
+                widget_contains_visible_text(
+                    controller.window.window().upcast_ref(),
+                    "Setup required",
+                )
+            });
+            assert!(!widget_contains_visible_text(
+                controller.window.window().upcast_ref(),
+                "TV address"
+            ));
+            assert!(!controller.application.borrow().setup_busy());
             assert!(controller
                 .window
                 .window()
@@ -2623,16 +2645,25 @@ pub(crate) mod controller_test_support {
                 .unwrap()
                 .visible_dialog()
                 .is_none());
-            assert!(!controller.window.main_menu_visible());
+            assert!(controller.window.main_menu_visible());
             ApplicationController::navigate(&controller, ApplicationPage::Settings);
             assert!(controller
                 .application
                 .borrow_mut()
                 .handle_settings_intent(SettingsIntent::Refresh)
                 .is_none());
+            controller.window.activate_setup();
+            assert!(controller
+                .window
+                .window()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_some());
             if !existing {
                 pump_until(|| {
                     widget_contains_text(controller.window.window().upcast_ref(), "Pair a TV")
+                        && !controller.application.borrow().setup_busy()
                 });
                 for intent in [
                     OnboardingIntent::SetAddress("192.0.2.10".into()),
@@ -2696,11 +2727,12 @@ pub(crate) mod controller_test_support {
             ApplicationController::refresh_setup(&controller);
             pump_until(|| {
                 controller.window.setup_visible()
-                    && widget_contains_text(
+                    && widget_contains_visible_text(
                         controller.window.window().upcast_ref(),
-                        "Service stopped",
+                        "Setup required",
                     )
             });
+            assert!(!controller.application.borrow().setup_busy());
             assert_eq!(fixture.calls.lock().unwrap().len(), calls);
             fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
             fixture.publish();
@@ -2723,7 +2755,44 @@ pub(crate) mod controller_test_support {
         pump_until(|| {
             controller.window.setup_visible() && !controller.application.borrow().setup_busy()
         });
-        ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Cancel);
+        controller.window.activate_setup();
+        // Libadwaita 1.5 opens the sheet on deferred frame ticks. Wait until
+        // it accepts focus before simulating dismissal.
+        pump_until(|| {
+            !controller.application.borrow().setup_busy()
+                && controller
+                    .window
+                    .window()
+                    .downcast::<adw::ApplicationWindow>()
+                    .unwrap()
+                    .visible_dialog()
+                    .is_some_and(|dialog| dialog.focus().is_some())
+        });
+        controller
+            .window
+            .window()
+            .downcast::<adw::ApplicationWindow>()
+            .unwrap()
+            .visible_dialog()
+            .unwrap()
+            .close();
+        pump_until(|| {
+            controller.window.setup_visible()
+                && controller
+                    .window
+                    .window()
+                    .downcast::<adw::ApplicationWindow>()
+                    .unwrap()
+                    .visible_dialog()
+                    .is_none()
+        });
+        assert!(!controller.closed.get());
+        assert!(widget_contains_visible_text(
+            controller.window.window().upcast_ref(),
+            "Setup required"
+        ));
+        assert!(!controller.window.navigation_visible());
+        ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         pump_until(|| controller.closed.get());
         assert!(fixture.calls.lock().unwrap().is_empty());
     }

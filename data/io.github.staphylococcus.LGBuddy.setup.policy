@@ -2,6 +2,12 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN" "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>LG Buddy</vendor>
+  <action id="io.github.staphylococcus.LGBuddy.setup">
+    <description>Complete LG Buddy setup</description>
+    <message>LG Buddy needs administrator permission to complete setup of its background services and desktop integration.</message>
+    <defaults><allow_any>auth_admin_keep</allow_any><allow_inactive>auth_admin_keep</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <annotate key="org.freedesktop.policykit.imply">io.github.staphylococcus.LGBuddy.setup.services io.github.staphylococcus.LGBuddy.setup.kwin</annotate>
+  </action>
   <action id="io.github.staphylococcus.LGBuddy.setup.services">
     <description>Set up LG Buddy background services</description>
     <message>LG Buddy needs administrator permission to install or repair its background services for TV sleep and wake.</message>

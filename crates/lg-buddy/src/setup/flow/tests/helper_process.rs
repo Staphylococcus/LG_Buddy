@@ -45,6 +45,7 @@ impl SetupSteps for HelperSteps {
                 helper: &self.helper,
                 authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: Some(lease.file()),
+                authorization_session: None,
             }
             .execute(false, cancellation, progress)
         } else {
@@ -113,8 +114,11 @@ fn orphaned_service_and_plasma_helpers_keep_competing_flows_excluded() {
         let fixture = Fixture::new([action(), action(), action()]);
         let helper = fixture.root.join("helper.sh");
         fs::write(&helper, r#"#!/bin/sh
-[ "$1" != --status ] || exit 3
-exec "$LG_BUDDY_HELPER_TEST_EXE" --exact setup::flow::tests::helper_process::helper_child --nocapture --test-threads=1
+main() {
+[ "$1" != --status ] || return 3
+"$LG_BUDDY_HELPER_TEST_EXE" --exact setup::flow::tests::helper_process::helper_child --nocapture --test-threads=1
+}
+if [ "${BASH_SOURCE:-$0}" = "$0" ]; then main "$@"; fi
 "#).unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
         let listener = UnixListener::bind(fixture.root.join("ready.sock")).unwrap();

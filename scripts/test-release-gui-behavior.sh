@@ -307,9 +307,12 @@ sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CON
 cp "$CONFIG_FILE" "$WORK_DIR/stale-config.env"
 publish_setup_assessment
 start_gui enabled "" "" normal
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-text "saved TV configuration needs migration"
-observe_gui_state --expected-absent-text "Main Menu"
 send_closing_mnemonic Escape
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
 finish_gui "migration recovery gate"
 cmp "$CONFIG_FILE" "$WORK_DIR/stale-config.env" || fail "Migration gate changed configuration."
 python3 - "$STATE_FILE" <<'PY_STALE'
@@ -454,9 +457,13 @@ cmp -s "$CONFIG_FILE" "$WORK_DIR/before-unpair.env" || fail "Cancelling Unpair c
 observe_gui_state --activate-control "Unpair TV…"
 observe_gui_state --expected-tvs-state unpair
 observe_gui_state --activate-control Unpair
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-tvs-state pairing
 [ ! -e "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Unpair left the native credential."
-observe_gui_state --activate-control Close
+observe_gui_state --activate-control Cancel
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
 finish_gui "input editing and confirmed unpairing"
 cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 
@@ -464,16 +471,20 @@ cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
 cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
 start_gui enabled "" "" normal
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-tvs-state pairing
 xdotool key --window "$WINDOW_ID" Return
 observe_gui_state --expected-tvs-state pairing-invalid
 send_closing_mnemonic Escape
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
 finish_gui "invalid setup form cancellation"
-# A second opening starts with a fresh form and uses the header's Close button.
+# A second opening remains at the gate until the user chooses setup.
 start_gui enabled "" "" normal
-observe_gui_state --expected-tvs-state pairing
+observe_gui_state --expected-tvs-state setup-required
 observe_gui_state --activate-control Close
-finish_gui "fresh setup form cancellation"
+finish_gui "setup gate cancellation"
 python3 - "$WORK_DIR/before-empty.json" "$STATE_FILE" <<'PY_EMPTY'
 import json, sys
 before, after = [json.load(open(path)) for path in sys.argv[1:]]

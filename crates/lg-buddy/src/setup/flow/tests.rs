@@ -11,6 +11,65 @@ use std::{
 
 mod helper_process;
 
+struct AuthorizedSteps {
+    steps: FakeSteps,
+    session: Arc<crate::setup::authorization::AuthorizationSession>,
+}
+
+impl SetupSteps for AuthorizedSteps {
+    fn authorization_session(
+        &self,
+    ) -> Option<Arc<crate::setup::authorization::AuthorizationSession>> {
+        Some(self.session.clone())
+    }
+
+    fn inspect(&self, step: SetupStep) -> StepResponse {
+        self.steps.inspect(step)
+    }
+
+    fn execute(
+        &self,
+        step: SetupStep,
+        answer: StepAnswer,
+        cancellation: &StepCancellation,
+        lease: &FlowLock,
+        progress: &mut dyn FnMut(StepResponse),
+    ) -> StepResponse {
+        self.steps
+            .execute(step, answer, cancellation, lease, progress)
+    }
+}
+
+#[test]
+fn completion_cancellation_and_drop_close_the_shared_authorization_session() {
+    for outcome in ["complete", "cancel", "drop"] {
+        let fixture = Fixture::new([
+            StepResponse::Complete,
+            action(),
+            StepResponse::NotApplicable,
+        ]);
+        let session = Arc::new(crate::setup::authorization::AuthorizationSession::default());
+        let mut flow = OnboardingFlow::with_backend(
+            Box::new(AuthorizedSteps {
+                steps: FakeSteps(fixture.state.clone()),
+                session: session.clone(),
+            }),
+            &fixture.lock(),
+        )
+        .unwrap();
+        let cancellation = flow.cancellation();
+        match outcome {
+            "complete" => assert_eq!(advance(&mut flow).outcome, FlowOutcome::Complete),
+            "cancel" => assert!(cancellation.cancel()),
+            _ => drop(flow),
+        }
+        assert!(!cancellation.can_cancel());
+        let error = session.services(Path::new("unused"), None).unwrap_err();
+        assert_eq!(error.to_string(), "setup authorization session is closed");
+        assert!(fixture.open().is_ok());
+    }
+}
+
 fn action() -> StepResponse {
     StepResponse::ActionRequired {
         explanation: "Set up this component.",
