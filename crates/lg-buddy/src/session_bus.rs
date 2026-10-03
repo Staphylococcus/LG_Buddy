@@ -730,9 +730,11 @@ mod tests {
     use dbus::Message as DbusMessage;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::fs;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
     use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
@@ -1162,11 +1164,40 @@ mod tests {
         assert_eq!(bus.name_has_owner("org.example.Missing"), Ok(false));
     }
 
+    struct PrivateDbusConfig(PathBuf);
+
+    impl PrivateDbusConfig {
+        fn new(contents: &str) -> Result<Self, String> {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "lg-buddy-test-bus-{}-{}.conf",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|err| format!("create private dbus-daemon config: {err}"))?;
+            let config = Self(path);
+            file.write_all(contents.as_bytes())
+                .map_err(|err| format!("write private dbus-daemon config: {err}"))?;
+            Ok(config)
+        }
+    }
+
+    impl Drop for PrivateDbusConfig {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
     /// Owns a private test bus and reaps it before joining its address reader.
     struct PrivateDbusDaemon {
         address: String,
         child: Child,
         stdout_reader: Option<JoinHandle<()>>,
+        config: PrivateDbusConfig,
     }
 
     impl PrivateDbusDaemon {
@@ -1190,17 +1221,11 @@ mod tests {
 </busconfig>"#;
 
         fn start() -> Result<Self, String> {
-            let config = std::env::temp_dir().join("lg-buddy-test-bus.conf");
-            std::fs::write(&config, Self::TEST_BUS_CONFIG)
-                .map_err(|err| format!("write private dbus-daemon config: {err}"))?;
+            let config = PrivateDbusConfig::new(Self::TEST_BUS_CONFIG)?;
             let child = Command::new("dbus-daemon")
-                .args([
-                    "--config-file",
-                    config.to_str().unwrap(),
-                    "--nofork",
-                    "--nopidfile",
-                    "--print-address=1",
-                ])
+                .arg("--config-file")
+                .arg(&config.0)
+                .args(["--nofork", "--nopidfile", "--print-address=1"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -1213,6 +1238,7 @@ mod tests {
                 address: String::new(),
                 child,
                 stdout_reader: None,
+                config,
             };
             let stdout = daemon.child.stdout.take().expect("piped stdout");
             let (tx, rx) = mpsc::channel();
@@ -1255,6 +1281,42 @@ mod tests {
             if let Some(reader) = self.stdout_reader.take() {
                 let _ = reader.join();
             }
+        }
+    }
+
+    #[test]
+    fn private_dbus_daemon_fixtures_start_concurrently_with_isolated_configs() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let starts: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    PrivateDbusDaemon::start().expect("start concurrent private dbus-daemon")
+                })
+            })
+            .collect();
+        let daemons: Vec<_> = starts
+            .into_iter()
+            .map(|start| start.join().expect("join private dbus-daemon startup"))
+            .collect();
+        let paths: HashSet<_> = daemons
+            .iter()
+            .map(|daemon| daemon.config.0.clone())
+            .collect();
+        assert_eq!(paths.len(), daemons.len(), "each bus needs its own config");
+        for path in &paths {
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                PrivateDbusDaemon::TEST_BUS_CONFIG
+            );
+        }
+        drop(daemons);
+        for path in paths {
+            assert!(
+                !path.exists(),
+                "private bus config was not cleaned up: {path:?}"
+            );
         }
     }
 
