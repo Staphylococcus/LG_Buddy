@@ -39,13 +39,23 @@ impl SetupContext {
             config,
             user_units: user_units_directory(&home, env::var_os("XDG_CONFIG_HOME")),
             system_root: PathBuf::from("/"),
-            kwin_helper: PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh"),
+            kwin_helper: installed_kwin_helper(&env::current_exe().map_err(context_failure)?),
             // A different config or caller-provided runtime override cannot
             // bypass another GUI/CLI flow for this user.
             lock_path: PathBuf::from(format!("/run/user/{uid}/lg-buddy-onboarding.lock")),
             authorization,
         })
     }
+}
+
+fn installed_kwin_helper(executable: &Path) -> PathBuf {
+    if let Some(prefix) = executable.parent().and_then(Path::parent) {
+        let helper = prefix.join("lib/lg-buddy/kwin/setup.sh");
+        if helper.is_file() {
+            return helper;
+        }
+    }
+    PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh")
 }
 
 fn user_units_directory(home: &Path, xdg_config_home: Option<OsString>) -> PathBuf {
@@ -158,6 +168,25 @@ fn context_failure(error: impl ToString) -> StepFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kwin_helper_follows_the_installed_executable_prefix() {
+        let prefix = env::temp_dir().join(format!("lg-buddy-kwin-prefix-{}", std::process::id()));
+        let helper = prefix.join("lib/lg-buddy/kwin/setup.sh");
+        assert_eq!(
+            installed_kwin_helper(&prefix.join("bin/lg-buddy")),
+            PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh")
+        );
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, "exit 2\n").unwrap();
+        for executable in ["lg-buddy", "lg-buddy-gui", ".lg-buddy-gui-wrapped"] {
+            assert_eq!(
+                installed_kwin_helper(&prefix.join("bin").join(executable)),
+                helper
+            );
+        }
+        std::fs::remove_dir_all(prefix).unwrap();
+    }
+
     #[test]
     fn user_units_follow_the_xdg_configuration_directory() {
         let home = Path::new("/home/user");

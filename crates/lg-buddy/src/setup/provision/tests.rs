@@ -429,6 +429,63 @@ fn stale_loaded_bindings_are_repaired_even_when_files_match() {
 }
 
 #[test]
+fn declarative_services_are_checked_without_imperative_files_or_mutations() {
+    for timer in [false, true] {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.root.join("etc")).unwrap();
+        fs::write(fixture.root.join("etc/NIXOS"), "").unwrap();
+        fs::write(
+            &fixture.config,
+            format!(
+                "updates_auto_check={}\n",
+                if timer { "enabled" } else { "disabled" }
+            ),
+        )
+        .unwrap();
+        fixture.system.set(true);
+        fixture.active.set(true);
+        fixture
+            .user
+            .borrow_mut()
+            .insert(SCREEN.into(), (true, true));
+        fixture
+            .user
+            .borrow_mut()
+            .insert(TIMER.into(), (timer, timer));
+        assert_eq!(fixture.plan().inspect(), StepResponse::Complete);
+        assert_eq!(fixture.run(), StepResponse::Complete);
+        assert!(fixture.calls.borrow().is_empty());
+        assert!(!fixture.units.exists());
+
+        fixture.system_binding.set(false);
+        assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+        fixture.system_binding.set(true);
+        fixture.user_binding.set(false);
+        assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+        fixture.user_binding.set(true);
+        fixture.active.set(false);
+        assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+        fixture.active.set(true);
+        fixture
+            .user
+            .borrow_mut()
+            .insert(SCREEN.into(), (false, true));
+        assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+        fixture
+            .user
+            .borrow_mut()
+            .insert(SCREEN.into(), (true, true));
+        fixture
+            .user
+            .borrow_mut()
+            .insert(TIMER.into(), (!timer, !timer));
+        assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+        assert!(fixture.calls.borrow().is_empty());
+        assert!(!fixture.units.exists());
+    }
+}
+
+#[test]
 fn unsupported_installation_is_blocked_without_mutation() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.root.join("etc")).unwrap();
