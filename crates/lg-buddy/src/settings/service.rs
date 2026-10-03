@@ -60,6 +60,20 @@ pub enum UserUnitEnableOutcome {
 }
 
 pub trait ServiceController {
+    /// Inject a flow-owned permission session without changing controllers
+    /// that do not perform privileged subprocess work.
+    fn with_setup_authorization<T>(
+        &self,
+        lock: Arc<File>,
+        _session: Arc<crate::setup::authorization::AuthorizationSession>,
+        operation: impl FnOnce(&Self) -> T,
+    ) -> T
+    where
+        Self: Sized,
+    {
+        self.with_command_lock(lock, operation)
+    }
+
     /// Scope subprocess supervision to an onboarding operation. Controllers
     /// without subprocesses can use the default implementation.
     fn with_command_lock<T>(&self, _lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T
@@ -150,6 +164,7 @@ pub struct SystemdUserServiceController {
     command_path: PathBuf,
     skip_systemd_actions: bool,
     command_lock: Option<Arc<File>>,
+    authorization_session: Option<Arc<crate::setup::authorization::AuthorizationSession>>,
 }
 
 impl Default for SystemdUserServiceController {
@@ -166,6 +181,7 @@ impl SystemdUserServiceController {
                 .unwrap_or_else(|| PathBuf::from("systemctl")),
             skip_systemd_actions: env_truthy("LG_BUDDY_SKIP_SYSTEMD_ACTIONS"),
             command_lock: None,
+            authorization_session: None,
         }
     }
 
@@ -217,6 +233,18 @@ impl SystemdUserServiceController {
 }
 
 impl ServiceController for SystemdUserServiceController {
+    fn with_setup_authorization<T>(
+        &self,
+        lock: Arc<File>,
+        session: Arc<crate::setup::authorization::AuthorizationSession>,
+        operation: impl FnOnce(&Self) -> T,
+    ) -> T {
+        let mut controller = self.clone();
+        controller.command_lock = Some(lock);
+        controller.authorization_session = Some(session);
+        operation(&controller)
+    }
+
     fn with_command_lock<T>(&self, lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T {
         let mut controller = self.clone();
         controller.command_lock = Some(lock);
@@ -292,26 +320,24 @@ impl ServiceController for SystemdUserServiceController {
         config: &Path,
         authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
-        let executable = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
-            "pkexec"
-        } else {
-            "sudo"
-        };
-        let mut command = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
-            let mut command = crate::setup::lock::command_with_lock(
-                "/usr/bin/pkexec",
-                self.command_lock.as_ref(),
-            );
-            command.arg("--disable-internal-agent");
-            command
-        } else {
-            let mut command =
-                crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
-            if authorization == crate::setup::flow::AuthorizationMode::Noninteractive {
-                command.arg("-n");
-            }
-            command
-        };
+        if authorization == crate::setup::flow::AuthorizationMode::Interactive {
+            let local_session = crate::setup::authorization::AuthorizationSession::default();
+            let session = self
+                .authorization_session
+                .as_deref()
+                .unwrap_or(&local_session);
+            let output = session
+                .services(config, self.command_lock.as_ref())
+                .map_err(|error| SettingsError::Activation {
+                    message: error.to_string(),
+                })?;
+            return activation_result("pkexec", &output);
+        }
+        let mut command =
+            crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
+        if authorization == crate::setup::flow::AuthorizationMode::Noninteractive {
+            command.arg("-n");
+        }
         let output = command
             .arg("/usr/lib/lg-buddy/setup-services")
             .arg(config)
@@ -319,7 +345,7 @@ impl ServiceController for SystemdUserServiceController {
             .map_err(|error| SettingsError::Activation {
                 message: error.to_string(),
             })?;
-        activation_result(executable, &output)
+        activation_result("sudo", &output)
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {

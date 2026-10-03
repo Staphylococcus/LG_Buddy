@@ -45,6 +45,7 @@ impl SetupSteps for HelperSteps {
                 helper: &self.helper,
                 authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: Some(lease.file()),
+                authorization_session: None,
             }
             .execute(false, cancellation, progress)
         } else {

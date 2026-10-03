@@ -637,6 +637,7 @@ echo 0 > kwin-status
         kwin_helper: helper,
         lock_path: lock_path.clone(),
         authorization: AuthorizationMode::Noninteractive,
+        authorization_session: std::sync::Arc::default(),
     };
     NativeSteps {
         context,

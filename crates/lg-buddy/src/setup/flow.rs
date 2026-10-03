@@ -78,6 +78,9 @@ pub struct FlowProgress {
 
 /// Deliberately internal: non-pairing setup has no independent public executor.
 pub(super) trait SetupSteps: Send {
+    fn authorization_session(&self) -> Option<Arc<super::authorization::AuthorizationSession>> {
+        None
+    }
     fn inspect(&self, step: SetupStep) -> StepResponse;
     fn execute(
         &self,
@@ -90,6 +93,7 @@ pub(super) trait SetupSteps: Send {
 }
 
 struct Control {
+    authorization_session: Option<Arc<super::authorization::AuthorizationSession>>,
     lease: Option<FlowLock>,
     attempt: Option<StepCancellation>,
     cancelled: bool,
@@ -99,6 +103,9 @@ struct Control {
 impl Control {
     fn close(&mut self) {
         self.closed = true;
+        if let Some(session) = self.authorization_session.take() {
+            session.close();
+        }
         self.lease.take();
     }
 }
@@ -166,9 +173,11 @@ impl OnboardingFlow {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let lease = FlowLock::acquire(lock_path)?;
         let observed = inspect_steps(backend.as_ref());
+        let authorization_session = backend.authorization_session();
         let mut flow = Self {
             backend,
             control: Arc::new(Mutex::new(Control {
+                authorization_session,
                 lease: Some(lease),
                 attempt: None,
                 cancelled: false,

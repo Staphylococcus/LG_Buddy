@@ -8,6 +8,7 @@ use std::sync::{
 use crate::presentation::brightness::UserFacingError;
 
 pub mod assessment;
+pub mod authorization;
 pub mod cli;
 mod environment;
 pub mod flow;

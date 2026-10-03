@@ -115,6 +115,9 @@ privileged() {
         return 127
     elif [ "$terminal" -eq 1 ]; then
         /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
+    elif declare -F _lg_buddy_privileged >/dev/null; then
+        # An onboarding flow can supply a shared Polkit authorization route.
+        _lg_buddy_privileged "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/pkexec ]; then
         /usr/bin/pkexec --disable-internal-agent "$payload_dir/setup.sh" "$@"
     elif [ -t 0 ] && [ -x /usr/bin/sudo ]; then
