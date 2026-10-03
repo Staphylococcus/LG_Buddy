@@ -821,7 +821,12 @@ def main() -> int:
                 except Exception:
                     continue
             time.sleep(0.05)
-        raise SystemExit(f"could not select the {args.select_page} tab")
+        visible = [
+            (normalized_name(item), role_name(item))
+            for item in accessible_tree()
+            if is_showing(item)
+        ]
+        raise SystemExit(f"could not select the {args.select_page} tab; visible controls: {visible}")
     if args.edit_settings_timeout is not None:
         if not args.window_id:
             raise SystemExit("--edit-settings-timeout needs --window-id")

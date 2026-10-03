@@ -205,9 +205,9 @@ finish_gui() {
 }
 
 send_closing_mnemonic() {
-    # The key-down event closes the window, so xdotool may see BadWindow while
-    # sending key-up. The following behavior and bounded process wait verify it.
-    xdotool key --window "$WINDOW_ID" "$1" 2>/dev/null || true
+    # Keep key-up directed at the X session even if key-down destroys the window.
+    xdotool windowfocus --sync "$WINDOW_ID"
+    xdotool key "$1"
 }
 
 start_accessibility_bus() {
@@ -443,7 +443,7 @@ done
 cp "$CONFIG_FILE" "$WORK_DIR/before-unpair.env"
 observe_gui_state --activate-control "Unpair TV…"
 observe_gui_state --expected-tvs-state unpair
-xdotool key --window "$WINDOW_ID" Escape
+send_closing_mnemonic Escape
 observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
 cmp -s "$CONFIG_FILE" "$WORK_DIR/before-unpair.env" || fail "Cancelling Unpair changed the configuration."
 [ -f "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Cancelling Unpair removed the credential."
@@ -463,7 +463,7 @@ start_gui enabled "" "" normal
 observe_gui_state --expected-tvs-state pairing
 xdotool key --window "$WINDOW_ID" Return
 observe_gui_state --expected-tvs-state pairing-invalid
-xdotool key --window "$WINDOW_ID" Escape
+send_closing_mnemonic Escape
 finish_gui "invalid setup form cancellation"
 # A second opening starts with a fresh form and uses the header's Close button.
 start_gui enabled "" "" normal
