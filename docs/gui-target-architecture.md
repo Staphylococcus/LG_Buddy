@@ -89,7 +89,7 @@ crates/lg-buddy-gui/src/
   overview.rs                    Overview widgets and slider rendering
   tvs.rs                         TV details, adaptive list, and unpair dialog
   pairing.rs                     reusable TV connection form
-  onboarding.rs                  central setup gate and step rendering
+  onboarding.rs                  setup modal dialog and step rendering
   settings.rs                    native settings rows and editors
 ```
 
@@ -183,8 +183,10 @@ single details/blank view. Selection is application state. A separate bounded
 model-name read may replace the profile heading, but it does not rewrite the
 profile.
 
-The central setup gate embeds the pairing form when pairing is required.
-The form forwards address, MAC and input edits to
+The central **Setup required** gate has one **Complete setup** action. Cached
+assessment reads never open a flow. The splash retains the normal window header
+and menu with navigation hidden. The action opens the shared modal dialog, which
+embeds the pairing form when pairing is required. The form forwards address, MAC and input edits to
 `setup::gui::OnboardingApplication`. Workers keep the `OnboardingFlow` alive
 between responses, including authorization and additional dependency consent.
 Only the flow decides which step comes next. GUI admission additionally requires
@@ -346,8 +348,8 @@ application intent as an explicit Cancel action.
 
 Onboarding displays the backend's progress message and a spinner while work
 runs. Dismissal follows the step's live cancellation gate. Pairing success
-advances to remaining setup in the same central view. Daemon verification
-admits and refreshes normal views; closing unfinished setup closes the GUI.
+advances to remaining setup in the same modal dialog. Daemon verification
+admits and refreshes normal views; cancelling unfinished setup returns to the splash.
 
 ## Workers, stale completions, cancellation, and persistence
 

@@ -35,6 +35,8 @@ PY
 }
 
 journey_pair() {
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --activate-control "Complete setup"
     observe_gui_state --expected-tvs-state pairing
     observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
     observe_gui_state --focus-control "HDMI input" --window-id "$WINDOW_ID"
@@ -49,14 +51,10 @@ journey_close() {
 
 journey_diagnostics() {
     local label="$1"
-    if [ "${2:-normal}" = gate ]; then
-        observe_gui_state --activate-control Diagnostics
-    else
-        observe_gui_state --focus-control "Main Menu" --window-id "$WINDOW_ID"
-        # GTK 4.14 does not expose Gio menu-item labels through AT-SPI.
-        xdotool key --window "$WINDOW_ID" Return
-        xdotool key Home Return
-    fi
+    observe_gui_state --focus-control "Main Menu" --window-id "$WINDOW_ID"
+    # GTK 4.14 does not expose Gio menu-item labels through AT-SPI.
+    xdotool key --window "$WINDOW_ID" Return
+    xdotool key Home Return
     observe_gui_state --expected-diagnostics-state report
     observe_gui_state --read-diagnostics "$WORK_DIR/$label-report.txt"
     observe_gui_state --focus-control Copy --window-id "$WINDOW_ID"
@@ -189,8 +187,8 @@ SH
     rm -f "$token" "$WORK_DIR/services/setup-ready"
     start_setup_session --services-ready "$WORK_DIR/services/setup-ready"
     start_gui enabled "" "" normal
-    observe_gui_state --expected-tvs-state pairing
-    observe_gui_state --expected-absent-text "Main Menu"
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --expected-text "Main Menu"
     journey_diagnostics before-pairing gate
     [ ! -s "$CONFIG_FILE" ] || fail "Diagnostics changed the fresh configuration."
     journey_close "cancelled initial setup"
@@ -222,7 +220,7 @@ SH
     cp "$token" "$WORK_DIR/paired-token.snapshot"
     cp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot"
     start_gui enabled "" "" normal
-    observe_gui_state --expected-text "Background services"
+    observe_gui_state --expected-tvs-state setup-required
     observe_gui_state --expected-absent-text "TV address"
     cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Opening recovery requested authorization."
 
@@ -261,8 +259,8 @@ SH
     rm "$WORK_DIR/services/setup-ready"
     publish_setup_assessment
     start_gui enabled "" "" normal
-    observe_gui_state --expected-text "Background services"
-    observe_gui_state --expected-absent-text "Main Menu"
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --expected-text "Main Menu"
     journey_setting screen.idle_timeout 720
     touch "$WORK_DIR/services/setup-ready"
     publish_setup_assessment

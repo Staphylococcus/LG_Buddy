@@ -28,6 +28,7 @@ pub enum OnboardingIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingPresentation {
+    pub is_gate: bool,
     pub title: String,
     pub description: String,
     pub pairing: Option<PairingPresentation>,
@@ -38,9 +39,23 @@ pub struct OnboardingPresentation {
 }
 
 impl OnboardingPresentation {
+    pub fn required(error: Option<UserFacingError>) -> Self {
+        Self {
+            is_gate: true,
+            title: "Setup required".into(),
+            description: "Complete setup before using LG Buddy.".into(),
+            pairing: None,
+            action: Some("Complete setup"),
+            can_cancel: true,
+            busy: false,
+            error,
+        }
+    }
+
     /// Render a backend response without deciding which step comes next.
     pub fn for_step(step: SetupStep, response: &StepResponse) -> Self {
         let mut view = Self {
+            is_gate: false,
             title: match step {
                 SetupStep::Pairing => "Pair a TV",
                 SetupStep::Services => "Background services",
@@ -100,6 +115,7 @@ impl OnboardingPresentation {
     }
     fn opening() -> Self {
         Self {
+            is_gate: false,
             title: "Complete setup".into(),
             description: "Checking what needs to be set up…".into(),
             pairing: None,
@@ -432,6 +448,7 @@ impl OnboardingApplication {
         let snapshot = self.snapshot.as_ref().unwrap();
         if snapshot.outcome == FlowOutcome::Complete {
             self.presentation = Some(OnboardingPresentation {
+                is_gate: false,
                 title: "Setup complete".into(),
                 description: "Your TV and the required background services are ready.".into(),
                 pairing: None,

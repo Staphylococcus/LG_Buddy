@@ -44,13 +44,18 @@ verification that KWin setup succeeded.
 The session daemon assesses installation at startup, after configuration
 conversion. The GUI reads its published result. Complete installations open the
 functional UI directly; incomplete or unavailable assessments show one central
-**Complete setup** view instead of normal pages. There is no completion row in
-Settings or independent first-run Pair TV screen. An existing paired TV proceeds
-directly to its remaining service or integration work. The application supports
-zero or one configured TV.
+**Setup required** screen instead of normal pages. Its single **Complete setup**
+action opens the shared setup/repair modal dialog with its own header. The splash
+keeps the normal application header, window controls and menu, with navigation
+hidden. Cancelling the dialog returns to the splash. There is no completion row in Settings
+or independent first-run Pair TV screen. Opening the GUI does not open a flow or
+inspect setup requirements again. After the action is selected, an existing
+paired TV proceeds directly to its remaining service or integration work. The
+application supports zero or one configured TV.
 
-The gate is implemented by the [GTK onboarding view](../crates/lg-buddy-gui/src/onboarding.rs),
-which embeds the TV form. The toolkit-independent
+The splash is implemented by the [application window](../crates/lg-buddy-gui/src/window.rs).
+The [GTK onboarding dialog](../crates/lg-buddy-gui/src/onboarding.rs) embeds the TV form.
+The toolkit-independent
 [onboarding controller](../crates/lg-buddy/src/setup/gui.rs) owns its state, input
 and worker operations. GTK renders the returned state; it does not decide step
 order, readiness or completion.
@@ -63,7 +68,7 @@ While an assessment runs, the previous published result remains authoritative.
 The GUI continues reading the cache to receive later publications; opening,
 reactivation and navigation never request actual reassessment.
 
-The gate reuses the shared setup/repair flow. Completing the flow requests daemon
+The gate's action opens the shared setup/repair flow. Completing the flow requests daemon
 verification; only a newly verified Complete result admits normal pages and
 operations. Partial completion and cancellation cannot unlock them. Missing
 daemon results or failed inspection stay in the same recovery view with repair,
@@ -85,8 +90,9 @@ Each step reports and enforces whether its current operation is cancelable.
 The flow and both frontends respect that decision, including window close
 requests. They do not force or queue cancellation of a noncancelable operation.
 Accepted cancellation stops the attempt and further fallback authorization
-requests. Completed work remains in place; closing setup closes the GUI, and
-reopening resumes unfinished requirements. There are no unsolicited login password
+requests. Completed work remains in place; cancelling the setup dialog returns
+to the splash, where its action resumes unfinished requirements. Closing the
+application window exits the GUI. There are no unsolicited login password
 prompts or automatic authorization retries.
 
 Headless setup presents the same requirements, explanations and outcomes through
@@ -102,8 +108,8 @@ flowchart TD
     CHECK --> CACHE["Published snapshot"]
     GUI["Open GUI"] --> CACHE
     CACHE -->|"Complete"| UI["Functional UI"]
-    CACHE -->|"Incomplete or unavailable"| GATE["Complete setup gate"]
-    GATE --> FLOW["Shared onboarding"]
+    CACHE -->|"Incomplete or unavailable"| GATE["Setup required gate"]
+    GATE -->|"Complete setup action"| FLOW["Shared onboarding"]
     CLI["Headless setup"] --> FLOW
     FLOW --> INSPECT["Inspect current state and determine remaining work"]
     INSPECT -->|"Requirements met"| DONE["Setup complete"]
