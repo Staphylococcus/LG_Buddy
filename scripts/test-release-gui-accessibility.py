@@ -278,7 +278,9 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
         if pair is None or cancel is None or not is_sensitive(cancel):
             return None
         if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible) or "Main Menu" in names:
-            raise SystemExit("Incomplete setup exposed normal navigation")
+            # AT-SPI reads are not atomic across the normal-to-setup transition.
+            # Require navigation to disappear within the same bounded wait.
+            return None
         if expected_state == "pairing-invalid":
             if not any(role(item) == pyatspi.ROLE_ALERT and "address" in name(item).lower()
                        for item in visible):
