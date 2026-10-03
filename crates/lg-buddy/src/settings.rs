@@ -226,6 +226,10 @@ pub fn run_settings_command<W: io::Write>(
     command: SettingsCommand,
     writer: &mut W,
 ) -> Result<(), SettingsError> {
+    let mutates = matches!(
+        &command,
+        SettingsCommand::Set { .. } | SettingsCommand::Unset(_)
+    );
     let store = SettingsStore::load_from_env()?;
     let configured_backend = store
         .effective_by_name("screen.backend")
@@ -235,7 +239,11 @@ pub fn run_settings_command<W: io::Write>(
     let presentation = screen::presentation_for_command(&command, configured_backend.as_deref());
     let runner = SettingsCommandRunner::new(store);
     let runner = runner.with_screen_backend_presentation(presentation);
-    runner.run(command, writer)
+    let result = runner.run(command, writer);
+    if mutates {
+        let _ = crate::session_notifications::request_setup_assessment();
+    }
+    result
 }
 
 #[cfg(test)]

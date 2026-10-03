@@ -364,7 +364,13 @@ impl<E: SessionActionExecutor> SessionEventDispatcher<E> {
 }
 
 pub fn run_monitor<W: Write>(writer: &mut W) -> Result<(), RunError> {
-    crate::startup::backend_start()?;
+    if let Err(error) = crate::startup::backend_start() {
+        writeln!(writer, "LG Buddy Monitor: setup requires repair: {error}")?;
+        let _session_service = spawn_session_notification_service(MonitorDiagnostics::default())
+            .map_err(|error| RunError::Policy(error.to_string()))?;
+        return run_passive_session_agent(writer)
+            .map_err(|error| RunError::Policy(error.to_string()));
+    }
     run_monitor_with_executor(writer, RuntimeActionExecutor::default()).map_err(|err| match err {
         SessionRunnerError::BackendSelection(err) => RunError::BackendSelection(err),
         SessionRunnerError::BackendDetection(err) => RunError::BackendDetection(err),
@@ -605,7 +611,13 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
     executor: E,
 ) -> Result<(), SessionRunnerError> {
     let snapshot = MonitorDiagnostics::default();
-    let screen_idle_blank_enabled = screen_idle_blank_enabled_from_config()?;
+    let screen_idle_blank_enabled = match screen_idle_blank_enabled_from_config() {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            writeln!(writer, "LG Buddy Monitor: setup requires repair: {error}")?;
+            false
+        }
+    };
     if !screen_idle_blank_enabled {
         snapshot.waiting(None, "idle blanking disabled; passive session service");
         let _session_service = match spawn_session_notification_service(snapshot.clone()) {
@@ -625,8 +637,20 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
         return run_passive_session_agent(writer);
     }
 
-    let initial_configured =
-        configured_backend_from_env_or_config().map_err(SessionRunnerError::BackendSelection)?;
+    let initial_configured = match configured_backend_from_env_or_config() {
+        Ok(backend) => backend,
+        Err(error) => {
+            writeln!(writer, "LG Buddy Monitor: setup requires repair: {error}")?;
+            let _session_service =
+                spawn_session_notification_service(snapshot).map_err(|error| {
+                    SessionRunnerError::Failed {
+                        backend: ScreenBackend::Auto,
+                        message: error.to_string(),
+                    }
+                })?;
+            return run_passive_session_agent(writer);
+        }
+    };
     let mut executor = Some(executor);
     let started = Instant::now();
     let test_timeout = monitor_test_timeout();
@@ -656,8 +680,13 @@ fn run_monitor_with_executor<W: Write, E: SessionActionExecutor>(
                 if test_timeout_reached(started, test_timeout) {
                     return Ok(());
                 }
-                let configured = configured_backend_from_env_or_config()
-                    .map_err(SessionRunnerError::BackendSelection)?;
+                let configured = match configured_backend_from_env_or_config() {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        writeln!(writer, "LG Buddy Monitor: setup requires repair: {error}")?;
+                        return run_passive_session_agent(writer);
+                    }
+                };
                 let resolution = prepare_monitor_backend(&mut probe, configured);
                 (configured, resolution)
             }

@@ -51,6 +51,57 @@ const RECENTLY_CLOSED_NOTIFICATION_LIMIT: usize = 16;
 const GNOME_SHELL_BUS_NAME: &str = "org.gnome.Shell";
 const GNOME_SHELL_PROCESS_NAME: &str = "gnome-shell";
 
+const GET_SETUP_ASSESSMENT: &str = "GetSetupAssessment";
+const REQUEST_SETUP_ASSESSMENT: &str = "RequestSetupAssessment";
+
+fn setup_proxy(
+    connection: &DbusConnection,
+) -> Result<dbus::blocking::Proxy<'_, &DbusConnection>, crate::setup::StepFailure> {
+    let bus = connection.with_proxy(
+        DBUS_SERVICE_NAME,
+        DBUS_OBJECT_PATH,
+        Duration::from_millis(500),
+    );
+    let (owner,): (String,) = bus
+        .method_call(DBUS_INTERFACE, "GetNameOwner", (SESSION_BUS_NAME,))
+        .map_err(crate::setup::published::unavailable)?;
+    Ok(connection.with_proxy(owner, SESSION_OBJECT_PATH, Duration::from_millis(500)))
+}
+
+pub(crate) fn read_setup_snapshot(
+) -> Result<crate::setup::published::SetupSnapshot, crate::setup::StepFailure> {
+    let connection = DbusConnection::new_session().map_err(crate::setup::published::unavailable)?;
+    let (json,): (String,) = setup_proxy(&connection)?
+        .method_call(SESSION_INTERFACE, GET_SETUP_ASSESSMENT, ())
+        .map_err(crate::setup::published::unavailable)?;
+    let snapshot: crate::setup::published::SetupSnapshot =
+        serde_json::from_str(&json).map_err(crate::setup::published::unavailable)?;
+    let config = crate::config::resolve_config_path_from_env().unwrap_or_default();
+    let normalized = |path: &std::path::Path| {
+        if path.as_os_str().is_empty() {
+            return path.to_owned();
+        }
+        path.canonicalize()
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_owned())
+    };
+    if normalized(&config) != normalized(&snapshot.config) {
+        return Err(crate::setup::published::unavailable(
+            "session service uses a different configuration",
+        ));
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn request_setup_assessment() -> Result<(String, u64), crate::setup::StepFailure> {
+    // Validate the daemon's configuration before asking it to reassess.
+    read_setup_snapshot()?;
+    let connection = DbusConnection::new_session().map_err(crate::setup::published::unavailable)?;
+    setup_proxy(&connection)?
+        .method_call(SESSION_INTERFACE, REQUEST_SETUP_ASSESSMENT, ())
+        .map_err(crate::setup::published::unavailable)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpdateNotificationRequest {
     check_channel: UpdateChannel,
@@ -721,7 +772,18 @@ where
     if session_service_startup_stopped(&stop) {
         return Ok(());
     }
-    register_session_methods(&connection, Arc::clone(&dispatcher), diagnostics)?;
+    let assessment = crate::setup::published::AssessmentWorker::spawn(
+        crate::setup::assessment::EnvironmentAssessmentBackend,
+        crate::config::resolve_config_path_from_env()
+            .map(|path| std::path::absolute(&path).unwrap_or(path))
+            .unwrap_or_default(),
+    );
+    register_session_methods(
+        &connection,
+        Arc::clone(&dispatcher),
+        diagnostics,
+        assessment.published.clone(),
+    )?;
     if session_service_startup_stopped(&stop) {
         return Ok(());
     }
@@ -751,6 +813,7 @@ fn register_session_methods<N, O, P>(
     connection: &DbusConnection,
     dispatcher: Arc<Mutex<SessionUpdateNotificationDispatcher<N, O, P>>>,
     diagnostics: MonitorDiagnostics,
+    setup: crate::setup::published::PublishedSetup,
 ) -> Result<(), SessionServiceError>
 where
     N: Notifier + Send + 'static,
@@ -760,6 +823,21 @@ where
     let mut crossroads = Crossroads::new();
     let method_dispatcher = Arc::clone(&dispatcher);
     let iface = crossroads.register(SESSION_INTERFACE, move |builder| {
+        let read_setup = setup.clone();
+        builder.method(GET_SETUP_ASSESSMENT, (), ("snapshot",), move |_, _, ()| {
+            serde_json::to_string(&read_setup.snapshot())
+                .map(|json| (json,))
+                .map_err(|err| MethodErr::failed(&err.to_string()))
+        });
+        builder.method(
+            REQUEST_SETUP_ASSESSMENT,
+            (),
+            ("instance", "revision"),
+            move |_, _, ()| {
+                let revision = setup.request().map_err(|err| MethodErr::failed(&err))?;
+                Ok((setup.snapshot().instance, revision))
+            },
+        );
         builder.method(
             GET_MONITOR_DIAGNOSTICS_METHOD,
             (),

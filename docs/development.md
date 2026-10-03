@@ -96,9 +96,10 @@ distribution's package manager before validating and installing the binary pair.
 The fresh release-bundle installer installs the payload and launches the installed
 GUI for pairing and service setup through the [shared completion flow](onboarding.md).
 Both GUI and CLI preserve desired settings when a later step fails or is cancelled.
-The GUI Settings row consumes backend setup status from the shared read-only
-assessment and onboarding observations. Run `cargo run -p lg-buddy --example
-setup_assessment` in the desktop session to inspect the same native checks.
+The central GUI setup gate consumes the session daemon's published assessment;
+only daemon-verified completion admits normal pages. Run `cargo run -p lg-buddy
+--example setup_assessment` in the desktop session to inspect the native checks
+directly without changing the published result.
 Use `install.sh --headless` for terminal installation and `lg-buddy setup` to
 resume. `configure.sh` forwards to setup. Configured installations and upgrades
 retain their saved settings.

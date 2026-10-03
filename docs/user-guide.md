@@ -11,10 +11,10 @@ up LG Buddy for the first time, start with the [installation instructions](../RE
 <a id="desktop-app"></a>
 ## Open LG Buddy
 
-Open **LG Buddy** from your application launcher, or run `lg-buddy`. With a saved TV, it opens
-**Overview**. After a fresh release-bundle install, the app opens directly to
-[Pair a TV](#pair-your-first-tv): **TVs** is the only page and the other tabs
-are hidden until pairing succeeds. For a keyboard shortcut straight to
+Open **LG Buddy** from your application launcher, or run `lg-buddy`. A complete
+installation opens **Overview**. Missing pairing, services or applicable
+integration opens **Complete setup** instead. Normal pages become available
+only after the session service verifies completion. For a keyboard shortcut straight to
 brightness, bind `lg-buddy brightness` to your preferred key combination.
 
 LG Buddy manages one TV. Screenshots use sample TV data.
@@ -61,14 +61,12 @@ Updating or uninstalling LG Buddy does not change the extension.
 
 ### Pair Your First TV
 
-Open **TVs → Pair a TV**. Before starting, turn on the TV, connect it to the
+Open LG Buddy's **Complete setup** view. Before starting, turn on the TV, connect it to the
 same network as the computer, and find its IPv4 and MAC addresses. Enable
 **TV On With Mobile / Wake-on-LAN** on the TV. A static IP and **Always Ready**
 are strongly recommended.
 
-![The TVs tab with no TV configured and a Pair a TV button](screenshots/tvs-empty.png)
-
-In the dialog:
+In the pairing form:
 
 1. Enter the TV's IP and MAC addresses.
 2. Select the HDMI input connected to the computer. This sets the input LG
@@ -76,20 +74,19 @@ In the dialog:
 3. Choose **Pair**, then approve the native webOS pairing request with the
    remote.
 
-Cancel is available until saving starts; once saving starts, the dialog stays
+Closing is available until saving starts; once saving starts, the window stays
 open until the operation finishes. When verification and saving finish,
-the same dialog continues with background services and any required Plasma
+the same view continues with background services and any required Plasma
 integration. Each step explains its changes before you continue or authorize
 it. A local plugin build may ask separately to install development packages.
-Only **Setup complete** confirms that all applicable requirements are ready.
+Normal pages open only after the session service verifies all applicable requirements.
 
-Cancelling retains your paired TV and saved behavior choices. **Settings →
-Complete setup** resumes the remaining work, without pairing again when valid
-credentials are already saved. The row appears after setup has detected remaining work.
-Noncancelable service changes must finish before the dialog can close. Pairing
-errors remain in the dialog with a retry action.
-
-![The Pair a TV dialog with setup guidance and address fields](screenshots/pairing.png)
+Closing retains your paired TV and saved behavior choices. Reopen LG Buddy to
+resume the remaining work, without pairing again when valid credentials are
+already saved. Noncancelable service changes must finish before the window can
+close. Pairing errors remain in the setup view with a retry action; diagnostics
+are available there as well. Unavailable session state keeps this same recovery
+view open instead of exposing normal pages.
 
 Automatic power and idle behavior require the [installed payload](../README.md#install).
 
@@ -396,7 +393,7 @@ checks include command-line alternatives for headless use:
 | Problem | Check |
 | --- | --- |
 | The TV is disconnected | Check its power, network, saved address, and Wake-on-LAN setting. For rejected authorization, follow [Fix a pairing problem](#fix-pairing-problem). |
-| Idle blanking does not work | Check **Complete setup** in Settings and the current activity/inhibition sources in diagnostics. For headless use: `systemctl --user status LG_Buddy_screen.service` and `journalctl --user -u LG_Buddy_screen.service --since today`. |
+| Idle blanking does not work | Complete any setup shown when opening LG Buddy, and check current activity/inhibition sources in diagnostics. For headless use: `systemctl --user status LG_Buddy_screen.service` and `journalctl --user -u LG_Buddy_screen.service --since today`. |
 | A setting shows an error | Follow its message, then use **Retry apply** when offered. If a behavior is off after a declined or unavailable activation, enable it again in **Settings** after fixing the reported service or authorization issue. |
 | System sleep/wake behavior is wrong | `systemctl status LG_Buddy_lifecycle.service`<br>`journalctl -u LG_Buddy_lifecycle.service --since today` |
 | An update cannot be installed | In the GUI, use the update toast's **Copy details** action. For a headless update, keep the complete `updates install` output, confirm the saved channel, and report the installed version from `lg-buddy --version`. |

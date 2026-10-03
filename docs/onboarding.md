@@ -41,23 +41,33 @@ verification that KWin setup succeeded.
 
 ## User experience
 
-Initial setup presents **Pair a TV**. Its action and the Settings **Complete
-setup** row open the same modal, containing the backend-defined pairing,
-background services and applicable integration segments. An existing paired TV
-proceeds directly to its remaining service or integration work. The application
-supports zero or one configured TV.
+The session daemon assesses installation at startup, after configuration
+conversion. The GUI reads its published result. Complete installations open the
+functional UI directly; incomplete or unavailable assessments show one central
+**Complete setup** view instead of normal pages. There is no completion row in
+Settings or independent first-run Pair TV screen. An existing paired TV proceeds
+directly to its remaining service or integration work. The application supports
+zero or one configured TV.
 
-The modal is implemented by the [GTK onboarding view](../crates/lg-buddy-gui/src/onboarding.rs),
+The gate is implemented by the [GTK onboarding view](../crates/lg-buddy-gui/src/onboarding.rs),
 which embeds the TV form. The toolkit-independent
 [onboarding controller](../crates/lg-buddy/src/setup/gui.rs) owns its state, input
 and worker operations. GTK renders the returned state; it does not decide step
 order, readiness or completion.
 
-A bounded, asynchronous, read-only assessment runs on application startup. It
-does not install anything, change settings, initiate pairing, request
-administrator authorization, or open onboarding. When applicable requirements
-are unmet, Settings shows the neutral **Complete setup** row. The row reflects
-backend status and disappears when current observations confirm completion.
+Snapshot reads are asynchronous and bounded, and do not run inspections. They
+do not install anything, change settings, initiate pairing, or request
+administrator authorization. The window waits for the first quick cached read
+before presentation, avoiding a checking/setup flash during ordinary opens.
+While an assessment runs, the previous published result remains authoritative.
+The GUI continues reading the cache to receive later publications; opening,
+reactivation and navigation never request actual reassessment.
+
+The gate reuses the shared setup/repair flow. Completing the flow requests daemon
+verification; only a newly verified Complete result admits normal pages and
+operations. Partial completion and cancellation cannot unlock them. Missing
+daemon results or failed inspection stay in the same recovery view with repair,
+retry and diagnostics. A later published Incomplete result restores the gate.
 
 The flow explains each required change and its purpose before requesting
 authorization. Plasma setup explains that the integration allows LG Buddy to
@@ -72,11 +82,11 @@ same result for dismissal, denial or unavailable authorization. Technical detail
 remain in diagnostics; the user-facing message describes the available action.
 
 Each step reports and enforces whether its current operation is cancelable.
-The flow and both frontends respect that decision, including modal close
+The flow and both frontends respect that decision, including window close
 requests. They do not force or queue cancellation of a noncancelable operation.
 Accepted cancellation stops the attempt and further fallback authorization
-requests. Completed work remains in place, and **Complete setup** remains
-available for unfinished requirements. There are no unsolicited login password
+requests. Completed work remains in place; closing setup closes the GUI, and
+reopening resumes unfinished requirements. There are no unsolicited login password
 prompts or automatic authorization retries.
 
 Headless setup presents the same requirements, explanations and outcomes through
@@ -88,10 +98,12 @@ without opening a graphical prompt or reporting full completion.
 
 ```mermaid
 flowchart TD
-    START["Application startup"] --> CHECK["Shared read-only assessment"]
-    CHECK -->|"Requirements unmet"| ROW["Settings: Complete setup"]
-    ROW --> FLOW["Shared onboarding"]
-    FIRST["Pair a TV prompt"] --> FLOW
+    START["Daemon startup / settled setup changes"] --> CHECK["Shared read-only assessment"]
+    CHECK --> CACHE["Published snapshot"]
+    GUI["Open GUI"] --> CACHE
+    CACHE -->|"Complete"| UI["Functional UI"]
+    CACHE -->|"Incomplete or unavailable"| GATE["Complete setup gate"]
+    GATE --> FLOW["Shared onboarding"]
     CLI["Headless setup"] --> FLOW
     FLOW --> INSPECT["Inspect current state and determine remaining work"]
     INSPECT -->|"Requirements met"| DONE["Setup complete"]
@@ -102,6 +114,7 @@ flowchart TD
     APPLY --> VERIFY["Reassess and verify"]
     VERIFY -->|"Remaining work"| INSPECT
     VERIFY -->|"Requirements met"| DONE
+    DONE --> CHECK
 ```
 
 ### Step ownership
@@ -194,13 +207,23 @@ read-only inspections without opening a flow or taking its execution lock.
 All steps must report complete or not applicable for overall completion;
 inspection failure leaves setup incomplete.
 
-The [application coordinator](../crates/lg-buddy/src/application.rs) requests
-assessment on startup, window reactivation, entering Settings, and after setup
-or relevant configuration mutations settle. Only one assessment worker runs at
-a time; overlapping requests coalesce. Mutations invalidate older results and
-pause new checks until they finish. Application shutdown rejects late results
-without holding the GUI open. The [Settings view](../crates/lg-buddy-gui/src/settings.rs)
-renders the resulting backend status alongside observations from the flow.
+The existing screen/session process owns a [published assessment worker](../crates/lg-buddy/src/setup/published.rs).
+It hosts `GetSetupAssessment` and `RequestSetupAssessment` on its existing
+`io.github.Staphylococcus.LGBuddy.Session1` endpoint, including passive recovery
+after configuration failure. There is no new daemon or timer. Each snapshot
+contains the daemon instance, revision, configuration, status and unmet
+requirements. Probes run outside the snapshot lock. Requests coalesce and a
+superseded worker result cannot replace the published snapshot.
+
+The [application coordinator](../crates/lg-buddy/src/application.rs) withholds
+normal operations until admission. Settled GUI setup/configuration mutations
+request verification; CLI setup/settings changes notify the same daemon on a
+best-effort basis without introducing a blanket CLI gate. An instance/revision
+barrier prevents an older Complete snapshot from unlocking a finished repair.
+Daemon restart results are evaluated as a new startup assessment. Late frontend
+workers cannot overwrite a newer operation or reopen a closed application.
+The planned notification workflow (#267) consumes this same published state and simply activates the
+ordinary GUI; it does not own completion or pass a special setup flag.
 
 Read-only systemctl queries have a two-second limit, KWin inspection has a
 five-second limit, and D-Bus property calls have two-second timeouts. A native
@@ -240,7 +263,9 @@ adapter respects the same cancellation gates as the GUI.
 Setup respects ownership of installed files and services. Automatic service
 setup is blocked on declaratively managed or immutable systems such as NixOS
 and ostree installations; there is no separate external-rebuild onboarding
-workflow. Supported operations verify readiness in the running session rather
+workflow. Their existing blocked assessment also keeps the strict GUI gate
+closed; managed-install readiness needs explicit support, not a completeness
+exemption. Supported operations verify readiness in the running session rather
 than introducing an applied-but-awaiting-readiness completion state.
 
 The existing TV client, inhibition policy, KWin plugin ABI and

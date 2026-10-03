@@ -11,6 +11,13 @@ fn snapshot(plasma: StepResponse) -> Result<SetupAssessment, StepFailure> {
     })
 }
 
+fn read(plasma: StepResponse) -> Result<AssessmentRead, StepFailure> {
+    Ok(AssessmentRead {
+        snapshot: super::super::published::SetupSnapshot::from_assessment(snapshot(plasma)),
+        requested: None,
+    })
+}
+
 #[test]
 fn only_verified_or_inapplicable_steps_satisfy_setup() {
     for response in [StepResponse::Complete, StepResponse::NotApplicable] {
@@ -72,6 +79,7 @@ fn reassessment_can_gain_and_lose_requirements_without_execution() {
         ),
     ] {
         fixture.responses.lock().unwrap()[1..].clone_from_slice(&[services, plasma]);
+        fixture.publish();
         let operation = health.request().unwrap();
         assert_eq!(
             health.complete(operation, operation.execute(&fixture)),
@@ -88,19 +96,23 @@ fn changes_coalesce_and_stale_completion_cannot_replace_flow_state() {
     let old = health.request().unwrap();
     assert!(health.request().is_none());
     assert!(health.set_paused(true).is_none());
-    health.observe_flow(SetupStatus::Complete);
+    health.changed();
     assert!(health.request().is_none());
     assert!(health.set_paused(false).is_none());
     let next = health
         .complete(old, Err(worker_stopped()))
         .unwrap()
         .unwrap();
-    assert_eq!(health.status(), SetupStatus::Complete);
-    assert!(health
-        .complete(old, snapshot(StepResponse::Complete))
-        .is_none());
+    assert_eq!(health.status(), SetupStatus::Unchecked);
+    assert!(health.complete(old, read(StepResponse::Complete)).is_none());
     assert_eq!(
-        health.complete(next, snapshot(StepResponse::NotApplicable)),
+        health.complete(
+            next,
+            Ok(AssessmentRead {
+                requested: Some((String::new(), 0)),
+                ..read(StepResponse::NotApplicable).unwrap()
+            })
+        ),
         Some(None)
     );
     assert_eq!(health.status(), SetupStatus::Complete);
@@ -112,7 +124,7 @@ fn check_finishing_during_setup_waits_for_setup_to_close() {
     let old = health.request().unwrap();
     health.set_paused(true);
     assert_eq!(
-        health.complete(old, snapshot(StepResponse::Complete)),
+        health.complete(old, read(StepResponse::Complete)),
         Some(None)
     );
     assert_eq!(health.status(), SetupStatus::Unchecked);
@@ -126,8 +138,35 @@ fn shutdown_rejects_late_results_and_new_work() {
     let mut health = SetupHealth::default();
     let old = health.request().unwrap();
     health.shutdown();
-    assert!(health
-        .complete(old, snapshot(StepResponse::Complete))
-        .is_none());
+    assert!(health.complete(old, read(StepResponse::Complete)).is_none());
     assert!(health.request().is_none());
+}
+
+#[test]
+fn only_the_requested_revision_or_a_new_daemon_can_verify_a_finished_repair() {
+    let mut health = SetupHealth::default();
+    health.changed();
+    let first = health.request().unwrap();
+    let mut pending = read(StepResponse::Complete).unwrap();
+    pending.snapshot.instance = "daemon-a".into();
+    pending.snapshot.revision = 10;
+    pending.requested = Some(("daemon-a".into(), 12));
+    health.complete(first, Ok(pending.clone())).unwrap();
+    assert_ne!(health.status(), SetupStatus::Complete);
+    pending.requested = None;
+    pending.snapshot.revision = 11;
+    let next = health.request().unwrap();
+    health.complete(next, Ok(pending.clone())).unwrap();
+    assert_ne!(health.status(), SetupStatus::Complete);
+    pending.snapshot.revision = 12;
+    let next = health.request().unwrap();
+    health.complete(next, Ok(pending.clone())).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
+    health.changed();
+    let next = health.request().unwrap();
+    pending.requested = Some(("daemon-a".into(), 13));
+    pending.snapshot.instance = "daemon-b".into();
+    pending.snapshot.revision = 1;
+    health.complete(next, Ok(pending)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
 }

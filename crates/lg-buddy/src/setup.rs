@@ -16,6 +16,7 @@ pub(crate) mod kwin;
 pub(crate) mod lock;
 pub(crate) mod pairing;
 pub(crate) mod provision;
+pub mod published;
 pub(crate) mod services;
 mod terminal_signals;
 

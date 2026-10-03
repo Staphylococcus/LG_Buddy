@@ -55,6 +55,66 @@ fn native_config(
 }
 
 #[test]
+fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_not_assess() {
+    let bus = MockSessionBusIdleMonitor::new("setup-snapshot-bus");
+    let config = TestConfigFile::new("setup-missing-config");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .arg("monitor")
+        .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+        .env("LG_BUDDY_CONFIG", config.path())
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
+        .env_remove("WAYLAND_SOCKET")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
+    let proxy = connection.with_proxy(
+        "io.github.Staphylococcus.LGBuddy",
+        "/io/github/Staphylococcus/LGBuddy/Session",
+        Duration::from_millis(200),
+    );
+    let read = || -> Option<lg_buddy::setup::published::SetupSnapshot> {
+        let (json,): (String,) = proxy
+            .method_call(
+                "io.github.Staphylococcus.LGBuddy.Session1",
+                "GetSetupAssessment",
+                (),
+            )
+            .ok()?;
+        serde_json::from_str(&json).ok()
+    };
+    wait_until(Duration::from_secs(3), || {
+        read().is_some_and(|snapshot| {
+            snapshot.status == lg_buddy::setup::assessment::SetupStatus::Incomplete
+        })
+    });
+    let snapshot = read().unwrap();
+    assert!(!snapshot.requirements.is_empty());
+    for _ in 0..3 {
+        let started = Instant::now();
+        assert_eq!(read().unwrap(), snapshot);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+    let (instance, revision): (String, u64) = proxy
+        .method_call(
+            "io.github.Staphylococcus.LGBuddy.Session1",
+            "RequestSetupAssessment",
+            (),
+        )
+        .unwrap();
+    assert_eq!(instance, snapshot.instance);
+    assert!(revision > snapshot.revision);
+    wait_until(Duration::from_secs(3), || {
+        read().is_some_and(|snapshot| snapshot.revision >= revision)
+    });
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!config.path().exists());
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
 fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_new_checks() {
     let mut env = TestEnv::new();
     let bus = MockSessionBusIdleMonitor::new("monitor-diagnostics-bus");

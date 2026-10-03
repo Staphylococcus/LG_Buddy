@@ -614,6 +614,19 @@ The third question, user needs, should be covered by a small acceptance layer an
 
 ### Shared terminal setup
 
+Daemon publication tests cover quick cached reads during blocked probes,
+coalesced requests, rejection of superseded results, and explicit inapplicability.
+`runtime_entrypoints` starts a real monitor on a private bus with missing config
+and verifies that its setup endpoint remains available, reads do not advance the
+assessment revision, and explicit reassessment publishes a new result without
+mutating installation. Application/GTK scenarios cover withheld normal operations,
+inline pairing and repair, daemon confirmation, cancellation, and later regating.
+Installed GUI transport tests use `test-setup-session.py` as an external session
+peer: it publishes fixture results independently, and never inspects on reads.
+They verify the central gate, preserved partial work, external repair publication,
+and ordinary complete/offline opens. Native service repair stays covered by Rust
+step/flow tests, separately from the installed transport fixture.
+
 `cargo test -p lg-buddy` covers the terminal adapter against the shared flow,
 including dependency consent, distinct exit results and signal cancellation gates.
 Native-adapter integration verifies service/KWin repair and preservation of saved

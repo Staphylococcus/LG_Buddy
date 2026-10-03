@@ -10,6 +10,7 @@ pub struct Fixture {
     root: PathBuf,
     pub responses: Arc<Mutex<[StepResponse; 3]>>,
     pub calls: Arc<Mutex<Vec<SetupStep>>>,
+    published: Mutex<super::super::published::SetupSnapshot>,
 }
 impl Fixture {
     pub fn new(paired: bool, plasma: bool) -> Self {
@@ -20,7 +21,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
-        Self {
+        let fixture = Self {
             root,
             responses: Arc::new(Mutex::new([
                 if paired {
@@ -42,7 +43,20 @@ impl Fixture {
                 },
             ])),
             calls: Arc::new(Mutex::new(Vec::new())),
-        }
+            published: Mutex::new(super::super::published::SetupSnapshot::from_assessment(
+                Err(stopped()),
+            )),
+        };
+        fixture.publish();
+        fixture
+    }
+    pub fn publish(&self) {
+        let result = super::super::assessment::AssessmentBackend::assess(self);
+        let mut state = self.published.lock().unwrap();
+        let mut snapshot = super::super::published::SetupSnapshot::from_assessment(result);
+        snapshot.instance = self.root.to_string_lossy().into_owned();
+        snapshot.revision = state.revision + 1;
+        *state = snapshot;
     }
 }
 impl Drop for Fixture {
@@ -95,6 +109,16 @@ impl OnboardingBackend for Fixture {
             }),
             &self.root.join("lock"),
         )
+    }
+}
+impl super::super::published::SnapshotBackend for Fixture {
+    fn snapshot(&self) -> Result<super::super::published::SetupSnapshot, StepFailure> {
+        Ok(self.published.lock().unwrap().clone())
+    }
+    fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+        self.publish();
+        let state = self.published.lock().unwrap();
+        Ok((state.instance.clone(), state.revision))
     }
 }
 impl super::super::assessment::AssessmentBackend for Fixture {
