@@ -316,7 +316,8 @@ Notes:
 - LG Buddy owns the configured timeout value for this backend.
 - LG Buddy owns one inactivity deadline. Desktop, auxiliary, active, and wake
   activity reports reset it; expiry after `screen_idle_timeout` triggers blanking.
-- ScreenSaver idle cannot trigger blanking by itself. ScreenSaver active and
+- ScreenSaver idle cannot trigger blanking by itself; actual system display-off
+  is handled separately by the [Linux DPMS source](#system-display-blanking-linux-dpms). ScreenSaver active and
   wake signals reset the same LG Buddy deadline and remain restore observations
   evaluated by screen policy.
 
@@ -387,8 +388,10 @@ The native `wayland` backend requires `ext_idle_notifier_v1` version 2 or newer
 and at least one advertised `wl_seat`. It monitors every seat, including
 seats that currently advertise no input capabilities, using zero-timeout idle
 notifications from `get_input_idle_notification`. Its `resumed` maps to desktop
-activity; `idled` remains observational, so only LG Buddy's inactivity deadline
-can trigger blanking.
+activity; `idled` remains observational and cannot itself trigger blanking.
+For this activity path, LG Buddy owns the inactivity deadline. Actual system
+display-off is a separate blanking trigger from the
+[Linux DPMS source](#system-display-blanking-linux-dpms).
 
 Only `get_input_idle_notification` is used by this activity adapter. Idle-notify
 does not supply an inhibition capability. The separate KWin plugin supplies
@@ -399,6 +402,35 @@ of the bound notifier, or removal of the last seat causes the adapter to rebuild
 its connection and subscriptions while other adapters keep running. Previously
 published observations remain valid. Explicit selection does not enable another native source. Automatic
 operation attempts both native interfaces without desktop-name selection.
+
+### System display blanking (Linux DPMS)
+
+Since 1.9.0, the native monitor independently observes actual system display-off
+through `sources/linux/dpms.rs`. This differs from GNOME ScreenSaver idle and
+Wayland idle-notifier `idled`: those activity-provider idle notifications
+are not blanking authorities, while a validated Linux DPMS transition is.
+
+The source polls `/sys/class/drm/card*-*/{status,dpms}` every 500 ms by default.
+A known On → Off transition on any still-connected connector produces a
+`SystemBlank` runner message with `EventSource::LinuxDpms`. Initial Off,
+unknown/unreadable state, disconnect, repeated Off, and Off → On do not produce
+a blank or activity observation. Connector-to-TV matching is not implemented;
+any connected connector's transition can request TV blanking.
+
+The runner feeds the observation into `InactivityEngine::observe_provider_idle`
+and dispatches the existing screen-off policy before the configured inactivity
+deadline. It does not consult the ordinary idle-inhibition gate: the system
+has already turned the display off. Input checks, ownership, suspend coordination,
+and successful-blank completion remain shared. Only a successful blank arms the
+five-minute power-off grace period. Repeated blanks preserve that deadline, and
+stale activity cannot undo a newer system blank. A DPMS On reading does not
+restore the TV; accepted activity uses the existing restore policy.
+
+This source runs with the enabled native monitor, not the passive session mode
+used when `screen_idle_blank` is disabled. Detection requires readable DRM DPMS
+state from the graphics driver and compositor. See the
+[user guide](user-guide.md#desktop-screen-blanking-and-the-idle-timer) for timing
+examples and user-facing limitations.
 
 ## Module Ownership
 
@@ -427,6 +459,9 @@ The code split is:
   - independent SessionManager inhibition state, subscriptions and recovery
 - `crates/lg-buddy/src/sources/desktop/wayland.rs`
   - native Wayland registry, seat, idle-notification, and activity mapping
+- `crates/lg-buddy/src/sources/linux/dpms.rs`
+  - observes connected DRM connector On → Off transitions independently of
+    desktop activity; the shared runner owns TV blanking and delayed power-off
 - `crates/lg-buddy/src/sources/linux/logind.rs`
   - system lifecycle mapping plus the optional current-session lock observer,
     including bus setup, session resolution, rebinding, and `LockedHint`
