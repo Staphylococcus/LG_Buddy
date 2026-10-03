@@ -5,7 +5,7 @@ use super::{
     StepFailure, StepResponse,
 };
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SetupStatus {
     #[default]
     Unchecked,
@@ -46,13 +46,27 @@ pub(super) fn assess_steps(steps: &dyn SetupSteps) -> SetupAssessment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssessmentOperation(u64);
+pub struct AssessmentOperation(u64, bool);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssessmentRead {
+    pub snapshot: super::published::SetupSnapshot,
+    pub requested: Option<(String, u64)>,
+}
 impl AssessmentOperation {
     pub fn execute(
         self,
-        backend: &(impl AssessmentBackend + ?Sized),
-    ) -> Result<SetupAssessment, StepFailure> {
-        backend.assess()
+        backend: &(impl super::published::SnapshotBackend + ?Sized),
+    ) -> Result<AssessmentRead, StepFailure> {
+        let requested = if self.1 {
+            Some(backend.request_reassessment()?)
+        } else {
+            None
+        };
+        Ok(AssessmentRead {
+            snapshot: backend.snapshot()?,
+            requested,
+        })
     }
 }
 
@@ -67,8 +81,8 @@ pub fn worker_stopped() -> StepFailure {
     }
 }
 
-/// Keep at most one assessment worker in flight. Changes invalidate its result;
-/// after it settles, one fresh assessment replaces any coalesced requests.
+/// Keep one cached read in flight. Setup changes reject older reads and request
+/// daemon verification after mutation settles, without replacing stored status.
 #[derive(Default)]
 pub(crate) struct SetupHealth {
     status: SetupStatus,
@@ -76,24 +90,30 @@ pub(crate) struct SetupHealth {
     running: Option<AssessmentOperation>,
     stale: bool,
     paused: bool,
+    verification_needed: bool,
+    required: Option<(String, u64)>,
 }
 impl SetupHealth {
     pub fn status(&self) -> SetupStatus {
         self.status
     }
-    pub fn observe_flow(&mut self, status: SetupStatus) {
-        self.status = status;
+    pub fn changed(&mut self) {
+        self.verification_needed = true;
+        self.required = None;
+        self.stale = true;
+    }
+    pub fn verification_pending(&self) -> bool {
+        self.verification_needed || self.required.is_some()
     }
     pub fn request(&mut self) -> Option<AssessmentOperation> {
         if self.paused {
             return None;
         }
         if self.running.is_some() {
-            self.stale = true;
             return None;
         }
         self.next += 1;
-        let operation = AssessmentOperation(self.next);
+        let operation = AssessmentOperation(self.next, self.verification_needed);
         self.running = Some(operation);
         self.stale = false;
         Some(operation)
@@ -113,7 +133,7 @@ impl SetupHealth {
     pub fn complete(
         &mut self,
         operation: AssessmentOperation,
-        result: Result<SetupAssessment, StepFailure>,
+        result: Result<AssessmentRead, StepFailure>,
     ) -> Option<Option<AssessmentOperation>> {
         if self.running != Some(operation) {
             return None;
@@ -122,9 +142,23 @@ impl SetupHealth {
         if self.stale || self.paused {
             return Some(self.request());
         }
-        self.status = result
-            .map(|assessment| assessment.status())
-            .unwrap_or(SetupStatus::Incomplete);
+        match result {
+            Ok(read) => {
+                if let Some(required) = read.requested {
+                    self.required = Some(required);
+                    self.verification_needed = false;
+                }
+                let verified = !self.verification_needed
+                    && self.required.as_ref().is_none_or(|(instance, revision)| {
+                        read.snapshot.instance != *instance || read.snapshot.revision >= *revision
+                    });
+                if verified {
+                    self.status = read.snapshot.status;
+                    self.required = None;
+                }
+            }
+            Err(_) => self.status = SetupStatus::Incomplete,
+        }
         Some(None)
     }
     pub fn shutdown(&mut self) {

@@ -17,6 +17,16 @@ pub(crate) fn inspect(path: &Path) -> StepResponse {
         Err(error) => failed("The saved TV configuration could not be read.", error),
         Ok(profiles) => match profiles.first() {
             None => StepResponse::InputRequired(StepInput::Pairing { saved: None }),
+            Some(profile) if profile.platform() == TvPlatform::Bscpylgtv => {
+                StepResponse::Blocked(StepFailure {
+                    presentation: UserFacingError::new(
+                        "LG Buddy's saved TV configuration needs migration.",
+                        "Restart LG Buddy's session service to convert the configuration, then retry setup.",
+                    ),
+                    diagnostic: "retired bscpylgtv TV profile requires daemon startup conversion".into(),
+                    retryable: true,
+                })
+            }
             Some(profile) => match profile.credentials() {
                 TvCredentialState::Stored | TvCredentialState::LocalFile => StepResponse::Complete,
                 TvCredentialState::Missing | TvCredentialState::Malformed
@@ -161,6 +171,18 @@ mod tests {
             PairingRequest::parse("192.0.2.42", "02:11:22:33:44:55", HdmiInput::Hdmi1).unwrap(),
         )
     }
+    #[test]
+    fn a_retired_profile_is_blocked_without_frontend_conversion() {
+        let (path, _) = fixture();
+        let contents = "tvs_primary_ip=192.0.2.42\ntvs_primary_mac=02:11:22:33:44:55\ntvs_primary_input=HDMI_1\ntvs_primary_platform=bscpylgtv\n";
+        fs::write(&path, contents).unwrap();
+        let StepResponse::Blocked(error) = inspect(&path) else {
+            panic!("retired profile must require daemon migration");
+        };
+        assert!(error.presentation.summary().contains("needs migration"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    }
+
     #[test]
     fn pairing_and_credential_repair_are_idempotent_and_preserve_preferences() {
         let (path, request) = fixture();

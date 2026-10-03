@@ -135,6 +135,8 @@ pub(crate) fn run(options: SetupOptions, writer: &mut impl Write) -> Result<(), 
         writer,
     );
     drop(signals);
+    // CLI setup retains its own exit semantics; daemon verification is best effort.
+    let _ = crate::session_notifications::request_setup_assessment();
     result
 }
 

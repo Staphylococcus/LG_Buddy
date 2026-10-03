@@ -257,7 +257,7 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
     if expected_state == "unpair":
         return (accessibles, None) if {"Unpair TV?", "Cancel", "Unpair"} <= names else None
     if expected_state in ("pairing", "pairing-invalid"):
-        if len(dialogs) != 1 or not {"TV address", "MAC address", "HDMI input", "Cancel", "Pair"} <= names:
+        if dialogs or not {"Complete setup", "TV address", "MAC address", "HDMI input", "Close", "Pair"} <= names:
             return None
         pair = next(
             (
@@ -270,16 +270,17 @@ def tvs_contract(expected_state: str, address: str | None, tv_name: str):
         cancel = next(
             (
                 item for item in visible
-                if name(item) == "Cancel"
+                if name(item) == "Close"
                 and role(item) == pyatspi.ROLE_PUSH_BUTTON
             ),
             None,
         )
         if pair is None or cancel is None or not is_sensitive(cancel):
             return None
-        dialog_names = {normalized_name(item) for item in accessible_tree(dialogs[0])}
-        if "Close" in dialog_names:
-            raise SystemExit("Pairing exposed a close button alongside Cancel")
+        if any(role(item) == pyatspi.ROLE_PAGE_TAB for item in visible) or "Main Menu" in names:
+            # AT-SPI reads are not atomic across the normal-to-setup transition.
+            # Require navigation to disappear within the same bounded wait.
+            return None
         if expected_state == "pairing-invalid":
             if not any(role(item) == pyatspi.ROLE_ALERT and "address" in name(item).lower()
                        for item in visible):
@@ -822,7 +823,12 @@ def main() -> int:
                 except Exception:
                     continue
             time.sleep(0.05)
-        raise SystemExit(f"could not select the {args.select_page} tab")
+        visible = [
+            (normalized_name(item), role_name(item))
+            for item in accessible_tree()
+            if is_showing(item)
+        ]
+        raise SystemExit(f"could not select the {args.select_page} tab; visible controls: {visible}")
     if args.edit_settings_timeout is not None:
         if not args.window_id:
             raise SystemExit("--edit-settings-timeout needs --window-id")

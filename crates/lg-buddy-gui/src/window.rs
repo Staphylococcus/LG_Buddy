@@ -20,6 +20,8 @@ pub(crate) struct ApplicationWindow {
     onboarding: crate::onboarding::OnboardingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
+    content: gtk::Stack,
+    pending_brightness_focus: Cell<bool>,
     switcher: adw::ViewSwitcher,
     switcher_bar: adw::ViewSwitcherBar,
     #[cfg(test)]
@@ -128,7 +130,16 @@ impl ApplicationWindow {
         let toolbar = adw::ToolbarView::builder().content(&content).build();
         toolbar.add_top_bar(&header);
         toolbar.add_bottom_bar(&switcher_bar);
-        window.set_content(Some(&toolbar));
+        let gate = gtk::Stack::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .hhomogeneous(false)
+            .vhomogeneous(false)
+            .build();
+        gate.add_named(&toolbar, Some("application"));
+        gate.add_named(&onboarding.root, Some("setup"));
+        gate.set_visible_child_name("setup");
+        window.set_content(Some(&gate));
         let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
             adw::BreakpointConditionLengthType::MaxWidth,
             540.0,
@@ -170,6 +181,8 @@ impl ApplicationWindow {
             onboarding,
             toasts,
             stack,
+            content: gate,
+            pending_brightness_focus: Cell::new(false),
             switcher,
             switcher_bar,
             #[cfg(test)]
@@ -194,12 +207,20 @@ impl ApplicationWindow {
     ) {
         self.onboarding.render(&self.window, presentation);
     }
-    pub(crate) fn render_setup_status(
-        &self,
-        status: lg_buddy::setup::gui::SetupStatus,
-        available: bool,
-    ) {
-        self.settings.render_setup_status(status, available);
+    pub(crate) fn set_admitted(&self, admitted: bool) {
+        if !admitted {
+            self.tvs.dismiss_confirmation();
+        }
+        self.content
+            .set_visible_child_name(if admitted { "application" } else { "setup" });
+        if admitted && self.pending_brightness_focus.replace(false) {
+            self.overview.focus_brightness();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn setup_visible(&self) -> bool {
+        self.content.visible_child_name().as_deref() == Some("setup")
+            && self.onboarding.root.is_mapped()
     }
 
     pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
@@ -251,6 +272,10 @@ impl ApplicationWindow {
     }
 
     pub(crate) fn focus_brightness(&self) {
+        if self.content.visible_child_name().as_deref() != Some("application") {
+            self.pending_brightness_focus.set(true);
+            return;
+        }
         if self.window.visible_dialog().is_none() {
             self.overview.focus_brightness();
         }
@@ -282,12 +307,14 @@ impl ApplicationWindow {
 
     #[cfg(test)]
     pub(crate) fn navigation_visible(&self) -> bool {
-        self.switcher.is_visible() && self.switcher_bar.is_visible()
+        self.content.visible_child_name().as_deref() == Some("application")
+            && self.switcher.is_visible()
+            && self.switcher_bar.is_visible()
     }
 
     #[cfg(test)]
     pub(crate) fn main_menu_visible(&self) -> bool {
-        self.menu_button.is_visible() && self.menu_button.is_sensitive()
+        self.menu_button.is_mapped() && self.menu_button.is_sensitive()
     }
 }
 

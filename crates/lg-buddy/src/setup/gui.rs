@@ -145,13 +145,16 @@ pub struct OnboardingResult {
 }
 
 /// Environment selection is injected for isolated frontend integration tests.
-pub trait OnboardingBackend: super::assessment::AssessmentBackend {
+pub trait OnboardingBackend: super::published::SnapshotBackend {
     fn open(&self) -> Result<OnboardingFlow, StepFailure>;
 }
 pub struct EnvironmentOnboardingBackend;
-impl super::assessment::AssessmentBackend for EnvironmentOnboardingBackend {
-    fn assess(&self) -> Result<super::assessment::SetupAssessment, StepFailure> {
-        super::assessment::EnvironmentAssessmentBackend.assess()
+impl super::published::SnapshotBackend for EnvironmentOnboardingBackend {
+    fn snapshot(&self) -> Result<super::published::SetupSnapshot, StepFailure> {
+        crate::session_notifications::read_setup_snapshot()
+    }
+    fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+        crate::session_notifications::request_setup_assessment()
     }
 }
 impl OnboardingBackend for EnvironmentOnboardingBackend {
@@ -161,6 +164,9 @@ impl OnboardingBackend for EnvironmentOnboardingBackend {
 }
 
 impl OnboardingOperation {
+    pub fn changes_setup(&self) -> bool {
+        matches!(self.command, Command::Advance(..))
+    }
     pub fn execute(
         &self,
         progress: &mut dyn FnMut(FlowProgress),
@@ -212,6 +218,9 @@ pub struct OnboardingApplication {
 }
 
 impl OnboardingApplication {
+    pub fn presentation(&self) -> Option<&OnboardingPresentation> {
+        self.presentation.as_ref()
+    }
     pub fn is_open(&self) -> bool {
         self.presentation.is_some()
     }
@@ -230,6 +239,7 @@ impl OnboardingApplication {
             self.draft = PairingDraft::default();
             self.draft_loaded = false;
             self.snapshot = None;
+            self.status = SetupStatus::Unchecked;
             self.cancellation = None;
             self.cancelling = false;
             self.presentation = Some(OnboardingPresentation::opening());
