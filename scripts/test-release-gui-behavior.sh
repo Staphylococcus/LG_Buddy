@@ -307,9 +307,12 @@ sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CON
 cp "$CONFIG_FILE" "$WORK_DIR/stale-config.env"
 publish_setup_assessment
 start_gui enabled "" "" normal
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-text "saved TV configuration needs migration"
-observe_gui_state --expected-absent-text "Main Menu"
 send_closing_mnemonic Escape
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
 finish_gui "migration recovery gate"
 cmp "$CONFIG_FILE" "$WORK_DIR/stale-config.env" || fail "Migration gate changed configuration."
 python3 - "$STATE_FILE" <<'PY_STALE'

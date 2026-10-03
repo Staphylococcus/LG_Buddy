@@ -213,7 +213,7 @@ SH
     journey_setting screen.idle_blank enabled
     journey_setting system.sleep_wake_policy enabled
     observe_gui_state --expected-text "Background services"
-    observe_gui_state --expected-absent-text "Main Menu"
+    observe_gui_state --expected-text "Cancel"
     journey_capture onboarding-services
     journey_close "paired TV with incomplete services"
     cp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot"
