@@ -2756,7 +2756,18 @@ pub(crate) mod controller_test_support {
             controller.window.setup_visible() && !controller.application.borrow().setup_busy()
         });
         controller.window.activate_setup();
-        pump_until(|| !controller.application.borrow().setup_busy());
+        // Libadwaita 1.5 opens the sheet on deferred frame ticks. Wait until
+        // it accepts focus before simulating dismissal.
+        pump_until(|| {
+            !controller.application.borrow().setup_busy()
+                && controller
+                    .window
+                    .window()
+                    .downcast::<adw::ApplicationWindow>()
+                    .unwrap()
+                    .visible_dialog()
+                    .is_some_and(|dialog| dialog.focus().is_some())
+        });
         controller
             .window
             .window()
