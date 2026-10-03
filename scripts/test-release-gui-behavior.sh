@@ -274,9 +274,13 @@ start_setup_session() {
     SETUP_SESSION_PID=$!
     for ((attempt = 0; attempt < 100; attempt++)); do
         [ ! -f "$WORK_DIR/setup-ready" ] || return 0
-        kill -0 "$SETUP_SESSION_PID" 2>/dev/null || fail "Setup session fixture exited."
+        if ! kill -0 "$SETUP_SESSION_PID" 2>/dev/null; then
+            cat "$WORK_DIR/setup-session.output" >&2
+            fail "Setup session fixture exited."
+        fi
         sleep 0.05
     done
+    cat "$WORK_DIR/setup-session.output" >&2
     fail "Setup session fixture did not publish its initial result."
 }
 
