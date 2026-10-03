@@ -557,12 +557,11 @@ PY
 # Cancelling the loading window never writes a value.
 reset_tv_state 37 20 false "$GET_BRIGHTNESS" 2000 false
 start_gui
+# Window presentation precedes setup admission; cancel an actual pending TV read.
+wait_for_requests "$GET_BRIGHTNESS" 1
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
 finish_gui "loading cancellation"
-# Wait for the delayed brightness read before checking for writes. Other read
-# workers may still be finishing when the next scenario resets the state.
-wait_for_requests "$GET_BRIGHTNESS" 1
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -578,6 +577,8 @@ stop_behavior_tv
 if [ -n "$TV_FIXTURE" ]; then
     source "$SCRIPT_DIR/test-release-gui-journey.sh"
     run_installed_gui_journey
+    # The journey publishes for its own config; restore the outer scenario's peer.
+    start_setup_session
 fi
 
 if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then
