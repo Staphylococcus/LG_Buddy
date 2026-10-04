@@ -130,8 +130,9 @@ impl OnboardingPresentation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Open,
+    Run(FlowToken),
     Advance(FlowToken, StepAnswer),
-    Refresh,
+    Retry,
 }
 
 #[derive(Clone)]
@@ -181,7 +182,7 @@ impl OnboardingBackend for EnvironmentOnboardingBackend {
 
 impl OnboardingOperation {
     pub fn changes_setup(&self) -> bool {
-        matches!(self.command, Command::Advance(..))
+        !matches!(self.command, Command::Open)
     }
     pub fn execute(
         &self,
@@ -201,8 +202,14 @@ impl OnboardingOperation {
         let flow = slot.as_mut().ok_or_else(stopped)?;
         let snapshot = match &self.command {
             Command::Open => flow.snapshot(),
-            Command::Refresh => flow.refresh(),
-            Command::Advance(token, answer) => flow.advance(*token, answer.clone(), progress),
+            Command::Run(token) => flow.run(*token, progress),
+            Command::Retry => {
+                let snapshot = flow.refresh();
+                flow.run(snapshot.token, progress)
+            }
+            Command::Advance(token, answer) => {
+                flow.advance_until_pause(*token, answer.clone(), progress)
+            }
         };
         Ok(OnboardingResult {
             snapshot,
@@ -317,7 +324,7 @@ impl OnboardingApplication {
                     StepAnswer::InstallBuildDependencies
                 }
                 StepResponse::Failed(error) | StepResponse::Blocked(error) if error.retryable => {
-                    return Some(self.start(Command::Refresh))
+                    return Some(self.start(Command::Retry))
                 }
                 _ => return None,
             };
@@ -338,13 +345,9 @@ impl OnboardingApplication {
         operation: &OnboardingOperation,
         progress: FlowProgress,
     ) -> Option<OnboardingTransition> {
-        if self.active.as_ref() != Some(operation)
-            || self.cancelling
-            || !self
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.token == progress.token)
-        {
+        // One operation can span several snapshot revisions. Its identity
+        // rejects late progress; answer tokens are still checked by the flow.
+        if self.active.as_ref() != Some(operation) || self.cancelling {
             return None;
         }
         self.presentation = Some(OnboardingPresentation::for_step(
@@ -387,6 +390,18 @@ impl OnboardingApplication {
                     return Some(self.close());
                 }
                 self.snapshot = Some(result.snapshot);
+                // Opening only inspects. Install the cancellation handle before
+                // dispatching automatic work so even the first step can stop.
+                if operation.command == Command::Open
+                    && self.snapshot.as_ref().is_some_and(|snapshot| {
+                        matches!(
+                            snapshot.current(),
+                            Some((_, StepResponse::ActionRequired { .. }))
+                        )
+                    })
+                {
+                    return Some(self.start(Command::Run(self.snapshot.as_ref().unwrap().token)));
+                }
                 self.present_snapshot();
             }
             Err(error) => {

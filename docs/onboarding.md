@@ -74,8 +74,12 @@ operations. Partial completion and cancellation cannot unlock them. Missing
 daemon results or failed inspection stay in the same recovery view with repair,
 retry and diagnostics. A later published Incomplete result restores the gate.
 
-The flow explains each required change and its purpose before requesting
-authorization. Plasma setup explains that the integration allows LG Buddy to
+Starting setup approves the routine installation and repair work as a whole.
+The flow advances through those steps automatically, reporting progress, and
+pauses only for TV input/approval, native authorization, separate consent to
+install build dependencies, or failed/blocked work. Retry is always explicit;
+authorization denial or dismissal never starts an automatic retry or fallback.
+Plasma setup explains that the integration allows LG Buddy to
 recognize apps' requests to keep the TV on. System authorization dialogs identify
 LG Buddy and the operation in human-readable terms. If a local build needs
 compiler or development packages, the flow requests separate consent for them.
@@ -181,9 +185,12 @@ inputs and current state.
 
 The flow is a synchronous worker API. Frontends open it with an authorization
 mode, render a snapshot, and submit an answer with that snapshot's opaque token.
-Each call executes at most the current step. The backend owns completion;
+Opening and refreshing a flow only inspect. Explicitly starting routine work
+or submitting input runs until the next input, failure or blocked requirement,
+or verified completion. The backend owns progression and completion;
 frontends cannot inject successful step results. Tokens reject stale or foreign
-answers and let renderers ignore delayed progress.
+answers; worker operation identities let renderers ignore delayed progress
+across the snapshot revisions of one automatic run.
 
 The [execution context](../crates/lg-buddy/src/setup/environment.rs) resolves one
 configuration and the current user/session and installation context. User units
@@ -264,6 +271,8 @@ Terminal authorization uses sudo, and noninteractive runs require existing sudo
 permission. Exit codes distinguish completion (0), failed or blocked work (1),
 invalid arguments (2), missing input (3), and cancellation (130). The terminal
 adapter respects the same cancellation gates as the GUI.
+Interactive setup asks once to approve required work, rather than once per
+service or integration step. Build-dependency consent remains a separate prompt.
 
 ## Boundaries and verification
 

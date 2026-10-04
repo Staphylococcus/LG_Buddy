@@ -2673,31 +2673,14 @@ pub(crate) mod controller_test_support {
                     ApplicationController::handle_onboarding_intent(&controller, intent);
                 }
             }
-            pump_until(|| {
-                widget_contains_text(
-                    controller.window.window().upcast_ref(),
-                    "Background services",
-                ) && !controller.application.borrow().setup_busy()
-            });
-            assert!(!fixture.calls.lock().unwrap().contains(&SetupStep::Services));
-            ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Submit);
             if plasma {
                 pump_until(|| {
                     widget_contains_text(
                         controller.window.window().upcast_ref(),
-                        "Plasma integration",
+                        "Install compiler packages?",
                     ) && !controller.application.borrow().setup_busy()
                 });
-                ApplicationController::handle_onboarding_intent(
-                    &controller,
-                    OnboardingIntent::Submit,
-                );
-                pump_until(|| {
-                    widget_contains_text(
-                        controller.window.window().upcast_ref(),
-                        "Install compiler packages?",
-                    )
-                });
+                assert_eq!(fixture.responses.lock().unwrap()[1], StepResponse::Complete);
                 ApplicationController::handle_onboarding_intent(
                     &controller,
                     OnboardingIntent::Submit,
@@ -2742,7 +2725,7 @@ pub(crate) mod controller_test_support {
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         }
 
-        let fixture = Arc::new(Fixture::new(true, false));
+        let fixture = Arc::new(Fixture::new(true, true));
         let gtk_app = test_application("CancelSetup");
         let (controller, opening) = ApplicationController::with_backends(
             &gtk_app,
@@ -2756,18 +2739,16 @@ pub(crate) mod controller_test_support {
             controller.window.setup_visible() && !controller.application.borrow().setup_busy()
         });
         controller.window.activate_setup();
-        // Libadwaita 1.5 opens the sheet on deferred frame ticks. Wait until
-        // it accepts focus before simulating dismissal.
         pump_until(|| {
             !controller.application.borrow().setup_busy()
-                && controller
-                    .window
-                    .window()
-                    .downcast::<adw::ApplicationWindow>()
-                    .unwrap()
-                    .visible_dialog()
-                    .is_some_and(|dialog| dialog.focus().is_some())
+                && widget_contains_visible_text(
+                    controller.window.window().upcast_ref(),
+                    "Install compiler packages?",
+                )
         });
+        // Libadwaita 1.5 opens the sheet on deferred frame ticks after mapping.
+        // Let those ticks settle before requesting native dismissal.
+        pump_for(Duration::from_millis(100));
         controller
             .window
             .window()
@@ -2794,7 +2775,11 @@ pub(crate) mod controller_test_support {
         assert!(!controller.window.navigation_visible());
         ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         pump_until(|| controller.closed.get());
-        assert!(fixture.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            *fixture.calls.lock().unwrap(),
+            [SetupStep::Services, SetupStep::Plasma]
+        );
+        assert_ne!(fixture.responses.lock().unwrap()[2], StepResponse::Complete);
     }
 
     fn assert_cancel_waits_for_write_in_application_loop() {

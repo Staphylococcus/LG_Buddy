@@ -219,6 +219,128 @@ impl OnboardingFlow {
         self.snapshot()
     }
 
+    /// Starting setup approves routine work for the flow, not additional input
+    /// or build dependencies. Failures and blocked work always return to the caller.
+    pub fn run(
+        &mut self,
+        token: FlowToken,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
+        self.try_run(token, &mut |event| {
+            progress(event);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+
+    /// Progress failure cancels safe work if possible, or waits for the current
+    /// mutation to finish. It never starts another step after that failure.
+    pub fn try_run<E>(
+        &mut self,
+        token: FlowToken,
+        progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    ) -> Result<FlowSnapshot, E> {
+        if token != self.snapshot.token || self.control.lock().unwrap().closed {
+            return Ok(self.snapshot());
+        }
+        if !matches!(
+            self.snapshot().current(),
+            Some((_, StepResponse::ActionRequired { .. }))
+        ) {
+            return Ok(self.snapshot());
+        }
+        let fresh = self.inspect();
+        if fresh != self.observed {
+            self.observed = fresh;
+            self.publish(None);
+        }
+        let mut attempted = Vec::new();
+        loop {
+            // Execution already published a fresh aggregate verification. Do
+            // not re-probe past a failed or blocked requirement without Retry.
+            let snapshot = self.snapshot();
+            let Some((step, StepResponse::ActionRequired { .. })) = snapshot.current() else {
+                return Ok(snapshot);
+            };
+            let step = *step;
+            // A successful command without verified readiness must not cause
+            // an automatic retry (including after later inspections regress).
+            if attempted.contains(&step) {
+                self.publish(Some((
+                    step,
+                    StepResponse::Failed(StepFailure {
+                        presentation: crate::presentation::brightness::UserFacingError::new(
+                            "Setup could not be verified",
+                            "The requirement is still incomplete. Retry to check and repair it.",
+                        ),
+                        diagnostic: format!("{step:?} remains incomplete after setup execution"),
+                        retryable: true,
+                    }),
+                )));
+                return Ok(self.snapshot());
+            }
+            attempted.push(step);
+            let cancellation = self.cancellation();
+            let mut error = None;
+            let result =
+                self.execute_current(step, snapshot.token, StepAnswer::Continue, &mut |event| {
+                    report_progress(progress, &cancellation, &mut error, event);
+                });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            if !satisfied(&result.steps[step as usize].1)
+                && !matches!(
+                    result.steps[step as usize].1,
+                    StepResponse::ActionRequired { .. }
+                )
+            {
+                return Ok(result);
+            }
+        }
+    }
+
+    /// Apply explicit input, then continue verified routine work without
+    /// asking the frontend to select or approve each remaining step.
+    pub fn advance_until_pause(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
+        self.try_advance_until_pause(token, answer, &mut |event| {
+            progress(event);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+
+    /// Submit input with the same progress-error boundary as routine work.
+    pub fn try_advance_until_pause<E>(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    ) -> Result<FlowSnapshot, E> {
+        if token != self.snapshot.token {
+            return Ok(self.snapshot());
+        }
+        let step = self.snapshot().current().map(|(step, _)| *step);
+        let cancellation = self.cancellation();
+        let mut error = None;
+        let snapshot = self.advance(token, answer, &mut |event| {
+            report_progress(progress, &cancellation, &mut error, event);
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        if step.is_some_and(|step| satisfied(&snapshot.steps[step as usize].1)) {
+            self.try_run(snapshot.token, progress)
+        } else {
+            Ok(snapshot)
+        }
+    }
+
     /// Execute at most the current step. A new request always returns to the
     /// frontend; neither failures nor authorization requests auto-retry.
     pub fn advance(
@@ -248,6 +370,16 @@ impl OnboardingFlow {
         if !permitted {
             return self.snapshot();
         }
+        self.execute_current(step, token, answer, progress)
+    }
+
+    fn execute_current(
+        &mut self,
+        step: SetupStep,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
         let cancellation = StepCancellation::default();
         let lease = {
             let mut control = self.control.lock().unwrap();
@@ -318,6 +450,20 @@ impl Drop for OnboardingFlow {
     fn drop(&mut self) {
         // A cancellation handle may outlive its flow, but must not keep a lock.
         self.control.lock().unwrap().close();
+    }
+}
+
+fn report_progress<E>(
+    progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    cancellation: &FlowCancellation,
+    error: &mut Option<E>,
+    event: FlowProgress,
+) {
+    if error.is_none() {
+        if let Err(failure) = progress(event) {
+            cancellation.cancel();
+            *error = Some(failure);
+        }
     }
 }
 

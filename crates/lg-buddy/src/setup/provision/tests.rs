@@ -696,17 +696,16 @@ fn native_flow_composes_pairing_service_repair_and_plasma_dependency_consent() {
         let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
         assert_eq!(snapshot.current().unwrap().0, SetupStep::Services);
         assert!(!root.join("etc/systemd").exists());
-        let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
+        let snapshot = flow.run(snapshot.token, &mut |_| {});
         assert!(files_match(&user_files).unwrap());
         assert!(files_match(&system_files).unwrap());
         if plasma {
             assert_eq!(snapshot.current().unwrap().0, SetupStep::Plasma);
-            let snapshot = flow.advance(snapshot.token, StepAnswer::Continue, &mut |_| {});
             assert!(matches!(
                 snapshot.current().unwrap().1,
                 StepResponse::InputRequired(crate::setup::StepInput::BuildDependencies { .. })
             ));
-            let snapshot = flow.advance(
+            let snapshot = flow.advance_until_pause(
                 snapshot.token,
                 StepAnswer::InstallBuildDependencies,
                 &mut |_| {},

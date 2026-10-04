@@ -148,6 +148,7 @@ pub(super) fn render(
     writer: &mut impl Write,
 ) -> Result<(), SetupError> {
     let cancellation = flow.cancellation();
+    let mut approved = options.yes;
     writeln!(writer, "LG Buddy setup")?;
     loop {
         let snapshot = flow.snapshot();
@@ -215,13 +216,14 @@ pub(super) fn render(
                     }
                 };
                 consent(
-                    options.yes,
+                    approved,
                     interactive,
                     reader,
                     writer,
-                    "Pair this TV?",
-                    "Use --yes to approve pairing.",
+                    "Complete required setup?",
+                    "Use --yes to approve pairing and the required setup work.",
                 )?;
+                approved = true;
                 StepAnswer::Pairing(request)
             }
             StepResponse::ActionRequired {
@@ -241,13 +243,14 @@ pub(super) fn render(
                     )?;
                 }
                 consent(
-                    options.yes,
+                    approved,
                     interactive,
                     reader,
                     writer,
-                    "Continue?",
+                    "Complete required setup?",
                     "Use --yes to approve the required setup work.",
                 )?;
+                approved = true;
                 StepAnswer::Continue
             }
             StepResponse::InputRequired(StepInput::BuildDependencies { explanation }) => {
@@ -277,17 +280,17 @@ pub(super) fn render(
         if cancellation.can_cancel() && super::terminal_signals::interrupted() {
             cancellation.cancel();
         }
-        let mut output_error = None;
-        flow.advance(snapshot.token, answer, &mut |event| {
+        let mut progress = |event: super::flow::FlowProgress| {
             if let StepResponse::Running { message, .. } = event.response {
-                if let Err(error) = writeln!(writer, "{message}").and_then(|()| writer.flush()) {
-                    output_error = Some(error);
-                    cancellation.cancel();
-                }
+                writeln!(writer, "{message}")?;
+                writer.flush()?;
             }
-        });
-        if let Some(error) = output_error {
-            return Err(error.into());
+            Ok::<_, io::Error>(())
+        };
+        if answer == StepAnswer::Continue {
+            flow.try_run(snapshot.token, &mut progress)?;
+        } else {
+            flow.try_advance_until_pause(snapshot.token, answer, &mut progress)?;
         }
     }
 }
