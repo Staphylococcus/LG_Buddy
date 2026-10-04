@@ -740,7 +740,8 @@ fn lock_probe_child() {
     }
     let _lock = result.unwrap();
     if mode == "hold" {
-        println!("LOCK_READY");
+        // Separate readiness from libtest's inline serial progress output.
+        println!("\nLOCK_READY");
         std::io::stdout().flush().unwrap();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).unwrap();
