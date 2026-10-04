@@ -132,6 +132,11 @@ The [GNOME/Plasma VM validation record](desktop-session-validation.md) documents
 desktop switching with a retained user manager, tested inhibition routes, a
 startup race, lifecycle recovery, and the boundary of native Wayland inhibition coverage.
 
+The [native setup recovery record](setup-recovery-validation.md) separately
+validates installed daemon assessment, notification activation, native repair
+and fresh-publication GUI admission. It names fixture boundaries and provides
+selectable disposable-VM checks; mock-backed GUI CI alone is not native proof.
+
 ### What belongs here
 
 - readable acceptance scenarios for the main flows
