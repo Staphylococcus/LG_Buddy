@@ -37,7 +37,7 @@ impl KWinSetup<'_> {
                     explanation: "Set up Plasma integration so applications can keep the TV on. A compatible plugin is used when available; otherwise LG Buddy attempts a local build.",
                     requires_authorization: true,
                 },
-                Some(4) => StepResponse::Blocked(failure("This installation does not support automatic Plasma integration setup. Configure the integration through your system's supported installation mechanism, then recheck setup.", &output, false)),
+                Some(4..=8) => StepResponse::Blocked(external_failure(&output)),
                 _ => StepResponse::Failed(failure("Plasma integration could not be checked.", &output, true)),
             },
             Err(error) => io_failure(error),
@@ -123,6 +123,25 @@ impl KWinSetup<'_> {
             args.contains(&"--allow-dependencies"),
             self.command_lock.as_ref(),
         )
+    }
+}
+fn external_failure(output: &Output) -> StepFailure {
+    let (cause, message) = match output.status.code() {
+        Some(5) => (Cause::ManagedInstallation, "The active KWin session has no compatible LG Buddy bridge. Add the bridge to your NixOS Plasma configuration, build and activate it, then load it in the user session and recheck. Setup will not modify Nix-managed plugin files."),
+        Some(6) => (Cause::ManagedInstallation, "The active KWin session has no compatible LG Buddy bridge. Install the bridge through your immutable system's supported image or package mechanism, load it in the user session, then recheck. Setup will not modify image-owned plugin files."),
+        Some(7) => (Cause::UnsupportedInstallation, "This KWin version is not supported by the Plasma setup helper. Automatic setup requires KWin 6. Use a supported desktop or install a compatible bridge through your system's supported mechanism, then recheck."),
+        Some(8) => (Cause::UnsupportedInstallation, "KWin's plugin directory is not supported by the Plasma setup helper. Install a compatible LG Buddy bridge through your system's package mechanism and load it in the user session, then recheck."),
+        _ => (Cause::UnsupportedInstallation, "This installation does not support automatic Plasma integration setup. Configure the integration through your system's supported installation mechanism, then recheck setup."),
+    };
+    StepFailure {
+        presentation: UserFacingError::new("Plasma setup incomplete", message),
+        diagnostic: diagnostic(output),
+        recovery: SetupRecovery::new(
+            cause,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally,
+        ),
+        retryable: true,
     }
 }
 fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {
@@ -278,6 +297,35 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
         assert!(!f.0.join("actions").exists());
     }
 
+    #[test]
+    fn external_blocks_are_specific_recheckable_and_never_provision() {
+        let f = Fixture::new();
+        for (status, guidance, cause) in [
+            (
+                4,
+                "supported installation mechanism",
+                Cause::UnsupportedInstallation,
+            ),
+            (5, "NixOS Plasma configuration", Cause::ManagedInstallation),
+            (6, "immutable system", Cause::ManagedInstallation),
+            (7, "requires KWin 6", Cause::UnsupportedInstallation),
+            (8, "plugin directory", Cause::UnsupportedInstallation),
+        ] {
+            fs::write(f.0.join("status"), status.to_string()).unwrap();
+            let StepResponse::Blocked(error) = f.run(false) else {
+                panic!("external setup must remain blocked");
+            };
+            assert!(error.presentation.detail().contains(guidance));
+            assert_eq!(error.recovery.cause, cause);
+            assert_eq!(error.recovery.action, Action::RepairExternally);
+            assert!(error.retryable);
+            assert!(!error.recovery.can_repair_here());
+            assert!(!f.0.join("actions").exists());
+        }
+        fs::write(f.0.join("status"), "0").unwrap();
+        assert_eq!(f.run(false), StepResponse::Complete);
+        assert!(!f.0.join("actions").exists());
+    }
     #[test]
     fn status_and_inapplicable_desktop_do_not_execute_provisioning() {
         let f = Fixture::new();

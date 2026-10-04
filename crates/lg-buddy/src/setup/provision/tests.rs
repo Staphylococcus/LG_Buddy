@@ -508,6 +508,59 @@ fn unsupported_installation_is_blocked_without_mutation() {
 }
 
 #[test]
+fn managed_recovery_identifies_bindings_and_runtime_state_without_writes() {
+    for marker in ["etc/NIXOS", "run/ostree-booted"] {
+        let fixture = Fixture::new();
+        let marker_path = fixture.root.join(marker);
+        fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+        fs::write(marker_path, "").unwrap();
+        fixture.system.set(true);
+        fixture.active.set(true);
+        fixture.system_binding.set(false);
+        fixture.user_binding.set(false);
+        let StepResponse::Blocked(error) = fixture.run() else {
+            panic!("managed requirements must remain blocked");
+        };
+        let detail = error.presentation.detail();
+        assert!(detail.contains("bind LG_Buddy.service"));
+        assert!(detail.contains("bind LG_Buddy_screen.service"));
+        assert!(detail.contains("enable LG_Buddy_screen.service"));
+        assert!(detail.contains(if marker == "etc/NIXOS" {
+            "build it, and activate it"
+        } else {
+            "immutable system's image"
+        }));
+        assert!(error.retryable);
+        assert!(!error.recovery.can_repair_here());
+        assert!(!detail.contains(fixture.config.to_str().unwrap()));
+        assert!(fixture.calls.borrow().is_empty());
+        fixture.system_binding.set(true);
+        fixture.user_binding.set(true);
+        fixture
+            .user
+            .borrow_mut()
+            .insert(SCREEN.into(), (true, true));
+        fixture
+            .user
+            .borrow_mut()
+            .insert(TIMER.into(), (false, false));
+        if marker != "etc/NIXOS" {
+            for spec in fixture
+                .plan()
+                .system_files()
+                .unwrap()
+                .into_iter()
+                .chain(fixture.plan().user_files().unwrap())
+            {
+                write_file(&spec).unwrap();
+            }
+        }
+        assert_eq!(fixture.plan().inspect(), StepResponse::Complete);
+        assert!(fixture.calls.borrow().is_empty());
+    }
+}
+
+#[test]
 fn invalid_update_preference_fails_before_any_mutation() {
     for installed in [false, true] {
         let fixture = Fixture::new();

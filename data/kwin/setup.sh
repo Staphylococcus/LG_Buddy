@@ -262,7 +262,9 @@ provision() {
 }
 
 # Structured status protocol: 0 ready, 2 inapplicable, 3 needs setup,
-# 4 unsupported installation, 1 inspection failure. This function never writes.
+# 4 legacy unsupported installation, 5 NixOS, 6 immutable image,
+# 7 unsupported compositor version, 8 unsupported plugin layout, 1 failure.
+# This function never writes.
 inspect_session() {
     uid="$(id -u)"
     [ "$uid" -ne 0 ] || return 2
@@ -279,8 +281,10 @@ inspect_session() {
     # Already installed bridges can be ready even where imperative repair is unsupported.
     existing="$("$runtime" kwin-bridge check 2>/dev/null)" \
         && [ "$existing" = "$kwin_version"$'\t'"$source_id" ] && return 0
-    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 4
-    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 4
+    [[ "$kwin_version" = 6.* ]] || return 7
+    [ ! -e /etc/NIXOS ] || return 5
+    [ ! -e /run/ostree-booted ] || return 6
+    plugin_root_supported "$plugin_root" || return 8
     return 3
 }
 

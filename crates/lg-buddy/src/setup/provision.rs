@@ -58,17 +58,34 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                 if self.declarative_installation()
                     || self.system_root.join("run/ostree-booted").exists() =>
             {
-                StepResponse::Blocked(failure(
-                    "Repair LG Buddy's services through your system configuration or image, then recheck setup.",
-                    "declaratively managed or immutable system",
-                    SetupRecovery::new(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
-                ))
+                match self.unmet_requirements() {
+                    Ok(requirements) => {
+                        let owner = if self.declarative_installation() {
+                            "Update the NixOS system and user service configuration, build it, and activate it."
+                        } else {
+                            "Repair the LG Buddy package and service configuration through your immutable system's image or supported package mechanism."
+                        };
+                        StepResponse::Blocked(failure(
+                            &format!("Unmet requirements: {}. {owner} Confirm the loaded services use this setup configuration, then recheck.", requirements.join("; ")),
+                            "managed service requirements are incomplete",
+                            SetupRecovery::new(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
+                        ))
+                    }
+                    Err(error) => StepResponse::Failed(settings_failure(
+                        "Service setup could not be checked.",
+                        error,
+                    )),
+                }
             }
             Ok(false) if self.controller.systemd_actions_disabled() => {
                 StepResponse::Blocked(failure(
                     "Service changes are disabled. Enable them outside setup, then recheck.",
                     "systemd mutations disabled",
-                    SetupRecovery::new(Cause::UnsupportedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
+                    SetupRecovery::new(
+                        Cause::UnsupportedInstallation,
+                        Boundary::SystemConfiguration,
+                        Action::RepairExternally,
+                    ),
                 ))
             }
             Ok(false) => match self.system_ready() {
@@ -84,9 +101,10 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             Err(SettingsError::InvalidValue { key, .. }) if key == "updates.auto_check" => {
                 super::configuration::update_input(self.config)
             }
-            Err(error) => {
-                StepResponse::Failed(settings_failure("Service setup could not be checked.", error))
-            }
+            Err(error) => StepResponse::Failed(settings_failure(
+                "Service setup could not be checked.",
+                error,
+            )),
         }
     }
 
@@ -300,6 +318,92 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             && self.controller.user_unit_is_enabled(TIMER)? == timer
             && self.controller.user_service_is_active(TIMER)? == timer)
     }
+    fn unmet_requirements(&self) -> Result<Vec<&'static str>, SettingsError> {
+        let mut missing = Vec::new();
+        if !self.declarative_installation() {
+            if !files_match(&self.system_files()?)? {
+                missing.push(
+                    "system service files and lifecycle hooks must match the installed package",
+                );
+            }
+            if !files_match(&self.user_files()?)? {
+                missing.push(
+                    "screen and update-check user unit files must match the installed package",
+                );
+            }
+        }
+        for path in LEGACY_HANDLERS {
+            match fs::symlink_metadata(self.system_root.join(path)) {
+                Ok(_) => {
+                    missing.push("remove legacy wake/sleep services and hooks");
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        for (ready, requirement) in [
+            (
+                self.controller.system_unit_is_enabled(STARTUP)?,
+                "enable LG_Buddy.service",
+            ),
+            (
+                self.controller.system_unit_is_enabled(LIFECYCLE)?,
+                "enable LG_Buddy_lifecycle.service",
+            ),
+            (
+                self.controller.system_lifecycle_is_active()?,
+                "start LG_Buddy_lifecycle.service",
+            ),
+            (
+                self.binding_matches(self.controller.system_service_config_path(STARTUP))?,
+                "bind LG_Buddy.service to this configuration",
+            ),
+            (
+                self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?,
+                "bind LG_Buddy_lifecycle.service to this configuration",
+            ),
+            (
+                self.binding_matches(self.controller.user_service_config_path(SCREEN))?,
+                "bind LG_Buddy_screen.service to this configuration",
+            ),
+            (
+                self.binding_matches(
+                    self.controller
+                        .user_service_config_path("LG_Buddy_update_check.service"),
+                )?,
+                "bind LG_Buddy_update_check.service to this configuration",
+            ),
+            (
+                self.controller.user_unit_is_enabled(SCREEN)?,
+                "enable LG_Buddy_screen.service",
+            ),
+            (
+                self.controller.user_service_is_active(SCREEN)?,
+                "start LG_Buddy_screen.service",
+            ),
+        ] {
+            if !ready {
+                missing.push(requirement);
+            }
+        }
+        let timer = self.desired_timer()?;
+        if self.controller.user_unit_is_enabled(TIMER)? != timer {
+            missing.push(if timer {
+                "enable LG_Buddy_update_check.timer"
+            } else {
+                "disable LG_Buddy_update_check.timer"
+            });
+        }
+        if self.controller.user_service_is_active(TIMER)? != timer {
+            missing.push(if timer {
+                "start LG_Buddy_update_check.timer"
+            } else {
+                "stop LG_Buddy_update_check.timer"
+            });
+        }
+        Ok(missing)
+    }
     fn binding_matches(
         &self,
         declared: Result<PathBuf, SettingsError>,
@@ -381,7 +485,10 @@ fn failure(message: &str, diagnostic: impl ToString, recovery: SetupRecovery) ->
         presentation: UserFacingError::new("Service setup incomplete", message),
         diagnostic: diagnostic.to_string(),
         recovery,
-        retryable: matches!(recovery.action, Action::Retry | Action::Recheck),
+        retryable: matches!(
+            recovery.action,
+            Action::Retry | Action::Recheck | Action::RepairExternally
+        ),
     }
 }
 fn settings_failure(message: &str, error: SettingsError) -> StepFailure {
