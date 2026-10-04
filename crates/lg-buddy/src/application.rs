@@ -129,6 +129,7 @@ pub struct Application {
     admitted: bool,
     opening: Option<(OverviewTransition, TvsTransition, SettingsTransition)>,
     setup_error: Option<crate::presentation::brightness::UserFacingError>,
+    setup_recovery: Option<crate::setup::recovery::SetupRecovery>,
     setup_read_failed: bool,
     setup_checked: bool,
     manual_setup: bool,
@@ -161,6 +162,7 @@ impl Application {
                 admitted: false,
                 opening: Some((overview_opening, tvs_opening, settings_opening)),
                 setup_error: None,
+                setup_recovery: None,
                 setup_read_failed: false,
                 setup_checked: false,
                 manual_setup: false,
@@ -277,10 +279,21 @@ impl Application {
         }
         let opening = intent == OnboardingIntent::Open;
         if intent == OnboardingIntent::Submit && self.onboarding.status() == SetupStatus::Complete {
-            self.setup_health.changed();
-            self.onboarding.handle(OnboardingIntent::Cancel);
-            let update = self.onboarding.handle(OnboardingIntent::Open)?;
-            return Some(self.onboarding_transition(update));
+            use crate::setup::recovery::{RecoveryAction, RecoveryCause};
+            if self.setup_recovery.is_some_and(|recovery| {
+                recovery.can_repair_here() && recovery.action == RecoveryAction::Repair
+            }) {
+                self.onboarding.handle(OnboardingIntent::Cancel);
+                let update = self.onboarding.handle(OnboardingIntent::Open)?;
+                return Some(self.onboarding_transition(update));
+            }
+            let restart = self.setup_recovery.is_some_and(|recovery| {
+                recovery.cause == RecoveryCause::VerifierUnavailable
+                    && recovery.action == RecoveryAction::RestartSession
+            });
+            self.setup_health.retry_verification(restart);
+            self.setup_error = None;
+            return self.refresh_setup();
         }
         let update = self.onboarding.handle(intent)?;
         if opening {
@@ -324,9 +337,12 @@ impl Application {
         if self.closed {
             return None;
         }
-        let operation = self.setup_health.request()?;
+        let operation = self.setup_health.request();
+        if operation.is_none() && !self.setup_health.verification_expired() {
+            return None;
+        }
         let mut transition = self.transition(None, None, None);
-        transition.assessment = Some(operation);
+        transition.assessment = operation;
         Some(transition)
     }
     pub fn complete_setup_assessment(
@@ -337,8 +353,16 @@ impl Application {
         if self.closed {
             return None;
         }
-        self.setup_read_failed = result.is_err();
-        self.setup_error = match &result {
+        let recovery = match &result {
+            Err(error) => Some(error.recovery),
+            Ok(read) => read
+                .snapshot
+                .requirements
+                .first()
+                .map(|requirement| requirement.recovery),
+        };
+        let read_failed = result.is_err();
+        let error = match &result {
             Err(error) => Some(error.presentation.clone()),
             Ok(read) if read.snapshot.status == SetupStatus::Incomplete => {
                 Some(crate::presentation::brightness::UserFacingError::new(
@@ -354,7 +378,13 @@ impl Application {
             }
             _ => None,
         };
+        let accepted = self.setup_health.accepts(operation);
         let next = self.setup_health.complete(operation, result)?;
+        if accepted {
+            self.setup_read_failed = read_failed;
+            self.setup_error = error;
+            self.setup_recovery = recovery;
+        }
         self.setup_checked = true;
         let ready = self.setup_health.status() == SetupStatus::Complete
             && !self.onboarding.is_busy()
@@ -803,13 +833,15 @@ impl Application {
                 Some({
                     let presentation =
                         self.onboarding.presentation().cloned().unwrap_or_else(|| {
-                            crate::setup::gui::OnboardingPresentation::required(
+                            let mut view = crate::setup::gui::OnboardingPresentation::required(
                                 if self.setup_read_failed {
                                     self.setup_error.clone()
                                 } else {
                                     None
                                 },
-                            )
+                            );
+                            view.recovery = self.setup_recovery;
+                            view
                         });
                     let mut presentation = presentation.clone();
                     if self.onboarding.is_open()
@@ -819,8 +851,32 @@ impl Application {
                         presentation.title = "Verifying setup".into();
                         presentation.description =
                             "The session service has not yet verified installation.".into();
-                        presentation.action = Some("Retry");
+                        use crate::setup::recovery::{RecoveryAction, RecoveryCause};
+                        presentation.action = Some(match self.setup_recovery {
+                            Some(recovery)
+                                if recovery.cause == RecoveryCause::VerifierUnavailable
+                                    && recovery.action == RecoveryAction::RestartSession =>
+                            {
+                                "Restart session service"
+                            }
+                            Some(recovery)
+                                if recovery.can_repair_here()
+                                    && recovery.action == RecoveryAction::Repair =>
+                            {
+                                "Repair setup"
+                            }
+                            Some(recovery) if recovery.action == RecoveryAction::Retry => {
+                                "Retry verification"
+                            }
+                            _ => "Recheck",
+                        });
                         presentation.error = self.setup_error.clone();
+                        presentation.recovery = self.setup_recovery;
+                        if self.setup_health.verification_expired() && presentation.error.is_none()
+                        {
+                            presentation.description = "Verification has not completed. Recheck the session service; setup remains required. No repair was cancelled.".into();
+                            presentation.error = Some(crate::presentation::brightness::UserFacingError::new("Verification is taking longer than expected", "Check LG Buddy's session service in Diagnostics, then recheck. You can close this dialog without resetting setup."));
+                        }
                     }
                     OnboardingTransition {
                         presentation: Some(presentation),
@@ -1209,10 +1265,19 @@ mod tests {
             .complete_setup_assessment(read, Err(crate::setup::published::unavailable("no daemon")))
             .unwrap();
         let presentation = gate.onboarding().unwrap().presentation.as_ref().unwrap();
+        assert_eq!(gate.setup_status(), SetupStatus::Unchecked);
+        assert!(!gate.admitted());
+        assert!(app
+            .handle_settings_intent(SettingsIntent::Refresh)
+            .is_none());
         assert!(presentation.is_gate);
         assert_eq!(
             presentation.error.as_ref().unwrap().summary(),
             "Setup state unavailable"
+        );
+        assert_eq!(
+            presentation.recovery.unwrap().action,
+            crate::setup::recovery::RecoveryAction::RestartSession
         );
         assert!(gate.onboarding().unwrap().operation.is_none());
         let closed = app
@@ -1224,6 +1289,148 @@ mod tests {
         ));
         assert!(app.closed);
         assert!(!app.onboarding.is_open());
+    }
+
+    #[test]
+    fn failed_cached_reads_preserve_admission_but_cannot_verify_setup_changes() {
+        use crate::{
+            navigation::ApplicationPage,
+            setup::{gui::fixtures::Fixture, published::unavailable, StepResponse},
+        };
+        let fixture = Fixture::new(true, false);
+        fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
+        fixture.publish();
+        let (mut app, opening) = Application::open();
+        let read = opening.assessment_operation().unwrap();
+        let admitted = app
+            .complete_setup_assessment(read, read.execute(&fixture))
+            .unwrap();
+        assert!(admitted.admitted());
+        app.complete_tvs_read(
+            admitted.tvs().unwrap().read_operation().unwrap(),
+            Ok(vec![TvProfile::new(
+                TvId::primary(),
+                "Primary TV",
+                "192.0.2.10".parse().unwrap(),
+                "02:11:22:33:44:55".parse().unwrap(),
+                HdmiInput::Hdmi1,
+                TvPlatform::LgWebOs,
+                TvCredentialState::Stored,
+            )]),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let read = app.refresh_setup().unwrap().assessment_operation().unwrap();
+            let retained = app
+                .complete_setup_assessment(read, Err(unavailable("cached read failed")))
+                .unwrap();
+            assert!(retained.admitted());
+            assert_eq!(retained.setup_status(), SetupStatus::Complete);
+            assert!(retained.onboarding().is_none());
+            assert!(app.select_page(ApplicationPage::Settings).is_some());
+        }
+
+        let opening = app
+            .handle_onboarding_intent(OnboardingIntent::Open)
+            .unwrap();
+        assert!(!opening.admitted());
+        let operation = opening.onboarding().unwrap().operation.clone().unwrap();
+        let complete = app
+            .complete_onboarding(&operation, operation.execute_with(&fixture, &mut |_| {}))
+            .unwrap();
+        let verification = complete.assessment_operation().unwrap();
+        let failed = app
+            .complete_setup_assessment(verification, Err(unavailable("verifier unavailable")))
+            .unwrap();
+        assert!(!failed.admitted());
+        assert!(app.setup_health.verification_pending());
+        assert_eq!(
+            failed
+                .onboarding()
+                .unwrap()
+                .presentation
+                .as_ref()
+                .unwrap()
+                .title,
+            "Verifying setup"
+        );
+        assert!(app.select_page(ApplicationPage::Settings).is_none());
+
+        let retry = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        assert!(
+            retry.onboarding().unwrap().operation.is_none(),
+            "verification recovery must not reopen or rerun setup"
+        );
+        assert!(!retry.admitted());
+        let recovery = retry.assessment_operation().unwrap();
+        app.complete_setup_assessment(recovery, recovery.execute(&fixture))
+            .unwrap();
+        assert!(fixture.calls.lock().unwrap().is_empty());
+
+        let fresh = app.refresh_setup().unwrap().assessment_operation().unwrap();
+        let verified = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert!(verified.admitted());
+        fixture.responses.lock().unwrap()[1] = StepResponse::Failed(unavailable("service failed"));
+        fixture.publish();
+        let fresh = app.refresh_setup().unwrap().assessment_operation().unwrap();
+        let incomplete = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert!(!incomplete.admitted());
+        assert_eq!(incomplete.setup_status(), SetupStatus::Incomplete);
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn published_recovery_facts_reach_the_central_gate_without_starting_repair() {
+        use crate::setup::{
+            gui::fixtures::Fixture,
+            recovery::{RecoveryAction, RecoveryCause},
+        };
+        let fixture = Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let read = opening.assessment_operation().unwrap();
+        let gate = app
+            .complete_setup_assessment(read, read.execute(&fixture))
+            .unwrap();
+        let recovery = gate
+            .onboarding()
+            .unwrap()
+            .presentation
+            .as_ref()
+            .unwrap()
+            .recovery
+            .unwrap();
+        assert_eq!(recovery.cause, RecoveryCause::MissingIntegration);
+        assert_eq!(recovery.action, RecoveryAction::Repair);
+        assert!(gate.onboarding().unwrap().operation.is_none());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+        assert!(!gate.admitted());
+    }
+
+    #[test]
+    fn stale_assessment_cannot_replace_recovery_guidance() {
+        let fixture = crate::setup::gui::fixtures::Fixture::new(true, false);
+        let (mut app, opening) = Application::open();
+        let read = opening.assessment_operation().unwrap();
+        app.complete_setup_assessment(read, read.execute(&fixture))
+            .unwrap();
+        let expected = app.setup_recovery;
+        let old = app.refresh_setup().unwrap().assessment_operation().unwrap();
+        app.setup_health.changed();
+        let stale = app
+            .complete_setup_assessment(
+                old,
+                Err(crate::setup::published::unavailable("stale verifier")),
+            )
+            .unwrap();
+        assert_eq!(app.setup_recovery, expected);
+        assert!(!app.setup_read_failed);
+        assert!(stale.assessment_operation().is_some());
     }
 
     #[test]

@@ -91,6 +91,134 @@ fn reassessment_can_gain_and_lose_requirements_without_execution() {
 }
 
 #[test]
+fn failed_cached_reads_retain_the_last_published_status() {
+    for status in [
+        SetupStatus::Unchecked,
+        SetupStatus::Incomplete,
+        SetupStatus::Complete,
+    ] {
+        let mut health = SetupHealth::default();
+        let operation = health.request().unwrap();
+        let mut published = read(StepResponse::Complete).unwrap();
+        published.snapshot.status = status;
+        health.complete(operation, Ok(published)).unwrap();
+        for _ in 0..3 {
+            let operation = health.request().unwrap();
+            assert!(!operation.1, "cached retries must not request assessment");
+            assert_eq!(
+                health.complete(operation, Err(worker_stopped())),
+                Some(None)
+            );
+            assert_eq!(health.status(), status);
+            assert!(!health.verification_pending());
+        }
+    }
+}
+
+#[test]
+fn verification_deadline_is_observation_only_and_fresh_results_still_admit() {
+    let mut health = SetupHealth::default();
+    health.changed();
+    let requested = health.request().unwrap();
+    let started = health.verification_started.unwrap();
+    let mut stale = read(StepResponse::Complete).unwrap();
+    stale.snapshot.instance = "daemon".into();
+    stale.snapshot.revision = 1;
+    stale.requested = Some(("daemon".into(), 2));
+    health.complete(requested, Ok(stale.clone())).unwrap();
+    assert!(!health.verification_expired_at(
+        started + VERIFICATION_WAIT - std::time::Duration::from_millis(1)
+    ));
+    assert!(health.verification_expired_at(started + VERIFICATION_WAIT));
+    assert!(health.verification_pending());
+    assert_eq!(health.status(), SetupStatus::Unchecked);
+    let cached = health.request().unwrap();
+    assert!(!cached.1 && !cached.2);
+    health.complete(cached, Ok(stale.clone())).unwrap();
+    assert!(health.verification_pending());
+    let fresh = health.request().unwrap();
+    stale.snapshot.revision = 2;
+    stale.requested = None;
+    health.complete(fresh, Ok(stale)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
+    assert!(!health.verification_expired_at(started + VERIFICATION_WAIT));
+}
+
+#[test]
+fn restart_is_explicit_and_never_repeated_by_polling() {
+    let mut health = SetupHealth::default();
+    health.retry_verification(true);
+    let restart = health.request().unwrap();
+    assert!(restart.2);
+    health.complete(restart, Err(worker_stopped())).unwrap();
+    let retry = health.request().unwrap();
+    assert!(retry.1 && !retry.2);
+    health.complete(retry, Err(worker_stopped())).unwrap();
+    health.retry_verification(false);
+    assert!(!health.request().unwrap().2);
+}
+
+#[test]
+fn read_failure_and_unchecked_replacement_cannot_clear_a_verification_barrier() {
+    let mut health = SetupHealth::default();
+    let first = health.request().unwrap();
+    let mut published = read(StepResponse::Complete).unwrap();
+    published.snapshot.instance = "daemon-a".into();
+    published.snapshot.revision = 1;
+    health.complete(first, Ok(published.clone())).unwrap();
+    health.changed();
+    let requested = health.request().unwrap();
+    published.requested = Some(("daemon-a".into(), 2));
+    health.complete(requested, Ok(published)).unwrap();
+    assert!(health.verification_pending());
+
+    let failed = health.request().unwrap();
+    health.complete(failed, Err(worker_stopped())).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
+    assert!(health.verification_pending());
+
+    let replacement = health.request().unwrap();
+    let mut starting = read(StepResponse::Complete).unwrap();
+    starting.snapshot.instance = "daemon-b".into();
+    starting.snapshot.status = SetupStatus::Unchecked;
+    health.complete(replacement, Ok(starting)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
+    assert!(health.verification_pending());
+
+    let assessed = health.request().unwrap();
+    let mut incomplete = read(StepResponse::Failed(worker_stopped())).unwrap();
+    incomplete.snapshot.instance = "daemon-b".into();
+    incomplete.snapshot.revision = 1;
+    health.complete(assessed, Ok(incomplete)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Incomplete);
+    assert!(!health.verification_pending());
+}
+
+#[test]
+fn an_unchecked_daemon_replacement_is_not_a_new_assessment() {
+    let mut health = SetupHealth::default();
+    let first = health.request().unwrap();
+    let mut published = read(StepResponse::Complete).unwrap();
+    published.snapshot.instance = "daemon-a".into();
+    published.snapshot.revision = 1;
+    health.complete(first, Ok(published)).unwrap();
+
+    let replacement = health.request().unwrap();
+    let mut starting = read(StepResponse::Complete).unwrap();
+    starting.snapshot.instance = "daemon-b".into();
+    starting.snapshot.status = SetupStatus::Unchecked;
+    health.complete(replacement, Ok(starting)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Complete);
+
+    let assessed = health.request().unwrap();
+    let mut incomplete = read(StepResponse::Failed(worker_stopped())).unwrap();
+    incomplete.snapshot.instance = "daemon-b".into();
+    incomplete.snapshot.revision = 1;
+    health.complete(assessed, Ok(incomplete)).unwrap();
+    assert_eq!(health.status(), SetupStatus::Incomplete);
+}
+
+#[test]
 fn changes_coalesce_and_stale_completion_cannot_replace_flow_state() {
     let mut health = SetupHealth::default();
     let old = health.request().unwrap();
@@ -130,7 +258,7 @@ fn check_finishing_during_setup_waits_for_setup_to_close() {
     assert_eq!(health.status(), SetupStatus::Unchecked);
     let fresh = health.set_paused(false).unwrap();
     assert_eq!(health.complete(fresh, Err(worker_stopped())), Some(None));
-    assert_eq!(health.status(), SetupStatus::Incomplete);
+    assert_eq!(health.status(), SetupStatus::Unchecked);
 }
 
 #[test]

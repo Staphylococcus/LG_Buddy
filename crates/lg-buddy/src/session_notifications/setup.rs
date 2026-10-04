@@ -28,6 +28,7 @@ use std::{
 
 const GUI_BUS_NAME: &str = "io.github.staphylococcus.LGBuddy";
 const COMPLETE_SETUP: &str = "complete-setup";
+const DEFAULT_ACTION: &str = "default";
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -99,7 +100,12 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
         let requirements: BTreeSet<_> = snapshot
             .requirements
             .iter()
-            .filter(|item| item.actionable && snapshot.status == SetupStatus::Incomplete)
+            .filter(|item| {
+                snapshot.status == SetupStatus::Incomplete
+                    && ((item.needs_attention && item.recovery.warrants_notification())
+                        || (item.recovery == crate::setup::recovery::SetupRecovery::default()
+                            && item.actionable))
+            })
             .map(|item| RequirementKey {
                 config: snapshot.config.clone(),
                 step: item.step.clone(),
@@ -153,6 +159,10 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
             .collect::<Vec<_>>()
             .join("\n");
         let mut notification = Notification::new("LG Buddy needs attention", body);
+        notification.actions.push(NotificationAction {
+            key: DEFAULT_ACTION.into(),
+            label: "Complete setup".into(),
+        });
         notification.actions.push(NotificationAction {
             key: COMPLETE_SETUP.into(),
             label: "Complete setup".into(),
@@ -249,7 +259,7 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
             }
             return Ok(());
         }
-        if action.as_deref() != Some(COMPLETE_SETUP) {
+        if !matches!(action.as_deref(), Some(COMPLETE_SETUP | DEFAULT_ACTION)) {
             return Ok(());
         }
         let active = self.pending.as_ref().is_some_and(matches);

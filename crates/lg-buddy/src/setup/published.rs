@@ -15,6 +15,11 @@ use std::{
 pub trait SnapshotBackend: Send + Sync {
     fn snapshot(&self) -> Result<SetupSnapshot, StepFailure>;
     fn request_reassessment(&self) -> Result<(String, u64), StepFailure>;
+    fn restart_verifier(&self) -> Result<(), StepFailure> {
+        Err(unavailable(
+            "this backend cannot restart the session verifier",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +27,12 @@ pub struct SetupRequirement {
     pub step: String,
     pub reason: String,
     pub actionable: bool,
+    /// Independent of whether this frontend can perform the remedy.
+    #[serde(default)]
+    pub needs_attention: bool,
+    /// Older peers omit these facts; unknown facts never authorize repair.
+    #[serde(default)]
+    pub recovery: super::recovery::SetupRecovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +57,16 @@ impl SetupSnapshot {
             Ok(assessment) => {
                 snapshot.status = assessment.status();
                 for (step, response) in assessment.steps {
+                    let Some(recovery) = response.recovery() else {
+                        continue;
+                    };
                     let (reason, actionable) = match response {
+                        StepResponse::InputRequired(StepInput::CorrectTv { .. }) => {
+                            ("Correct the saved TV details.".into(), true)
+                        }
+                        StepResponse::InputRequired(StepInput::UpdatePreference { .. }) => {
+                            ("Choose a valid update-check preference.".into(), true)
+                        }
                         StepResponse::Complete | StepResponse::NotApplicable => continue,
                         StepResponse::InputRequired(StepInput::Pairing { .. }) => {
                             ("Complete TV details and pairing.".into(), true)
@@ -76,6 +96,8 @@ impl SetupSnapshot {
                         .into(),
                         reason,
                         actionable,
+                        needs_attention: recovery.needs_attention(),
+                        recovery,
                     });
                 }
             }
@@ -89,6 +111,8 @@ impl SetupSnapshot {
                         error.presentation.detail()
                     ),
                     actionable: false,
+                    needs_attention: error.recovery.needs_attention(),
+                    recovery: error.recovery,
                 });
             }
         }
@@ -187,6 +211,11 @@ pub fn unavailable(error: impl ToString) -> StepFailure {
             "Start or restart LG Buddy's session service, then retry setup.",
         ),
         diagnostic: error.to_string(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::VerifierUnavailable,
+            super::recovery::RepairBoundary::SessionService,
+            super::recovery::RecoveryAction::RestartSession,
+        ),
         retryable: true,
     }
 }

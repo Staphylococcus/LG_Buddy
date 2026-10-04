@@ -396,14 +396,15 @@ fn repair_rejects_cancellation_after_execution_begins() {
     let cancellation = StepCancellation::default();
     assert_eq!(
         fixture.plan().execute(&cancellation, &mut |state| {
-            assert!(matches!(
+            if matches!(
                 state,
                 StepResponse::Running {
                     cancelable: false,
                     ..
                 }
-            ));
-            assert!(!cancellation.cancel());
+            ) {
+                assert!(!cancellation.cancel());
+            }
         }),
         StepResponse::Complete
     );
@@ -490,9 +491,73 @@ fn unsupported_installation_is_blocked_without_mutation() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.root.join("etc")).unwrap();
     fs::write(fixture.root.join("etc/NIXOS"), "").unwrap();
-    assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+    let StepResponse::Blocked(error) = fixture.run() else {
+        panic!("managed install must be blocked");
+    };
+    assert_eq!(
+        error.recovery,
+        SetupRecovery::new(
+            Cause::ManagedInstallation,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally
+        )
+    );
+    assert!(!error.recovery.can_repair_here());
     assert!(fixture.calls.borrow().is_empty());
     assert!(!fixture.units.exists());
+}
+
+#[test]
+fn managed_recovery_identifies_bindings_and_runtime_state_without_writes() {
+    for marker in ["etc/NIXOS", "run/ostree-booted"] {
+        let fixture = Fixture::new();
+        let marker_path = fixture.root.join(marker);
+        fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+        fs::write(marker_path, "").unwrap();
+        fixture.system.set(true);
+        fixture.active.set(true);
+        fixture.system_binding.set(false);
+        fixture.user_binding.set(false);
+        let StepResponse::Blocked(error) = fixture.run() else {
+            panic!("managed requirements must remain blocked");
+        };
+        let detail = error.presentation.detail();
+        assert!(detail.contains("bind LG_Buddy.service"));
+        assert!(detail.contains("bind LG_Buddy_screen.service"));
+        assert!(detail.contains("enable LG_Buddy_screen.service"));
+        assert!(detail.contains(if marker == "etc/NIXOS" {
+            "build it, and activate it"
+        } else {
+            "immutable system's image"
+        }));
+        assert!(error.retryable);
+        assert!(!error.recovery.can_repair_here());
+        assert!(!detail.contains(fixture.config.to_str().unwrap()));
+        assert!(fixture.calls.borrow().is_empty());
+        fixture.system_binding.set(true);
+        fixture.user_binding.set(true);
+        fixture
+            .user
+            .borrow_mut()
+            .insert(SCREEN.into(), (true, true));
+        fixture
+            .user
+            .borrow_mut()
+            .insert(TIMER.into(), (false, false));
+        if marker != "etc/NIXOS" {
+            for spec in fixture
+                .plan()
+                .system_files()
+                .unwrap()
+                .into_iter()
+                .chain(fixture.plan().user_files().unwrap())
+            {
+                write_file(&spec).unwrap();
+            }
+        }
+        assert_eq!(fixture.plan().inspect(), StepResponse::Complete);
+        assert!(fixture.calls.borrow().is_empty());
+    }
 }
 
 #[test]
@@ -507,10 +572,18 @@ fn invalid_update_preference_fails_before_any_mutation() {
         fs::write(&fixture.config, "updates_auto_check=typo\n").unwrap();
 
         for response in [fixture.plan().inspect(), fixture.run()] {
-            let StepResponse::Failed(failure) = response else {
-                panic!("invalid preference must fail: {response:?}");
-            };
-            assert!(failure.diagnostic.contains("updates.auto_check"));
+            assert!(matches!(
+                response,
+                StepResponse::InputRequired(super::super::StepInput::UpdatePreference { .. })
+            ));
+            assert_eq!(
+                response.recovery(),
+                Some(SetupRecovery::new(
+                    Cause::InvalidConfiguration,
+                    Boundary::UserInput,
+                    Action::CorrectConfiguration
+                ))
+            );
         }
         assert!(fixture.plan().repair().is_err());
         assert!(fixture.calls.borrow().is_empty());
@@ -627,6 +700,7 @@ cd -- "$_fixture_dir"
 printf '%s\n' "$*" >> kwin-actions
 [[ "$*" == *--noninteractive* ]] || return 1
 [[ "$*" == *--allow-dependencies* ]] || return 77
+_lg_buddy_begin_mutation || return $?
 echo 0 > kwin-status
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
@@ -657,6 +731,78 @@ fn native_flow(fixture: Fixture, plasma: bool) -> crate::setup::flow::Onboarding
     let steps = native_steps(fixture, plasma);
     let lock = steps.context.lock_path.clone();
     crate::setup::flow::OnboardingFlow::with_backend(Box::new(steps), &lock).unwrap()
+}
+
+#[test]
+fn explicit_verifier_restart_requires_local_matching_ownership() {
+    use crate::setup::environment::restart_verifier_with;
+    for variant in ["local", "nixos", "ostree", "misbound", "busy"] {
+        let fixture = Fixture::new();
+        let mut steps = native_steps(fixture, false);
+        steps.controller.calls.borrow_mut().clear();
+        match variant {
+            "nixos" => {
+                fs::create_dir_all(steps.context.system_root.join("etc")).unwrap();
+                fs::write(steps.context.system_root.join("etc/NIXOS"), "").unwrap();
+            }
+            "ostree" => {
+                fs::create_dir_all(steps.context.system_root.join("run")).unwrap();
+                fs::write(steps.context.system_root.join("run/ostree-booted"), "").unwrap();
+            }
+            "misbound" => steps.context.config = steps.context.config.with_extension("other"),
+            _ => {}
+        }
+        let lease = (variant == "busy")
+            .then(|| crate::setup::lock::FlowLock::acquire(&steps.context.lock_path).unwrap());
+        let result = restart_verifier_with(&steps.context, &steps.controller);
+        if variant == "local" {
+            assert!(result.is_ok());
+            assert_eq!(
+                *steps.controller.calls.borrow(),
+                [format!("restart {SCREEN}")]
+            );
+        } else {
+            assert!(result.is_err());
+            assert!(steps.controller.calls.borrow().is_empty());
+        }
+        drop(lease);
+    }
+}
+
+#[test]
+fn update_preference_correction_resumes_native_service_repair() {
+    use crate::setup::flow::{FlowOutcome, SetupStep, StepAnswer};
+    let fixture = Fixture::new();
+    fs::write(&fixture.config, "updates_auto_check=typo\nscreen_idle_blank=enabled\ntvs_primary_ip=192.0.2.42\ntvs_primary_mac=02:11:22:33:44:55\ntvs_primary_input=HDMI_1\ntvs_primary_platform=lg_webos\n").unwrap();
+    let token = fixture.root.join("tvs/primary/access-token.json");
+    fs::create_dir_all(token.parent().unwrap()).unwrap();
+    fs::write(&token, r#"{"access_token":"existing"}"#).unwrap();
+    let config = fixture.config.clone();
+    let mut flow = native_flow(fixture, false);
+    let before = flow.snapshot();
+    let Some((
+        SetupStep::Services,
+        StepResponse::InputRequired(crate::setup::StepInput::UpdatePreference { revision }),
+    )) = before.current()
+    else {
+        panic!("correct preference first: {before:?}")
+    };
+    let after = flow.advance_until_pause(
+        before.token,
+        StepAnswer::CorrectUpdatePreference {
+            enabled: false,
+            revision: *revision,
+        },
+        &mut |_| {},
+    );
+    assert_eq!(after.outcome, FlowOutcome::Complete);
+    let contents = fs::read_to_string(config).unwrap();
+    assert!(contents.contains("updates_auto_check=disabled"));
+    assert!(contents.contains("screen_idle_blank=enabled"));
+    assert_eq!(
+        fs::read_to_string(token).unwrap(),
+        r#"{"access_token":"existing"}"#
+    );
 }
 
 #[test]
@@ -821,6 +967,59 @@ fn terminal_renderer_repairs_native_steps_and_repeat_preserves_files() {
     );
     assert_eq!(fs::read(root.join("kwin-actions")).unwrap(), actions);
     assert_eq!(fs::read(config).unwrap(), original);
+}
+
+#[test]
+fn terminal_corrects_saved_values_without_repairing_existing_credentials() {
+    use crate::{parse_args, setup::cli, Command, ParseOutcome};
+    let fixture = Fixture::new();
+    let config = fixture.config.clone();
+    fs::write(&config, "tvs_primary_ip=broken\ntvs_primary_mac=02:11:22:33:44:55\ntvs_primary_input=HDMI_2\ntvs_primary_platform=lg_webos\nupdates_auto_check=typo\nscreen_idle_blank=disabled\nunknown_setting=retain\n").unwrap();
+    let token = config
+        .parent()
+        .unwrap()
+        .join("tvs/primary/access-token.json");
+    fs::create_dir_all(token.parent().unwrap()).unwrap();
+    fs::write(&token, r#"{"access_token":"existing"}"#).unwrap();
+    let mut flow = native_flow(fixture, false);
+    let ParseOutcome::Command(Command::Setup(options)) = parse_args([
+        "setup",
+        "--non-interactive",
+        "--yes",
+        "--tv-ip",
+        "192.0.2.42",
+        "--update-checks",
+        "disabled",
+    ])
+    .unwrap() else {
+        panic!("setup options")
+    };
+    let mut output = Vec::new();
+    cli::render(
+        &mut flow,
+        &options,
+        false,
+        &mut std::io::empty(),
+        &mut output,
+    )
+    .unwrap();
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .ends_with("Setup complete.\n"));
+    let contents = fs::read_to_string(config).unwrap();
+    for value in [
+        "tvs_primary_ip=192.0.2.42",
+        "tvs_primary_input=HDMI_2",
+        "updates_auto_check=disabled",
+        "screen_idle_blank=disabled",
+        "unknown_setting=retain",
+    ] {
+        assert!(contents.contains(value));
+    }
+    assert_eq!(
+        fs::read_to_string(token).unwrap(),
+        r#"{"access_token":"existing"}"#
+    );
 }
 
 #[test]

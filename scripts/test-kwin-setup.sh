@@ -41,7 +41,7 @@ elif [ "$2" = check ]; then
 fi
 SH
 chmod 755 "$runtime"
-plugin_root_supported() { [ "$1" = "$plugin_root" ]; }
+plugin_root_supported() { [ "$1" = "$fixture/plugins" ]; }
 configure_plugin() { echo "configure $*" >> "$fixture/actions"; }
 privileged() {
     echo "privileged $*" >> "$fixture/actions"
@@ -195,12 +195,26 @@ printf '%s\t%s\t%s\t%s\n' "$kwin_version" "$qt_version" "$plugin_root" :1.42 > "
 touch "$fixture/ready"
 main --status
 rm "$fixture/ready"
+original_version="$kwin_version"
+printf '5.27.0\t%s\t%s\t:1.42\n' "$qt_version" "$plugin_root" > "$fixture/info"
 status=0
 main --status || status=$?
-if [ -e /etc/NIXOS ] || [ -e /run/ostree-booted ]; then
-    test "$status" = 4
+test "$status" = 7
+printf '%s\t%s\t%s\t:1.42\n' "$original_version" "$qt_version" "$plugin_root" > "$fixture/info"
+status=0
+main --status || status=$?
+if [ -e /etc/NIXOS ]; then
+    test "$status" = 5
+elif [ -e /run/ostree-booted ]; then
+    test "$status" = 6
 else
     test "$status" = 3
+    original_root="$plugin_root"
+    printf '%s\t%s\t/unsupported/qt/plugins\t:1.42\n' "$original_version" "$qt_version" > "$fixture/info"
+    status=0
+    main --status || status=$?
+    test "$status" = 8
+    printf '%s\t%s\t%s\t:1.42\n' "$original_version" "$qt_version" "$original_root" > "$fixture/info"
     artifact "$payload_dir/prebuilt/candidate" prebuilt
     main
     test ! -e "$XDG_STATE_HOME"

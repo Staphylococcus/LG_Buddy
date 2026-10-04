@@ -10,6 +10,7 @@ use crate::presentation::brightness::UserFacingError;
 pub mod assessment;
 pub mod authorization;
 pub mod cli;
+mod configuration;
 mod environment;
 pub mod flow;
 pub mod gui;
@@ -18,6 +19,7 @@ pub(crate) mod lock;
 pub(crate) mod pairing;
 pub(crate) mod provision;
 pub mod published;
+pub mod recovery;
 pub(crate) mod services;
 mod terminal_signals;
 
@@ -26,6 +28,9 @@ mod terminal_signals;
 pub struct StepFailure {
     pub presentation: UserFacingError,
     pub diagnostic: String,
+    pub recovery: recovery::SetupRecovery,
+    /// Whether this flow can re-inspect after the user addresses the cause.
+    /// This is not proof that the flow can perform the required repair.
     pub retryable: bool,
 }
 
@@ -36,6 +41,11 @@ fn authorization_failed(diagnostic: impl Into<String>) -> StepResponse {
             "Retry to authorize setup, or cancel and complete setup later.",
         ),
         diagnostic: diagnostic.into(),
+        recovery: recovery::SetupRecovery::new(
+            recovery::RecoveryCause::AuthorizationDenied,
+            recovery::RepairBoundary::LocalSetup,
+            recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     })
 }
@@ -62,12 +72,57 @@ pub enum StepResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepInput {
+    CorrectTv {
+        address: String,
+        mac: String,
+        input: crate::config::HdmiInput,
+        revision: [u8; 32],
+    },
+    UpdatePreference {
+        revision: [u8; 32],
+    },
     Pairing {
         saved: Option<crate::pairing::PairingRequest>,
     },
     BuildDependencies {
         explanation: &'static str,
     },
+}
+
+impl StepResponse {
+    pub fn recovery(&self) -> Option<recovery::SetupRecovery> {
+        use recovery::{
+            RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary,
+            SetupRecovery,
+        };
+        Some(match self {
+            Self::Complete | Self::NotApplicable => return None,
+            Self::InputRequired(
+                StepInput::CorrectTv { .. } | StepInput::UpdatePreference { .. },
+            ) => SetupRecovery::new(
+                Cause::InvalidConfiguration,
+                Boundary::UserInput,
+                Action::CorrectConfiguration,
+            ),
+            Self::InputRequired(_) => SetupRecovery::new(
+                Cause::InputRequired,
+                Boundary::UserInput,
+                Action::ProvideInput,
+            ),
+            Self::ActionRequired { .. } => SetupRecovery::new(
+                Cause::MissingIntegration,
+                Boundary::LocalSetup,
+                Action::Repair,
+            ),
+            Self::Failed(error) | Self::Blocked(error) => error.recovery,
+            Self::Running { .. } => {
+                SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait)
+            }
+            Self::Cancelled => {
+                SetupRecovery::new(Cause::Unverified, Boundary::LocalSetup, Action::Recheck)
+            }
+        })
+    }
 }
 
 const AVAILABLE: u8 = 0;
@@ -106,6 +161,10 @@ impl StepCancellation {
         self.0
             .compare_exchange(AVAILABLE, RUNNING, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    pub(crate) fn protect(&self) -> bool {
+        self.begin() || self.0.load(Ordering::Acquire) == RUNNING
     }
 
     pub(crate) fn finish(&self) {

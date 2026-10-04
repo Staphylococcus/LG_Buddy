@@ -185,7 +185,8 @@ SH
     # Incomplete installation gates normal pages; opening never mutates it.
     : > "$CONFIG_FILE"
     rm -f "$token" "$WORK_DIR/services/setup-ready"
-    start_setup_session --services-ready "$WORK_DIR/services/setup-ready"
+    start_setup_session --services-ready "$WORK_DIR/services/setup-ready" \
+        --read-error-marker "$WORK_DIR/setup-read-error"
     start_gui enabled "" "" normal
     observe_gui_state --expected-tvs-state setup-required
     observe_gui_state --expected-text "Main Menu"
@@ -232,9 +233,34 @@ SH
     publish_setup_assessment
     observe_gui_state --select-page TVs
     observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 --expected-tv-name OLED42C2
+    # Cached transport failure is not a newly assessed incomplete installation.
+    touch "$WORK_DIR/setup-read-error"
+    local read_failures=0
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        read_failures="$(cat "$WORK_DIR/setup-read-error.observed" 2>/dev/null || true)"
+        [ "${read_failures:-0}" -lt 3 ] || break
+        sleep 0.05
+    done
+    [ "${read_failures:-0}" -ge 3 ] || fail "GUI did not exercise failed cached reads."
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 \
+        --expected-tv-name OLED42C2 --expected-absent-text "Setup required"
+    observe_gui_state --select-page Settings
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
+    rm "$WORK_DIR/setup-read-error"
     cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Recovery changed saved settings."
     cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Recovery paired an existing TV again."
     journey_diagnostics paired
+    # Correct malformed saved details inside the gate, retaining the credential.
+    sed -i 's/^tvs_primary_ip=.*/tvs_primary_ip=broken/' "$CONFIG_FILE"
+    publish_setup_assessment
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --activate-control 'Complete setup'
+    observe_gui_state --expected-text 'Correct TV details'
+    observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
+    observe_gui_state --activate-control 'Save TV details'
+    observe_gui_state --select-page TVs
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 --expected-tv-name OLED42C2
+    cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Correction changed the existing credential."
     observe_gui_state --select-page Settings
     observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
 

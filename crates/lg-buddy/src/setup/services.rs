@@ -4,6 +4,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use crate::settings::{ServiceController, SettingsError, UserServiceState};
@@ -42,6 +45,11 @@ impl ServiceStep {
                         return self.blocked(
                             "LG Buddy's screen service is not installed.",
                             "LG Buddy's screen service is not installed.",
+                            SetupRecovery::new(
+                                Cause::MissingIntegration,
+                                Boundary::LocalSetup,
+                                Action::Repair,
+                            ),
                         )
                     }
                     Err(error) => {
@@ -58,6 +66,11 @@ impl ServiceStep {
                     return self.blocked(
                         "LG Buddy's system service installation needs repair.",
                         error.to_string(),
+                        SetupRecovery::new(
+                            Cause::MissingIntegration,
+                            Boundary::LocalSetup,
+                            Action::Repair,
+                        ),
                     );
                 }
                 services.system_lifecycle_is_active()
@@ -68,6 +81,11 @@ impl ServiceStep {
             Ok(false) if services.systemd_actions_disabled() => self.blocked(
                 "Service changes are disabled in this environment.",
                 "systemd actions are disabled; the service was not activated",
+                SetupRecovery::new(
+                    Cause::UnsupportedInstallation,
+                    Boundary::SystemConfiguration,
+                    Action::RepairExternally,
+                ),
             ),
             Ok(false) => StepResponse::ActionRequired {
                 explanation: match self {
@@ -97,6 +115,7 @@ impl ServiceStep {
                 self.blocked(
                     "This setup attempt has already started.",
                     "service activation attempt cannot be executed twice",
+                    SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait),
                 )
             };
         }
@@ -142,7 +161,13 @@ impl ServiceStep {
         }
     }
 
-    fn failure(self, detail: &str, diagnostic: impl ToString, retryable: bool) -> StepFailure {
+    fn failure(
+        self,
+        detail: &str,
+        diagnostic: impl ToString,
+        retryable: bool,
+        recovery: SetupRecovery,
+    ) -> StepFailure {
         StepFailure {
             presentation: UserFacingError::new(
                 match self {
@@ -152,16 +177,27 @@ impl ServiceStep {
                 detail,
             ),
             diagnostic: diagnostic.to_string(),
+            recovery,
             retryable,
         }
     }
 
     fn failed(self, detail: &str, diagnostic: impl ToString) -> StepResponse {
-        StepResponse::Failed(self.failure(detail, diagnostic, true))
+        StepResponse::Failed(self.failure(
+            detail,
+            diagnostic,
+            true,
+            SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
+        ))
     }
 
-    fn blocked(self, detail: &str, diagnostic: impl ToString) -> StepResponse {
-        StepResponse::Blocked(self.failure(detail, diagnostic, false))
+    fn blocked(
+        self,
+        detail: &str,
+        diagnostic: impl ToString,
+        recovery: SetupRecovery,
+    ) -> StepResponse {
+        StepResponse::Blocked(self.failure(detail, diagnostic, false, recovery))
     }
 }
 

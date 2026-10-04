@@ -377,9 +377,9 @@ impl ApplicationController {
                 Self::start_onboarding(controller, operation.clone());
             }
         }
-        controller
-            .window
-            .set_navigation_visible(transition.navigation().tabs_visible());
+        controller.window.set_navigation_visible(
+            transition.admitted() && transition.navigation().tabs_visible(),
+        );
         controller
             .window
             .navigate(transition.navigation().selected());
@@ -1181,6 +1181,86 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod controller_test_support {
+    pub(crate) fn isolated(name: &str) -> bool {
+        if std::env::var("LG_BUDDY_GTK_SCENARIO").as_deref() == Ok(name) {
+            gtk::init().expect("GTK display required");
+            return true;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("LG_BUDDY_GTK_SCENARIO", name)
+            .status()
+            .expect("start isolated GTK scenario");
+        assert!(status.success(), "isolated GTK scenario failed: {name}");
+        false
+    }
+
+    #[test]
+    fn startup_gate() {
+        if isolated("controller_test_support::startup_gate") {
+            run_pairing_scenario("InitialSetup");
+        }
+    }
+    #[test]
+    fn post_repair_verification() {
+        if isolated("controller_test_support::post_repair_verification") {
+            run_pairing_scenario("RepairPlasma");
+        }
+    }
+    #[test]
+    fn gnome_repair_without_plasma() {
+        if isolated("controller_test_support::gnome_repair_without_plasma") {
+            run_pairing_scenario("RepairGnome");
+        }
+    }
+    #[test]
+    fn cancel_close_and_reopen() {
+        if isolated("controller_test_support::cancel_close_and_reopen") {
+            run_pairing_scenario("CancelSetup");
+        }
+    }
+    #[test]
+    fn corrective_input() {
+        if isolated("controller_test_support::corrective_input") {
+            crate::onboarding::run_renderer_scenarios(&test_application("CorrectiveInput"));
+        }
+    }
+    #[test]
+    fn rapid_modal_completion() {
+        if isolated("controller_test_support::rapid_modal_completion") {
+            crate::onboarding::run_rapid_completion(&test_application("RapidCompletion"));
+        }
+    }
+    #[test]
+    fn managed_block_recheck() {
+        if isolated("controller_test_support::managed_block_recheck") {
+            run_managed_block();
+        }
+    }
+    #[test]
+    fn tvs_renderer() {
+        if isolated("controller_test_support::tvs_renderer") {
+            crate::tvs::run_renderer_scenarios(&test_application("TvsRenderer"));
+        }
+    }
+    #[test]
+    fn settings_renderer() {
+        if isolated("controller_test_support::settings_renderer") {
+            crate::settings::run_renderer_scenarios(&test_application("SettingsRenderer"));
+        }
+    }
+    #[test]
+    fn diagnostics_renderer() {
+        if isolated("controller_test_support::diagnostics_renderer") {
+            crate::diagnostics::run_renderer_scenarios(&test_application("DiagnosticsRenderer"));
+        }
+    }
+    #[test]
+    fn ordinary_controller_workers() {
+        if isolated("controller_test_support::ordinary_controller_workers") {
+            run_scenario();
+        }
+    }
     fn published_complete() -> std::sync::Arc<lg_buddy::setup::gui::fixtures::Fixture> {
         let fixture = lg_buddy::setup::gui::fixtures::Fixture::new(true, false);
         fixture.responses.lock().unwrap()[1] = lg_buddy::setup::StepResponse::Complete;
@@ -1576,7 +1656,6 @@ pub(crate) mod controller_test_support {
             gtk::is_initialized(),
             "renderer test must initialize GTK first"
         );
-        run_pairing_scenario();
         run_settings_scenario();
         run_settings_write_scenario();
         run_manual_update_check_scenario();
@@ -2558,14 +2637,86 @@ pub(crate) mod controller_test_support {
         }
     }
 
-    fn run_pairing_scenario() {
+    fn run_managed_block() {
+        use adw::prelude::*;
+        use lg_buddy::setup::gui::{fixtures::Fixture, OnboardingIntent};
+        let fixture = Arc::new(Fixture::managed());
+        let gtk_app = test_application("ManagedRecheck");
+        let (controller, opening) = ApplicationController::with_backends(
+            &gtk_app,
+            Arc::new(PanicBackend),
+            Arc::new(EmptyTvsBackend),
+            fixture.clone(),
+            Arc::new(DefaultSettingsBackend),
+        );
+        ApplicationController::apply_transition(&controller, opening);
+        pump_until(|| {
+            controller.window.setup_visible() && !controller.application.borrow().setup_busy()
+        });
+        controller.window.activate_setup();
+        pump_until(|| {
+            widget_contains_visible_text(controller.window.window().upcast_ref(), "Recheck")
+                && !controller.application.borrow().setup_busy()
+        });
+        assert!(widget_contains_visible_text(
+            controller.window.window().upcast_ref(),
+            "Bind LG_Buddy_screen.service"
+        ));
+        ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Submit);
+        pump_until(|| !controller.application.borrow().setup_busy());
+        assert!(controller.window.setup_visible());
+        assert!(!controller.window.navigation_visible());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+        ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Cancel);
+        pump_until(|| {
+            controller
+                .window
+                .window()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_none()
+        });
+        controller.shutdown();
+        controller.window.close();
+    }
+
+    fn run_pairing_scenario(scenario: &str) {
         use adw::prelude::*;
         use lg_buddy::setup::{
-            flow::SetupStep,
-            gui::{fixtures::Fixture, OnboardingIntent},
-            StepResponse,
+            flow::{OnboardingFlow, SetupStep},
+            gui::{fixtures::Fixture, OnboardingBackend, OnboardingIntent},
+            published::{SetupSnapshot, SnapshotBackend},
+            StepFailure, StepResponse,
         };
         use lg_buddy::{navigation::ApplicationPage, settings_view::SettingsIntent};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct CachedReads {
+            fixture: Arc<Fixture>,
+            fail: AtomicBool,
+            failures: AtomicUsize,
+        }
+        impl SnapshotBackend for CachedReads {
+            fn snapshot(&self) -> Result<SetupSnapshot, StepFailure> {
+                if self.fail.load(Ordering::SeqCst) {
+                    self.failures.fetch_add(1, Ordering::SeqCst);
+                    Err(lg_buddy::setup::published::unavailable(
+                        "cached read failed",
+                    ))
+                } else {
+                    self.fixture.snapshot()
+                }
+            }
+            fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+                self.fixture.request_reassessment()
+            }
+        }
+        impl OnboardingBackend for CachedReads {
+            fn open(&self) -> Result<OnboardingFlow, StepFailure> {
+                self.fixture.open()
+            }
+        }
         struct SetupTvs(Arc<Fixture>);
         impl lg_buddy::tvs::TvsBackend for SetupTvs {
             fn read_profiles(
@@ -2594,7 +2745,15 @@ pub(crate) mod controller_test_support {
             (true, true, "RepairPlasma"),
             (true, false, "RepairGnome"),
         ] {
+            if scenario != name {
+                continue;
+            }
             let fixture = Arc::new(Fixture::new(existing, plasma));
+            let reads = Arc::new(CachedReads {
+                fixture: fixture.clone(),
+                fail: AtomicBool::new(false),
+                failures: AtomicUsize::new(0),
+            });
             let gtk_app = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             for _ in 0..4 {
@@ -2618,7 +2777,7 @@ pub(crate) mod controller_test_support {
                 &gtk_app,
                 Arc::new(backend),
                 Arc::new(SetupTvs(fixture.clone())),
-                fixture.clone(),
+                reads.clone(),
                 Arc::new(DefaultSettingsBackend),
             );
             assert!(opening.overview().is_none());
@@ -2706,6 +2865,20 @@ pub(crate) mod controller_test_support {
                 .unwrap()
                 .visible_dialog()
                 .is_none());
+            reads.fail.store(true, Ordering::SeqCst);
+            pump_until(|| reads.failures.load(Ordering::SeqCst) >= 3);
+            assert!(!controller.window.setup_visible());
+            assert!(controller.window.navigation_visible());
+            assert!(controller
+                .window
+                .window()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_none());
+            ApplicationController::navigate(&controller, ApplicationPage::Settings);
+            assert_eq!(controller.window.visible_page(), ApplicationPage::Settings);
+            reads.fail.store(false, Ordering::SeqCst);
             let calls = fixture.calls.lock().unwrap().len();
             fixture.responses.lock().unwrap()[1] = StepResponse::ActionRequired {
                 explanation: "Service stopped",
@@ -2725,6 +2898,7 @@ pub(crate) mod controller_test_support {
                     )
             });
             assert!(!controller.application.borrow().setup_busy());
+            assert!(!controller.window.navigation_visible());
             assert_eq!(fixture.calls.lock().unwrap().len(), calls);
             fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
             fixture.publish();
@@ -2734,6 +2908,9 @@ pub(crate) mod controller_test_support {
             ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         }
 
+        if scenario != "CancelSetup" {
+            return;
+        }
         let fixture = Arc::new(Fixture::new(true, true));
         let gtk_app = test_application("CancelSetup");
         let (controller, opening) = ApplicationController::with_backends(
@@ -2782,11 +2959,30 @@ pub(crate) mod controller_test_support {
             "Setup required"
         ));
         assert!(!controller.window.navigation_visible());
+        controller.window.activate_setup();
+        pump_until(|| {
+            !controller.application.borrow().setup_busy()
+                && widget_contains_visible_text(
+                    controller.window.window().upcast_ref(),
+                    "Install compiler packages?",
+                )
+        });
+        ApplicationController::handle_onboarding_intent(&controller, OnboardingIntent::Cancel);
+        pump_until(|| {
+            controller
+                .window
+                .window()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_none()
+        });
+        assert!(!controller.closed.get());
         ApplicationController::handle_intent(&controller, OverviewIntent::Cancel);
         pump_until(|| controller.closed.get());
         assert_eq!(
             *fixture.calls.lock().unwrap(),
-            [SetupStep::Services, SetupStep::Plasma]
+            [SetupStep::Services, SetupStep::Plasma, SetupStep::Plasma]
         );
         assert_ne!(fixture.responses.lock().unwrap()[2], StepResponse::Complete);
     }

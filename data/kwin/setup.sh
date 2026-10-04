@@ -108,13 +108,23 @@ system_action() {
 privileged() {
     # Match the installer privilege route, using trusted absolute executables.
     if [ "$(id -u)" -eq 0 ]; then
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         /usr/bin/sudo -n /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ "$noninteractive" -eq 1 ]; then
         return 127
     elif [ "$terminal" -eq 1 ]; then
-        /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
+        if declare -F _lg_buddy_privileged >/dev/null; then
+            _lg_buddy_privileged /bin/bash "$payload_dir/setup.sh" "$@"
+        else
+            /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
+        fi
     elif declare -F _lg_buddy_privileged >/dev/null; then
         # An onboarding flow can supply a shared Polkit authorization route.
         _lg_buddy_privileged "$payload_dir/setup.sh" "$@"
@@ -175,6 +185,9 @@ try_artifacts() {
             }
         fi
         # Keep receipts even for rejected candidates, so cleanup can be retried
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         # if authorization to remove a file is temporarily unavailable.
         printf '%s\t%s\n' "$plugin_root" "$id" > "$state_dir/plugins/$id.tsv"
         # A unique filename per artifact avoids Qt caching a rejected candidate
@@ -209,6 +222,9 @@ try_artifacts() {
 remove_plugin() {
     local root="$1" id="$2"
     valid_id "$id" && [[ "$id" = "lg_buddy_inhibition_${uid}_"* ]] || return 0
+    if declare -F _lg_buddy_begin_mutation >/dev/null; then
+        _lg_buddy_begin_mutation || return $?
+    fi
     "$runtime" kwin-bridge unload "$id" >>"$log_file" 2>&1 || true
     configure_plugin "$id" false || true
     if plugin_root_supported "$root" && privileged --system-remove "$uid" "$root" "$id"; then
@@ -256,7 +272,9 @@ provision() {
 }
 
 # Structured status protocol: 0 ready, 2 inapplicable, 3 needs setup,
-# 4 unsupported installation, 1 inspection failure. This function never writes.
+# 4 legacy unsupported installation, 5 NixOS, 6 immutable image,
+# 7 unsupported compositor version, 8 unsupported plugin layout, 1 failure.
+# This function never writes.
 inspect_session() {
     uid="$(id -u)"
     [ "$uid" -ne 0 ] || return 2
@@ -273,8 +291,10 @@ inspect_session() {
     # Already installed bridges can be ready even where imperative repair is unsupported.
     existing="$("$runtime" kwin-bridge check 2>/dev/null)" \
         && [ "$existing" = "$kwin_version"$'\t'"$source_id" ] && return 0
-    plugin_root_supported "$plugin_root" && [[ "$kwin_version" = 6.* ]] || return 4
-    [ ! -e /run/ostree-booted ] && [ ! -e /etc/NIXOS ] || return 4
+    [[ "$kwin_version" = 6.* ]] || return 7
+    [ ! -e /etc/NIXOS ] || return 5
+    [ ! -e /run/ostree-booted ] || return 6
+    plugin_root_supported "$plugin_root" || return 8
     return 3
 }
 

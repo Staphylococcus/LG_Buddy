@@ -80,11 +80,41 @@ fn failure(retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Incomplete", "Try again."),
         diagnostic: "fixture error".into(),
+        recovery: crate::setup::recovery::SetupRecovery::new(
+            crate::setup::recovery::RecoveryCause::TemporaryFailure,
+            crate::setup::recovery::RepairBoundary::LocalSetup,
+            crate::setup::recovery::RecoveryAction::Retry,
+        ),
         retryable,
     }
 }
 fn index(step: SetupStep) -> usize {
     SetupStep::ORDER.iter().position(|id| *id == step).unwrap()
+}
+
+#[test]
+fn externally_changed_preference_pauses_before_any_repair() {
+    let fixture = Fixture::new([
+        StepResponse::Complete,
+        StepResponse::InputRequired(StepInput::UpdatePreference { revision: [0; 32] }),
+        StepResponse::NotApplicable,
+    ]);
+    let mut flow = fixture.open().unwrap();
+    let before = flow.snapshot();
+    fixture.state.lock().unwrap().observed[1] = action();
+    let after = flow.advance_until_pause(
+        before.token,
+        StepAnswer::CorrectUpdatePreference {
+            enabled: false,
+            revision: [0; 32],
+        },
+        &mut |_| {},
+    );
+    assert!(matches!(
+        after.current(),
+        Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+    ));
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
 }
 
 struct State {
@@ -181,6 +211,177 @@ impl Drop for Fixture {
 }
 fn advance(flow: &mut OnboardingFlow) -> FlowSnapshot {
     flow.advance(flow.snapshot().token, StepAnswer::Continue, &mut |_| {})
+}
+
+struct StalledSteps {
+    steps: FakeSteps,
+    helper_lease: Arc<Mutex<Option<Arc<std::fs::File>>>>,
+}
+impl SetupSteps for StalledSteps {
+    fn inspect(&self, step: SetupStep) -> StepResponse {
+        self.steps.inspect(step)
+    }
+    fn execute(
+        &self,
+        step: SetupStep,
+        answer: StepAnswer,
+        cancellation: &StepCancellation,
+        lease: &FlowLock,
+        progress: &mut dyn FnMut(StepResponse),
+    ) -> StepResponse {
+        if self.steps.0.lock().unwrap().calls.is_empty() {
+            assert!(cancellation.protect());
+            self.steps.0.lock().unwrap().calls.push(step);
+            *self.helper_lease.lock().unwrap() = Some(lease.file());
+            cancellation.finish();
+            let mut error = failure(true);
+            error.recovery = crate::setup::recovery::SetupRecovery::new(
+                crate::setup::recovery::RecoveryCause::Busy,
+                crate::setup::recovery::RepairBoundary::LocalSetup,
+                crate::setup::recovery::RecoveryAction::Recheck,
+            );
+            StepResponse::Blocked(error)
+        } else {
+            assert!(self.helper_lease.lock().unwrap().is_none());
+            self.steps
+                .execute(step, answer, cancellation, lease, progress)
+        }
+    }
+}
+
+#[test]
+fn stalled_execution_requires_a_fresh_lease_even_in_the_same_flow() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    let helper_lease = Arc::new(Mutex::new(None));
+    let mut flow = OnboardingFlow::with_backend(
+        Box::new(StalledSteps {
+            steps: FakeSteps(fixture.state.clone()),
+            helper_lease: helper_lease.clone(),
+        }),
+        &fixture.lock(),
+    )
+    .unwrap();
+    let stalled = flow.run(flow.snapshot().token, &mut |_| {});
+    assert!(matches!(
+        stalled.current(),
+        Some((SetupStep::Services, StepResponse::Blocked(_)))
+    ));
+    for _ in 0..3 {
+        let checked = flow.refresh();
+        assert!(matches!(
+            checked.current(),
+            Some((SetupStep::Services, StepResponse::Blocked(_)))
+        ));
+        flow.run(checked.token, &mut |_| {
+            panic!("no repair while helper is active")
+        });
+        flow.advance(checked.token, StepAnswer::Continue, &mut |_| {
+            panic!("no repair while helper is active")
+        });
+        assert!(fixture.open().is_err());
+    }
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    helper_lease.lock().unwrap().take();
+    let checked = flow.refresh();
+    assert!(matches!(
+        checked.current(),
+        Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+    ));
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    let done = flow.advance_until_pause(checked.token, StepAnswer::Continue, &mut |_| {});
+    assert_eq!(done.outcome, FlowOutcome::Complete);
+    assert_eq!(
+        fixture.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Services, SetupStep::Plasma]
+    );
+    assert!(fixture.open().is_ok());
+}
+
+#[test]
+fn modal_recheck_cannot_retry_a_still_active_helper() {
+    use crate::setup::{
+        gui::{OnboardingApplication, OnboardingBackend, OnboardingIntent},
+        published::{SetupSnapshot, SnapshotBackend},
+    };
+    struct Backend {
+        state: Arc<Mutex<State>>,
+        path: PathBuf,
+        helper_lease: Arc<Mutex<Option<Arc<std::fs::File>>>>,
+    }
+    impl SnapshotBackend for Backend {
+        fn snapshot(&self) -> Result<SetupSnapshot, StepFailure> {
+            unreachable!("modal does not read daemon publication")
+        }
+        fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+            unreachable!("modal does not publish assessment")
+        }
+    }
+    impl OnboardingBackend for Backend {
+        fn open(&self) -> Result<OnboardingFlow, StepFailure> {
+            OnboardingFlow::with_backend(
+                Box::new(StalledSteps {
+                    steps: FakeSteps(self.state.clone()),
+                    helper_lease: self.helper_lease.clone(),
+                }),
+                &self.path,
+            )
+        }
+    }
+    let fixture = Fixture::new([
+        StepResponse::Complete,
+        action(),
+        StepResponse::NotApplicable,
+    ]);
+    let backend = Backend {
+        state: fixture.state.clone(),
+        path: fixture.lock(),
+        helper_lease: Arc::new(Mutex::new(None)),
+    };
+    let mut app = OnboardingApplication::default();
+    let mut update = app.handle(OnboardingIntent::Open).unwrap();
+    while let Some(operation) = update.operation {
+        let result = operation.execute_with(&backend, &mut |_| {});
+        update = app.complete(&operation, result).unwrap();
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            update.presentation.as_ref().unwrap().action,
+            Some("Recheck")
+        );
+        let operation = app
+            .handle(OnboardingIntent::Submit)
+            .unwrap()
+            .operation
+            .unwrap();
+        assert!(!operation.changes_setup());
+        let result = operation.execute_with(&backend, &mut |_| panic!("no mutation"));
+        update = app.complete(&operation, result).unwrap();
+        assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    }
+    backend.helper_lease.lock().unwrap().take();
+    let operation = app
+        .handle(OnboardingIntent::Submit)
+        .unwrap()
+        .operation
+        .unwrap();
+    let result = operation.execute_with(&backend, &mut |_| panic!("recheck is read-only"));
+    update = app.complete(&operation, result).unwrap();
+    assert_eq!(update.presentation.unwrap().action, Some("Continue"));
+    let operation = app
+        .handle(OnboardingIntent::Submit)
+        .unwrap()
+        .operation
+        .unwrap();
+    let result = operation.execute_with(&backend, &mut |_| {});
+    app.complete(&operation, result).unwrap();
+    assert_eq!(
+        app.status(),
+        crate::setup::assessment::SetupStatus::Complete
+    );
+    assert_eq!(
+        fixture.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Services]
+    );
 }
 
 #[test]
@@ -710,7 +911,8 @@ fn lock_probe_child() {
     }
     let _lock = result.unwrap();
     if mode == "hold" {
-        println!("LOCK_READY");
+        // Separate readiness from libtest's inline serial progress output.
+        println!("\nLOCK_READY");
         std::io::stdout().flush().unwrap();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).unwrap();

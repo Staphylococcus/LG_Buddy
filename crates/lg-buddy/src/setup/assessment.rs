@@ -46,7 +46,7 @@ pub(super) fn assess_steps(steps: &dyn SetupSteps) -> SetupAssessment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AssessmentOperation(u64, bool);
+pub struct AssessmentOperation(u64, bool, bool);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssessmentRead {
@@ -58,6 +58,9 @@ impl AssessmentOperation {
         self,
         backend: &(impl super::published::SnapshotBackend + ?Sized),
     ) -> Result<AssessmentRead, StepFailure> {
+        if self.2 {
+            backend.restart_verifier()?;
+        }
         let requested = if self.1 {
             Some(backend.request_reassessment()?)
         } else {
@@ -77,6 +80,11 @@ pub fn worker_stopped() -> StepFailure {
             "Open Complete setup to check the remaining requirements.",
         ),
         diagnostic: "setup assessment worker stopped without a result".into(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::TemporaryFailure,
+            super::recovery::RepairBoundary::SessionService,
+            super::recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     }
 }
@@ -92,8 +100,14 @@ pub(crate) struct SetupHealth {
     paused: bool,
     verification_needed: bool,
     required: Option<(String, u64)>,
+    verification_started: Option<std::time::Instant>,
+    restart_requested: bool,
 }
+pub(crate) const VERIFICATION_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 impl SetupHealth {
+    pub fn accepts(&self, operation: AssessmentOperation) -> bool {
+        self.running == Some(operation) && !self.stale && !self.paused
+    }
     pub fn status(&self) -> SetupStatus {
         self.status
     }
@@ -101,6 +115,21 @@ impl SetupHealth {
         self.verification_needed = true;
         self.required = None;
         self.stale = true;
+        self.verification_started = None;
+    }
+    pub fn retry_verification(&mut self, restart: bool) {
+        self.changed();
+        self.restart_requested = restart;
+    }
+    pub fn verification_expired(&self) -> bool {
+        self.verification_expired_at(std::time::Instant::now())
+    }
+    fn verification_expired_at(&self, now: std::time::Instant) -> bool {
+        !self.paused
+            && self.verification_pending()
+            && self
+                .verification_started
+                .is_some_and(|started| now.saturating_duration_since(started) >= VERIFICATION_WAIT)
     }
     pub fn verification_pending(&self) -> bool {
         self.verification_needed || self.required.is_some()
@@ -113,7 +142,14 @@ impl SetupHealth {
             return None;
         }
         self.next += 1;
-        let operation = AssessmentOperation(self.next, self.verification_needed);
+        if self.verification_needed && self.verification_started.is_none() {
+            self.verification_started = Some(std::time::Instant::now());
+        }
+        let operation = AssessmentOperation(
+            self.next,
+            self.verification_needed,
+            std::mem::take(&mut self.restart_requested),
+        );
         self.running = Some(operation);
         self.stale = false;
         Some(operation)
@@ -142,22 +178,24 @@ impl SetupHealth {
         if self.stale || self.paused {
             return Some(self.request());
         }
-        match result {
-            Ok(read) => {
-                if let Some(required) = read.requested {
-                    self.required = Some(required);
-                    self.verification_needed = false;
-                }
-                let verified = !self.verification_needed
-                    && self.required.as_ref().is_none_or(|(instance, revision)| {
-                        read.snapshot.instance != *instance || read.snapshot.revision >= *revision
-                    });
-                if verified {
-                    self.status = read.snapshot.status;
-                    self.required = None;
-                }
+        // Availability is presented by the caller; it does not replace the
+        // last published status or clear pending verification.
+        if let Ok(read) = result {
+            if let Some(required) = read.requested {
+                self.required = Some(required);
+                self.verification_needed = false;
             }
-            Err(_) => self.status = SetupStatus::Incomplete,
+            let verified = !self.verification_needed
+                && self.required.as_ref().is_none_or(|(instance, revision)| {
+                    read.snapshot.instance != *instance || read.snapshot.revision >= *revision
+                });
+            // Unchecked is a daemon's startup placeholder, not a replacement
+            // assessment or confirmation of a settled setup mutation.
+            if verified && read.snapshot.status != SetupStatus::Unchecked {
+                self.status = read.snapshot.status;
+                self.required = None;
+                self.verification_started = None;
+            }
         }
         Some(None)
     }

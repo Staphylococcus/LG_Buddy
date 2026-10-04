@@ -76,6 +76,50 @@ pub(super) struct NativeSteps<C = SystemdUserServiceController> {
     pub controller: C,
 }
 
+pub(super) fn restart_verifier() -> Result<(), StepFailure> {
+    let context = SetupContext::from_env(AuthorizationMode::Noninteractive)?;
+    restart_verifier_with(&context, &SystemdUserServiceController::from_env())
+}
+
+pub(super) fn restart_verifier_with(
+    context: &SetupContext,
+    controller: &impl ServiceController,
+) -> Result<(), StepFailure> {
+    use super::recovery::{
+        RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+    };
+    let failure = |cause, boundary, action, detail: &str, diagnostic: String| StepFailure {
+        presentation: UserFacingError::new("Session service needs recovery", detail),
+        recovery: SetupRecovery::new(cause, boundary, action),
+        diagnostic,
+        retryable: true,
+    };
+    if context.system_root.join("etc/NIXOS").exists()
+        || context.system_root.join("run/ostree-booted").exists()
+        || controller.systemd_actions_disabled()
+    {
+        return Err(failure(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally, "Restart LG Buddy's session service through your system configuration or image, then recheck setup.", "session service is externally managed".into()));
+    }
+    let binding = controller
+        .user_service_config_path("LG_Buddy_screen.service")
+        .map_err(|error| {
+            failure(
+                Cause::MissingIntegration,
+                Boundary::LocalSetup,
+                Action::Repair,
+                "Repair LG Buddy's background services, then verify setup again.",
+                error.to_string(),
+            )
+        })?;
+    let normalized = |path: &Path| path.canonicalize().or_else(|_| std::path::absolute(path));
+    if !matches!((normalized(&binding), normalized(&context.config)), (Ok(binding), Ok(config)) if binding == config)
+    {
+        return Err(failure(Cause::InvalidConfiguration, Boundary::SystemConfiguration, Action::RepairExternally, "The session service is bound to another configuration. Correct its binding externally, then recheck setup.", "refusing to restart a differently bound session service".into()));
+    }
+    let lease = super::lock::FlowLock::acquire(&context.lock_path)?;
+    controller.with_command_lock(lease.file(), |controller| controller.restart_user_service("LG_Buddy_screen.service")).map_err(|error| failure(Cause::TemporaryFailure, Boundary::SessionService, Action::Retry, "The session service could not be restarted. Check Diagnostics, then retry verification.", error.to_string()))
+}
+
 impl NativeSteps {
     pub(super) fn new(context: SetupContext) -> Self {
         Self {
@@ -126,6 +170,22 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
         match (step, answer) {
+            (SetupStep::Pairing, StepAnswer::CorrectTv { request, revision }) => {
+                super::configuration::correct_tv(
+                    &self.context.config,
+                    request,
+                    revision,
+                    cancellation,
+                )
+            }
+            (SetupStep::Services, StepAnswer::CorrectUpdatePreference { enabled, revision }) => {
+                super::configuration::correct_updates(
+                    &self.context.config,
+                    enabled,
+                    revision,
+                    cancellation,
+                )
+            }
             (SetupStep::Pairing, StepAnswer::Pairing(request)) => {
                 super::pairing::execute(&self.context.config, Some(request), cancellation, progress)
             }
@@ -161,6 +221,11 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                     "Respond to the current setup request before continuing.",
                 ),
                 diagnostic: "answer does not match the setup step".into(),
+                recovery: super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::InputRequired,
+                    super::recovery::RepairBoundary::UserInput,
+                    super::recovery::RecoveryAction::ProvideInput,
+                ),
                 retryable: true,
             }),
         }
@@ -174,6 +239,11 @@ fn context_failure(error: impl ToString) -> StepFailure {
             "The user configuration and session could not be resolved.",
         ),
         diagnostic: error.to_string(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::InvalidEnvironment,
+            super::recovery::RepairBoundary::SystemConfiguration,
+            super::recovery::RecoveryAction::RepairExternally,
+        ),
         retryable: true,
     }
 }

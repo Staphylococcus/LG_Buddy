@@ -94,6 +94,11 @@ impl SetupSteps for Steps {
                     "Try again.",
                 ),
                 diagnostic: "fixture failure".into(),
+                recovery: crate::setup::recovery::SetupRecovery::new(
+                    crate::setup::recovery::RecoveryCause::TemporaryFailure,
+                    crate::setup::recovery::RepairBoundary::LocalSetup,
+                    crate::setup::recovery::RecoveryAction::Retry,
+                ),
                 retryable: true,
             });
         }

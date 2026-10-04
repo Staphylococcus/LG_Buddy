@@ -31,12 +31,16 @@ Explicit foreground setup tries:
 3. Ordinary operation with no KWin source if no working bridge is obtained.
 
 Setup runs separately from the activity monitor. A runtime query or reconnection
-never starts a compiler or package manager. The application remains usable while
-setup runs and when setup cannot provide the source.
+never starts a compiler or package manager. The daemon can operate with reduced
+coverage when the source is unavailable. The GUI remains gated until applicable
+installation requirements are complete; the existing setup modal provides
+repair or external-remediation guidance.
 
 The backend consumes a read-only `--status` exit-code protocol from the helper:
-0 complete, 2 inapplicable, 3 setup needed, 4 unsupported installation, and 1
-inspection failure. `--foreground` performs provisioning; `--allow-dependencies`
+0 complete, 2 inapplicable, 3 setup needed, 4 legacy unsupported installation,
+5 NixOS-managed bridge, 6 immutable image, 7 unsupported KWin version,
+8 unsupported Qt plugin directory, and 1 inspection failure.
+`--foreground` performs provisioning; `--allow-dependencies`
 supplies explicit dependency consent, and `--noninteractive` forbids interactive
 authorization. Exit 77 requests dependency consent, 126 reports explicit
 cancellation, and 127 reports that authorization was not granted. An exhausted foreground attempt fails verification rather
@@ -72,11 +76,20 @@ Rejected and superseded installed files are removed; denied removal retains a
 receipt for retry. Uninstall removes this user's enabled plugins and local cache,
 while respecting package ownership.
 
+Automatic host mutation requires KWin 6 and a recognized Qt plugin directory.
+Unsupported versions or layouts remain incomplete, not inapplicable. A
+compatible bridge already loaded in KWin can satisfy setup regardless of who
+installed it. GNOME and sessions without KWin are inapplicable, not missing.
+
 Automatic host mutation is skipped on NixOS, OSTree and unsupported Qt layouts.
 Such installations may supply the same bridge through their platform packaging;
 the runtime adapter discovers it independently. Other desktops normally have no
-KWin source. These are supported coverage modes. Expected availability belongs
-to setup/validation, independently of the blanking Boolean.
+KWin source. Reduced runtime coverage does not satisfy applicable installation
+requirements. On NixOS, repair belongs to declarative configuration, its build
+and activation; only a live service/plugin check establishes readiness. OSTree
+uses its own supported image/package mechanism, not the Nix service contract.
+Managed or unsupported blocks offer read-only Recheck after external changes;
+Recheck never invokes the imperative provisioner.
 
 The release bundle keeps the source, metadata, helper scripts and prebuilts under
 `docs/kwin/` because older verified bundle readers permit additional payload there.
