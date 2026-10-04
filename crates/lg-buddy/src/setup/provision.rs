@@ -81,6 +81,9 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     error,
                 )),
             },
+            Err(SettingsError::InvalidValue { key, .. }) if key == "updates.auto_check" => {
+                super::configuration::update_input(self.config)
+            }
             Err(error) => {
                 StepResponse::Failed(settings_failure("Service setup could not be checked.", error))
             }

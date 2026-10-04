@@ -56,6 +56,12 @@ impl SetupSnapshot {
                         continue;
                     };
                     let (reason, actionable) = match response {
+                        StepResponse::InputRequired(StepInput::CorrectTv { .. }) => {
+                            ("Correct the saved TV details.".into(), true)
+                        }
+                        StepResponse::InputRequired(StepInput::UpdatePreference { .. }) => {
+                            ("Choose a valid update-check preference.".into(), true)
+                        }
                         StepResponse::Complete | StepResponse::NotApplicable => continue,
                         StepResponse::InputRequired(StepInput::Pairing { .. }) => {
                             ("Complete TV details and pairing.".into(), true)

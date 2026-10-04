@@ -250,6 +250,17 @@ SH
     cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Recovery changed saved settings."
     cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Recovery paired an existing TV again."
     journey_diagnostics paired
+    # Correct malformed saved details inside the gate, retaining the credential.
+    sed -i 's/^tvs_primary_ip=.*/tvs_primary_ip=broken/' "$CONFIG_FILE"
+    publish_setup_assessment
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --activate-control 'Complete setup'
+    observe_gui_state --expected-text 'Correct TV details'
+    observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
+    observe_gui_state --activate-control 'Save TV details'
+    observe_gui_state --select-page TVs
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1
+    cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Correction changed the existing credential."
     observe_gui_state --select-page Settings
     observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
 

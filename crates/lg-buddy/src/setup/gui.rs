@@ -22,8 +22,14 @@ pub enum OnboardingIntent {
     SetAddress(String),
     SetMac(String),
     SetInput(HdmiInput),
+    SetUpdateChecks(bool),
     Submit,
     Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePreferencePresentation {
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +43,7 @@ pub struct OnboardingPresentation {
     pub busy: bool,
     pub error: Option<UserFacingError>,
     pub recovery: Option<super::recovery::SetupRecovery>,
+    pub update_checks: Option<UpdatePreferencePresentation>,
 }
 
 impl OnboardingPresentation {
@@ -51,6 +58,7 @@ impl OnboardingPresentation {
             busy: false,
             error,
             recovery: None,
+            update_checks: None,
         }
     }
 
@@ -71,8 +79,34 @@ impl OnboardingPresentation {
             busy: false,
             error: None,
             recovery: response.recovery(),
+            update_checks: None,
         };
         match response {
+            StepResponse::InputRequired(StepInput::CorrectTv {
+                address,
+                mac,
+                input,
+                ..
+            }) => {
+                view.title = "Correct TV details".into();
+                view.description = "Confirm the corrected TV details. Existing credentials and unrelated settings are retained.".into();
+                view.pairing = Some(PairingPresentation::new(
+                    PairingDraft {
+                        address: address.clone(),
+                        mac: mac.clone(),
+                        input: *input,
+                    },
+                    PairingStage::Editing,
+                    None,
+                ));
+                view.action = Some("Save TV details");
+            }
+            StepResponse::InputRequired(StepInput::UpdatePreference { .. }) => {
+                view.title = "Update checks".into();
+                view.description = "The saved update-check preference is invalid. Choose whether LG Buddy should check for updates.".into();
+                view.update_checks = Some(UpdatePreferencePresentation { enabled: None });
+                view.action = Some("Save preference");
+            }
             StepResponse::InputRequired(StepInput::Pairing { saved }) => {
                 let draft = saved
                     .map(|r| PairingDraft {
@@ -127,6 +161,7 @@ impl OnboardingPresentation {
             busy: true,
             error: None,
             recovery: None,
+            update_checks: None,
         }
     }
 }
@@ -240,6 +275,7 @@ pub struct OnboardingApplication {
     presentation: Option<OnboardingPresentation>,
     draft: PairingDraft,
     draft_loaded: bool,
+    update_checks: Option<bool>,
     next: u64,
     cancelling: bool,
     status: SetupStatus,
@@ -267,6 +303,7 @@ impl OnboardingApplication {
             self.flow = Some(Arc::new(Mutex::new(None)));
             self.draft = PairingDraft::default();
             self.draft_loaded = false;
+            self.update_checks = None;
             self.snapshot = None;
             self.status = SetupStatus::Unchecked;
             self.cancellation = None;
@@ -312,6 +349,35 @@ impl OnboardingApplication {
             }
             let (_, response) = snapshot.current()?;
             let answer = match response {
+                StepResponse::InputRequired(StepInput::CorrectTv { revision, .. }) => {
+                    match PairingRequest::parse(
+                        &self.draft.address,
+                        &self.draft.mac,
+                        self.draft.input,
+                    ) {
+                        Ok(request) => StepAnswer::CorrectTv {
+                            request,
+                            revision: *revision,
+                        },
+                        Err(error) => {
+                            self.presentation.as_mut().unwrap().error = Some(error);
+                            return Some(self.transition(None));
+                        }
+                    }
+                }
+                StepResponse::InputRequired(StepInput::UpdatePreference { revision }) => {
+                    let Some(enabled) = self.update_checks else {
+                        self.presentation.as_mut().unwrap().error = Some(UserFacingError::new(
+                            "Update preference required",
+                            "Choose whether to enable update checks.",
+                        ));
+                        return Some(self.transition(None));
+                    };
+                    StepAnswer::CorrectUpdatePreference {
+                        enabled,
+                        revision: *revision,
+                    }
+                }
                 StepResponse::InputRequired(StepInput::Pairing { .. }) => {
                     match PairingRequest::parse(
                         &self.draft.address,
@@ -341,6 +407,12 @@ impl OnboardingApplication {
                 _ => return None,
             };
             return Some(self.start(Command::Advance(snapshot.token, answer)));
+        }
+        if let OnboardingIntent::SetUpdateChecks(enabled) = intent {
+            self.presentation.as_ref()?.update_checks.as_ref()?;
+            self.update_checks = Some(enabled);
+            self.present_snapshot();
+            return Some(self.transition(None));
         }
         self.presentation.as_ref()?.pairing.as_ref()?;
         match intent {
@@ -484,9 +556,15 @@ impl OnboardingApplication {
                 busy: false,
                 error: None,
                 recovery: None,
+                update_checks: None,
             });
         } else if let Some((step, response)) = snapshot.current() {
             let mut view = OnboardingPresentation::for_step(*step, response);
+            if view.update_checks.is_some() {
+                view.update_checks = Some(UpdatePreferencePresentation {
+                    enabled: self.update_checks,
+                });
+            }
             if let Some(pairing) = &view.pairing {
                 if !self.draft_loaded {
                     self.draft = PairingDraft {

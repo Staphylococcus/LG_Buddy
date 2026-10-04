@@ -10,6 +10,7 @@ use crate::presentation::brightness::UserFacingError;
 pub mod assessment;
 pub mod authorization;
 pub mod cli;
+mod configuration;
 mod environment;
 pub mod flow;
 pub mod gui;
@@ -71,6 +72,15 @@ pub enum StepResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepInput {
+    CorrectTv {
+        address: String,
+        mac: String,
+        input: crate::config::HdmiInput,
+        revision: [u8; 32],
+    },
+    UpdatePreference {
+        revision: [u8; 32],
+    },
     Pairing {
         saved: Option<crate::pairing::PairingRequest>,
     },
@@ -87,6 +97,13 @@ impl StepResponse {
         };
         Some(match self {
             Self::Complete | Self::NotApplicable => return None,
+            Self::InputRequired(
+                StepInput::CorrectTv { .. } | StepInput::UpdatePreference { .. },
+            ) => SetupRecovery::new(
+                Cause::InvalidConfiguration,
+                Boundary::UserInput,
+                Action::CorrectConfiguration,
+            ),
             Self::InputRequired(_) => SetupRecovery::new(
                 Cause::InputRequired,
                 Boundary::UserInput,

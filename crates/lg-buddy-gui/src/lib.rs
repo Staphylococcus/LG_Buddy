@@ -377,9 +377,9 @@ impl ApplicationController {
                 Self::start_onboarding(controller, operation.clone());
             }
         }
-        controller
-            .window
-            .set_navigation_visible(transition.navigation().tabs_visible());
+        controller.window.set_navigation_visible(
+            transition.admitted() && transition.navigation().tabs_visible(),
+        );
         controller
             .window
             .navigate(transition.navigation().selected());
@@ -2772,6 +2772,7 @@ pub(crate) mod controller_test_support {
                     )
             });
             assert!(!controller.application.borrow().setup_busy());
+            assert!(!controller.window.navigation_visible());
             assert_eq!(fixture.calls.lock().unwrap().len(), calls);
             fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
             fixture.publish();

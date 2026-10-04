@@ -25,6 +25,14 @@ impl SetupStep {
 /// explicit consent to the action described by the current snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepAnswer {
+    CorrectTv {
+        request: PairingRequest,
+        revision: [u8; 32],
+    },
+    CorrectUpdatePreference {
+        enabled: bool,
+        revision: [u8; 32],
+    },
     Continue,
     Pairing(PairingRequest),
     InstallBuildDependencies,
@@ -331,15 +339,23 @@ impl OnboardingFlow {
             return Ok(self.snapshot());
         }
         let step = self.snapshot().current().map(|(step, _)| *step);
+        let correct_preference = matches!(answer, StepAnswer::CorrectUpdatePreference { .. });
         let cancellation = self.cancellation();
         let mut error = None;
-        let snapshot = self.advance(token, answer, &mut |event| {
+        let (snapshot, executed) = self.advance_checked(token, answer, &mut |event| {
             report_progress(progress, &cancellation, &mut error, event);
         });
         if let Some(error) = error {
             return Err(error);
         }
-        if step.is_some_and(|step| satisfied(&snapshot.steps[step as usize].1)) {
+        if step.is_some_and(|step| satisfied(&snapshot.steps[step as usize].1))
+            || (correct_preference
+                && executed
+                && matches!(
+                    snapshot.current(),
+                    Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+                ))
+        {
             self.try_run(snapshot.token, progress)
         } else {
             Ok(snapshot)
@@ -354,17 +370,26 @@ impl OnboardingFlow {
         answer: StepAnswer,
         progress: &mut dyn FnMut(FlowProgress),
     ) -> FlowSnapshot {
+        self.advance_checked(token, answer, progress).0
+    }
+
+    fn advance_checked(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> (FlowSnapshot, bool) {
         if token != self.snapshot.token || self.control.lock().unwrap().closed {
-            return self.snapshot();
+            return (self.snapshot(), false);
         }
         let fresh = self.inspect();
         if fresh != self.observed {
             self.observed = fresh;
             self.publish(None);
-            return self.snapshot();
+            return (self.snapshot(), false);
         }
         let Some((step, response)) = self.snapshot.current() else {
-            return self.snapshot();
+            return (self.snapshot(), false);
         };
         let step = *step;
         let permitted = match response {
@@ -373,9 +398,9 @@ impl OnboardingFlow {
             _ => false,
         };
         if !permitted {
-            return self.snapshot();
+            return (self.snapshot(), false);
         }
-        self.execute_current(step, token, answer, progress)
+        (self.execute_current(step, token, answer, progress), true)
     }
 
     fn execute_current(

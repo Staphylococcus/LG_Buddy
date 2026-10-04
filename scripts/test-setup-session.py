@@ -8,6 +8,8 @@ Native service/integration inspections are covered by the Rust runtime tests.
 import argparse
 import json
 import os
+import ipaddress
+import re
 from pathlib import Path
 import dbus
 import dbus.service
@@ -33,7 +35,14 @@ class Session(dbus.service.Object):
         values = dict(line.split("=", 1) for line in self.config.read_text().splitlines() if "=" in line)
         token = self.config.parent / "tvs/primary/access-token.json"
         paired = values.get("tvs_primary_platform") == "lg_webos" and token.is_file()
+        try:
+            ipaddress.IPv4Address(values.get("tvs_primary_ip", ""))
+        except ipaddress.AddressValueError:
+            paired = False
+        paired = paired and bool(re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", values.get("tvs_primary_mac", "")))
+        paired = paired and values.get("tvs_primary_input") in {"HDMI_1", "HDMI_2", "HDMI_3", "HDMI_4"}
         services_ready = self.services is None or self.services.exists()
+        services_ready = services_ready and values.get("updates_auto_check", "disabled") in {"enabled", "disabled"}
         requirements = []
         if not paired:
             requirements.append({"step": "pairing", "reason": "Complete TV details and pairing.", "actionable": True})

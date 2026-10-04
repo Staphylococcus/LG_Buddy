@@ -14,6 +14,7 @@ pub struct SetupOptions {
     pub address: Option<String>,
     pub mac: Option<String>,
     pub input: Option<HdmiInput>,
+    pub update_checks: Option<bool>,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, ParseError> {
@@ -27,7 +28,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, 
             "--allow-build-dependencies" => {
                 options.allow_build_dependencies = true;
             }
-            "--tv-ip" | "--tv-mac" | "--input" => {
+            "--tv-ip" | "--tv-mac" | "--input" | "--update-checks" => {
                 let value = args
                     .next()
                     .filter(|value| !value.starts_with('-'))
@@ -41,6 +42,17 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, 
                                 "--input must be HDMI_1, HDMI_2, HDMI_3 or HDMI_4".into(),
                             )
                         })?)
+                    }
+                    "--update-checks" if options.update_checks.is_none() => {
+                        options.update_checks = Some(match value.as_str() {
+                            "enabled" => true,
+                            "disabled" => false,
+                            _ => {
+                                return Err(ParseError::Setup(
+                                    "--update-checks must be enabled or disabled".into(),
+                                ))
+                            }
+                        });
                     }
                     _ => return Err(ParseError::Setup(format!("duplicate option {arg}"))),
                 }
@@ -61,6 +73,7 @@ Usage: {program} setup [OPTIONS]
   --tv-ip ADDRESS              TV IPv4 address
   --tv-mac ADDRESS             TV network MAC address
   --input HDMI_1..HDMI_4        PC input (default: saved input or HDMI_1)
+  --update-checks VALUE        Correct an invalid preference: enabled or disabled
   --yes, -y                    Approve pairing and required service/integration work
   --allow-build-dependencies   Also approve compiler/development package installation
   --non-interactive            Never read input or request a password
@@ -170,23 +183,41 @@ pub(super) fn render(
             .current()
             .expect("incomplete flow has remaining work");
         let answer = match response {
-            StepResponse::InputRequired(StepInput::Pairing { saved }) => {
+            StepResponse::InputRequired(
+                input @ (StepInput::Pairing { .. } | StepInput::CorrectTv { .. }),
+            ) => {
+                let (saved_address, saved_mac, saved_input, correction) = match input {
+                    StepInput::Pairing { saved } => (
+                        saved.map(|r| r.address().to_string()),
+                        saved.map(|r| r.mac().to_string()),
+                        saved.map(|r| r.input()),
+                        None,
+                    ),
+                    StepInput::CorrectTv {
+                        address,
+                        mac,
+                        input,
+                        revision,
+                    } => (
+                        Some(address.clone()),
+                        Some(mac.clone()),
+                        Some(*input),
+                        Some(*revision),
+                    ),
+                    _ => unreachable!(),
+                };
                 writeln!(
                     writer,
-                    "Pair a TV. Turn it on and approve the connection request on the TV."
+                    "{}",
+                    if correction.is_some() {
+                        "Correct the saved TV details. Credentials and unrelated settings will be retained."
+                    } else {
+                        "Pair a TV. Turn it on and approve the connection request on the TV."
+                    }
                 )?;
-                let address = options
-                    .address
-                    .clone()
-                    .or_else(|| saved.map(|s| s.address().to_string()));
-                let mac = options
-                    .mac
-                    .clone()
-                    .or_else(|| saved.map(|s| s.mac().to_string()));
-                let input = options
-                    .input
-                    .or_else(|| saved.map(|s| s.input()))
-                    .unwrap_or(HdmiInput::Hdmi1);
+                let address = options.address.clone().or(saved_address);
+                let mac = options.mac.clone().or(saved_mac);
+                let input = options.input.or(saved_input).unwrap_or(HdmiInput::Hdmi1);
                 let request = loop {
                     let (address, mac, input) = if interactive {
                         (
@@ -230,7 +261,45 @@ pub(super) fn render(
                     "Use --yes to approve pairing and the required setup work.",
                 )?;
                 approved = true;
-                StepAnswer::Pairing(request)
+                match correction {
+                    Some(revision) => StepAnswer::CorrectTv { request, revision },
+                    None => StepAnswer::Pairing(request),
+                }
+            }
+            StepResponse::InputRequired(StepInput::UpdatePreference { revision }) => {
+                let enabled = if let Some(enabled) = options.update_checks {
+                    enabled
+                } else if interactive {
+                    loop {
+                        match prompt(
+                            reader,
+                            writer,
+                            "Automatic update checks (enabled/disabled)",
+                            None,
+                        )?
+                        .as_str()
+                        {
+                            "enabled" => break true,
+                            "disabled" => break false,
+                            _ => writeln!(writer, "Choose enabled or disabled.")?,
+                        }
+                    }
+                } else {
+                    return Err(SetupError::Incomplete("Supply --update-checks enabled or disabled to correct the saved preference."));
+                };
+                consent(
+                    approved,
+                    interactive,
+                    reader,
+                    writer,
+                    "Save preference and complete required setup?",
+                    "Use --yes to approve the correction and required setup work.",
+                )?;
+                approved = true;
+                StepAnswer::CorrectUpdatePreference {
+                    enabled,
+                    revision: *revision,
+                }
             }
             StepResponse::ActionRequired {
                 explanation,

@@ -119,7 +119,7 @@ fn recovery_facts_survive_publication_and_are_shared_by_gui_and_cli() {
             Cause::InvalidConfiguration,
             Boundary::UserInput,
             Action::CorrectConfiguration,
-            false,
+            true,
         ),
         (
             Cause::MissingIntegration,

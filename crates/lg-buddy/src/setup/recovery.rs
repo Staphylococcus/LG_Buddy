@@ -79,7 +79,10 @@ impl SetupRecovery {
             )
             && matches!(
                 self.action,
-                RecoveryAction::Repair | RecoveryAction::ProvideInput | RecoveryAction::Retry
+                RecoveryAction::Repair
+                    | RecoveryAction::ProvideInput
+                    | RecoveryAction::CorrectConfiguration
+                    | RecoveryAction::Retry
             )
     }
 

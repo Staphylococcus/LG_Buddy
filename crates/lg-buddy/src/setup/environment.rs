@@ -126,6 +126,22 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
         match (step, answer) {
+            (SetupStep::Pairing, StepAnswer::CorrectTv { request, revision }) => {
+                super::configuration::correct_tv(
+                    &self.context.config,
+                    request,
+                    revision,
+                    cancellation,
+                )
+            }
+            (SetupStep::Services, StepAnswer::CorrectUpdatePreference { enabled, revision }) => {
+                super::configuration::correct_updates(
+                    &self.context.config,
+                    enabled,
+                    revision,
+                    cancellation,
+                )
+            }
             (SetupStep::Pairing, StepAnswer::Pairing(request)) => {
                 super::pairing::execute(&self.context.config, Some(request), cancellation, progress)
             }

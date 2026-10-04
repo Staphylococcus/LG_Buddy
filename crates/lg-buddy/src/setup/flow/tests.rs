@@ -92,6 +92,31 @@ fn index(step: SetupStep) -> usize {
     SetupStep::ORDER.iter().position(|id| *id == step).unwrap()
 }
 
+#[test]
+fn externally_changed_preference_pauses_before_any_repair() {
+    let fixture = Fixture::new([
+        StepResponse::Complete,
+        StepResponse::InputRequired(StepInput::UpdatePreference { revision: [0; 32] }),
+        StepResponse::NotApplicable,
+    ]);
+    let mut flow = fixture.open().unwrap();
+    let before = flow.snapshot();
+    fixture.state.lock().unwrap().observed[1] = action();
+    let after = flow.advance_until_pause(
+        before.token,
+        StepAnswer::CorrectUpdatePreference {
+            enabled: false,
+            revision: [0; 32],
+        },
+        &mut |_| {},
+    );
+    assert!(matches!(
+        after.current(),
+        Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+    ));
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
+}
+
 struct State {
     observed: [StepResponse; 3],
     calls: Vec<SetupStep>,

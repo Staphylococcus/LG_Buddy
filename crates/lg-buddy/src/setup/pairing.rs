@@ -8,44 +8,21 @@ use crate::pairing::{
     PairingError, PairingFailure, PairingOperation, PairingOutcome, PairingRequest, PairingStage,
 };
 use crate::presentation::brightness::UserFacingError;
-use crate::settings::SettingsStore;
 use crate::tvs::{read_profiles_from_store, TvCredentialState, TvsReadFailure};
 use std::path::Path;
 
 pub(crate) fn inspect(path: &Path) -> StepResponse {
-    let store = match SettingsStore::load(path) {
-        Ok(store) => store,
+    let store = match super::configuration::load(path) {
+        Ok((store, _, _)) => store,
         Err(error) => {
-            let recovery = match &error {
-                crate::settings::SettingsError::InvalidValue { .. }
-                | crate::settings::SettingsError::ReadConfig {
-                    kind: std::io::ErrorKind::InvalidData,
-                    ..
-                } => configuration_recovery(),
-                crate::settings::SettingsError::ReadConfig {
-                    kind: std::io::ErrorKind::PermissionDenied,
-                    ..
-                } => SetupRecovery::new(
-                    Cause::InvalidEnvironment,
-                    Boundary::SystemConfiguration,
-                    Action::RepairExternally,
-                ),
-                _ => {
-                    SetupRecovery::new(Cause::TemporaryFailure, Boundary::UserInput, Action::Retry)
-                }
-            };
-            return failed_with(
-                "The saved TV configuration could not be read.",
-                error,
-                recovery,
-            );
+            return StepResponse::Failed(error);
         }
     };
     let profiles = read_profiles_from_store(path, &store);
     match profiles {
         Err(error) => failed_with("The saved TV configuration could not be read.", &error,
             match error.failure() {
-                TvsReadFailure::InvalidConfiguration => configuration_recovery(),
+                TvsReadFailure::InvalidConfiguration => return super::configuration::tv_input(path),
                 TvsReadFailure::MigrationRequired => SetupRecovery::new(Cause::InvalidConfiguration, Boundary::SessionService, Action::RestartSession),
                 _ => SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
             }),
@@ -127,7 +104,10 @@ fn execute_with(
         return StepResponse::Cancelled;
     }
     let before = inspect(path);
-    if !matches!(before, StepResponse::InputRequired(_)) {
+    if !matches!(
+        before,
+        StepResponse::InputRequired(StepInput::Pairing { .. })
+    ) {
         return before;
     }
     let Some(request) = request else {
@@ -247,11 +227,27 @@ mod tests {
     fn malformed_tv_details_require_correction_not_another_pairing_attempt() {
         let (path, _) = fixture();
         fs::write(&path, "tvs_primary_ip=not-an-ip\n").unwrap();
-        let StepResponse::Failed(error) = inspect(&path) else {
+        let response = inspect(&path);
+        let StepResponse::InputRequired(StepInput::CorrectTv { ref address, .. }) = response else {
             panic!("malformed profile must remain incomplete");
         };
-        assert_eq!(error.recovery, configuration_recovery());
-        let published = crate::setup::published::SetupSnapshot::from_assessment(Err(error));
+        assert_eq!(address, "not-an-ip");
+        assert_eq!(response.recovery(), Some(configuration_recovery()));
+        let published = crate::setup::published::SetupSnapshot::from_assessment(Ok(
+            super::super::assessment::SetupAssessment {
+                steps: [
+                    (super::super::flow::SetupStep::Pairing, response),
+                    (
+                        super::super::flow::SetupStep::Services,
+                        StepResponse::Complete,
+                    ),
+                    (
+                        super::super::flow::SetupStep::Plasma,
+                        StepResponse::NotApplicable,
+                    ),
+                ],
+            },
+        ));
         assert!(published.requirements[0].needs_attention);
         assert!(!published.requirements[0].reason.contains("not-an-ip"));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -340,7 +336,7 @@ mod tests {
     }
     #[test]
     fn missing_input_and_bad_config_never_initiate_pairing() {
-        let (path, _) = fixture();
+        let (path, request) = fixture();
         assert!(matches!(
             execute_with(
                 &path,
@@ -352,7 +348,16 @@ mod tests {
             StepResponse::InputRequired(_)
         ));
         fs::write(&path, "tvs_primary_ip=broken\n").unwrap();
-        assert!(matches!(inspect(&path), StepResponse::Failed(_)));
+        assert!(matches!(
+            execute_with(
+                &path,
+                Some(request),
+                &StepCancellation::default(),
+                &mut |_| {},
+                |_, _| panic!("correct before pairing")
+            ),
+            StepResponse::InputRequired(StepInput::CorrectTv { .. })
+        ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

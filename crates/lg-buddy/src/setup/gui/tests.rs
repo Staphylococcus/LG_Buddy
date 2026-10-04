@@ -49,6 +49,51 @@ fn pairing_services_dependencies_and_verified_completion_share_one_modal() {
     finish(&mut app, opening, &fixture);
     assert_eq!(fixture.calls.lock().unwrap().len(), calls);
 }
+
+#[test]
+fn corrective_input_uses_the_existing_modal_and_requires_explicit_values() {
+    for input in [
+        StepInput::CorrectTv {
+            address: "broken".into(),
+            mac: "02:11:22:33:44:55".into(),
+            input: crate::config::HdmiInput::Hdmi2,
+            revision: [1; 32],
+        },
+        StepInput::UpdatePreference { revision: [2; 32] },
+    ] {
+        let fixture = fixtures::Fixture::new(true, false);
+        let index = if matches!(input, StepInput::CorrectTv { .. }) {
+            0
+        } else {
+            1
+        };
+        fixture.responses.lock().unwrap()[index] = StepResponse::InputRequired(input);
+        let mut app = OnboardingApplication::default();
+        let opening = app.handle(OnboardingIntent::Open).unwrap();
+        let ready = finish(&mut app, opening, &fixture);
+        let presentation = ready.presentation.unwrap();
+        assert!(!presentation.is_gate);
+        assert!(presentation.recovery.unwrap().can_repair_here());
+        let invalid = app.handle(OnboardingIntent::Submit).unwrap();
+        assert!(invalid.operation.is_none());
+        assert!(invalid.presentation.unwrap().error.is_some());
+        if index == 0 {
+            assert_eq!(presentation.pairing.unwrap().address(), "broken");
+            app.handle(OnboardingIntent::SetAddress("192.0.2.42".into()));
+        } else {
+            assert_eq!(presentation.update_checks.unwrap().enabled, None);
+            app.handle(OnboardingIntent::SetUpdateChecks(false));
+        }
+        let correction = app.handle(OnboardingIntent::Submit).unwrap();
+        assert!(correction.operation.as_ref().unwrap().changes_setup());
+        finish(&mut app, correction, &fixture);
+        assert_eq!(app.status(), SetupStatus::Complete);
+        assert_eq!(
+            fixture.calls.lock().unwrap().first(),
+            Some(&SetupStep::ORDER[index])
+        );
+    }
+}
 #[test]
 fn cancel_reopen_rejects_old_results_and_only_repairs_remaining_steps() {
     let fixture = fixtures::Fixture::new(true, false);
