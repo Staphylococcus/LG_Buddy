@@ -541,6 +541,11 @@ mod tests {
 
     #[test]
     fn compact_controls_submit_and_keep_focus_without_render_feedback() {
+        if !crate::controller_test_support::isolated(
+            "overview::tests::compact_controls_submit_and_keep_focus_without_render_feedback",
+        ) {
+            return;
+        }
         gtk::init().expect("GTK display required");
         retry_button_follows_the_latest_declaration();
         let application = adw::Application::builder()
@@ -740,9 +745,5 @@ mod tests {
         assert!(view.volume.retry.button.is_visible());
         view.window.close();
         late_brightness_respects_focus(&application);
-        crate::tvs::run_renderer_scenarios(&application);
-        crate::settings::run_renderer_scenarios(&application);
-        crate::diagnostics::run_renderer_scenarios(&application);
-        crate::controller_test_support::run_scenario();
     }
 }

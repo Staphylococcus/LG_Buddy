@@ -234,6 +234,20 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(view.form.root.is_visible());
     view.primary.emit_clicked();
     assert_eq!(intents.borrow_mut().pop(), Some(OnboardingIntent::Submit));
+    let correction = OnboardingPresentation::for_step(
+        SetupStep::Pairing,
+        &StepResponse::InputRequired(StepInput::CorrectTv {
+            address: "invalid saved address".into(),
+            mac: "02:11:22:33:44:55".into(),
+            input: lg_buddy::config::HdmiInput::Hdmi3,
+            revision: [0; 32],
+        }),
+    );
+    view.render(&window, Some(&correction));
+    assert!(view.form.root.is_visible());
+    assert_eq!(view.dialog.title(), "Correct TV details");
+    assert_eq!(view.primary.label().as_deref(), Some("Save TV details"));
+    assert!(intents.borrow().is_empty());
     let preference = OnboardingPresentation::for_step(
         SetupStep::Services,
         &StepResponse::InputRequired(StepInput::UpdatePreference { revision: [0; 32] }),
@@ -284,7 +298,23 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     view.render(&window, None);
     assert!(!view.presented.get());
     pump_until(|| window.visible_dialog().is_none());
+    window.close();
+}
 
+#[cfg(test)]
+pub(crate) fn run_rapid_completion(application: &adw::Application) {
+    use crate::controller_test_support::pump_until;
+    use lg_buddy::setup::{flow::SetupStep, StepInput, StepResponse};
+    let intents = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let window = adw::ApplicationWindow::builder()
+        .application(application)
+        .build();
+    window.present();
+    pump_until(|| window.is_mapped());
+    let pairing = OnboardingPresentation::for_step(
+        SetupStep::Pairing,
+        &StepResponse::InputRequired(StepInput::Pairing { saved: None }),
+    );
     // Request dismissal before the first opening frame, then reopen setup.
     let view = OnboardingView::new(Rc::new({
         let intents = intents.clone();

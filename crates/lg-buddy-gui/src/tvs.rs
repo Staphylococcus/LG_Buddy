@@ -1023,5 +1023,4 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(view.split_bin.current_breakpoint().is_some());
     assert!(view.split.is_collapsed());
     window.close();
-    crate::onboarding::run_renderer_scenarios(application);
 }

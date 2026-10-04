@@ -614,6 +614,16 @@ The third question, user needs, should be covered by a small acceptance layer an
 
 ### Shared terminal setup
 
+GTK setup scenarios run in fresh subprocesses with one toolkit-owning thread.
+Select `controller_test_support::startup_gate`, `post_repair_verification`,
+`gnome_repair_without_plasma`, `corrective_input`, `cancel_close_and_reopen`,
+`managed_block_recheck`, or `rapid_modal_completion` by name with
+`cargo test -p lg-buddy-gui <name> -- --nocapture`. A display and session bus
+are required, as for the full GTK suite. TV, Settings, Diagnostics and ordinary
+controller-worker tests are separate names; backend admission/flow/adapter
+tests remain in `lg-buddy`. Isolation does not substitute for the real-desktop
+validation recorded in `desktop-session-validation.md`.
+
 Daemon publication tests cover quick cached reads during blocked probes,
 coalesced requests, rejection of superseded results, and explicit inapplicability.
 `runtime_entrypoints` starts a real monitor on a private bus with missing config

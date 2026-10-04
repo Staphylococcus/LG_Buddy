@@ -58,6 +58,20 @@ impl Fixture {
         snapshot.revision = state.revision + 1;
         *state = snapshot;
     }
+    pub fn managed() -> Self {
+        use crate::setup::recovery::{
+            RecoveryAction, RecoveryCause, RepairBoundary, SetupRecovery,
+        };
+        let fixture = Self::new(true, false);
+        fixture.responses.lock().unwrap()[1] = StepResponse::Blocked(StepFailure {
+            presentation: UserFacingError::new("Service setup incomplete", "Bind LG_Buddy_screen.service through NixOS configuration, build and activate it, then recheck."),
+            diagnostic: "fixture managed binding".into(),
+            recovery: SetupRecovery::new(RecoveryCause::ManagedInstallation, RepairBoundary::SystemConfiguration, RecoveryAction::RepairExternally),
+            retryable: true,
+        });
+        fixture.publish();
+        fixture
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
