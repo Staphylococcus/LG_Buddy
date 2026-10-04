@@ -279,10 +279,21 @@ impl Application {
         }
         let opening = intent == OnboardingIntent::Open;
         if intent == OnboardingIntent::Submit && self.onboarding.status() == SetupStatus::Complete {
-            self.setup_health.changed();
-            self.onboarding.handle(OnboardingIntent::Cancel);
-            let update = self.onboarding.handle(OnboardingIntent::Open)?;
-            return Some(self.onboarding_transition(update));
+            use crate::setup::recovery::{RecoveryAction, RecoveryCause};
+            if self.setup_recovery.is_some_and(|recovery| {
+                recovery.can_repair_here() && recovery.action == RecoveryAction::Repair
+            }) {
+                self.onboarding.handle(OnboardingIntent::Cancel);
+                let update = self.onboarding.handle(OnboardingIntent::Open)?;
+                return Some(self.onboarding_transition(update));
+            }
+            let restart = self.setup_recovery.is_some_and(|recovery| {
+                recovery.cause == RecoveryCause::VerifierUnavailable
+                    && recovery.action == RecoveryAction::RestartSession
+            });
+            self.setup_health.retry_verification(restart);
+            self.setup_error = None;
+            return self.refresh_setup();
         }
         let update = self.onboarding.handle(intent)?;
         if opening {
@@ -326,9 +337,12 @@ impl Application {
         if self.closed {
             return None;
         }
-        let operation = self.setup_health.request()?;
+        let operation = self.setup_health.request();
+        if operation.is_none() && !self.setup_health.verification_expired() {
+            return None;
+        }
         let mut transition = self.transition(None, None, None);
-        transition.assessment = Some(operation);
+        transition.assessment = operation;
         Some(transition)
     }
     pub fn complete_setup_assessment(
@@ -837,9 +851,32 @@ impl Application {
                         presentation.title = "Verifying setup".into();
                         presentation.description =
                             "The session service has not yet verified installation.".into();
-                        presentation.action = Some("Retry");
+                        use crate::setup::recovery::{RecoveryAction, RecoveryCause};
+                        presentation.action = Some(match self.setup_recovery {
+                            Some(recovery)
+                                if recovery.cause == RecoveryCause::VerifierUnavailable
+                                    && recovery.action == RecoveryAction::RestartSession =>
+                            {
+                                "Restart session service"
+                            }
+                            Some(recovery)
+                                if recovery.can_repair_here()
+                                    && recovery.action == RecoveryAction::Repair =>
+                            {
+                                "Repair setup"
+                            }
+                            Some(recovery) if recovery.action == RecoveryAction::Retry => {
+                                "Retry verification"
+                            }
+                            _ => "Recheck",
+                        });
                         presentation.error = self.setup_error.clone();
                         presentation.recovery = self.setup_recovery;
+                        if self.setup_health.verification_expired() && presentation.error.is_none()
+                        {
+                            presentation.description = "Verification has not completed. Recheck the session service; setup remains required. No repair was cancelled.".into();
+                            presentation.error = Some(crate::presentation::brightness::UserFacingError::new("Verification is taking longer than expected", "Check LG Buddy's session service in Diagnostics, then recheck. You can close this dialog without resetting setup."));
+                        }
                     }
                     OnboardingTransition {
                         presentation: Some(presentation),
@@ -1318,6 +1355,19 @@ mod tests {
             "Verifying setup"
         );
         assert!(app.select_page(ApplicationPage::Settings).is_none());
+
+        let retry = app
+            .handle_onboarding_intent(OnboardingIntent::Submit)
+            .unwrap();
+        assert!(
+            retry.onboarding().unwrap().operation.is_none(),
+            "verification recovery must not reopen or rerun setup"
+        );
+        assert!(!retry.admitted());
+        let recovery = retry.assessment_operation().unwrap();
+        app.complete_setup_assessment(recovery, recovery.execute(&fixture))
+            .unwrap();
+        assert!(fixture.calls.lock().unwrap().is_empty());
 
         let fresh = app.refresh_setup().unwrap().assessment_operation().unwrap();
         let verified = app

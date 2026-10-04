@@ -15,6 +15,7 @@ pub struct SetupOptions {
     pub mac: Option<String>,
     pub input: Option<HdmiInput>,
     pub update_checks: Option<bool>,
+    pub restart_session_service: bool,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, ParseError> {
@@ -28,6 +29,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, 
             "--allow-build-dependencies" => {
                 options.allow_build_dependencies = true;
             }
+            "--restart-session-service" => options.restart_session_service = true,
             "--tv-ip" | "--tv-mac" | "--input" | "--update-checks" => {
                 let value = args
                     .next()
@@ -74,6 +76,7 @@ Usage: {program} setup [OPTIONS]
   --tv-mac ADDRESS             TV network MAC address
   --input HDMI_1..HDMI_4        PC input (default: saved input or HDMI_1)
   --update-checks VALUE        Correct an invalid preference: enabled or disabled
+  --restart-session-service    Restart the locally owned verifier before setup
   --yes, -y                    Approve pairing and required service/integration work
   --allow-build-dependencies   Also approve compiler/development package installation
   --non-interactive            Never read input or request a password
@@ -139,6 +142,17 @@ impl From<io::Error> for SetupError {
 
 pub(crate) fn run(options: SetupOptions, writer: &mut impl Write) -> Result<(), SetupError> {
     let interactive = !options.noninteractive && io::stdin().is_terminal();
+    if options.restart_session_service {
+        consent(
+            options.yes,
+            interactive,
+            &mut io::BufReader::new(io::stdin()),
+            writer,
+            "Restart LG Buddy's session service?",
+            "Use --yes to approve restarting the session service.",
+        )?;
+        super::environment::restart_verifier().map_err(SetupError::Failed)?;
+    }
     let mut flow = OnboardingFlow::open(if interactive {
         AuthorizationMode::Terminal
     } else {
@@ -155,7 +169,19 @@ pub(crate) fn run(options: SetupOptions, writer: &mut impl Write) -> Result<(), 
     );
     drop(signals);
     // CLI setup retains its own exit semantics; daemon verification is best effort.
-    let _ = crate::session_notifications::request_setup_assessment();
+    if let Err(error) = crate::session_notifications::request_setup_assessment() {
+        if result.is_ok() {
+            writeln!(
+                writer,
+                "Session verification remains pending: {} {}",
+                error.presentation.summary(),
+                error.presentation.detail()
+            )?;
+            if error.recovery.cause == super::recovery::RecoveryCause::VerifierUnavailable {
+                writeln!(writer, "For a locally managed service, run `lg-buddy setup --yes --restart-session-service`; externally managed installations require recovery through their system configuration.")?;
+            }
+        }
+    }
     result
 }
 

@@ -679,6 +679,42 @@ fn native_flow(fixture: Fixture, plasma: bool) -> crate::setup::flow::Onboarding
 }
 
 #[test]
+fn explicit_verifier_restart_requires_local_matching_ownership() {
+    use crate::setup::environment::restart_verifier_with;
+    for variant in ["local", "nixos", "ostree", "misbound", "busy"] {
+        let fixture = Fixture::new();
+        let mut steps = native_steps(fixture, false);
+        steps.controller.calls.borrow_mut().clear();
+        match variant {
+            "nixos" => {
+                fs::create_dir_all(steps.context.system_root.join("etc")).unwrap();
+                fs::write(steps.context.system_root.join("etc/NIXOS"), "").unwrap();
+            }
+            "ostree" => {
+                fs::create_dir_all(steps.context.system_root.join("run")).unwrap();
+                fs::write(steps.context.system_root.join("run/ostree-booted"), "").unwrap();
+            }
+            "misbound" => steps.context.config = steps.context.config.with_extension("other"),
+            _ => {}
+        }
+        let lease = (variant == "busy")
+            .then(|| crate::setup::lock::FlowLock::acquire(&steps.context.lock_path).unwrap());
+        let result = restart_verifier_with(&steps.context, &steps.controller);
+        if variant == "local" {
+            assert!(result.is_ok());
+            assert_eq!(
+                *steps.controller.calls.borrow(),
+                [format!("restart {SCREEN}")]
+            );
+        } else {
+            assert!(result.is_err());
+            assert!(steps.controller.calls.borrow().is_empty());
+        }
+        drop(lease);
+    }
+}
+
+#[test]
 fn update_preference_correction_resumes_native_service_repair() {
     use crate::setup::flow::{FlowOutcome, SetupStep, StepAnswer};
     let fixture = Fixture::new();

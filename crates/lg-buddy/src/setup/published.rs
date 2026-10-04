@@ -15,6 +15,11 @@ use std::{
 pub trait SnapshotBackend: Send + Sync {
     fn snapshot(&self) -> Result<SetupSnapshot, StepFailure>;
     fn request_reassessment(&self) -> Result<(String, u64), StepFailure>;
+    fn restart_verifier(&self) -> Result<(), StepFailure> {
+        Err(unavailable(
+            "this backend cannot restart the session verifier",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

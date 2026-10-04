@@ -213,6 +213,9 @@ impl super::published::SnapshotBackend for EnvironmentOnboardingBackend {
     fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
         crate::session_notifications::request_setup_assessment()
     }
+    fn restart_verifier(&self) -> Result<(), StepFailure> {
+        super::environment::restart_verifier()
+    }
 }
 impl OnboardingBackend for EnvironmentOnboardingBackend {
     fn open(&self) -> Result<OnboardingFlow, StepFailure> {
