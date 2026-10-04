@@ -2686,8 +2686,17 @@ pub(crate) mod controller_test_support {
                     OnboardingIntent::Submit,
                 );
             }
+            // Admission renders before libadwaita finishes dismissing the dialog.
             pump_until(|| {
-                !controller.window.setup_visible() && controller.window.navigation_visible()
+                !controller.window.setup_visible()
+                    && controller.window.navigation_visible()
+                    && controller
+                        .window
+                        .window()
+                        .downcast::<adw::ApplicationWindow>()
+                        .unwrap()
+                        .visible_dialog()
+                        .is_none()
             });
             assert!(controller.window.main_menu_visible());
             assert!(controller
