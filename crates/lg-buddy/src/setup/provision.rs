@@ -95,7 +95,7 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
         cancellation: &StepCancellation,
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
-        if !cancellation.begin() {
+        if !cancellation.can_cancel() {
             return if cancellation.is_cancelled() {
                 StepResponse::Cancelled
             } else {
@@ -107,12 +107,17 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             };
         }
         progress(StepResponse::Running {
-            message: "Setting up LG Buddy background services…",
-            cancelable: false,
+            message: "Preparing LG Buddy background services…",
+            cancelable: true,
         });
         let before = self.inspect();
         let response = if matches!(before, StepResponse::ActionRequired { .. }) {
-            match self.repair() {
+            match self.repair_cancellable(cancellation, &mut || {
+                progress(StepResponse::Running {
+                    message: "Setting up LG Buddy background services…",
+                    cancelable: false,
+                })
+            }) {
                 Ok(()) => match self.inspect() {
                     StepResponse::Complete => StepResponse::Complete,
                     StepResponse::Failed(error) | StepResponse::Blocked(error) => {
@@ -136,8 +141,11 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
         } else {
             before
         };
-        cancellation.finish();
-        response
+        if cancellation.finish_and_was_cancelled() {
+            StepResponse::Cancelled
+        } else {
+            response
+        }
     }
 
     fn desired_timer(&self) -> Result<bool, SettingsError> {
@@ -304,14 +312,28 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             .as_ref()
             == Some(&expected))
     }
+    #[cfg(test)]
     fn repair(&self) -> Result<(), SettingsError> {
+        self.repair_cancellable(&StepCancellation::default(), &mut || {})
+    }
+    fn repair_cancellable(
+        &self,
+        cancellation: &StepCancellation,
+        mutation: &mut dyn FnMut(),
+    ) -> Result<(), SettingsError> {
         let timer = self.desired_timer()?;
         if !self.system_ready()? {
-            self.controller.repair_system_services(
+            self.controller.repair_system_services_cancellable(
                 &fs::canonicalize(self.config).map_err(io_error)?,
                 self.authorization,
+                cancellation,
+                mutation,
             )?;
         }
+        if !cancellation.protect() {
+            return Err(SettingsError::ActivationCancelled);
+        }
+        mutation();
         let stale_binding =
             !self.binding_matches(self.controller.user_service_config_path(SCREEN))?;
         let files = self.user_files()?;
@@ -364,6 +386,9 @@ fn failure(message: &str, diagnostic: impl ToString, recovery: SetupRecovery) ->
 }
 fn settings_failure(message: &str, error: SettingsError) -> StepFailure {
     let recovery = match &error {
+        SettingsError::SetupInProgress => {
+            SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Recheck)
+        }
         SettingsError::InvalidValue { .. }
         | SettingsError::MissingRequiredSetting { .. }
         | SettingsError::ReadConfig {
@@ -385,6 +410,10 @@ fn settings_failure(message: &str, error: SettingsError) -> StepFailure {
         _ => SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
     };
     let mut failure = failure(message, &error, recovery);
+    if matches!(error, SettingsError::SetupInProgress) {
+        failure.presentation =
+            UserFacingError::new("Setup helper still active", &error.to_string());
+    }
     // Corrective editing is a separate follow-up; reinspection remains available
     // after the configuration is corrected outside this flow.
     failure.retryable = true;

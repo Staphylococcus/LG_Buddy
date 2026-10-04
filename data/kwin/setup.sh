@@ -175,6 +175,9 @@ try_artifacts() {
             }
         fi
         # Keep receipts even for rejected candidates, so cleanup can be retried
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         # if authorization to remove a file is temporarily unavailable.
         printf '%s\t%s\n' "$plugin_root" "$id" > "$state_dir/plugins/$id.tsv"
         # A unique filename per artifact avoids Qt caching a rejected candidate
@@ -209,6 +212,9 @@ try_artifacts() {
 remove_plugin() {
     local root="$1" id="$2"
     valid_id "$id" && [[ "$id" = "lg_buddy_inhibition_${uid}_"* ]] || return 0
+    if declare -F _lg_buddy_begin_mutation >/dev/null; then
+        _lg_buddy_begin_mutation || return $?
+    fi
     "$runtime" kwin-bridge unload "$id" >>"$log_file" 2>&1 || true
     configure_plugin "$id" false || true
     if plugin_root_supported "$root" && privileged --system-remove "$uid" "$root" "$id"; then

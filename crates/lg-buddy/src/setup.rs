@@ -163,6 +163,10 @@ impl StepCancellation {
             .is_ok()
     }
 
+    pub(crate) fn protect(&self) -> bool {
+        self.begin() || self.0.load(Ordering::Acquire) == RUNNING
+    }
+
     pub(crate) fn finish(&self) {
         self.0.store(FINISHED, Ordering::Release);
     }

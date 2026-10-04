@@ -177,6 +177,108 @@ impl Drop for Fixture {
     }
 }
 
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "worker did not reach {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn preparation_stalls_are_cancelable_without_mutating_or_leaking_the_owner() {
+    for phase in ["authorization", "build", "ipc"] {
+        let fixture = Fixture::new();
+        let stall = format!(
+            "touch '{}/ready'; while true; do sleep 0.01; done",
+            fixture.0.display()
+        );
+        let (script, operation, argument) = match phase {
+            "authorization" => { fixture.script("pkcheck", &stall); (fixture.runner(), "services", fixture.0.join("config")) }
+            "build" => { fs::write(fixture.0.join("plasma.sh"), format!("main() {{ {stall}; }}")).unwrap(); (fixture.runner(), "plasma", fixture.0.join("plasma.sh")) }
+            _ => (format!("IFS= read -r -d '' op; IFS= read -r -d '' path; IFS= read -r -d '' option; {stall}"), "services", fixture.0.join("config")),
+        };
+        let lock_path = fixture.0.join("flow.lock");
+        let lease = super::super::lock::FlowLock::try_acquire(&lock_path).unwrap();
+        let mut process =
+            SessionProcess::start(&script, AuthorizationMode::Interactive, Some(&lease.file()))
+                .unwrap();
+        let cancellation = super::super::StepCancellation::default();
+        let worker_cancel = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            process.run(
+                operation,
+                &argument,
+                false,
+                Some(&worker_cancel),
+                &mut || panic!("no mutation consent"),
+                Duration::from_secs(5),
+            )
+        });
+        wait_for_file(&fixture.0.join("ready"));
+        assert!(cancellation.cancel());
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        drop(lease);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::super::lock::FlowLock::try_acquire(&lock_path).is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "cancelled preparation retained its lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[test]
+fn observation_timeout_does_not_kill_mutation_or_release_its_lease() {
+    let fixture = Fixture::new();
+    fixture.script("pkexec", "touch \"$root/ready\"; while [ ! -f \"$root/release\" ]; do sleep 0.01; done; touch \"$root/finished\"");
+    let script = fixture.runner();
+    let path = fixture.0.join("flow.lock");
+    let lease = super::super::lock::FlowLock::try_acquire(&path).unwrap();
+    let mut process =
+        SessionProcess::start(&script, AuthorizationMode::Interactive, Some(&lease.file()))
+            .unwrap();
+    let cancellation = super::super::StepCancellation::default();
+    let worker_cancel = cancellation.clone();
+    let worker = std::thread::spawn(move || {
+        process.run(
+            "services",
+            Path::new("config"),
+            false,
+            Some(&worker_cancel),
+            &mut || assert!(!worker_cancel.cancel()),
+            Duration::from_millis(200),
+        )
+    });
+    wait_for_file(&fixture.0.join("ready"));
+    assert!(!cancellation.cancel());
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    drop(lease);
+    assert!(
+        super::super::lock::FlowLock::try_acquire(&path).is_err(),
+        "active mutation must exclude another flow after caller closes"
+    );
+    fs::write(fixture.0.join("release"), "").unwrap();
+    wait_for_file(&fixture.0.join("finished"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while super::super::lock::FlowLock::try_acquire(&path).is_err() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn terminal_services_and_plasma_share_parent_scoped_sudo_permission() {
     let fixture = Fixture::new();
@@ -565,9 +667,18 @@ fn closing_the_session_reaps_its_owner_and_releases_the_inherited_lease() {
         .as_ref()
         .unwrap()
         .child
+        .as_ref()
+        .unwrap()
         .id();
     session.close();
-    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "idle owner did not finish closing"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     drop(lease);
     assert!(super::super::lock::FlowLock::try_acquire(&path).is_ok());
     assert!(session.services(Path::new("after close"), None).is_err());

@@ -80,7 +80,7 @@ impl FlowLock {
         open().map(|file| Self(Arc::new(file)))
     }
 
-    pub(super) fn file(&self) -> Arc<File> {
+    pub(crate) fn file(&self) -> Arc<File> {
         self.0.clone()
     }
 }

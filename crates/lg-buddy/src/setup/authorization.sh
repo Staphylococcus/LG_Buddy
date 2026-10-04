@@ -3,6 +3,17 @@
 # shellcheck source-path=SCRIPTDIR
 set -uo pipefail
 _lg_buddy_mode="$1"
+exec 3>&1 4<&0
+_lg_buddy_mutation=0
+_lg_buddy_begin_mutation() {
+    [ "${_lg_buddy_cancellable:-0}" = 1 ] || return 0
+    [ "$_lg_buddy_mutation" = 0 ] || return 0
+    printf 'mutation\n' >&3
+    local answer
+    IFS= read -r -d '' answer <&4 || return 126
+    [ "$answer" = continue ] || return 126
+    _lg_buddy_mutation=1
+}
 umask 077
 _lg_buddy_output=$(mktemp -d "${TMPDIR:-/tmp}/lg-buddy-authorization.XXXXXX") || exit 1
 trap 'rm -rf -- "$_lg_buddy_output"' EXIT
@@ -14,8 +25,19 @@ _lg_buddy_subject="$$,${_lg_buddy_fields[19]},$UID"
 
 _lg_buddy_privileged() {
     case "$_lg_buddy_mode" in
-        terminal) /usr/bin/sudo "$@"; return $? ;;
-        noninteractive) /usr/bin/sudo -n "$@"; return $? ;;
+        terminal)
+            if [ "${_lg_buddy_cancellable:-0}" = 1 ]; then
+                /usr/bin/sudo -v || return 127
+                _lg_buddy_begin_mutation || return $?
+                /usr/bin/sudo -n "$@"
+            else /usr/bin/sudo "$@"; fi
+            return $? ;;
+        noninteractive)
+            if [ "${_lg_buddy_cancellable:-0}" = 1 ]; then
+                /usr/bin/sudo -n /usr/bin/true || return 127
+                _lg_buddy_begin_mutation || return $?
+            fi
+            /usr/bin/sudo -n "$@"; return $? ;;
         interactive) ;;
         *) return 1 ;;
     esac
@@ -23,6 +45,7 @@ _lg_buddy_privileged() {
     # retry a dismissed/denied challenge or fall back to another authenticator.
     if /usr/bin/pkcheck --action-id io.github.staphylococcus.LGBuddy.setup \
         --process "$_lg_buddy_subject" --allow-user-interaction >/dev/null; then
+        _lg_buddy_begin_mutation || return $?
         /usr/bin/pkexec --disable-internal-agent "$@"
     else
         local status=$?
@@ -58,6 +81,9 @@ _lg_buddy_run() {
 while IFS= read -r -d '' _lg_buddy_operation \
     && IFS= read -r -d '' _lg_buddy_path \
     && IFS= read -r -d '' _lg_buddy_option; do
+    _lg_buddy_cancellable=0
+    case "$_lg_buddy_operation" in *-cancellable) _lg_buddy_cancellable=1; _lg_buddy_operation="${_lg_buddy_operation%-cancellable}" ;; esac
+    _lg_buddy_mutation=0
     if _lg_buddy_run </dev/null >"$_lg_buddy_output/stdout" 2>"$_lg_buddy_output/stderr"; then
         _lg_buddy_status=0
     else

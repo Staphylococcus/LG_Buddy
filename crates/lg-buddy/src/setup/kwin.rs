@@ -49,7 +49,7 @@ impl KWinSetup<'_> {
         cancellation: &StepCancellation,
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
-        if !cancellation.begin() {
+        if !cancellation.can_cancel() {
             return if cancellation.is_cancelled() {
                 StepResponse::Cancelled
             } else {
@@ -65,16 +65,14 @@ impl KWinSetup<'_> {
             };
         }
         progress(StepResponse::Running {
-            message: "Setting up Plasma integration…",
-            cancelable: false,
+            message: "Preparing Plasma integration…",
+            cancelable: true,
         });
         let before = self.inspect();
         let response = if matches!(before, StepResponse::ActionRequired { .. }) {
-            let mut args = vec!["--foreground"];
-            if allow_dependencies {
-                args.push("--allow-dependencies");
-            }
-            match self.invoke(&args) {
+            let local_session = super::authorization::AuthorizationSession::new(self.authorization);
+            let session = self.authorization_session.unwrap_or(&local_session);
+            match session.plasma_cancellable(self.helper, allow_dependencies, self.command_lock.as_ref(), cancellation, &mut || progress(StepResponse::Running { message: "Setting up Plasma integration…", cancelable: false })) {
                 Ok(output) => match output.status.code() {
                     Some(0) => match self.inspect() {
                         StepResponse::Complete => StepResponse::Complete,
@@ -91,8 +89,11 @@ impl KWinSetup<'_> {
         } else {
             before
         };
-        cancellation.finish();
-        response
+        if cancellation.finish_and_was_cancelled() {
+            StepResponse::Cancelled
+        } else {
+            response
+        }
     }
     fn invoke(&self, args: &[&str]) -> std::io::Result<Output> {
         if args == ["--status"] {
@@ -148,6 +149,15 @@ fn diagnostic(output: &Output) -> String {
     )
 }
 fn io_failure(error: std::io::Error) -> StepResponse {
+    if error.kind() == std::io::ErrorKind::ConnectionAborted {
+        return StepResponse::Cancelled;
+    }
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return StepResponse::Blocked(StepFailure {
+            presentation: UserFacingError::new("Setup helper still active", "A Plasma setup helper may still be running. Recheck before starting another repair; completed work is retained."),
+            diagnostic: error.to_string(), recovery: SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Recheck), retryable: true,
+        });
+    }
     StepResponse::Failed(StepFailure {
         presentation: UserFacingError::new(
             "Plasma setup incomplete",
@@ -187,6 +197,7 @@ cd -- "$_fixture_dir"
 [ "$1" != --status ] || return "$(cat status)"
 printf '%s\n' "$*" >> actions
 result="$(cat result)"
+_lg_buddy_begin_mutation || return $?
 if [ "$result" = 0 ] && [ ! -f fail-verification ]; then echo 0 > status; fi
 return "$result"
 }
@@ -376,14 +387,15 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
         let cancellation = StepCancellation::default();
         assert_eq!(
             step.execute(false, &cancellation, &mut |s| {
-                assert!(matches!(
+                if matches!(
                     s,
                     StepResponse::Running {
                         cancelable: false,
                         ..
                     }
-                ));
-                assert!(!cancellation.cancel());
+                ) {
+                    assert!(!cancellation.cancel());
+                }
             }),
             StepResponse::Complete
         );

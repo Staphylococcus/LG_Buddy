@@ -396,14 +396,15 @@ fn repair_rejects_cancellation_after_execution_begins() {
     let cancellation = StepCancellation::default();
     assert_eq!(
         fixture.plan().execute(&cancellation, &mut |state| {
-            assert!(matches!(
+            if matches!(
                 state,
                 StepResponse::Running {
                     cancelable: false,
                     ..
                 }
-            ));
-            assert!(!cancellation.cancel());
+            ) {
+                assert!(!cancellation.cancel());
+            }
         }),
         StepResponse::Complete
     );
@@ -646,6 +647,7 @@ cd -- "$_fixture_dir"
 printf '%s\n' "$*" >> kwin-actions
 [[ "$*" == *--noninteractive* ]] || return 1
 [[ "$*" == *--allow-dependencies* ]] || return 77
+_lg_buddy_begin_mutation || return $?
 echo 0 > kwin-status
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
