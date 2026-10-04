@@ -29,7 +29,7 @@ pub struct NotificationAgent {
     pub deliveries: mpsc::Receiver<Delivery>,
     pub closes: mpsc::Receiver<u32>,
     release: mpsc::Sender<()>,
-    actions: mpsc::Sender<(String, u32, Option<String>)>,
+    actions: mpsc::Sender<(String, u32, String, Option<String>)>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -40,7 +40,7 @@ impl NotificationAgent {
         let (delivered, deliveries) = mpsc::channel();
         let (closed, closes) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        let (actions, invoked) = mpsc::channel::<(String, u32, Option<String>)>();
+        let (actions, invoked) = mpsc::channel::<(String, u32, String, Option<String>)>();
         let (ready, started) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
@@ -109,11 +109,11 @@ impl NotificationAgent {
             ready.send(()).unwrap();
             while !stopped.load(Ordering::SeqCst) {
                 connection.process(Duration::from_millis(20)).unwrap();
-                for (destination, id, token) in invoked.try_iter() {
+                for (destination, id, action, token) in invoked.try_iter() {
                     if let Some(token) = token {
                         send_token(&connection, &destination, id, &token);
                     }
-                    send_action(&connection, &destination, id);
+                    send_action(&connection, &destination, id, &action);
                 }
             }
         });
@@ -133,12 +133,22 @@ impl NotificationAgent {
     }
     pub fn invoke(&self, delivery: &Delivery) {
         self.actions
-            .send((delivery.sender.clone(), delivery.id, None))
+            .send((
+                delivery.sender.clone(),
+                delivery.id,
+                "complete-setup".into(),
+                None,
+            ))
             .unwrap();
     }
-    pub fn invoke_with_token(&self, delivery: &Delivery, token: &str) {
+    pub fn invoke_default_with_token(&self, delivery: &Delivery, token: &str) {
         self.actions
-            .send((delivery.sender.clone(), delivery.id, Some(token.into())))
+            .send((
+                delivery.sender.clone(),
+                delivery.id,
+                "default".into(),
+                Some(token.into()),
+            ))
             .unwrap();
     }
 }
@@ -152,10 +162,10 @@ pub fn send_token(connection: &Connection, destination: &str, id: u32, token: &s
     connection.channel().flush();
 }
 
-pub fn send_action(connection: &Connection, destination: &str, id: u32) {
+pub fn send_action(connection: &Connection, destination: &str, id: u32, action: &str) {
     let mut message = Message::new_signal(PATH, INTERFACE, "ActionInvoked")
         .unwrap()
-        .append2(id, "complete-setup".to_string());
+        .append2(id, action.to_string());
     message.set_destination(Some(destination.into()));
     connection.send(message).unwrap();
     connection.channel().flush();

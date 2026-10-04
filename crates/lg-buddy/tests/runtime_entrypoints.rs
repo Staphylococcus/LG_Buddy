@@ -173,7 +173,15 @@ fn setup_notification_keeps_reads_fast_and_only_trusted_action_opens_ordinary_gu
         .unwrap();
     assert_eq!(delivery.summary, "LG Buddy needs attention");
     assert!(!delivery.body.is_empty());
-    assert_eq!(delivery.actions, ["complete-setup", "Complete setup"]);
+    assert_eq!(
+        delivery.actions,
+        [
+            "default",
+            "Complete setup",
+            "complete-setup",
+            "Complete setup"
+        ]
+    );
     let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
     let proxy = connection.with_proxy(
         "io.github.Staphylococcus.LGBuddy",
@@ -238,11 +246,11 @@ fn setup_notification_keeps_reads_fast_and_only_trusted_action_opens_ordinary_gu
         delivery.id,
         "untrusted-token",
     );
-    setup_notifications::send_action(&connection, &delivery.sender, delivery.id);
+    setup_notifications::send_action(&connection, &delivery.sender, delivery.id, "default");
     thread::sleep(Duration::from_millis(400));
     assert!(!launched.exists());
     let expected = "0\ntrusted-token\ntrusted-token\n";
-    agent.invoke_with_token(&delivery, "trusted-token");
+    agent.invoke_default_with_token(&delivery, "trusted-token");
     wait_until(Duration::from_secs(3), || {
         fs::read_to_string(&launched).ok().as_deref() == Some(expected)
     });
