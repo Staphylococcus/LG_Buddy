@@ -1068,10 +1068,7 @@ mod tests {
             app.complete_setup_assessment(read, read.execute(&fixture))
                 .unwrap();
         }
-        let apply = app
-            .handle_onboarding_intent(OnboardingIntent::Submit)
-            .unwrap();
-        let operation = apply.onboarding().unwrap().operation.clone().unwrap();
+        let operation = ready.onboarding().unwrap().operation.clone().unwrap();
         let result = operation.execute_with(&fixture, &mut |_| {});
         let complete = app.complete_onboarding(&operation, result).unwrap();
         assert_eq!(complete.setup_status(), SetupStatus::Incomplete);
@@ -1133,10 +1130,7 @@ mod tests {
         assert!(app.handle_settings_intent(SettingsIntent::Retry).is_none());
         assert!(app.handle_tvs_intent(TvsIntent::UnpairTv).is_none());
 
-        let action = app
-            .handle_onboarding_intent(OnboardingIntent::Submit)
-            .unwrap();
-        let operation = action.onboarding().unwrap().operation.clone().unwrap();
+        let operation = ready.onboarding().unwrap().operation.clone().unwrap();
         let result = operation.execute_with(&fixture, &mut |_| {
             // The live step is already noncancelable, even before GTK renders
             // the progress event that disables the Cancel button.
@@ -1198,11 +1192,12 @@ mod tests {
             assert_eq!(
                 presentation.title,
                 if paired {
-                    "Background services"
+                    "Complete setup"
                 } else {
                     "Pair a TV"
                 }
             );
+            assert_eq!(step.onboarding().unwrap().operation.is_some(), paired);
         }
     }
 

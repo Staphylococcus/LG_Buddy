@@ -12,6 +12,7 @@ pub(crate) struct OnboardingView {
     cancel: gtk::Button,
     progress: gtk::Spinner,
     presented: Cell<bool>,
+    pending_close: Rc<Cell<bool>>,
 }
 impl OnboardingView {
     pub fn new(on_intent: Rc<dyn Fn(OnboardingIntent)>) -> Self {
@@ -91,6 +92,11 @@ impl OnboardingView {
                 }
             }
         });
+        let pending_close = Rc::new(Cell::new(false));
+        dialog.connect_closed({
+            let pending_close = pending_close.clone();
+            move |_| pending_close.set(false)
+        });
         Self {
             dialog,
             description,
@@ -100,6 +106,7 @@ impl OnboardingView {
             cancel,
             progress,
             presented: Cell::new(false),
+            pending_close,
         }
     }
     pub fn render(
@@ -110,10 +117,24 @@ impl OnboardingView {
         let Some(view) = presentation.filter(|view| !view.is_gate) else {
             self.progress.stop();
             if self.presented.replace(false) {
-                self.dialog.force_close();
+                self.pending_close.set(true);
+                // Libadwaita 1.5 can ignore closure before its opening ticks.
+                // Retry on frames until closed, unless setup is reopened.
+                let pending_close = self.pending_close.clone();
+                self.dialog.add_tick_callback(move |dialog, _| {
+                    if pending_close.get() {
+                        dialog.force_close();
+                    }
+                    if pending_close.get() {
+                        gtk::glib::ControlFlow::Continue
+                    } else {
+                        gtk::glib::ControlFlow::Break
+                    }
+                });
             }
             return;
         };
+        self.pending_close.set(false);
         let had_form = self.form.root.is_visible();
         self.dialog.set_title(&view.title);
         self.description.set_text(&view.description);
@@ -153,6 +174,7 @@ impl OnboardingView {
 
 #[cfg(test)]
 pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
+    use crate::controller_test_support::pump_until;
     use lg_buddy::setup::{flow::SetupStep, gui::OnboardingPresentation, StepInput, StepResponse};
     use std::cell::RefCell;
     let intents = Rc::new(RefCell::new(Vec::new()));
@@ -164,6 +186,7 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .application(application)
         .build();
     window.present();
+    pump_until(|| window.is_mapped());
     view.render(&window, Some(&OnboardingPresentation::required(None)));
     assert!(!view.presented.get());
     assert!(window.visible_dialog().is_none());
@@ -213,5 +236,21 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert_eq!(intents.borrow_mut().pop(), Some(OnboardingIntent::Cancel));
     view.render(&window, None);
     assert!(!view.presented.get());
+    pump_until(|| window.visible_dialog().is_none());
+
+    // Request dismissal before the first opening frame, then reopen setup.
+    let view = OnboardingView::new(Rc::new({
+        let intents = intents.clone();
+        move |intent| intents.borrow_mut().push(intent)
+    }));
+    view.render(&window, Some(&pairing));
+    view.render(&window, None);
+    view.render(&window, Some(&pairing));
+    pump_until(|| view.form.root.is_mapped());
+    assert!(view.presented.get());
+    assert!(window.visible_dialog().is_some());
+    view.render(&window, None);
+    pump_until(|| window.visible_dialog().is_none());
+    assert!(intents.borrow().is_empty());
     window.close();
 }
