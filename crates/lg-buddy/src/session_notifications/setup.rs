@@ -99,7 +99,12 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
         let requirements: BTreeSet<_> = snapshot
             .requirements
             .iter()
-            .filter(|item| item.actionable && snapshot.status == SetupStatus::Incomplete)
+            .filter(|item| {
+                snapshot.status == SetupStatus::Incomplete
+                    && ((item.needs_attention && item.recovery.warrants_notification())
+                        || (item.recovery == crate::setup::recovery::SetupRecovery::default()
+                            && item.actionable))
+            })
             .map(|item| RequirementKey {
                 config: snapshot.config.clone(),
                 step: item.step.clone(),

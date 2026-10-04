@@ -59,6 +59,19 @@ pub struct SetupRecovery {
 }
 
 impl SetupRecovery {
+    pub fn warrants_notification(self) -> bool {
+        matches!(
+            self.cause,
+            RecoveryCause::InputRequired
+                | RecoveryCause::InvalidConfiguration
+                | RecoveryCause::InvalidEnvironment
+                | RecoveryCause::MissingIntegration
+                | RecoveryCause::MissingPayload
+                | RecoveryCause::AuthorizationDenied
+                | RecoveryCause::IncompatibleState
+                | RecoveryCause::ManagedInstallation
+        ) && !matches!(self.action, RecoveryAction::Unknown | RecoveryAction::Wait)
+    }
     pub const fn new(
         cause: RecoveryCause,
         boundary: RepairBoundary,

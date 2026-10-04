@@ -120,6 +120,65 @@ fn snapshot(revision: u64, steps: &[(&str, bool)]) -> SetupSnapshot {
     }
 }
 
+#[test]
+fn typed_concrete_failures_notify_once_but_uncertainty_and_unsupported_do_not() {
+    use crate::setup::recovery::{
+        RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+    };
+    for (cause, action, expected) in [
+        (Cause::InputRequired, Action::ProvideInput, true),
+        (
+            Cause::InvalidConfiguration,
+            Action::CorrectConfiguration,
+            true,
+        ),
+        (Cause::InvalidEnvironment, Action::RepairExternally, true),
+        (Cause::MissingIntegration, Action::Repair, true),
+        (Cause::MissingPayload, Action::RepairExternally, true),
+        (Cause::AuthorizationDenied, Action::Retry, true),
+        (Cause::IncompatibleState, Action::RepairExternally, true),
+        (Cause::ManagedInstallation, Action::RepairExternally, true),
+        (Cause::TemporaryFailure, Action::Retry, false),
+        (Cause::VerifierUnavailable, Action::RestartSession, false),
+        (Cause::Busy, Action::Recheck, false),
+        (Cause::Unverified, Action::Retry, false),
+        (
+            Cause::UnsupportedInstallation,
+            Action::RepairExternally,
+            false,
+        ),
+        (Cause::Unknown, Action::Unknown, false),
+    ] {
+        let mut state = snapshot(1, &[("services", false)]);
+        state.requirements[0].needs_attention = true;
+        state.requirements[0].recovery =
+            SetupRecovery::new(cause, Boundary::SystemConfiguration, action);
+        let mut attention = Attention::new(
+            "host".into(),
+            RecordingBackend::default(),
+            MemoryLedger::default(),
+        );
+        attention.observe(&state).unwrap();
+        attention.observe(&state).unwrap();
+        assert_eq!(
+            attention.backend.notifications.borrow().len(),
+            usize::from(expected),
+            "{cause:?}"
+        );
+        assert_eq!(*attention.backend.opens.borrow(), 0);
+        if !expected {
+            assert_eq!(*attention.backend.queries.borrow(), 0);
+        }
+        state.status = SetupStatus::Complete;
+        state.revision = 2;
+        attention.observe(&state).unwrap();
+        assert_eq!(
+            attention.backend.closes.borrow().len(),
+            usize::from(expected)
+        );
+    }
+}
+
 fn attention() -> Attention<RecordingBackend, MemoryLedger> {
     Attention::new(
         "host".into(),
