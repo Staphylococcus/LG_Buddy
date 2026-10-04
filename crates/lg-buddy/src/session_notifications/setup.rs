@@ -28,6 +28,7 @@ use std::{
 
 const GUI_BUS_NAME: &str = "io.github.staphylococcus.LGBuddy";
 const COMPLETE_SETUP: &str = "complete-setup";
+const DEFAULT_ACTION: &str = "default";
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -159,6 +160,10 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
             .join("\n");
         let mut notification = Notification::new("LG Buddy needs attention", body);
         notification.actions.push(NotificationAction {
+            key: DEFAULT_ACTION.into(),
+            label: "Complete setup".into(),
+        });
+        notification.actions.push(NotificationAction {
             key: COMPLETE_SETUP.into(),
             label: "Complete setup".into(),
         });
@@ -254,7 +259,7 @@ impl<B: AttentionBackend, L: AttentionLedger> Attention<B, L> {
             }
             return Ok(());
         }
-        if action.as_deref() != Some(COMPLETE_SETUP) {
+        if !matches!(action.as_deref(), Some(COMPLETE_SETUP | DEFAULT_ACTION)) {
             return Ok(());
         }
         let active = self.pending.as_ref().is_some_and(matches);

@@ -211,12 +211,36 @@ fn actionable_installation_requirements_use_one_safe_gui_action() {
         .contains("Pair &lt;TV&gt; &amp; finish setup."));
     assert_eq!(
         notifications[0].actions,
-        vec![NotificationAction {
-            key: COMPLETE_SETUP.into(),
-            label: "Complete setup".into(),
-        }]
+        vec![
+            NotificationAction {
+                key: DEFAULT_ACTION.into(),
+                label: "Complete setup".into(),
+            },
+            NotificationAction {
+                key: COMPLETE_SETUP.into(),
+                label: "Complete setup".into(),
+            }
+        ]
     );
     assert_eq!(*attention.backend.opens.borrow(), 0);
+}
+
+#[test]
+fn notification_body_activation_opens_the_same_gui_only_once() {
+    let mut attention = attention();
+    attention
+        .observe(&snapshot(1, &[("services", true)]))
+        .unwrap();
+    let default = NotificationSignal::ActionInvoked {
+        id: NotificationId(1),
+        action_key: DEFAULT_ACTION.into(),
+    };
+    attention.signal(":1.20", default.clone()).unwrap();
+    assert_eq!(*attention.backend.opens.borrow(), 0);
+    attention.signal(":1.10", default).unwrap();
+    attention.signal(":1.10", action(1)).unwrap();
+    assert_eq!(*attention.backend.opens.borrow(), 1);
+    assert!(attention.pending.is_none());
 }
 
 #[test]
