@@ -259,7 +259,7 @@ SH
     observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
     observe_gui_state --activate-control 'Save TV details'
     observe_gui_state --select-page TVs
-    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 --expected-tv-name OLED42C2
     cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Correction changed the existing credential."
     observe_gui_state --select-page Settings
     observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
