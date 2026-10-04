@@ -135,6 +135,12 @@ impl AuthorizationSession {
         state.closed = true;
         state.process.take();
     }
+
+    pub(super) fn release_process(&self) {
+        // An idle owner must release its lease too. Active detached helpers
+        // still retain theirs; later execution needs a freshly acquired lease.
+        self.0.lock().unwrap().process.take();
+    }
 }
 
 #[derive(Debug)]

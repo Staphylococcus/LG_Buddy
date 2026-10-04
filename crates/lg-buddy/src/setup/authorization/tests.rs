@@ -64,8 +64,13 @@ if ! has_grant; then
     printf '%s\n' "$PPID" >> "$root/sudo-prompts"
     printf '%s' "$PPID" > "$root/sudo-grant"
 fi
+[ "${1:-}" != -v ] || exit 0
 printf '%s\n' "$PPID" >> "$root/sudo-executors"
 printf '%s\0' "$@" >> "$root/sudo-arguments"
+[ ! -f "$root/stall-mutation" ] || {
+    touch "$root/ready"
+    while [ ! -f "$root/release" ]; do sleep 0.01; done
+}
 printf 'sudo helper diagnostic' >&2
 [ ! -f "$root/sudo-helper-result" ] || exit "$(cat "$root/sudo-helper-result")"
 "#,
@@ -89,6 +94,10 @@ shift
 [ "$(cat "$root/grant")" = "$PPID" ] || exit 127
 printf '%s\n' "$PPID" >> "$root/executors"
 printf '%s\0' "$@" >> "$root/arguments"
+[ ! -f "$root/stall-mutation" ] || {
+    touch "$root/ready"
+    while [ ! -f "$root/release" ]; do sleep 0.01; done
+}
 printf 'output\0with\nnewlines'
 printf 'helper diagnostic' >&2
 [ "${2:-}" != fail ] || exit 1
@@ -187,6 +196,109 @@ fn wait_for_file(path: &Path) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn every_plasma_privilege_route_protects_mutation_before_execution() {
+    for (mode, cached) in [
+        (AuthorizationMode::Terminal, false),
+        (AuthorizationMode::Terminal, true),
+        (AuthorizationMode::Interactive, false),
+        (AuthorizationMode::Interactive, true),
+        (AuthorizationMode::Noninteractive, true),
+    ] {
+        let fixture = Fixture::new();
+        if cached {
+            fs::write(fixture.0.join("sudo-grant"), "grant").unwrap();
+        }
+        fs::write(fixture.0.join("stall-mutation"), "").unwrap();
+        let path = fixture.0.join("flow.lock");
+        let lease = super::super::lock::FlowLock::try_acquire(&path).unwrap();
+        let session = Arc::new(fixture.session_for_mode(mode, Some(&lease.file())));
+        let cancellation = super::super::StepCancellation::default();
+        let protected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = std::thread::spawn({
+            let session = session.clone();
+            let cancellation = cancellation.clone();
+            let protected = protected.clone();
+            let root = fixture.0.clone();
+            let file = lease.file();
+            move || {
+                session.plasma_cancellable(
+                    &root.join("plasma.sh"),
+                    true,
+                    Some(&file),
+                    &cancellation,
+                    &mut || {
+                        assert!(!root.join("sudo-executors").exists());
+                        assert!(!root.join("executors").exists());
+                        assert!(!cancellation.can_cancel());
+                        protected.store(true, Ordering::Release);
+                    },
+                )
+            }
+        });
+        wait_for_file(&fixture.0.join("ready"));
+        let acknowledged = protected.load(Ordering::Acquire);
+        let cancelled = cancellation.cancel();
+        fs::write(fixture.0.join("release"), "").unwrap();
+        let result = worker.join().unwrap();
+        session.close();
+        assert!(acknowledged, "unprotected route: {mode:?}, cached={cached}");
+        assert!(!cancelled, "running mutation accepted cancellation");
+        assert!(result.unwrap().status.success());
+        let executions = if mode == AuthorizationMode::Interactive && !cached {
+            "executors"
+        } else {
+            "sudo-executors"
+        };
+        assert_eq!(fixture.lines(executions).len(), 3);
+        assert!(super::super::lock::FlowLock::try_acquire(&path).is_err());
+    }
+}
+
+#[test]
+fn releasing_an_idle_authorizer_allows_reacquisition_without_closing_the_session() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("flow.lock");
+    let lease = super::super::lock::FlowLock::try_acquire(&path).unwrap();
+    let session = fixture.session(Some(&lease.file()));
+    assert!(session
+        .services(Path::new("config"), None)
+        .unwrap()
+        .status
+        .success());
+    session.release_process();
+    assert!(!session.0.lock().unwrap().closed);
+    drop(lease);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let lease = loop {
+        if let Ok(lease) = super::super::lock::FlowLock::try_acquire(&path) {
+            break lease;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "idle authorizer retained the old lease"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // Polkit grants belong to the old process subject, not the new owner.
+    fs::remove_file(fixture.0.join("grant")).unwrap();
+    session.0.lock().unwrap().process = Some(
+        SessionProcess::start(
+            &fixture.runner(),
+            AuthorizationMode::Interactive,
+            Some(&lease.file()),
+        )
+        .unwrap(),
+    );
+    assert!(session
+        .services(Path::new("retry"), None)
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(fixture.lines("prompts").len(), 2);
+    session.close();
 }
 
 #[test]

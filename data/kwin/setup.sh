@@ -108,13 +108,23 @@ system_action() {
 privileged() {
     # Match the installer privilege route, using trusted absolute executables.
     if [ "$(id -u)" -eq 0 ]; then
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
+        if declare -F _lg_buddy_begin_mutation >/dev/null; then
+            _lg_buddy_begin_mutation || return $?
+        fi
         /usr/bin/sudo -n /bin/bash "$payload_dir/setup.sh" "$@"
     elif [ "$noninteractive" -eq 1 ]; then
         return 127
     elif [ "$terminal" -eq 1 ]; then
-        /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
+        if declare -F _lg_buddy_privileged >/dev/null; then
+            _lg_buddy_privileged /bin/bash "$payload_dir/setup.sh" "$@"
+        else
+            /usr/bin/sudo /bin/bash "$payload_dir/setup.sh" "$@"
+        fi
     elif declare -F _lg_buddy_privileged >/dev/null; then
         # An onboarding flow can supply a shared Polkit authorization route.
         _lg_buddy_privileged "$payload_dir/setup.sh" "$@"

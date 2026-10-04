@@ -4,7 +4,7 @@
 
 use super::{lock::FlowLock, StepCancellation, StepFailure, StepResponse};
 use crate::pairing::PairingRequest;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -155,6 +155,8 @@ impl FlowCancellation {
 pub struct OnboardingFlow {
     backend: Box<dyn SetupSteps>,
     control: Arc<Mutex<Control>>,
+    lock_path: PathBuf,
+    waiting_step: Option<SetupStep>,
     snapshot: FlowSnapshot,
     // Keep read-only observations separate from a step's outstanding request
     // (e.g. additional input discovered during execution). Reinspection must
@@ -184,6 +186,8 @@ impl OnboardingFlow {
         let authorization_session = backend.authorization_session();
         let mut flow = Self {
             backend,
+            lock_path: lock_path.to_owned(),
+            waiting_step: None,
             control: Arc::new(Mutex::new(Control {
                 authorization_session,
                 lease: Some(lease),
@@ -221,6 +225,25 @@ impl OnboardingFlow {
     /// closed; re-entry opens a new flow and inspects current facts again.
     pub fn refresh(&mut self) -> FlowSnapshot {
         if !self.control.lock().unwrap().closed {
+            if let Some(step) = self.waiting_step {
+                match FlowLock::acquire(&self.lock_path) {
+                    Ok(lease) => {
+                        let mut control = self.control.lock().unwrap();
+                        if control.closed {
+                            drop(control);
+                            return self.snapshot();
+                        }
+                        control.lease = Some(lease);
+                        self.waiting_step = None;
+                    }
+                    Err(error) => {
+                        if error.recovery.cause != super::recovery::RecoveryCause::Busy {
+                            self.publish(Some((step, StepResponse::Blocked(error))));
+                        }
+                        return self.snapshot();
+                    }
+                }
+            }
             self.observed = self.inspect();
             self.publish(None);
         }
@@ -250,6 +273,9 @@ impl OnboardingFlow {
     ) -> Result<FlowSnapshot, E> {
         if token != self.snapshot.token || self.control.lock().unwrap().closed {
             return Ok(self.snapshot());
+        }
+        if self.waiting_step.is_some() {
+            return Ok(self.refresh());
         }
         if !matches!(
             self.snapshot().current(),
@@ -382,6 +408,9 @@ impl OnboardingFlow {
         if token != self.snapshot.token || self.control.lock().unwrap().closed {
             return (self.snapshot(), false);
         }
+        if self.waiting_step.is_some() {
+            return (self.refresh(), false);
+        }
         let fresh = self.inspect();
         if fresh != self.observed {
             self.observed = fresh;
@@ -435,6 +464,17 @@ impl OnboardingFlow {
             control.cancelled |= response == StepResponse::Cancelled;
             if control.cancelled {
                 control.close();
+            } else if response.recovery().is_some_and(|recovery| {
+                recovery.cause == super::recovery::RecoveryCause::Busy
+                    && recovery.action == super::recovery::RecoveryAction::Recheck
+            }) {
+                // The helper may outlive this attempt. Do not let the same
+                // flow reuse its lease to start another mutation.
+                if let Some(session) = &control.authorization_session {
+                    session.release_process();
+                }
+                control.lease.take();
+                self.waiting_step = Some(step);
             }
         }
         self.observed = self.inspect();
