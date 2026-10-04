@@ -142,22 +142,23 @@ impl SetupHealth {
         if self.stale || self.paused {
             return Some(self.request());
         }
-        match result {
-            Ok(read) => {
-                if let Some(required) = read.requested {
-                    self.required = Some(required);
-                    self.verification_needed = false;
-                }
-                let verified = !self.verification_needed
-                    && self.required.as_ref().is_none_or(|(instance, revision)| {
-                        read.snapshot.instance != *instance || read.snapshot.revision >= *revision
-                    });
-                if verified {
-                    self.status = read.snapshot.status;
-                    self.required = None;
-                }
+        // Availability is presented by the caller; it does not replace the
+        // last published status or clear pending verification.
+        if let Ok(read) = result {
+            if let Some(required) = read.requested {
+                self.required = Some(required);
+                self.verification_needed = false;
             }
-            Err(_) => self.status = SetupStatus::Incomplete,
+            let verified = !self.verification_needed
+                && self.required.as_ref().is_none_or(|(instance, revision)| {
+                    read.snapshot.instance != *instance || read.snapshot.revision >= *revision
+                });
+            // Unchecked is a daemon's startup placeholder, not a replacement
+            // assessment or confirmation of a settled setup mutation.
+            if verified && read.snapshot.status != SetupStatus::Unchecked {
+                self.status = read.snapshot.status;
+                self.required = None;
+            }
         }
         Some(None)
     }

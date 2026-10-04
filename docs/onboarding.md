@@ -68,6 +68,12 @@ While an assessment runs, the previous published result remains authoritative.
 The GUI continues reading the cache to receive later publications; opening,
 reactivation and navigation never request actual reassessment.
 
+A cached-read failure does not replace a previously verified installation result.
+Likewise, a restarted daemon's initial Unchecked snapshot is not a new assessment.
+Previously admitted pages remain available until a replacement assessment or local
+setup change invalidates admission; per-operation capability checks still apply.
+Initial unknown/unavailable setup and pending post-repair verification remain gated.
+
 The gate's action opens the shared setup/repair flow. Completing the flow requests daemon
 verification; only a newly verified Complete result admits normal pages and
 operations. Partial completion and cancellation cannot unlock them. Missing

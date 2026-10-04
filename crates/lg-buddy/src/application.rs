@@ -1209,6 +1209,11 @@ mod tests {
             .complete_setup_assessment(read, Err(crate::setup::published::unavailable("no daemon")))
             .unwrap();
         let presentation = gate.onboarding().unwrap().presentation.as_ref().unwrap();
+        assert_eq!(gate.setup_status(), SetupStatus::Unchecked);
+        assert!(!gate.admitted());
+        assert!(app
+            .handle_settings_intent(SettingsIntent::Refresh)
+            .is_none());
         assert!(presentation.is_gate);
         assert_eq!(
             presentation.error.as_ref().unwrap().summary(),
@@ -1224,6 +1229,87 @@ mod tests {
         ));
         assert!(app.closed);
         assert!(!app.onboarding.is_open());
+    }
+
+    #[test]
+    fn failed_cached_reads_preserve_admission_but_cannot_verify_setup_changes() {
+        use crate::{
+            navigation::ApplicationPage,
+            setup::{gui::fixtures::Fixture, published::unavailable, StepResponse},
+        };
+        let fixture = Fixture::new(true, false);
+        fixture.responses.lock().unwrap()[1] = StepResponse::Complete;
+        fixture.publish();
+        let (mut app, opening) = Application::open();
+        let read = opening.assessment_operation().unwrap();
+        let admitted = app
+            .complete_setup_assessment(read, read.execute(&fixture))
+            .unwrap();
+        assert!(admitted.admitted());
+        app.complete_tvs_read(
+            admitted.tvs().unwrap().read_operation().unwrap(),
+            Ok(vec![TvProfile::new(
+                TvId::primary(),
+                "Primary TV",
+                "192.0.2.10".parse().unwrap(),
+                "02:11:22:33:44:55".parse().unwrap(),
+                HdmiInput::Hdmi1,
+                TvPlatform::LgWebOs,
+                TvCredentialState::Stored,
+            )]),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            let read = app.refresh_setup().unwrap().assessment_operation().unwrap();
+            let retained = app
+                .complete_setup_assessment(read, Err(unavailable("cached read failed")))
+                .unwrap();
+            assert!(retained.admitted());
+            assert_eq!(retained.setup_status(), SetupStatus::Complete);
+            assert!(retained.onboarding().is_none());
+            assert!(app.select_page(ApplicationPage::Settings).is_some());
+        }
+
+        let opening = app
+            .handle_onboarding_intent(OnboardingIntent::Open)
+            .unwrap();
+        assert!(!opening.admitted());
+        let operation = opening.onboarding().unwrap().operation.clone().unwrap();
+        let complete = app
+            .complete_onboarding(&operation, operation.execute_with(&fixture, &mut |_| {}))
+            .unwrap();
+        let verification = complete.assessment_operation().unwrap();
+        let failed = app
+            .complete_setup_assessment(verification, Err(unavailable("verifier unavailable")))
+            .unwrap();
+        assert!(!failed.admitted());
+        assert!(app.setup_health.verification_pending());
+        assert_eq!(
+            failed
+                .onboarding()
+                .unwrap()
+                .presentation
+                .as_ref()
+                .unwrap()
+                .title,
+            "Verifying setup"
+        );
+        assert!(app.select_page(ApplicationPage::Settings).is_none());
+
+        let fresh = app.refresh_setup().unwrap().assessment_operation().unwrap();
+        let verified = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert!(verified.admitted());
+        fixture.responses.lock().unwrap()[1] = StepResponse::Failed(unavailable("service failed"));
+        fixture.publish();
+        let fresh = app.refresh_setup().unwrap().assessment_operation().unwrap();
+        let incomplete = app
+            .complete_setup_assessment(fresh, fresh.execute(&fixture))
+            .unwrap();
+        assert!(!incomplete.admitted());
+        assert_eq!(incomplete.setup_status(), SetupStatus::Incomplete);
+        assert!(fixture.calls.lock().unwrap().is_empty());
     }
 
     #[test]

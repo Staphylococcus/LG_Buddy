@@ -2561,11 +2561,39 @@ pub(crate) mod controller_test_support {
     fn run_pairing_scenario() {
         use adw::prelude::*;
         use lg_buddy::setup::{
-            flow::SetupStep,
-            gui::{fixtures::Fixture, OnboardingIntent},
-            StepResponse,
+            flow::{OnboardingFlow, SetupStep},
+            gui::{fixtures::Fixture, OnboardingBackend, OnboardingIntent},
+            published::{SetupSnapshot, SnapshotBackend},
+            StepFailure, StepResponse,
         };
         use lg_buddy::{navigation::ApplicationPage, settings_view::SettingsIntent};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct CachedReads {
+            fixture: Arc<Fixture>,
+            fail: AtomicBool,
+            failures: AtomicUsize,
+        }
+        impl SnapshotBackend for CachedReads {
+            fn snapshot(&self) -> Result<SetupSnapshot, StepFailure> {
+                if self.fail.load(Ordering::SeqCst) {
+                    self.failures.fetch_add(1, Ordering::SeqCst);
+                    Err(lg_buddy::setup::published::unavailable(
+                        "cached read failed",
+                    ))
+                } else {
+                    self.fixture.snapshot()
+                }
+            }
+            fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+                self.fixture.request_reassessment()
+            }
+        }
+        impl OnboardingBackend for CachedReads {
+            fn open(&self) -> Result<OnboardingFlow, StepFailure> {
+                self.fixture.open()
+            }
+        }
         struct SetupTvs(Arc<Fixture>);
         impl lg_buddy::tvs::TvsBackend for SetupTvs {
             fn read_profiles(
@@ -2595,6 +2623,11 @@ pub(crate) mod controller_test_support {
             (true, false, "RepairGnome"),
         ] {
             let fixture = Arc::new(Fixture::new(existing, plasma));
+            let reads = Arc::new(CachedReads {
+                fixture: fixture.clone(),
+                fail: AtomicBool::new(false),
+                failures: AtomicUsize::new(0),
+            });
             let gtk_app = test_application(name);
             let (backend, controls) = BlockingBackend::new();
             for _ in 0..4 {
@@ -2618,7 +2651,7 @@ pub(crate) mod controller_test_support {
                 &gtk_app,
                 Arc::new(backend),
                 Arc::new(SetupTvs(fixture.clone())),
-                fixture.clone(),
+                reads.clone(),
                 Arc::new(DefaultSettingsBackend),
             );
             assert!(opening.overview().is_none());
@@ -2706,6 +2739,20 @@ pub(crate) mod controller_test_support {
                 .unwrap()
                 .visible_dialog()
                 .is_none());
+            reads.fail.store(true, Ordering::SeqCst);
+            pump_until(|| reads.failures.load(Ordering::SeqCst) >= 3);
+            assert!(!controller.window.setup_visible());
+            assert!(controller.window.navigation_visible());
+            assert!(controller
+                .window
+                .window()
+                .downcast::<adw::ApplicationWindow>()
+                .unwrap()
+                .visible_dialog()
+                .is_none());
+            ApplicationController::navigate(&controller, ApplicationPage::Settings);
+            assert_eq!(controller.window.visible_page(), ApplicationPage::Settings);
+            reads.fail.store(false, Ordering::SeqCst);
             let calls = fixture.calls.lock().unwrap().len();
             fixture.responses.lock().unwrap()[1] = StepResponse::ActionRequired {
                 explanation: "Service stopped",

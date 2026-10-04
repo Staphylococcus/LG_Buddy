@@ -626,6 +626,11 @@ peer: it publishes fixture results independently, and never inspects on reads.
 They verify the central gate, preserved partial work, external repair publication,
 and ordinary complete/offline opens. Native service repair stays covered by Rust
 step/flow tests, separately from the installed transport fixture.
+Assessment/application tests distinguish transport failure from a new published
+requirement: failed reads and a restarted daemon's Unchecked placeholder retain
+the last assessment without clearing post-mutation verification. GTK scenarios
+and the installed journey inject repeated cached-read failures after admission
+and verify that normal navigation remains available without reopening setup.
 
 `cargo test -p lg-buddy` covers the terminal adapter against the shared flow,
 including dependency consent, distinct exit results and signal cancellation gates.
