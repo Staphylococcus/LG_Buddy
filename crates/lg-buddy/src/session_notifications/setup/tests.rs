@@ -110,6 +110,8 @@ fn snapshot(revision: u64, steps: &[(&str, bool)]) -> SetupSnapshot {
         requirements: steps
             .iter()
             .map(|(step, actionable)| SetupRequirement {
+                recovery: crate::setup::recovery::SetupRecovery::default(),
+                needs_attention: *actionable,
                 step: (*step).into(),
                 reason: format!("Complete {step}."),
                 actionable: *actionable,

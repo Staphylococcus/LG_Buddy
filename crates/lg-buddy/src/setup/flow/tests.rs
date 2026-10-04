@@ -80,6 +80,11 @@ fn failure(retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Incomplete", "Try again."),
         diagnostic: "fixture error".into(),
+        recovery: crate::setup::recovery::SetupRecovery::new(
+            crate::setup::recovery::RecoveryCause::TemporaryFailure,
+            crate::setup::recovery::RepairBoundary::LocalSetup,
+            crate::setup::recovery::RecoveryAction::Retry,
+        ),
         retryable,
     }
 }

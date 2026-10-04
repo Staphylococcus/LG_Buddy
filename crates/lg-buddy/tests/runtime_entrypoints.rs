@@ -93,6 +93,10 @@ fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_n
     });
     let snapshot = read().unwrap();
     assert!(!snapshot.requirements.is_empty());
+    assert!(snapshot.requirements.iter().all(|requirement| {
+        requirement.needs_attention
+            && requirement.recovery.cause != lg_buddy::setup::recovery::RecoveryCause::Unknown
+    }));
     for _ in 0..3 {
         let started = Instant::now();
         assert_eq!(read().unwrap(), snapshot);

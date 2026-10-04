@@ -1,4 +1,7 @@
 //! Native service installation/repair. Context is supplied by the flow.
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use crate::settings::{
@@ -56,16 +59,16 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     || self.system_root.join("run/ostree-booted").exists() =>
             {
                 StepResponse::Blocked(failure(
-                    "This installation does not support automatic service setup.",
+                    "Repair LG Buddy's services through your system configuration or image, then recheck setup.",
                     "declaratively managed or immutable system",
-                    false,
+                    SetupRecovery::new(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
                 ))
             }
             Ok(false) if self.controller.systemd_actions_disabled() => {
                 StepResponse::Blocked(failure(
-                    "Service changes are disabled.",
+                    "Service changes are disabled. Enable them outside setup, then recheck.",
                     "systemd mutations disabled",
-                    false,
+                    SetupRecovery::new(Cause::UnsupportedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
                 ))
             }
             Ok(false) => match self.system_ready() {
@@ -73,14 +76,13 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     explanation: "Install or repair LG Buddy's background services.",
                     requires_authorization: !system_ready,
                 },
-                Err(error) => StepResponse::Failed(failure(
+                Err(error) => StepResponse::Failed(settings_failure(
                     "Service setup could not be checked.",
                     error,
-                    true,
                 )),
             },
             Err(error) => {
-                StepResponse::Failed(failure("Service setup could not be checked.", error, true))
+                StepResponse::Failed(settings_failure("Service setup could not be checked.", error))
             }
         }
     }
@@ -97,7 +99,7 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                 StepResponse::Blocked(failure(
                     "This attempt has already started.",
                     "duplicate service setup attempt",
-                    false,
+                    SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait),
                 ))
             };
         }
@@ -116,17 +118,16 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     _ => StepResponse::Failed(failure(
                         "Service setup did not become ready.",
                         "verification after service repair failed",
-                        true,
+                        SetupRecovery::new(Cause::Unverified, Boundary::LocalSetup, Action::Retry),
                     )),
                 },
                 Err(SettingsError::ActivationCancelled) => StepResponse::Cancelled,
                 Err(SettingsError::AuthorizationFailed { message }) => {
                     super::authorization_failed(message)
                 }
-                Err(error) => StepResponse::Failed(failure(
+                Err(error) => StepResponse::Failed(settings_failure(
                     "Service setup could not be completed.",
                     error,
-                    true,
                 )),
             }
         } else {
@@ -350,12 +351,41 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
     }
 }
 
-fn failure(message: &str, diagnostic: impl ToString, retryable: bool) -> StepFailure {
+fn failure(message: &str, diagnostic: impl ToString, recovery: SetupRecovery) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Service setup incomplete", message),
         diagnostic: diagnostic.to_string(),
-        retryable,
+        recovery,
+        retryable: matches!(recovery.action, Action::Retry | Action::Recheck),
     }
+}
+fn settings_failure(message: &str, error: SettingsError) -> StepFailure {
+    let recovery = match &error {
+        SettingsError::InvalidValue { .. }
+        | SettingsError::MissingRequiredSetting { .. }
+        | SettingsError::ReadConfig {
+            kind: io::ErrorKind::InvalidData,
+            ..
+        } => SetupRecovery::new(
+            Cause::InvalidConfiguration,
+            Boundary::UserInput,
+            Action::CorrectConfiguration,
+        ),
+        SettingsError::ReadConfig {
+            kind: io::ErrorKind::PermissionDenied,
+            ..
+        } => SetupRecovery::new(
+            Cause::InvalidEnvironment,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally,
+        ),
+        _ => SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
+    };
+    let mut failure = failure(message, &error, recovery);
+    // Corrective editing is a separate follow-up; reinspection remains available
+    // after the configuration is corrected outside this flow.
+    failure.retryable = true;
+    failure
 }
 fn io_error(error: impl ToString) -> SettingsError {
     SettingsError::Activation {

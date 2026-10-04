@@ -274,6 +274,11 @@ impl OnboardingFlow {
                             "The requirement is still incomplete. Retry to check and repair it.",
                         ),
                         diagnostic: format!("{step:?} remains incomplete after setup execution"),
+                        recovery: super::recovery::SetupRecovery::new(
+                            super::recovery::RecoveryCause::Unverified,
+                            super::recovery::RepairBoundary::LocalSetup,
+                            super::recovery::RecoveryAction::Retry,
+                        ),
                         retryable: true,
                     }),
                 )));

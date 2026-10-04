@@ -161,6 +161,11 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                     "Respond to the current setup request before continuing.",
                 ),
                 diagnostic: "answer does not match the setup step".into(),
+                recovery: super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::InputRequired,
+                    super::recovery::RepairBoundary::UserInput,
+                    super::recovery::RecoveryAction::ProvideInput,
+                ),
                 retryable: true,
             }),
         }
@@ -174,6 +179,11 @@ fn context_failure(error: impl ToString) -> StepFailure {
             "The user configuration and session could not be resolved.",
         ),
         diagnostic: error.to_string(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::InvalidEnvironment,
+            super::recovery::RepairBoundary::SystemConfiguration,
+            super::recovery::RecoveryAction::RepairExternally,
+        ),
         retryable: true,
     }
 }

@@ -74,6 +74,20 @@ Previously admitted pages remain available until a replacement assessment or loc
 setup change invalidates admission; per-operation capability checks still apply.
 Initial unknown/unavailable setup and pending post-repair verification remain gated.
 
+Setup failures also carry typed recovery facts: the cause, the responsible repair
+boundary, and the next remedy. The same facts reach the modal, terminal errors,
+and published requirements. `retryable` only permits reinspection after addressing
+the cause; it does not mean a flow can repair the problem itself. Published
+`needs_attention` is separate from local repair capability. The legacy `actionable`
+notification flag is retained until attention delivery adopts these facts.
+Corrective configuration input and session-service recovery use this contract,
+but their dedicated remediation controls are separate follow-ups.
+
+Older published requirements without recovery facts decode as unknown; unknown
+enum values also remain unknown and cannot authorize a local repair. Malformed
+facts fail the cached read without replacing the last verified result. Publications
+contain application-owned guidance, never step diagnostics or credentials.
+
 The gate's action opens the shared setup/repair flow. Completing the flow requests daemon
 verification; only a newly verified Complete result admits normal pages and
 operations. Partial completion and cancellation cannot unlock them. Missing

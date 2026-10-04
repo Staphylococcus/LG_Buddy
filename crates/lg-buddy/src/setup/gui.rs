@@ -36,6 +36,7 @@ pub struct OnboardingPresentation {
     pub can_cancel: bool,
     pub busy: bool,
     pub error: Option<UserFacingError>,
+    pub recovery: Option<super::recovery::SetupRecovery>,
 }
 
 impl OnboardingPresentation {
@@ -49,6 +50,7 @@ impl OnboardingPresentation {
             can_cancel: true,
             busy: false,
             error,
+            recovery: None,
         }
     }
 
@@ -68,6 +70,7 @@ impl OnboardingPresentation {
             can_cancel: true,
             busy: false,
             error: None,
+            recovery: response.recovery(),
         };
         match response {
             StepResponse::InputRequired(StepInput::Pairing { saved }) => {
@@ -107,7 +110,7 @@ impl OnboardingPresentation {
             }
             StepResponse::Failed(error) | StepResponse::Blocked(error) => {
                 view.error = Some(error.presentation.clone());
-                view.action = error.retryable.then_some("Retry");
+                view.action = error.retryable.then_some(error.recovery.check_label());
             }
             _ => {}
         }
@@ -123,6 +126,7 @@ impl OnboardingPresentation {
             can_cancel: true,
             busy: true,
             error: None,
+            recovery: None,
         }
     }
 }
@@ -133,6 +137,7 @@ enum Command {
     Run(FlowToken),
     Advance(FlowToken, StepAnswer),
     Retry,
+    Recheck,
 }
 
 #[derive(Clone)]
@@ -182,7 +187,7 @@ impl OnboardingBackend for EnvironmentOnboardingBackend {
 
 impl OnboardingOperation {
     pub fn changes_setup(&self) -> bool {
-        !matches!(self.command, Command::Open)
+        !matches!(self.command, Command::Open | Command::Recheck)
     }
     pub fn execute(
         &self,
@@ -203,6 +208,7 @@ impl OnboardingOperation {
         let snapshot = match &self.command {
             Command::Open => flow.snapshot(),
             Command::Run(token) => flow.run(*token, progress),
+            Command::Recheck => flow.refresh(),
             Command::Retry => {
                 let snapshot = flow.refresh();
                 flow.run(snapshot.token, progress)
@@ -324,7 +330,13 @@ impl OnboardingApplication {
                     StepAnswer::InstallBuildDependencies
                 }
                 StepResponse::Failed(error) | StepResponse::Blocked(error) if error.retryable => {
-                    return Some(self.start(Command::Retry))
+                    let command = if error.recovery.action == super::recovery::RecoveryAction::Retry
+                    {
+                        Command::Retry
+                    } else {
+                        Command::Recheck
+                    };
+                    return Some(self.start(command));
                 }
                 _ => return None,
             };
@@ -471,6 +483,7 @@ impl OnboardingApplication {
                 can_cancel: true,
                 busy: false,
                 error: None,
+                recovery: None,
             });
         } else if let Some((step, response)) = snapshot.current() {
             let mut view = OnboardingPresentation::for_step(*step, response);
@@ -501,6 +514,11 @@ fn stopped() -> StepFailure {
             "Retry to check what remains to be set up.",
         ),
         diagnostic: "onboarding worker stopped".into(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::TemporaryFailure,
+            super::recovery::RepairBoundary::LocalSetup,
+            super::recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     }
 }

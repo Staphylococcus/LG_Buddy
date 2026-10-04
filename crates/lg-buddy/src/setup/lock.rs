@@ -25,7 +25,21 @@ impl FlowLock {
             presentation: UserFacingError::new("Setup unavailable", if error.kind() == io::ErrorKind::WouldBlock {
                 "Another LG Buddy setup is already open. Finish or close it before starting another."
             } else { "The setup lock could not be acquired. Run LG Buddy in your user session." }),
-            diagnostic: error.to_string(), retryable: true,
+            diagnostic: error.to_string(),
+            recovery: if error.kind() == io::ErrorKind::WouldBlock {
+                super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::Busy,
+                    super::recovery::RepairBoundary::LocalSetup,
+                    super::recovery::RecoveryAction::Recheck,
+                )
+            } else {
+                super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::InvalidEnvironment,
+                    super::recovery::RepairBoundary::SystemConfiguration,
+                    super::recovery::RecoveryAction::RepairExternally,
+                )
+            },
+            retryable: true,
         })
     }
 

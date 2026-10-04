@@ -84,6 +84,12 @@ pub enum SetupError {
     Io(io::Error),
 }
 impl SetupError {
+    pub fn recovery(&self) -> Option<super::recovery::SetupRecovery> {
+        match self {
+            Self::Failed(error) => Some(error.recovery),
+            _ => None,
+        }
+    }
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Incomplete(_) => 3,
@@ -270,7 +276,11 @@ pub(super) fn render(
                     return Err(SetupError::Failed(error.clone()));
                 }
                 writeln!(writer, "{}", SetupError::Failed(error.clone()))?;
-                consent(false, true, reader, writer, "Retry?", "")?;
+                let question = format!("{}?", error.recovery.check_label());
+                consent(false, true, reader, writer, &question, "")?;
+                if error.recovery.action != super::recovery::RecoveryAction::Retry {
+                    approved = false;
+                }
                 flow.refresh();
                 continue;
             }

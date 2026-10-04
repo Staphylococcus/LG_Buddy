@@ -77,6 +77,11 @@ pub fn worker_stopped() -> StepFailure {
             "Open Complete setup to check the remaining requirements.",
         ),
         diagnostic: "setup assessment worker stopped without a result".into(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::TemporaryFailure,
+            super::recovery::RepairBoundary::SessionService,
+            super::recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     }
 }
@@ -94,6 +99,9 @@ pub(crate) struct SetupHealth {
     required: Option<(String, u64)>,
 }
 impl SetupHealth {
+    pub fn accepts(&self, operation: AssessmentOperation) -> bool {
+        self.running == Some(operation) && !self.stale && !self.paused
+    }
     pub fn status(&self) -> SetupStatus {
         self.status
     }

@@ -1,5 +1,8 @@
 //! Explicit KWin provisioning. Status uses the provisioner's read-only protocol;
 //! login loading and the runtime inhibition source do not run this executor.
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepInput, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use std::path::Path;
@@ -18,6 +21,14 @@ pub(crate) struct KWinSetup<'a> {
 }
 impl KWinSetup<'_> {
     pub(crate) fn inspect(&self) -> StepResponse {
+        if !self.helper.is_file() {
+            return StepResponse::Failed(StepFailure {
+                presentation: UserFacingError::new("Plasma setup incomplete", "The installed Plasma setup helper is missing. Repair or reinstall the LG Buddy package, then recheck setup."),
+                diagnostic: format!("missing Plasma setup helper: {}", self.helper.display()),
+                recovery: SetupRecovery::new(Cause::MissingPayload, Boundary::Installation, Action::RepairExternally),
+                retryable: true,
+            });
+        }
         match self.invoke(&["--status"]) {
             Ok(output) => match output.status.code() {
                 Some(0) => StepResponse::Complete,
@@ -26,7 +37,7 @@ impl KWinSetup<'_> {
                     explanation: "Set up Plasma integration so applications can keep the TV on. A compatible plugin is used when available; otherwise LG Buddy attempts a local build.",
                     requires_authorization: true,
                 },
-                Some(4) => StepResponse::Blocked(failure("This installation does not support automatic Plasma integration setup.", &output, false)),
+                Some(4) => StepResponse::Blocked(failure("This installation does not support automatic Plasma integration setup. Configure the integration through your system's supported installation mechanism, then recheck setup.", &output, false)),
                 _ => StepResponse::Failed(failure("Plasma integration could not be checked.", &output, true)),
             },
             Err(error) => io_failure(error),
@@ -48,6 +59,7 @@ impl KWinSetup<'_> {
                         "This attempt has already started.",
                     ),
                     diagnostic: "duplicate KWin setup attempt".into(),
+                    recovery: SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait),
                     retryable: false,
                 })
             };
@@ -116,6 +128,15 @@ fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Plasma setup incomplete", message),
         diagnostic: diagnostic(output),
+        recovery: if retryable {
+            SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry)
+        } else {
+            SetupRecovery::new(
+                Cause::UnsupportedInstallation,
+                Boundary::SystemConfiguration,
+                Action::RepairExternally,
+            )
+        },
         retryable,
     }
 }
@@ -133,6 +154,7 @@ fn io_failure(error: std::io::Error) -> StepResponse {
             "The Plasma setup helper could not be run.",
         ),
         diagnostic: error.to_string(),
+        recovery: SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
         retryable: true,
     })
 }
@@ -215,7 +237,34 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
             "KWin setup exited Some(1): kwin-bridge info failed: session bus connection refused\n"
         );
         assert!(error.retryable);
+        assert_eq!(error.recovery.action, Action::Retry);
         assert!(!error.presentation.detail().contains("session bus"));
+    }
+
+    #[test]
+    fn missing_payload_requires_package_repair_and_never_invokes_a_helper() {
+        let f = Fixture::new();
+        fs::remove_file(f.helper()).unwrap();
+        let response = KWinSetup {
+            helper: &f.helper(),
+            authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
+            command_lock: None,
+            authorization_session: None,
+        }
+        .inspect();
+        let StepResponse::Failed(error) = response else {
+            panic!("missing payload must fail");
+        };
+        assert_eq!(
+            error.recovery,
+            SetupRecovery::new(
+                Cause::MissingPayload,
+                Boundary::Installation,
+                Action::RepairExternally
+            )
+        );
+        assert!(!error.recovery.can_repair_here());
+        assert!(!f.0.join("actions").exists());
     }
 
     #[test]
@@ -284,6 +333,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
         );
         assert!(error.retryable);
         assert!(error.diagnostic.contains("127"));
+        assert_eq!(error.recovery.cause, Cause::AuthorizationDenied);
+        assert_eq!(error.recovery.action, Action::Retry);
         assert_eq!(fs::read_to_string(f.0.join("status")).unwrap(), "3");
         assert_eq!(
             fs::read_to_string(f.0.join("actions"))

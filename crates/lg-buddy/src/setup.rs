@@ -18,6 +18,7 @@ pub(crate) mod lock;
 pub(crate) mod pairing;
 pub(crate) mod provision;
 pub mod published;
+pub mod recovery;
 pub(crate) mod services;
 mod terminal_signals;
 
@@ -26,6 +27,9 @@ mod terminal_signals;
 pub struct StepFailure {
     pub presentation: UserFacingError,
     pub diagnostic: String,
+    pub recovery: recovery::SetupRecovery,
+    /// Whether this flow can re-inspect after the user addresses the cause.
+    /// This is not proof that the flow can perform the required repair.
     pub retryable: bool,
 }
 
@@ -36,6 +40,11 @@ fn authorization_failed(diagnostic: impl Into<String>) -> StepResponse {
             "Retry to authorize setup, or cancel and complete setup later.",
         ),
         diagnostic: diagnostic.into(),
+        recovery: recovery::SetupRecovery::new(
+            recovery::RecoveryCause::AuthorizationDenied,
+            recovery::RepairBoundary::LocalSetup,
+            recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     })
 }
@@ -68,6 +77,35 @@ pub enum StepInput {
     BuildDependencies {
         explanation: &'static str,
     },
+}
+
+impl StepResponse {
+    pub fn recovery(&self) -> Option<recovery::SetupRecovery> {
+        use recovery::{
+            RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary,
+            SetupRecovery,
+        };
+        Some(match self {
+            Self::Complete | Self::NotApplicable => return None,
+            Self::InputRequired(_) => SetupRecovery::new(
+                Cause::InputRequired,
+                Boundary::UserInput,
+                Action::ProvideInput,
+            ),
+            Self::ActionRequired { .. } => SetupRecovery::new(
+                Cause::MissingIntegration,
+                Boundary::LocalSetup,
+                Action::Repair,
+            ),
+            Self::Failed(error) | Self::Blocked(error) => error.recovery,
+            Self::Running { .. } => {
+                SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait)
+            }
+            Self::Cancelled => {
+                SetupRecovery::new(Cause::Unverified, Boundary::LocalSetup, Action::Recheck)
+            }
+        })
+    }
 }
 
 const AVAILABLE: u8 = 0;

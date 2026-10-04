@@ -490,7 +490,18 @@ fn unsupported_installation_is_blocked_without_mutation() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.root.join("etc")).unwrap();
     fs::write(fixture.root.join("etc/NIXOS"), "").unwrap();
-    assert!(matches!(fixture.run(), StepResponse::Blocked(_)));
+    let StepResponse::Blocked(error) = fixture.run() else {
+        panic!("managed install must be blocked");
+    };
+    assert_eq!(
+        error.recovery,
+        SetupRecovery::new(
+            Cause::ManagedInstallation,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally
+        )
+    );
+    assert!(!error.recovery.can_repair_here());
     assert!(fixture.calls.borrow().is_empty());
     assert!(!fixture.units.exists());
 }
@@ -511,6 +522,14 @@ fn invalid_update_preference_fails_before_any_mutation() {
                 panic!("invalid preference must fail: {response:?}");
             };
             assert!(failure.diagnostic.contains("updates.auto_check"));
+            assert_eq!(
+                failure.recovery,
+                SetupRecovery::new(
+                    Cause::InvalidConfiguration,
+                    Boundary::UserInput,
+                    Action::CorrectConfiguration
+                )
+            );
         }
         assert!(fixture.plan().repair().is_err());
         assert!(fixture.calls.borrow().is_empty());

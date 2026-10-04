@@ -1,4 +1,7 @@
 //! Pairing readiness is local: an offline TV does not require another pairing.
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepInput, StepResponse};
 use crate::config::TvPlatform;
 use crate::pairing::{
@@ -6,15 +9,46 @@ use crate::pairing::{
 };
 use crate::presentation::brightness::UserFacingError;
 use crate::settings::SettingsStore;
-use crate::tvs::{read_profiles_from_store, TvCredentialState};
+use crate::tvs::{read_profiles_from_store, TvCredentialState, TvsReadFailure};
 use std::path::Path;
 
 pub(crate) fn inspect(path: &Path) -> StepResponse {
-    let profiles = SettingsStore::load(path)
-        .map_err(|e| e.to_string())
-        .and_then(|store| read_profiles_from_store(path, &store).map_err(|e| e.to_string()));
+    let store = match SettingsStore::load(path) {
+        Ok(store) => store,
+        Err(error) => {
+            let recovery = match &error {
+                crate::settings::SettingsError::InvalidValue { .. }
+                | crate::settings::SettingsError::ReadConfig {
+                    kind: std::io::ErrorKind::InvalidData,
+                    ..
+                } => configuration_recovery(),
+                crate::settings::SettingsError::ReadConfig {
+                    kind: std::io::ErrorKind::PermissionDenied,
+                    ..
+                } => SetupRecovery::new(
+                    Cause::InvalidEnvironment,
+                    Boundary::SystemConfiguration,
+                    Action::RepairExternally,
+                ),
+                _ => {
+                    SetupRecovery::new(Cause::TemporaryFailure, Boundary::UserInput, Action::Retry)
+                }
+            };
+            return failed_with(
+                "The saved TV configuration could not be read.",
+                error,
+                recovery,
+            );
+        }
+    };
+    let profiles = read_profiles_from_store(path, &store);
     match profiles {
-        Err(error) => failed("The saved TV configuration could not be read.", error),
+        Err(error) => failed_with("The saved TV configuration could not be read.", &error,
+            match error.failure() {
+                TvsReadFailure::InvalidConfiguration => configuration_recovery(),
+                TvsReadFailure::MigrationRequired => SetupRecovery::new(Cause::InvalidConfiguration, Boundary::SessionService, Action::RestartSession),
+                _ => SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
+            }),
         Ok(profiles) => match profiles.first() {
             None => StepResponse::InputRequired(StepInput::Pairing { saved: None }),
             Some(profile) if profile.platform() == TvPlatform::Bscpylgtv => {
@@ -24,6 +58,7 @@ pub(crate) fn inspect(path: &Path) -> StepResponse {
                         "Restart LG Buddy's session service to convert the configuration, then retry setup.",
                     ),
                     diagnostic: "retired bscpylgtv TV profile requires daemon startup conversion".into(),
+                    recovery: SetupRecovery::new(Cause::InvalidConfiguration, Boundary::SessionService, Action::RestartSession),
                     retryable: true,
                 })
             }
@@ -40,9 +75,10 @@ pub(crate) fn inspect(path: &Path) -> StepResponse {
                         Ok(request) => StepResponse::InputRequired(StepInput::Pairing {
                             saved: Some(request),
                         }),
-                        Err(error) => failed(
+                        Err(error) => failed_with(
                             "The saved TV configuration needs correction.",
                             error.detail(),
+                            configuration_recovery(),
                         ),
                     }
                 }
@@ -129,15 +165,37 @@ fn execute_with(
         Err(error) => StepResponse::Failed(StepFailure {
             presentation: error.presentation(),
             diagnostic: format!("pairing: {:?}", error.failure()),
+            recovery: SetupRecovery::new(
+                Cause::TemporaryFailure,
+                Boundary::LocalSetup,
+                Action::Retry,
+            ),
             retryable: true,
         }),
     }
 }
 
 fn failed(message: &str, diagnostic: impl ToString) -> StepResponse {
+    failed_with(
+        message,
+        diagnostic,
+        SetupRecovery::new(Cause::Unverified, Boundary::LocalSetup, Action::Retry),
+    )
+}
+
+fn configuration_recovery() -> SetupRecovery {
+    SetupRecovery::new(
+        Cause::InvalidConfiguration,
+        Boundary::UserInput,
+        Action::CorrectConfiguration,
+    )
+}
+
+fn failed_with(message: &str, diagnostic: impl ToString, recovery: SetupRecovery) -> StepResponse {
     StepResponse::Failed(StepFailure {
         presentation: UserFacingError::new("TV setup incomplete", message),
         diagnostic: diagnostic.to_string(),
+        recovery,
         retryable: true,
     })
 }
@@ -180,7 +238,23 @@ mod tests {
             panic!("retired profile must require daemon migration");
         };
         assert!(error.presentation.summary().contains("needs migration"));
+        assert_eq!(error.recovery.boundary, Boundary::SessionService);
+        assert_eq!(error.recovery.action, Action::RestartSession);
         assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    }
+
+    #[test]
+    fn malformed_tv_details_require_correction_not_another_pairing_attempt() {
+        let (path, _) = fixture();
+        fs::write(&path, "tvs_primary_ip=not-an-ip\n").unwrap();
+        let StepResponse::Failed(error) = inspect(&path) else {
+            panic!("malformed profile must remain incomplete");
+        };
+        assert_eq!(error.recovery, configuration_recovery());
+        let published = crate::setup::published::SetupSnapshot::from_assessment(Err(error));
+        assert!(published.requirements[0].needs_attention);
+        assert!(!published.requirements[0].reason.contains("not-an-ip"));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

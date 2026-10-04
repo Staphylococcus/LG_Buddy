@@ -66,18 +66,18 @@ fn setup_proxy(
     );
     let (owner,): (String,) = bus
         .method_call(DBUS_INTERFACE, "GetNameOwner", (SESSION_BUS_NAME,))
-        .map_err(crate::setup::published::unavailable)?;
+        .map_err(setup_transport_failure)?;
     Ok(connection.with_proxy(owner, SESSION_OBJECT_PATH, Duration::from_millis(500)))
 }
 
 pub(crate) fn read_setup_snapshot(
 ) -> Result<crate::setup::published::SetupSnapshot, crate::setup::StepFailure> {
-    let connection = DbusConnection::new_session().map_err(crate::setup::published::unavailable)?;
+    let connection = DbusConnection::new_session().map_err(setup_transport_failure)?;
     let (json,): (String,) = setup_proxy(&connection)?
         .method_call(SESSION_INTERFACE, GET_SETUP_ASSESSMENT, ())
-        .map_err(crate::setup::published::unavailable)?;
+        .map_err(setup_transport_failure)?;
     let snapshot: crate::setup::published::SetupSnapshot =
-        serde_json::from_str(&json).map_err(crate::setup::published::unavailable)?;
+        serde_json::from_str(&json).map_err(setup_protocol_failure)?;
     let config = crate::config::resolve_config_path_from_env().unwrap_or_default();
     let normalized = |path: &std::path::Path| {
         if path.as_os_str().is_empty() {
@@ -88,9 +88,12 @@ pub(crate) fn read_setup_snapshot(
             .unwrap_or_else(|_| path.to_owned())
     };
     if normalized(&config) != normalized(&snapshot.config) {
-        return Err(crate::setup::published::unavailable(
-            "session service uses a different configuration",
-        ));
+        let mut failure =
+            crate::setup::published::unavailable("session service uses a different configuration");
+        failure.recovery.cause = crate::setup::recovery::RecoveryCause::InvalidConfiguration;
+        failure.presentation = crate::presentation::brightness::UserFacingError::new(
+            "Session service configuration does not match", "Configure LG Buddy's session service to use the same configuration as this UI, then restart it and recheck setup.");
+        return Err(failure);
     }
     Ok(snapshot)
 }
@@ -98,10 +101,56 @@ pub(crate) fn read_setup_snapshot(
 pub(crate) fn request_setup_assessment() -> Result<(String, u64), crate::setup::StepFailure> {
     // Validate the daemon's configuration before asking it to reassess.
     read_setup_snapshot()?;
-    let connection = DbusConnection::new_session().map_err(crate::setup::published::unavailable)?;
+    let connection = DbusConnection::new_session().map_err(setup_transport_failure)?;
     setup_proxy(&connection)?
         .method_call(SESSION_INTERFACE, REQUEST_SETUP_ASSESSMENT, ())
-        .map_err(crate::setup::published::unavailable)
+        .map_err(setup_transport_failure)
+}
+
+fn setup_transport_failure(error: dbus::Error) -> crate::setup::StepFailure {
+    if matches!(
+        error.name(),
+        Some(
+            "org.freedesktop.DBus.Error.UnknownMethod"
+                | "org.freedesktop.DBus.Error.UnknownInterface"
+                | "org.freedesktop.DBus.Error.InvalidArgs"
+        )
+    ) {
+        return setup_protocol_failure(error);
+    }
+    let mut failure = crate::setup::published::unavailable(&error);
+    if matches!(
+        error.name(),
+        Some(
+            "org.freedesktop.DBus.Error.NoReply"
+                | "org.freedesktop.DBus.Error.Timeout"
+                | "org.freedesktop.DBus.Error.Disconnected"
+                | "org.freedesktop.DBus.Error.Failed"
+        )
+    ) {
+        failure.presentation = crate::presentation::brightness::UserFacingError::new(
+            "Setup state could not be read",
+            "Retry reading the session service's published setup state.",
+        );
+        failure.recovery = crate::setup::recovery::SetupRecovery::new(
+            crate::setup::recovery::RecoveryCause::TemporaryFailure,
+            crate::setup::recovery::RepairBoundary::SessionService,
+            crate::setup::recovery::RecoveryAction::Retry,
+        );
+    }
+    failure
+}
+
+fn setup_protocol_failure(error: impl ToString) -> crate::setup::StepFailure {
+    let mut failure = crate::setup::published::unavailable(error);
+    failure.presentation = crate::presentation::brightness::UserFacingError::new(
+        "Setup state is incompatible", "Update or repair the LG Buddy installation, then restart its session service and recheck setup.");
+    failure.recovery = crate::setup::recovery::SetupRecovery::new(
+        crate::setup::recovery::RecoveryCause::IncompatibleState,
+        crate::setup::recovery::RepairBoundary::Installation,
+        crate::setup::recovery::RecoveryAction::RepairExternally,
+    );
+    failure
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1154,6 +1203,51 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setup_transport_failures_keep_retry_verifier_and_protocol_recovery_distinct() {
+        use crate::setup::recovery::{
+            RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary,
+        };
+        for (name, cause, boundary, action) in [
+            (
+                "org.freedesktop.DBus.Error.NoReply",
+                Cause::TemporaryFailure,
+                Boundary::SessionService,
+                Action::Retry,
+            ),
+            (
+                "org.freedesktop.DBus.Error.Failed",
+                Cause::TemporaryFailure,
+                Boundary::SessionService,
+                Action::Retry,
+            ),
+            (
+                "org.freedesktop.DBus.Error.NameHasNoOwner",
+                Cause::VerifierUnavailable,
+                Boundary::SessionService,
+                Action::RestartSession,
+            ),
+            (
+                "org.freedesktop.DBus.Error.UnknownMethod",
+                Cause::IncompatibleState,
+                Boundary::Installation,
+                Action::RepairExternally,
+            ),
+        ] {
+            let failure = super::setup_transport_failure(dbus::Error::new_custom(
+                name,
+                "private transport diagnostic",
+            ));
+            assert_eq!(failure.recovery.cause, cause);
+            assert_eq!(failure.recovery.boundary, boundary);
+            assert_eq!(failure.recovery.action, action);
+            assert!(!failure
+                .presentation
+                .detail()
+                .contains("private transport diagnostic"));
+        }
+    }
+
     use super::{
         handle_notification_bus_signal, notification_signal_sender_is_trusted,
         process_identity_is_gnome_shell, show_update_notification_over_session_bus,

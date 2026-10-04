@@ -631,6 +631,11 @@ requirement: failed reads and a restarted daemon's Unchecked placeholder retain
 the last assessment without clearing post-mutation verification. GTK scenarios
 and the installed journey inject repeated cached-read failures after admission
 and verify that normal navigation remains available without reopening setup.
+Recovery-contract tests distinguish input correction, local repair, verifier
+recovery, transient retry, missing payload, and managed/unsupported repair across
+step responses, GUI/CLI adapters and serialized publications. Legacy/unknown
+recovery facts cannot grant local repair; malformed facts fail safely. Native
+daemon endpoint tests verify that typed facts survive the session-bus boundary.
 
 `cargo test -p lg-buddy` covers the terminal adapter against the shared flow,
 including dependency consent, distinct exit results and signal cancellation gates.

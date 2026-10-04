@@ -94,6 +94,41 @@ fn worker_failure_retries_with_a_fresh_flow_and_read_only_errors_stay_visible() 
 }
 
 #[test]
+fn recheck_returns_new_requirements_without_automatically_executing_them() {
+    use crate::setup::recovery::{RecoveryAction, RecoveryCause, RepairBoundary, SetupRecovery};
+    let fixture = fixtures::Fixture::new(true, false);
+    fixture.responses.lock().unwrap()[1] = StepResponse::Blocked(StepFailure {
+        presentation: UserFacingError::new(
+            "Externally managed",
+            "Repair externally, then recheck.",
+        ),
+        diagnostic: "fixture managed service".into(),
+        recovery: SetupRecovery::new(
+            RecoveryCause::ManagedInstallation,
+            RepairBoundary::SystemConfiguration,
+            RecoveryAction::RepairExternally,
+        ),
+        retryable: true,
+    });
+    let mut app = OnboardingApplication::default();
+    let opening = app.handle(OnboardingIntent::Open).unwrap();
+    let blocked = finish(&mut app, opening, &fixture);
+    assert_eq!(blocked.presentation.unwrap().action, Some("Recheck"));
+    fixture.responses.lock().unwrap()[1] = StepResponse::ActionRequired {
+        explanation: "Repair services",
+        requires_authorization: true,
+    };
+    let recheck = app.handle(OnboardingIntent::Submit).unwrap();
+    assert!(!recheck.operation.as_ref().unwrap().changes_setup());
+    let checked = finish(&mut app, recheck, &fixture);
+    assert_eq!(checked.presentation.unwrap().action, Some("Continue"));
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    let approved = app.handle(OnboardingIntent::Submit).unwrap();
+    finish(&mut app, approved, &fixture);
+    assert_eq!(*fixture.calls.lock().unwrap(), [SetupStep::Services]);
+}
+
+#[test]
 fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() {
     cancellation_waits_for_worker(SetupStep::Pairing);
     cancellation_waits_for_worker(SetupStep::Services);

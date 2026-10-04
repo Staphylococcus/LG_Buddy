@@ -22,6 +22,12 @@ pub struct SetupRequirement {
     pub step: String,
     pub reason: String,
     pub actionable: bool,
+    /// Independent of whether this frontend can perform the remedy.
+    #[serde(default)]
+    pub needs_attention: bool,
+    /// Older peers omit these facts; unknown facts never authorize repair.
+    #[serde(default)]
+    pub recovery: super::recovery::SetupRecovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +52,9 @@ impl SetupSnapshot {
             Ok(assessment) => {
                 snapshot.status = assessment.status();
                 for (step, response) in assessment.steps {
+                    let Some(recovery) = response.recovery() else {
+                        continue;
+                    };
                     let (reason, actionable) = match response {
                         StepResponse::Complete | StepResponse::NotApplicable => continue,
                         StepResponse::InputRequired(StepInput::Pairing { .. }) => {
@@ -76,6 +85,8 @@ impl SetupSnapshot {
                         .into(),
                         reason,
                         actionable,
+                        needs_attention: recovery.needs_attention(),
+                        recovery,
                     });
                 }
             }
@@ -89,6 +100,8 @@ impl SetupSnapshot {
                         error.presentation.detail()
                     ),
                     actionable: false,
+                    needs_attention: error.recovery.needs_attention(),
+                    recovery: error.recovery,
                 });
             }
         }
@@ -187,6 +200,11 @@ pub fn unavailable(error: impl ToString) -> StepFailure {
             "Start or restart LG Buddy's session service, then retry setup.",
         ),
         diagnostic: error.to_string(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::VerifierUnavailable,
+            super::recovery::RepairBoundary::SessionService,
+            super::recovery::RecoveryAction::RestartSession,
+        ),
         retryable: true,
     }
 }
