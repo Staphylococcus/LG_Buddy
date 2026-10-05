@@ -65,6 +65,7 @@ jobs:
             platform_access_token::tests::persist_assigns_requested_owner_when_running_as_root \
             pairing_store::tests::mutation_lock_is_shared_by_root_and_config_owner \
             pairing_store::tests::mutation_lock_rejects_unsafe_existing_markers \
+            setup::kwin::native::tests::system_install_validates_artifacts_and_preserves_existing_files \
             pairing_store::migration::tests::migration_preserves_config_access_metadata; do
             "$test_binary" --list --format=terse | grep -Fx "$test: test"
             sudo env TMPDIR="$privileged_test_dir" "$test_binary" "$test" --exact

@@ -23,6 +23,14 @@ pub mod recovery;
 pub(crate) mod services;
 mod terminal_signals;
 
+/// Internal installed KWin entry point, also used by the compatibility launcher.
+pub fn run_kwin_setup(args: &[String]) -> u8 {
+    match kwin::native::run(args) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
 /// Domain errors are normalized by the step, never interpreted by its caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepFailure {

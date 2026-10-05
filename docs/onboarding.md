@@ -183,7 +183,7 @@ a behavior; installation and repair remain the onboarding flow's responsibility.
 | Background services | The [service repair step](../crates/lg-buddy/src/setup/provision.rs) checks required files, ownership, configuration bindings, enablement and activity. System changes use the fixed [privileged helper](../data/setup-services.sh); user files are managed in the user's configuration directory. |
 | Screen monitor | Its configuration must match the selected configuration and the service must be active. An enabled unit alone is insufficient. |
 | Update checks | The timer follows the saved update setting. Its associated service need not run continuously. Invalid update preferences fail inspection before service or file changes. |
-| Plasma integration | The [KWin step](../crates/lg-buddy/src/setup/kwin.rs) inspects applicability and verifies the live bridge and compatibility. A plugin file or old setup receipt is insufficient. Explicit provisioning uses [the KWin helper](../data/kwin/setup.sh), including prebuilt selection, local compilation and separate dependency consent. |
+| Plasma integration | The [KWin step](../crates/lg-buddy/src/setup/kwin.rs) inspects applicability and verifies the live bridge and compatibility. A plugin file or old setup receipt is insufficient. Explicit provisioning is owned by [the native KWin provisioner](../crates/lg-buddy/src/setup/kwin/native.rs), including prebuilt selection, local compilation and separate dependency consent. The installed shell launcher preserves the existing package and authorization boundary. |
 
 Service repair stops an installed service before replacing its unit files or
 reloading configuration, then starts it with the new configuration. If repair

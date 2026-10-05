@@ -75,17 +75,9 @@ printf 'sudo helper diagnostic' >&2
 [ ! -f "$root/sudo-helper-result" ] || exit "$(cat "$root/sudo-helper-result")"
 "#,
         );
-        // Exercise the real privilege-selection function with isolated tools,
-        // even when the test itself is run by root.
-        let helper = include_str!("../../../../../data/kwin/setup.sh")
-            .replace("/usr/bin/sudo", fixture.0.join("sudo").to_str().unwrap())
-            .replace(
-                "/usr/bin/pkexec",
-                fixture.0.join("pkexec").to_str().unwrap(),
-            )
-            .replace("if [ \"$EUID\" -eq 0 ]; then", "if false; then")
-            .replace("if [ \"$(id -u)\" -eq 0 ]; then", "if false; then");
-        fs::write(fixture.0.join("setup.sh"), helper).unwrap();
+        // The privileged launcher is a compatibility boundary; the native
+        // provisioner owns its own kernel lock and state.
+        fs::write(fixture.0.join("setup.sh"), "exit 0\n").unwrap();
         fixture.script(
             "pkexec",
             r#"
@@ -107,13 +99,11 @@ printf 'helper diagnostic' >&2
             fixture.0.join("plasma.sh"),
             format!(
                 r#"
-source '{root}/setup.sh'
 payload_dir='{root}'
+privileged() {{ _lg_buddy_kwin_privileged '{root}/setup.sh' "$@"; }}
 foreground=0
 allow_dependencies=0
 main() {{
-    exec 9>'{root}/plasma.lock'
-    flock -n 9 || return 1
     [ "$1" = --foreground ] || return 1
     printf '%s\n' "$*" >> '{root}/plasma-options'
     for option in "${{@:2}}"; do
@@ -153,6 +143,7 @@ main() {{
             .replace("/usr/bin/pkcheck", self.0.join("pkcheck").to_str().unwrap())
             .replace("/usr/bin/pkexec", self.0.join("pkexec").to_str().unwrap())
             .replace("/usr/bin/sudo", self.0.join("sudo").to_str().unwrap())
+            .replace("if [ \"$EUID\" -eq 0 ]; then", "if false; then")
     }
 
     fn session(&self, lock: Option<&Arc<File>>) -> AuthorizationSession {
@@ -440,7 +431,7 @@ fn terminal_prompt_child() {
     let Some(root) = std::env::var_os("LG_BUDDY_TERMINAL_AUTHORIZATION_ROOT") else {
         return;
     };
-    let fixture = Fixture(root.into());
+    let fixture = std::mem::ManuallyDrop::new(Fixture(root.into()));
     let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
     assert!(session
         .services(Path::new("config"), None)
@@ -453,7 +444,6 @@ fn terminal_prompt_child() {
         .status
         .success());
     session.close();
-    std::mem::forget(fixture);
 }
 
 #[test]
@@ -644,7 +634,7 @@ fn services_and_multiple_plasma_operations_share_the_same_authorized_subject() {
     assert!(!arguments
         .split(|byte| *byte == 0)
         .any(|arg| arg == b"--system-dependencies"));
-    // A new request must neither retain KWin's local lock nor forget consent.
+    // A new request must retain authorization and preserve dependency consent.
     assert!(session
         .plasma(&fixture.0.join("plasma.sh"), true, None)
         .unwrap()
@@ -801,12 +791,11 @@ fn authorization_owner_child() {
     let Some(root) = std::env::var_os("LG_BUDDY_AUTHORIZATION_TEST_ROOT") else {
         return;
     };
-    let fixture = Fixture(root.into());
+    let fixture = std::mem::ManuallyDrop::new(Fixture(root.into()));
     let lease = super::super::lock::FlowLock::try_acquire(&fixture.0.join("flow.lock")).unwrap();
     let session = fixture.session(Some(&lease.file()));
     let _ = session.plasma(&fixture.0.join("plasma.sh"), false, None);
     // The parent kills this owner during the call; only it owns fixture cleanup.
-    std::mem::forget(fixture);
 }
 
 #[test]

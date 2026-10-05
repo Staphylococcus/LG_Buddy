@@ -120,7 +120,7 @@ pub(super) fn inherit_command_lock(command: &mut Command, lock: Option<&Arc<File
     let Some(lock) = lock else { return };
     let lock = lock.clone();
     // Duplicate only in the child, after stdio setup. The supervisor inherits a
-    // descriptor >= 10 (KWin uses 9); unrelated processes spawned by other
+    // descriptor >= 10; unrelated processes spawned by other
     // threads do not inherit it.
     unsafe {
         command.pre_exec(move || {
