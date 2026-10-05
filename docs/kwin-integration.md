@@ -19,9 +19,13 @@ The shared flow, startup assessment and **Complete setup** entry in Settings imp
 supported reduced coverage; an applicable unmet setup requirement remains pending.
 
 The native installer installs an optional `LG_Buddy_kwin.service` user unit and
-the bridge payload under `/usr/lib/lg-buddy/kwin`. Session activation can load an
-already installed plugin; it never provisions or requests authorization.
-Explicit foreground setup tries:
+the bridge payload under `/usr/lib/lg-buddy/kwin`. The Rust application owns
+inspection, artifact validation, provisioning, removal, and the kernel file lock.
+The installed `setup.sh` is a compatibility launcher for existing layouts and
+Polkit policy. The flow-scoped authorization owner brokers native privileged
+requests so services and Plasma retain the same authorization subject.
+Session activation runs the native entry point to load an already installed
+plugin; it never provisions or requests authorization. Explicit foreground setup tries:
 
 1. A compatible bundled prebuilt.
 2. A cached local build, or compilation against matching installed development
@@ -230,10 +234,13 @@ ordinary local-build/no-source fallbacks.
 
 ## Validation
 
-`scripts/test-kwin-setup.sh` exercises the production selection/fallback path
-with isolated build, privilege and loader boundaries: prebuilt without compilation,
-missing/incompatible/corrupt/rejected prebuilts, local-build cache reuse, failed
-build/install/load and cleanup retry. Private D-Bus tests in `tests/inhibition.rs`
+Native provisioner tests exercise prebuilt selection, incompatible/corrupt/rejected
+artifacts, local-build cache reuse, dependency consent, denied cleanup retry, and
+read-only managed-host inspection. `tests/kwin_provisioning.rs` runs the actual
+native worker against the authorization owner with mocked privilege tools and
+checks exclusion after frontend disconnection. `scripts/test-kwin-setup.sh` runs
+native inspection and removal with an empty `PATH`, proving that neither needs
+the external `flock` command or shell filesystem utilities. Private D-Bus tests in `tests/inhibition.rs`
 exercise the actual Rust adapter, independent PowerDevil/KWin Booleans, owner
 replacement, delayed replies, cancellation, failure and recovery.
 

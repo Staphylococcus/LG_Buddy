@@ -9,6 +9,8 @@ use std::path::Path;
 use std::process::Output;
 use std::{fs::File, sync::Arc};
 
+pub(super) mod native;
+
 const BUILD_DEPENDENCIES: StepResponse = StepResponse::InputRequired(StepInput::BuildDependencies {
     explanation: "A compatible Plasma plugin could not be built with the installed tools. Install the compiler and development packages needed to build it? This requires administrator permission.",
 });

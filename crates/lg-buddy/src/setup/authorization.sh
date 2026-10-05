@@ -54,14 +54,72 @@ _lg_buddy_privileged() {
     fi
 }
 
+# KWin's native worker owns its state and lock. This owner keeps the existing
+# authorization subject and cancellation handshake for each privileged request.
+_lg_buddy_kwin_privileged() {
+    local helper="$1"
+    shift
+    if [ "$EUID" -eq 0 ]; then
+        _lg_buddy_begin_mutation || return $?
+        /bin/bash "$helper" "$@"
+    elif [ -x /usr/bin/sudo ] && /usr/bin/sudo -n /usr/bin/true 2>/dev/null; then
+        _lg_buddy_begin_mutation || return $?
+        /usr/bin/sudo -n /bin/bash "$helper" "$@"
+    elif [ "$_lg_buddy_mode" = noninteractive ]; then
+        return 127
+    elif [ "$_lg_buddy_mode" = terminal ]; then
+        _lg_buddy_privileged /bin/bash "$helper" "$@"
+    else
+        _lg_buddy_privileged "$helper" "$@"
+    fi
+}
+
+_lg_buddy_kwin() {
+    local runtime="$1" payload="$2"
+    shift 2
+    exec 5>&1 6>&2
+    # Hold even a no-op worker until its coprocess descriptors are retained.
+    # Bash otherwise unsets them if a fast worker exits before the next command.
+    coproc _lg_buddy_native {
+        IFS= read -r -d '' _lg_buddy_start || exit 1
+        exec "$runtime" kwin-setup --broker --payload-dir "$payload" "$@"
+    }
+    local pid="$_lg_buddy_native_PID" input output operation count argument status i
+    local original_input="${_lg_buddy_native[1]}" original_output="${_lg_buddy_native[0]}"
+    exec {input}>&"$original_input" {output}<&"$original_output"
+    exec {original_input}>&- {original_output}<&-
+    printf '\0' >&"$input"
+    local -a arguments
+    while IFS= read -r -d '' operation <&"$output"; do
+        IFS= read -r -d '' count <&"$output" || break
+        [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -le 16 ] || break
+        arguments=()
+        for (( i=0; i<count; i++ )); do
+            IFS= read -r -d '' argument <&"$output" || break 2
+            arguments+=("$argument")
+        done
+        status=0
+        case "$operation" in
+            mutation) _lg_buddy_begin_mutation || status=$? ;;
+            privileged) _lg_buddy_kwin_privileged "$payload/setup.sh" "${arguments[@]}" || status=$? ;;
+            *) break ;;
+        esac
+        printf '%s\0' "$status" >&"$input" || break
+    done
+    exec {input}>&- {output}<&- 5>&- 6>&-
+    status=0
+    wait "$pid" || status=$?
+    return "$status"
+}
+
 _lg_buddy_run() {
     case "$_lg_buddy_operation" in
         services)
             _lg_buddy_privileged /usr/lib/lg-buddy/setup-services "$_lg_buddy_path"
             ;;
         plasma)
-            # The existing helper is sourceable. Running main in this shell
-            # keeps every privileged call attached to the same native subject.
+            # The compatibility launcher starts the native worker through this
+            # owner, preserving the same subject for privileged requests.
             # shellcheck source=../../../../data/kwin/setup.sh
             source "$_lg_buddy_path" || return 1
             local -a args=(--foreground)
@@ -89,8 +147,6 @@ while IFS= read -r -d '' _lg_buddy_operation \
     else
         _lg_buddy_status=$?
     fi
-    # KWin's step-local lock must not survive until the next request.
-    exec 9>&-
     printf '%s\n%s\n%s\n' "$_lg_buddy_status" \
         "$(wc -c <"$_lg_buddy_output/stdout")" "$(wc -c <"$_lg_buddy_output/stderr")"
     cat -- "$_lg_buddy_output/stdout" "$_lg_buddy_output/stderr"

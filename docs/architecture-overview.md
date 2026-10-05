@@ -947,6 +947,11 @@ exposes `can_blank()` when the ordinary activity deadline is due. A denial leave
 that deadline unchanged and is retried at a bounded cadence. Explicit lock and
 post-blank policy remain independent.
 
+The Rust setup layer owns KWin inspection, artifact compatibility, provisioning,
+removal, and locking. Its installed shell launcher preserves the existing
+package layout and Polkit entry point. Privileged requests pass through the
+shared authorization owner so services and Plasma use the same process subject.
+
 The separate preference section evaluates the existing honoring setting
 without I/O. Disabled honoring supplies a bypass for inhibition restrictions and
 release delay; it does not grant activity eligibility. Settings retain their
