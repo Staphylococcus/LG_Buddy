@@ -193,7 +193,13 @@ run_fresh_gui_launch_smoke() {
     done
     env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
         "$FRESH_ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-release-gui-accessibility.py" \
-        --timeout 30 --expected-tvs-state empty
+        --timeout 30 --expected-tvs-state setup-required
+    env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+        "$FRESH_ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-release-gui-accessibility.py" \
+        --timeout 30 --activate-control "Complete setup"
+    env -u NO_AT_BRIDGE ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals \
+        "$FRESH_ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-release-gui-accessibility.py" \
+        --timeout 30 --expected-tvs-state pairing
 
     gapplication action io.github.staphylococcus.LGBuddy quit
     wait "$FRESH_GUI_INSTALL_PID" || {

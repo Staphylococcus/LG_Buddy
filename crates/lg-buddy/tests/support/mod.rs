@@ -238,7 +238,6 @@ struct MockSystemLogindState {
     prepare_for_sleep_signals: VecDeque<bool>,
     locked_hint: bool,
     locked_hint_client_ready: bool,
-    locked_hint_read_count: usize,
     locked_hint_signals: VecDeque<bool>,
 }
 
@@ -265,7 +264,6 @@ impl MockSystemLogind {
             state.prepare_for_sleep_signals.clear();
             state.locked_hint = false;
             state.locked_hint_client_ready = false;
-            state.locked_hint_read_count = 0;
             state.locked_hint_signals.clear();
         });
     }
@@ -858,12 +856,21 @@ fn spawn_mock_logind_service(
                 .property::<bool, _>("Active")
                 .get(move |_, _| Ok(true));
             let state = Arc::clone(&session_state);
-            builder.property::<bool, _>("LockedHint").get(move |_, _| {
-                let mut state = state.lock().expect("mock logind state lock");
-                state.locked_hint_read_count += 1;
-                state.locked_hint_client_ready = state.locked_hint_read_count >= 2;
-                Ok(state.locked_hint)
-            });
+            builder
+                .property::<bool, _>("LockedHint")
+                .get(move |context, _| {
+                    let mut state = state.lock().expect("mock logind state lock");
+                    // GetAll also runs this getter during unrelated session discovery.
+                    // Only the lock observer's explicit Get has reconciled its baseline.
+                    if context
+                        .message()
+                        .and_then(|message| message.member())
+                        .is_some_and(|method| method == "Get")
+                    {
+                        state.locked_hint_client_ready = true;
+                    }
+                    Ok(state.locked_hint)
+                });
         });
         crossroads.insert(
             "/org/freedesktop/login1",

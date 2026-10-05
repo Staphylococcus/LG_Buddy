@@ -1,10 +1,15 @@
 //! Explicit KWin provisioning. Status uses the provisioner's read-only protocol;
 //! login loading and the runtime inhibition source do not run this executor.
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepInput, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use std::path::Path;
 use std::process::Output;
 use std::{fs::File, sync::Arc};
+
+pub(super) mod native;
 
 const BUILD_DEPENDENCIES: StepResponse = StepResponse::InputRequired(StepInput::BuildDependencies {
     explanation: "A compatible Plasma plugin could not be built with the installed tools. Install the compiler and development packages needed to build it? This requires administrator permission.",
@@ -14,9 +19,18 @@ pub(crate) struct KWinSetup<'a> {
     pub helper: &'a Path,
     pub authorization: crate::setup::flow::AuthorizationMode,
     pub command_lock: Option<Arc<File>>,
+    pub authorization_session: Option<&'a super::authorization::AuthorizationSession>,
 }
 impl KWinSetup<'_> {
     pub(crate) fn inspect(&self) -> StepResponse {
+        if !self.helper.is_file() {
+            return StepResponse::Failed(StepFailure {
+                presentation: UserFacingError::new("Plasma setup incomplete", "The installed Plasma setup helper is missing. Repair or reinstall the LG Buddy package, then recheck setup."),
+                diagnostic: format!("missing Plasma setup helper: {}", self.helper.display()),
+                recovery: SetupRecovery::new(Cause::MissingPayload, Boundary::Installation, Action::RepairExternally),
+                retryable: true,
+            });
+        }
         match self.invoke(&["--status"]) {
             Ok(output) => match output.status.code() {
                 Some(0) => StepResponse::Complete,
@@ -25,7 +39,7 @@ impl KWinSetup<'_> {
                     explanation: "Set up Plasma integration so applications can keep the TV on. A compatible plugin is used when available; otherwise LG Buddy attempts a local build.",
                     requires_authorization: true,
                 },
-                Some(4) => StepResponse::Blocked(failure("This installation does not support automatic Plasma integration setup.", &output, false)),
+                Some(4..=8) => StepResponse::Blocked(external_failure(&output)),
                 _ => StepResponse::Failed(failure("Plasma integration could not be checked.", &output, true)),
             },
             Err(error) => io_failure(error),
@@ -37,7 +51,7 @@ impl KWinSetup<'_> {
         cancellation: &StepCancellation,
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
-        if !cancellation.begin() {
+        if !cancellation.can_cancel() {
             return if cancellation.is_cancelled() {
                 StepResponse::Cancelled
             } else {
@@ -47,26 +61,20 @@ impl KWinSetup<'_> {
                         "This attempt has already started.",
                     ),
                     diagnostic: "duplicate KWin setup attempt".into(),
+                    recovery: SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait),
                     retryable: false,
                 })
             };
         }
         progress(StepResponse::Running {
-            message: "Setting up Plasma integration…",
-            cancelable: false,
+            message: "Preparing Plasma integration…",
+            cancelable: true,
         });
         let before = self.inspect();
         let response = if matches!(before, StepResponse::ActionRequired { .. }) {
-            let mut args = vec!["--foreground"];
-            if allow_dependencies {
-                args.push("--allow-dependencies");
-            }
-            match self.authorization {
-                super::flow::AuthorizationMode::Noninteractive => args.push("--noninteractive"),
-                super::flow::AuthorizationMode::Terminal => args.push("--terminal"),
-                super::flow::AuthorizationMode::Interactive => {}
-            }
-            match self.invoke(&args) {
+            let local_session = super::authorization::AuthorizationSession::new(self.authorization);
+            let session = self.authorization_session.unwrap_or(&local_session);
+            match session.plasma_cancellable(self.helper, allow_dependencies, self.command_lock.as_ref(), cancellation, &mut || progress(StepResponse::Running { message: "Setting up Plasma integration…", cancelable: false })) {
                 Ok(output) => match output.status.code() {
                     Some(0) => match self.inspect() {
                         StepResponse::Complete => StepResponse::Complete,
@@ -83,8 +91,11 @@ impl KWinSetup<'_> {
         } else {
             before
         };
-        cancellation.finish();
-        response
+        if cancellation.finish_and_was_cancelled() {
+            StepResponse::Cancelled
+        } else {
+            response
+        }
     }
     fn invoke(&self, args: &[&str]) -> std::io::Result<Output> {
         if args == ["--status"] {
@@ -107,18 +118,47 @@ impl KWinSetup<'_> {
                 })
                 .ok_or_else(|| std::io::Error::other("Plasma inspection could not run"));
         }
-        // Never inherit interactive terminal input into background workers.
-        super::lock::command_with_lock("bash", self.command_lock.as_ref())
-            .arg(self.helper)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let local_session = super::authorization::AuthorizationSession::new(self.authorization);
+        let session = self.authorization_session.unwrap_or(&local_session);
+        session.plasma(
+            self.helper,
+            args.contains(&"--allow-dependencies"),
+            self.command_lock.as_ref(),
+        )
+    }
+}
+fn external_failure(output: &Output) -> StepFailure {
+    let (cause, message) = match output.status.code() {
+        Some(5) => (Cause::ManagedInstallation, "The active KWin session has no compatible LG Buddy bridge. Add the bridge to your NixOS Plasma configuration, build and activate it, then load it in the user session and recheck. Setup will not modify Nix-managed plugin files."),
+        Some(6) => (Cause::ManagedInstallation, "The active KWin session has no compatible LG Buddy bridge. Install the bridge through your immutable system's supported image or package mechanism, load it in the user session, then recheck. Setup will not modify image-owned plugin files."),
+        Some(7) => (Cause::UnsupportedInstallation, "This KWin version is not supported by the Plasma setup helper. Automatic setup requires KWin 6. Use a supported desktop or install a compatible bridge through your system's supported mechanism, then recheck."),
+        Some(8) => (Cause::UnsupportedInstallation, "KWin's plugin directory is not supported by the Plasma setup helper. Install a compatible LG Buddy bridge through your system's package mechanism and load it in the user session, then recheck."),
+        _ => (Cause::UnsupportedInstallation, "This installation does not support automatic Plasma integration setup. Configure the integration through your system's supported installation mechanism, then recheck setup."),
+    };
+    StepFailure {
+        presentation: UserFacingError::new("Plasma setup incomplete", message),
+        diagnostic: diagnostic(output),
+        recovery: SetupRecovery::new(
+            cause,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally,
+        ),
+        retryable: true,
     }
 }
 fn failure(message: &str, output: &Output, retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Plasma setup incomplete", message),
         diagnostic: diagnostic(output),
+        recovery: if retryable {
+            SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry)
+        } else {
+            SetupRecovery::new(
+                Cause::UnsupportedInstallation,
+                Boundary::SystemConfiguration,
+                Action::RepairExternally,
+            )
+        },
         retryable,
     }
 }
@@ -130,12 +170,22 @@ fn diagnostic(output: &Output) -> String {
     )
 }
 fn io_failure(error: std::io::Error) -> StepResponse {
+    if error.kind() == std::io::ErrorKind::ConnectionAborted {
+        return StepResponse::Cancelled;
+    }
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        return StepResponse::Blocked(StepFailure {
+            presentation: UserFacingError::new("Setup helper still active", "A Plasma setup helper may still be running. Recheck before starting another repair; completed work is retained."),
+            diagnostic: error.to_string(), recovery: SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Recheck), retryable: true,
+        });
+    }
     StepResponse::Failed(StepFailure {
         presentation: UserFacingError::new(
             "Plasma setup incomplete",
             "The Plasma setup helper could not be run.",
         ),
         diagnostic: error.to_string(),
+        recovery: SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
         retryable: true,
     })
 }
@@ -162,12 +212,17 @@ mod tests {
             fs::write(
                 root.join("helper.sh"),
                 r#"#!/bin/bash
-cd -- "$(dirname -- "$0")"
-[ "$1" != --status ] || exit "$(cat status)"
+_fixture_dir="$(dirname -- "${BASH_SOURCE[0]}")"
+main() {
+cd -- "$_fixture_dir"
+[ "$1" != --status ] || return "$(cat status)"
 printf '%s\n' "$*" >> actions
 result="$(cat result)"
+_lg_buddy_begin_mutation || return $?
 if [ "$result" = 0 ] && [ ! -f fail-verification ]; then echo 0 > status; fi
-exit "$result"
+return "$result"
+}
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
 "#,
             )
             .unwrap();
@@ -181,6 +236,7 @@ exit "$result"
                 helper: &self.helper(),
                 authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
                 command_lock: None,
+                authorization_session: None,
             }
             .execute(allow, &StepCancellation::default(), &mut |_| {})
         }
@@ -202,6 +258,7 @@ exit "$result"
             helper: &f.helper(),
             authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
             command_lock: None,
+            authorization_session: None,
         }
         .inspect();
         let StepResponse::Failed(error) = response else {
@@ -212,9 +269,65 @@ exit "$result"
             "KWin setup exited Some(1): kwin-bridge info failed: session bus connection refused\n"
         );
         assert!(error.retryable);
+        assert_eq!(error.recovery.action, Action::Retry);
         assert!(!error.presentation.detail().contains("session bus"));
     }
 
+    #[test]
+    fn missing_payload_requires_package_repair_and_never_invokes_a_helper() {
+        let f = Fixture::new();
+        fs::remove_file(f.helper()).unwrap();
+        let response = KWinSetup {
+            helper: &f.helper(),
+            authorization: crate::setup::flow::AuthorizationMode::Noninteractive,
+            command_lock: None,
+            authorization_session: None,
+        }
+        .inspect();
+        let StepResponse::Failed(error) = response else {
+            panic!("missing payload must fail");
+        };
+        assert_eq!(
+            error.recovery,
+            SetupRecovery::new(
+                Cause::MissingPayload,
+                Boundary::Installation,
+                Action::RepairExternally
+            )
+        );
+        assert!(!error.recovery.can_repair_here());
+        assert!(!f.0.join("actions").exists());
+    }
+
+    #[test]
+    fn external_blocks_are_specific_recheckable_and_never_provision() {
+        let f = Fixture::new();
+        for (status, guidance, cause) in [
+            (
+                4,
+                "supported installation mechanism",
+                Cause::UnsupportedInstallation,
+            ),
+            (5, "NixOS Plasma configuration", Cause::ManagedInstallation),
+            (6, "immutable system", Cause::ManagedInstallation),
+            (7, "requires KWin 6", Cause::UnsupportedInstallation),
+            (8, "plugin directory", Cause::UnsupportedInstallation),
+        ] {
+            fs::write(f.0.join("status"), status.to_string()).unwrap();
+            let StepResponse::Blocked(error) = f.run(false) else {
+                panic!("external setup must remain blocked");
+            };
+            assert!(error.presentation.detail().contains(guidance));
+            assert_eq!(error.recovery.cause, cause);
+            assert_eq!(error.recovery.action, Action::RepairExternally);
+            assert!(error.retryable);
+            assert!(!error.recovery.can_repair_here());
+            assert!(!f.0.join("actions").exists());
+        }
+        fs::write(f.0.join("status"), "0").unwrap();
+        assert_eq!(f.run(false), StepResponse::Complete);
+        assert!(!f.0.join("actions").exists());
+    }
     #[test]
     fn status_and_inapplicable_desktop_do_not_execute_provisioning() {
         let f = Fixture::new();
@@ -223,6 +336,7 @@ exit "$result"
             helper: &helper,
             authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
+            authorization_session: None,
         };
         assert!(matches!(
             step.inspect(),
@@ -280,6 +394,8 @@ exit "$result"
         );
         assert!(error.retryable);
         assert!(error.diagnostic.contains("127"));
+        assert_eq!(error.recovery.cause, Cause::AuthorizationDenied);
+        assert_eq!(error.recovery.action, Action::Retry);
         assert_eq!(fs::read_to_string(f.0.join("status")).unwrap(), "3");
         assert_eq!(
             fs::read_to_string(f.0.join("actions"))
@@ -309,6 +425,7 @@ exit "$result"
             helper: &helper,
             authorization: crate::setup::flow::AuthorizationMode::Interactive,
             command_lock: None,
+            authorization_session: None,
         };
         let cancellation = StepCancellation::default();
         assert!(cancellation.cancel());
@@ -320,14 +437,15 @@ exit "$result"
         let cancellation = StepCancellation::default();
         assert_eq!(
             step.execute(false, &cancellation, &mut |s| {
-                assert!(matches!(
+                if matches!(
                     s,
                     StepResponse::Running {
                         cancelable: false,
                         ..
                     }
-                ));
-                assert!(!cancellation.cancel());
+                ) {
+                    assert!(!cancellation.cancel());
+                }
             }),
             StepResponse::Complete
         );

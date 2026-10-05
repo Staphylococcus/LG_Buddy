@@ -20,6 +20,11 @@ pub(crate) struct ApplicationWindow {
     onboarding: crate::onboarding::OnboardingView,
     toasts: adw::ToastOverlay,
     stack: adw::ViewStack,
+    content: gtk::Stack,
+    setup: adw::StatusPage,
+    setup_error: gtk::Label,
+    setup_primary: gtk::Button,
+    pending_brightness_focus: Cell<bool>,
     switcher: adw::ViewSwitcher,
     switcher_bar: adw::ViewSwitcherBar,
     #[cfg(test)]
@@ -69,7 +74,7 @@ impl ApplicationWindow {
         window.add_action(&diagnostics_action);
         let overview = crate::overview::OverviewView::new(&window, Rc::clone(&on_overview));
         let tvs = crate::tvs::TvsView::new(Rc::clone(&on_tvs));
-        let onboarding = crate::onboarding::OnboardingView::new(on_onboarding);
+        let onboarding = crate::onboarding::OnboardingView::new(Rc::clone(&on_onboarding));
         let settings = crate::settings::SettingsView::new(on_settings);
         let stack = adw::ViewStack::new();
         stack.set_hhomogeneous(false);
@@ -119,8 +124,38 @@ impl ApplicationWindow {
             crate::diagnostics::DiagnosticsView::new(on_diagnostics, menu_button.upcast_ref());
         header.pack_end(&menu_button);
         let switcher_bar = adw::ViewSwitcherBar::builder().stack(&stack).build();
+        let setup = adw::StatusPage::builder()
+            .icon_name("video-display-symbolic")
+            .title("Verifying setup")
+            .vexpand(true)
+            .build();
+        let setup_error = gtk::Label::builder().wrap(true).visible(false).build();
+        setup_error.set_accessible_role(gtk::AccessibleRole::Alert);
+        setup_error.add_css_class("error");
+        let setup_primary = gtk::Button::with_label("Complete setup");
+        setup_primary.add_css_class("suggested-action");
+        setup_primary.add_css_class("pill");
+        setup_primary.set_visible(false);
+        setup_primary
+            .connect_clicked(move |_| on_onboarding(lg_buddy::setup::gui::OnboardingIntent::Open));
+        let setup_actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        setup_actions.set_halign(gtk::Align::Center);
+        setup_actions.append(&setup_primary);
+        let setup_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        setup_content.append(&setup_error);
+        setup_content.append(&setup_actions);
+        setup.set_child(Some(&setup_content));
+        let gate = gtk::Stack::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .hhomogeneous(false)
+            .vhomogeneous(false)
+            .build();
+        gate.add_named(&stack, Some("application"));
+        gate.add_named(&setup, Some("setup"));
+        gate.set_visible_child_name("setup");
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&stack));
+        toasts.set_child(Some(&gate));
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&toasts);
         content.set_vexpand(true);
@@ -170,6 +205,11 @@ impl ApplicationWindow {
             onboarding,
             toasts,
             stack,
+            content: gate,
+            setup,
+            setup_error,
+            setup_primary,
+            pending_brightness_focus: Cell::new(false),
             switcher,
             switcher_bar,
             #[cfg(test)]
@@ -192,14 +232,50 @@ impl ApplicationWindow {
         &self,
         presentation: Option<&lg_buddy::setup::gui::OnboardingPresentation>,
     ) {
+        if let Some(view) = presentation.filter(|view| view.is_gate) {
+            self.setup.set_title(&view.title);
+            self.setup.set_description(Some(&view.description));
+            self.setup_error.set_visible(view.error.is_some());
+            self.setup_error.set_text(
+                &view
+                    .error
+                    .as_ref()
+                    .map(|error| format!("{}: {}", error.summary(), error.detail()))
+                    .unwrap_or_default(),
+            );
+            let newly_visible = !self.setup_primary.is_visible();
+            self.setup_primary.set_visible(view.action.is_some());
+            self.setup_primary.set_sensitive(!view.busy);
+            if newly_visible && view.action.is_some() {
+                let button = self.setup_primary.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    if button.is_mapped() && button.is_sensitive() {
+                        button.grab_focus();
+                    }
+                });
+            }
+        }
         self.onboarding.render(&self.window, presentation);
     }
-    pub(crate) fn render_setup_status(
-        &self,
-        status: lg_buddy::setup::gui::SetupStatus,
-        available: bool,
-    ) {
-        self.settings.render_setup_status(status, available);
+    pub(crate) fn set_admitted(&self, admitted: bool) {
+        if !admitted {
+            self.tvs.dismiss_confirmation();
+        }
+        self.content
+            .set_visible_child_name(if admitted { "application" } else { "setup" });
+        if admitted && self.pending_brightness_focus.replace(false) {
+            self.overview.focus_brightness();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn setup_visible(&self) -> bool {
+        self.content.visible_child_name().as_deref() == Some("setup") && self.setup.is_mapped()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn activate_setup(&self) {
+        assert!(self.setup_primary.is_mapped() && self.setup_primary.is_sensitive());
+        self.setup_primary.emit_clicked();
     }
 
     pub(crate) fn render_settings(&self, presentation: &SettingsPresentation) {
@@ -251,6 +327,10 @@ impl ApplicationWindow {
     }
 
     pub(crate) fn focus_brightness(&self) {
+        if self.content.visible_child_name().as_deref() != Some("application") {
+            self.pending_brightness_focus.set(true);
+            return;
+        }
         if self.window.visible_dialog().is_none() {
             self.overview.focus_brightness();
         }
@@ -282,12 +362,14 @@ impl ApplicationWindow {
 
     #[cfg(test)]
     pub(crate) fn navigation_visible(&self) -> bool {
-        self.switcher.is_visible() && self.switcher_bar.is_visible()
+        self.content.visible_child_name().as_deref() == Some("application")
+            && self.switcher.is_visible()
+            && self.switcher_bar.is_visible()
     }
 
     #[cfg(test)]
     pub(crate) fn main_menu_visible(&self) -> bool {
-        self.menu_button.is_visible() && self.menu_button.is_sensitive()
+        self.menu_button.is_mapped() && self.menu_button.is_sensitive()
     }
 }
 

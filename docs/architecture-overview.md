@@ -947,6 +947,11 @@ exposes `can_blank()` when the ordinary activity deadline is due. A denial leave
 that deadline unchanged and is retried at a bounded cadence. Explicit lock and
 post-blank policy remain independent.
 
+The Rust setup layer owns KWin inspection, artifact compatibility, provisioning,
+removal, and locking. Its installed shell launcher preserves the existing
+package layout and Polkit entry point. Privileged requests pass through the
+shared authorization owner so services and Plasma use the same process subject.
+
 The separate preference section evaluates the existing honoring setting
 without I/O. Disabled honoring supplies a bypass for inhibition restrictions and
 release delay; it does not grant activity eligibility. Settings retain their
@@ -993,7 +998,13 @@ The detailed session model is documented in `docs/session-backend-model.md`.
 `sources/desktop/wayland.rs` is the native Wayland adapter. It owns the
 Wayland connection, registry, every advertised seat, and zero-timeout idle
 notifications. Resumed notifications become desktop activity observations in
-the shared inactivity runtime; compositor idle does not directly blank the TV.
+the shared inactivity runtime; Wayland idle-notifier `idled` does not directly
+blank the TV. Actual system display-off is a separate source:
+`sources/linux/dpms.rs` observes connected Linux DRM DPMS On → Off transitions,
+and the runner routes them through the existing TV blanking, ownership, and
+delayed power-off policy without waiting for the inactivity deadline. See
+[System display blanking](session-backend-model.md#system-display-blanking-linux-dpms)
+for source requirements and multi-display limits.
 
 The session subsystem is intentionally asymmetric where the providers are
 asymmetric:

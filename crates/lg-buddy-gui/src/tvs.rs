@@ -466,13 +466,9 @@ impl TvsView {
         presentation: &TvsPresentation,
     ) {
         let Some(confirmation) = presentation.unpair_confirmation() else {
-            self.unpair_confirm_intent.replace(None);
-            self.unpair_cancel_intent.replace(None);
-            if self.unpair_dialog_visible.replace(false) {
-                self.unpair_dialog.force_close();
-                if let Some(focus) = self.restore_focus.take() {
-                    let _ = focus.grab_focus();
-                }
+            self.dismiss_confirmation();
+            if let Some(focus) = self.restore_focus.take() {
+                let _ = focus.grab_focus();
             }
             return;
         };
@@ -494,6 +490,14 @@ impl TvsView {
 
         if !self.unpair_dialog_visible.replace(true) {
             self.unpair_dialog.present(Some(parent));
+        }
+    }
+
+    pub(crate) fn dismiss_confirmation(&self) {
+        self.unpair_confirm_intent.replace(None);
+        self.unpair_cancel_intent.replace(None);
+        if self.unpair_dialog_visible.replace(false) {
+            self.unpair_dialog.force_close();
         }
     }
 }
@@ -971,6 +975,21 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         "cancel restores focus to the destructive action"
     );
 
+    let confirming = app.handle_intent(TvsIntent::UnpairTv).unwrap();
+    view.render(&window, confirming.presentation());
+    pump_until(|| {
+        view.unpair_dialog
+            .child()
+            .is_some_and(|child| child.is_mapped())
+    });
+    view.dismiss_confirmation();
+    pump_until(|| window.visible_dialog().is_none());
+    assert!(
+        intents.borrow().is_empty(),
+        "gating must not execute a dialog response"
+    );
+    assert!(!view.unpair_dialog_visible.get());
+
     let (mut app, opening) = TvsApplication::open();
     let failed = app
         .complete_read(
@@ -1004,5 +1023,4 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     assert!(view.split_bin.current_breakpoint().is_some());
     assert!(view.split.is_collapsed());
     window.close();
-    crate::onboarding::run_renderer_scenarios(application);
 }

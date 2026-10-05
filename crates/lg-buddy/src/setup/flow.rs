@@ -4,7 +4,7 @@
 
 use super::{lock::FlowLock, StepCancellation, StepFailure, StepResponse};
 use crate::pairing::PairingRequest;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -25,6 +25,14 @@ impl SetupStep {
 /// explicit consent to the action described by the current snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepAnswer {
+    CorrectTv {
+        request: PairingRequest,
+        revision: [u8; 32],
+    },
+    CorrectUpdatePreference {
+        enabled: bool,
+        revision: [u8; 32],
+    },
     Continue,
     Pairing(PairingRequest),
     InstallBuildDependencies,
@@ -78,6 +86,9 @@ pub struct FlowProgress {
 
 /// Deliberately internal: non-pairing setup has no independent public executor.
 pub(super) trait SetupSteps: Send {
+    fn authorization_session(&self) -> Option<Arc<super::authorization::AuthorizationSession>> {
+        None
+    }
     fn inspect(&self, step: SetupStep) -> StepResponse;
     fn execute(
         &self,
@@ -90,6 +101,7 @@ pub(super) trait SetupSteps: Send {
 }
 
 struct Control {
+    authorization_session: Option<Arc<super::authorization::AuthorizationSession>>,
     lease: Option<FlowLock>,
     attempt: Option<StepCancellation>,
     cancelled: bool,
@@ -99,6 +111,9 @@ struct Control {
 impl Control {
     fn close(&mut self) {
         self.closed = true;
+        if let Some(session) = self.authorization_session.take() {
+            session.close();
+        }
         self.lease.take();
     }
 }
@@ -140,6 +155,8 @@ impl FlowCancellation {
 pub struct OnboardingFlow {
     backend: Box<dyn SetupSteps>,
     control: Arc<Mutex<Control>>,
+    lock_path: PathBuf,
+    waiting_step: Option<SetupStep>,
     snapshot: FlowSnapshot,
     // Keep read-only observations separate from a step's outstanding request
     // (e.g. additional input discovered during execution). Reinspection must
@@ -166,9 +183,13 @@ impl OnboardingFlow {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let lease = FlowLock::acquire(lock_path)?;
         let observed = inspect_steps(backend.as_ref());
+        let authorization_session = backend.authorization_session();
         let mut flow = Self {
             backend,
+            lock_path: lock_path.to_owned(),
+            waiting_step: None,
             control: Arc::new(Mutex::new(Control {
+                authorization_session,
                 lease: Some(lease),
                 attempt: None,
                 cancelled: false,
@@ -204,10 +225,167 @@ impl OnboardingFlow {
     /// closed; re-entry opens a new flow and inspects current facts again.
     pub fn refresh(&mut self) -> FlowSnapshot {
         if !self.control.lock().unwrap().closed {
+            if let Some(step) = self.waiting_step {
+                match FlowLock::acquire(&self.lock_path) {
+                    Ok(lease) => {
+                        let mut control = self.control.lock().unwrap();
+                        if control.closed {
+                            drop(control);
+                            return self.snapshot();
+                        }
+                        control.lease = Some(lease);
+                        self.waiting_step = None;
+                    }
+                    Err(error) => {
+                        if error.recovery.cause != super::recovery::RecoveryCause::Busy {
+                            self.publish(Some((step, StepResponse::Blocked(error))));
+                        }
+                        return self.snapshot();
+                    }
+                }
+            }
             self.observed = self.inspect();
             self.publish(None);
         }
         self.snapshot()
+    }
+
+    /// Starting setup approves routine work for the flow, not additional input
+    /// or build dependencies. Failures and blocked work always return to the caller.
+    pub fn run(
+        &mut self,
+        token: FlowToken,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
+        self.try_run(token, &mut |event| {
+            progress(event);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+
+    /// Progress failure cancels safe work if possible, or waits for the current
+    /// mutation to finish. It never starts another step after that failure.
+    pub fn try_run<E>(
+        &mut self,
+        token: FlowToken,
+        progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    ) -> Result<FlowSnapshot, E> {
+        if token != self.snapshot.token || self.control.lock().unwrap().closed {
+            return Ok(self.snapshot());
+        }
+        if self.waiting_step.is_some() {
+            return Ok(self.refresh());
+        }
+        if !matches!(
+            self.snapshot().current(),
+            Some((_, StepResponse::ActionRequired { .. }))
+        ) {
+            return Ok(self.snapshot());
+        }
+        let fresh = self.inspect();
+        if fresh != self.observed {
+            self.observed = fresh;
+            self.publish(None);
+        }
+        let mut attempted = Vec::new();
+        loop {
+            // Execution already published a fresh aggregate verification. Do
+            // not re-probe past a failed or blocked requirement without Retry.
+            let snapshot = self.snapshot();
+            let Some((step, StepResponse::ActionRequired { .. })) = snapshot.current() else {
+                return Ok(snapshot);
+            };
+            let step = *step;
+            // A successful command without verified readiness must not cause
+            // an automatic retry (including after later inspections regress).
+            if attempted.contains(&step) {
+                self.publish(Some((
+                    step,
+                    StepResponse::Failed(StepFailure {
+                        presentation: crate::presentation::brightness::UserFacingError::new(
+                            "Setup could not be verified",
+                            "The requirement is still incomplete. Retry to check and repair it.",
+                        ),
+                        diagnostic: format!("{step:?} remains incomplete after setup execution"),
+                        recovery: super::recovery::SetupRecovery::new(
+                            super::recovery::RecoveryCause::Unverified,
+                            super::recovery::RepairBoundary::LocalSetup,
+                            super::recovery::RecoveryAction::Retry,
+                        ),
+                        retryable: true,
+                    }),
+                )));
+                return Ok(self.snapshot());
+            }
+            attempted.push(step);
+            let cancellation = self.cancellation();
+            let mut error = None;
+            let result =
+                self.execute_current(step, snapshot.token, StepAnswer::Continue, &mut |event| {
+                    report_progress(progress, &cancellation, &mut error, event);
+                });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            if !satisfied(&result.steps[step as usize].1)
+                && !matches!(
+                    result.steps[step as usize].1,
+                    StepResponse::ActionRequired { .. }
+                )
+            {
+                return Ok(result);
+            }
+        }
+    }
+
+    /// Apply explicit input, then continue verified routine work without
+    /// asking the frontend to select or approve each remaining step.
+    pub fn advance_until_pause(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
+        self.try_advance_until_pause(token, answer, &mut |event| {
+            progress(event);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+
+    /// Submit input with the same progress-error boundary as routine work.
+    pub fn try_advance_until_pause<E>(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    ) -> Result<FlowSnapshot, E> {
+        if token != self.snapshot.token {
+            return Ok(self.snapshot());
+        }
+        let step = self.snapshot().current().map(|(step, _)| *step);
+        let correct_preference = matches!(answer, StepAnswer::CorrectUpdatePreference { .. });
+        let cancellation = self.cancellation();
+        let mut error = None;
+        let (snapshot, executed) = self.advance_checked(token, answer, &mut |event| {
+            report_progress(progress, &cancellation, &mut error, event);
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        if step.is_some_and(|step| satisfied(&snapshot.steps[step as usize].1))
+            || (correct_preference
+                && executed
+                && matches!(
+                    snapshot.current(),
+                    Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+                ))
+        {
+            self.try_run(snapshot.token, progress)
+        } else {
+            Ok(snapshot)
+        }
     }
 
     /// Execute at most the current step. A new request always returns to the
@@ -218,17 +396,29 @@ impl OnboardingFlow {
         answer: StepAnswer,
         progress: &mut dyn FnMut(FlowProgress),
     ) -> FlowSnapshot {
+        self.advance_checked(token, answer, progress).0
+    }
+
+    fn advance_checked(
+        &mut self,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> (FlowSnapshot, bool) {
         if token != self.snapshot.token || self.control.lock().unwrap().closed {
-            return self.snapshot();
+            return (self.snapshot(), false);
+        }
+        if self.waiting_step.is_some() {
+            return (self.refresh(), false);
         }
         let fresh = self.inspect();
         if fresh != self.observed {
             self.observed = fresh;
             self.publish(None);
-            return self.snapshot();
+            return (self.snapshot(), false);
         }
         let Some((step, response)) = self.snapshot.current() else {
-            return self.snapshot();
+            return (self.snapshot(), false);
         };
         let step = *step;
         let permitted = match response {
@@ -237,8 +427,18 @@ impl OnboardingFlow {
             _ => false,
         };
         if !permitted {
-            return self.snapshot();
+            return (self.snapshot(), false);
         }
+        (self.execute_current(step, token, answer, progress), true)
+    }
+
+    fn execute_current(
+        &mut self,
+        step: SetupStep,
+        token: FlowToken,
+        answer: StepAnswer,
+        progress: &mut dyn FnMut(FlowProgress),
+    ) -> FlowSnapshot {
         let cancellation = StepCancellation::default();
         let lease = {
             let mut control = self.control.lock().unwrap();
@@ -264,6 +464,17 @@ impl OnboardingFlow {
             control.cancelled |= response == StepResponse::Cancelled;
             if control.cancelled {
                 control.close();
+            } else if response.recovery().is_some_and(|recovery| {
+                recovery.cause == super::recovery::RecoveryCause::Busy
+                    && recovery.action == super::recovery::RecoveryAction::Recheck
+            }) {
+                // The helper may outlive this attempt. Do not let the same
+                // flow reuse its lease to start another mutation.
+                if let Some(session) = &control.authorization_session {
+                    session.release_process();
+                }
+                control.lease.take();
+                self.waiting_step = Some(step);
             }
         }
         self.observed = self.inspect();
@@ -309,6 +520,20 @@ impl Drop for OnboardingFlow {
     fn drop(&mut self) {
         // A cancellation handle may outlive its flow, but must not keep a lock.
         self.control.lock().unwrap().close();
+    }
+}
+
+fn report_progress<E>(
+    progress: &mut dyn FnMut(FlowProgress) -> Result<(), E>,
+    cancellation: &FlowCancellation,
+    error: &mut Option<E>,
+    event: FlowProgress,
+) {
+    if error.is_none() {
+        if let Err(failure) = progress(event) {
+            cancellation.cancel();
+            *error = Some(failure);
+        }
     }
 }
 

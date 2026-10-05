@@ -41,26 +41,65 @@ verification that KWin setup succeeded.
 
 ## User experience
 
-Initial setup presents **Pair a TV**. Its action and the Settings **Complete
-setup** row open the same modal, containing the backend-defined pairing,
-background services and applicable integration segments. An existing paired TV
-proceeds directly to its remaining service or integration work. The application
-supports zero or one configured TV.
+The session daemon assesses installation at startup, after configuration
+conversion. The GUI reads its published result. Complete installations open the
+functional UI directly; incomplete or unavailable assessments show one central
+**Setup required** screen instead of normal pages. Its single **Complete setup**
+action opens the shared setup/repair modal dialog with its own header. The splash
+keeps the normal application header, window controls and menu, with navigation
+hidden. Cancelling the dialog returns to the splash. There is no completion row in Settings
+or independent first-run Pair TV screen. Opening the GUI does not open a flow or
+inspect setup requirements again. After the action is selected, an existing
+paired TV proceeds directly to its remaining service or integration work. The
+application supports zero or one configured TV.
 
-The modal is implemented by the [GTK onboarding view](../crates/lg-buddy-gui/src/onboarding.rs),
-which embeds the TV form. The toolkit-independent
+The splash is implemented by the [application window](../crates/lg-buddy-gui/src/window.rs).
+The [GTK onboarding dialog](../crates/lg-buddy-gui/src/onboarding.rs) embeds the TV form.
+The toolkit-independent
 [onboarding controller](../crates/lg-buddy/src/setup/gui.rs) owns its state, input
 and worker operations. GTK renders the returned state; it does not decide step
 order, readiness or completion.
 
-A bounded, asynchronous, read-only assessment runs on application startup. It
-does not install anything, change settings, initiate pairing, request
-administrator authorization, or open onboarding. When applicable requirements
-are unmet, Settings shows the neutral **Complete setup** row. The row reflects
-backend status and disappears when current observations confirm completion.
+Snapshot reads are asynchronous and bounded, and do not run inspections. They
+do not install anything, change settings, initiate pairing, or request
+administrator authorization. The window waits for the first quick cached read
+before presentation, avoiding a checking/setup flash during ordinary opens.
+While an assessment runs, the previous published result remains authoritative.
+The GUI continues reading the cache to receive later publications; opening,
+reactivation and navigation never request actual reassessment.
 
-The flow explains each required change and its purpose before requesting
-authorization. Plasma setup explains that the integration allows LG Buddy to
+A cached-read failure does not replace a previously verified installation result.
+Likewise, a restarted daemon's initial Unchecked snapshot is not a new assessment.
+Previously admitted pages remain available until a replacement assessment or local
+setup change invalidates admission; per-operation capability checks still apply.
+Initial unknown/unavailable setup and pending post-repair verification remain gated.
+
+Setup failures also carry typed recovery facts: the cause, the responsible repair
+boundary, and the next remedy. The same facts reach the modal, terminal errors,
+and published requirements. `retryable` only permits reinspection after addressing
+the cause; it does not mean a flow can repair the problem itself. Published
+`needs_attention` is separate from local repair capability. The legacy `actionable`
+notification flag is retained until attention delivery adopts these facts.
+Corrective configuration input and session-service recovery use this contract,
+but their dedicated remediation controls are separate follow-ups.
+
+Older published requirements without recovery facts decode as unknown; unknown
+enum values also remain unknown and cannot authorize a local repair. Malformed
+facts fail the cached read without replacing the last verified result. Publications
+contain application-owned guidance, never step diagnostics or credentials.
+
+The gate's action opens the shared setup/repair flow. Completing the flow requests daemon
+verification; only a newly verified Complete result admits normal pages and
+operations. Partial completion and cancellation cannot unlock them. Missing
+daemon results or failed inspection stay in the same recovery view with repair,
+retry and diagnostics. A later published Incomplete result restores the gate.
+
+Starting setup approves the routine installation and repair work as a whole.
+The flow advances through those steps automatically, reporting progress, and
+pauses only for TV input/approval, native authorization, separate consent to
+install build dependencies, or failed/blocked work. Retry is always explicit;
+authorization denial or dismissal never starts an automatic retry or fallback.
+Plasma setup explains that the integration allows LG Buddy to
 recognize apps' requests to keep the TV on. System authorization dialogs identify
 LG Buddy and the operation in human-readable terms. If a local build needs
 compiler or development packages, the flow requests separate consent for them.
@@ -72,11 +111,12 @@ same result for dismissal, denial or unavailable authorization. Technical detail
 remain in diagnostics; the user-facing message describes the available action.
 
 Each step reports and enforces whether its current operation is cancelable.
-The flow and both frontends respect that decision, including modal close
+The flow and both frontends respect that decision, including window close
 requests. They do not force or queue cancellation of a noncancelable operation.
 Accepted cancellation stops the attempt and further fallback authorization
-requests. Completed work remains in place, and **Complete setup** remains
-available for unfinished requirements. There are no unsolicited login password
+requests. Completed work remains in place; cancelling the setup dialog returns
+to the splash, where its action resumes unfinished requirements. Closing the
+application window exits the GUI. There are no unsolicited login password
 prompts or automatic authorization retries.
 
 Headless setup presents the same requirements, explanations and outcomes through
@@ -88,10 +128,12 @@ without opening a graphical prompt or reporting full completion.
 
 ```mermaid
 flowchart TD
-    START["Application startup"] --> CHECK["Shared read-only assessment"]
-    CHECK -->|"Requirements unmet"| ROW["Settings: Complete setup"]
-    ROW --> FLOW["Shared onboarding"]
-    FIRST["Pair a TV prompt"] --> FLOW
+    START["Daemon startup / settled setup changes"] --> CHECK["Shared read-only assessment"]
+    CHECK --> CACHE["Published snapshot"]
+    GUI["Open GUI"] --> CACHE
+    CACHE -->|"Complete"| UI["Functional UI"]
+    CACHE -->|"Incomplete or unavailable"| GATE["Setup required gate"]
+    GATE -->|"Complete setup action"| FLOW["Shared onboarding"]
     CLI["Headless setup"] --> FLOW
     FLOW --> INSPECT["Inspect current state and determine remaining work"]
     INSPECT -->|"Requirements met"| DONE["Setup complete"]
@@ -102,6 +144,7 @@ flowchart TD
     APPLY --> VERIFY["Reassess and verify"]
     VERIFY -->|"Remaining work"| INSPECT
     VERIFY -->|"Requirements met"| DONE
+    DONE --> CHECK
 ```
 
 ### Step ownership
@@ -140,7 +183,7 @@ a behavior; installation and repair remain the onboarding flow's responsibility.
 | Background services | The [service repair step](../crates/lg-buddy/src/setup/provision.rs) checks required files, ownership, configuration bindings, enablement and activity. System changes use the fixed [privileged helper](../data/setup-services.sh); user files are managed in the user's configuration directory. |
 | Screen monitor | Its configuration must match the selected configuration and the service must be active. An enabled unit alone is insufficient. |
 | Update checks | The timer follows the saved update setting. Its associated service need not run continuously. Invalid update preferences fail inspection before service or file changes. |
-| Plasma integration | The [KWin step](../crates/lg-buddy/src/setup/kwin.rs) inspects applicability and verifies the live bridge and compatibility. A plugin file or old setup receipt is insufficient. Explicit provisioning uses [the KWin helper](../data/kwin/setup.sh), including prebuilt selection, local compilation and separate dependency consent. |
+| Plasma integration | The [KWin step](../crates/lg-buddy/src/setup/kwin.rs) inspects applicability and verifies the live bridge and compatibility. A plugin file or old setup receipt is insufficient. Explicit provisioning is owned by [the native KWin provisioner](../crates/lg-buddy/src/setup/kwin/native.rs), including prebuilt selection, local compilation and separate dependency consent. The installed shell launcher preserves the existing package and authorization boundary. |
 
 Service repair stops an installed service before replacing its unit files or
 reloading configuration, then starts it with the new configuration. If repair
@@ -162,9 +205,12 @@ inputs and current state.
 
 The flow is a synchronous worker API. Frontends open it with an authorization
 mode, render a snapshot, and submit an answer with that snapshot's opaque token.
-Each call executes at most the current step. The backend owns completion;
+Opening and refreshing a flow only inspect. Explicitly starting routine work
+or submitting input runs until the next input, failure or blocked requirement,
+or verified completion. The backend owns progression and completion;
 frontends cannot inject successful step results. Tokens reject stale or foreign
-answers and let renderers ignore delayed progress.
+answers; worker operation identities let renderers ignore delayed progress
+across the snapshot revisions of one automatic run.
 
 The [execution context](../crates/lg-buddy/src/setup/environment.rs) resolves one
 configuration and the current user/session and installation context. User units
@@ -194,13 +240,23 @@ read-only inspections without opening a flow or taking its execution lock.
 All steps must report complete or not applicable for overall completion;
 inspection failure leaves setup incomplete.
 
-The [application coordinator](../crates/lg-buddy/src/application.rs) requests
-assessment on startup, window reactivation, entering Settings, and after setup
-or relevant configuration mutations settle. Only one assessment worker runs at
-a time; overlapping requests coalesce. Mutations invalidate older results and
-pause new checks until they finish. Application shutdown rejects late results
-without holding the GUI open. The [Settings view](../crates/lg-buddy-gui/src/settings.rs)
-renders the resulting backend status alongside observations from the flow.
+The existing screen/session process owns a [published assessment worker](../crates/lg-buddy/src/setup/published.rs).
+It hosts `GetSetupAssessment` and `RequestSetupAssessment` on its existing
+`io.github.Staphylococcus.LGBuddy.Session1` endpoint, including passive recovery
+after configuration failure. There is no new daemon or timer. Each snapshot
+contains the daemon instance, revision, configuration, status and unmet
+requirements. Probes run outside the snapshot lock. Requests coalesce and a
+superseded worker result cannot replace the published snapshot.
+
+The [application coordinator](../crates/lg-buddy/src/application.rs) withholds
+normal operations until admission. Settled GUI setup/configuration mutations
+request verification; CLI setup/settings changes notify the same daemon on a
+best-effort basis without introducing a blanket CLI gate. An instance/revision
+barrier prevents an older Complete snapshot from unlocking a finished repair.
+Daemon restart results are evaluated as a new startup assessment. Late frontend
+workers cannot overwrite a newer operation or reopen a closed application.
+The planned notification workflow (#267) consumes this same published state and simply activates the
+ordinary GUI; it does not own completion or pass a special setup flag.
 
 Read-only systemctl queries have a two-second limit, KWin inspection has a
 five-second limit, and D-Bus property calls have two-second timeouts. A native
@@ -211,6 +267,7 @@ run as the desktop user.
 | --- | --- |
 | GNOME | Missing required common services makes setup incomplete. Satisfying those requirements restores completeness; absent KWin integration adds no requirement. |
 | Plasma Wayland | Missing required common services or applicable KWin integration makes setup incomplete, including an incompatible or unloaded bridge. Repair must verify current readiness. |
+| NixOS | Loaded service state and configuration bindings verify declarative services without requiring the imperative installer's unit files. Already-ready services and compatible live KWin bridges are complete; missing requirements remain blocked from imperative repair. The package supplies the setup helper alongside its executable. |
 | Headless setup followed by graphical login, or a desktop change | Requirements are recomputed in the current session. An earlier result does not permanently suppress a newly applicable integration. Login itself does not provision it or request authorization. |
 
 ## Installation and terminal entry points
@@ -234,13 +291,17 @@ Terminal authorization uses sudo, and noninteractive runs require existing sudo
 permission. Exit codes distinguish completion (0), failed or blocked work (1),
 invalid arguments (2), missing input (3), and cancellation (130). The terminal
 adapter respects the same cancellation gates as the GUI.
+Interactive setup asks once to approve required work, rather than once per
+service or integration step. Build-dependency consent remains a separate prompt.
 
 ## Boundaries and verification
 
 Setup respects ownership of installed files and services. Automatic service
 setup is blocked on declaratively managed or immutable systems such as NixOS
 and ostree installations; there is no separate external-rebuild onboarding
-workflow. Supported operations verify readiness in the running session rather
+workflow. Their existing blocked assessment also keeps the strict GUI gate
+closed; managed-install readiness needs explicit support, not a completeness
+exemption. Supported operations verify readiness in the running session rather
 than introducing an applied-but-awaiting-readiness completion state.
 
 The existing TV client, inhibition policy, KWin plugin ABI and

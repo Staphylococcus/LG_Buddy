@@ -96,7 +96,9 @@ def main():
                              "--tv-mac", "02:11:22:33:44:55", "--input", "HDMI_2")
                 assert paired.returncode == 1, paired.stdout + paired.stderr
                 assert "Setup complete." not in paired.stdout
-                assert "does not support automatic service setup" in paired.stderr, paired.stdout + paired.stderr
+                for remedy in ("Unmet requirements:", "bind LG_Buddy_screen.service to this configuration",
+                               "Update the NixOS system and user service configuration, build it, and activate it"):
+                    assert remedy in paired.stderr, paired.stdout + paired.stderr
                 token = root / "tvs/primary/access-token.json"
                 assert token.exists(), paired.stdout + paired.stderr
                 saved, credential, modified = config.read_bytes(), token.read_bytes(), token.stat().st_mtime_ns
@@ -104,6 +106,7 @@ def main():
                 resumed = cli("--non-interactive", "--yes")
                 assert resumed.returncode == 1, resumed.stdout + resumed.stderr
                 assert "Pair a TV" not in resumed.stdout
+                assert "Unmet requirements:" in resumed.stderr, resumed.stdout + resumed.stderr
                 assert (config.read_bytes(), token.read_bytes(), token.stat().st_mtime_ns) == (saved, credential, modified)
                 deadline = time.monotonic() + 3
                 while json.loads((root / "control/state.json").read_text())["pairing_prompt_count"] != 1:

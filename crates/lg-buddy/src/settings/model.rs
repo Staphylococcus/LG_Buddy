@@ -627,6 +627,7 @@ pub enum SettingsError {
         message: String,
     },
     ActivationCancelled,
+    SetupInProgress,
     AuthorizationFailed {
         message: String,
     },
@@ -681,6 +682,7 @@ impl fmt::Display for SettingsError {
             Self::Apply { message } => write!(f, "{message}"),
             Self::Activation { message } => write!(f, "{message}"),
             Self::ActivationCancelled => write!(f, "authorization was cancelled"),
+            Self::SetupInProgress => write!(f, "A setup helper may still be running. Recheck setup before starting another repair; completed work is retained."),
             Self::AuthorizationFailed { message } => write!(f, "{message}"),
             Self::PlatformPreflight { key, message } => write!(
                 f,
@@ -728,6 +730,7 @@ impl std::error::Error for SettingsError {
             | Self::Apply { .. }
             | Self::Activation { .. }
             | Self::ActivationCancelled
+            | Self::SetupInProgress
             | Self::AuthorizationFailed { .. }
             | Self::PlatformPreflight { .. }
             | Self::ApplyAfterPersist { .. }

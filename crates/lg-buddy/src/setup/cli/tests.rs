@@ -94,6 +94,11 @@ impl SetupSteps for Steps {
                     "Try again.",
                 ),
                 diagnostic: "fixture failure".into(),
+                recovery: crate::setup::recovery::SetupRecovery::new(
+                    crate::setup::recovery::RecoveryCause::TemporaryFailure,
+                    crate::setup::recovery::RepairBoundary::LocalSetup,
+                    crate::setup::recovery::RecoveryAction::Retry,
+                ),
                 retryable: true,
             });
         }
@@ -164,11 +169,91 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn output_failure_finishes_the_current_mutation_but_stops_further_repairs() {
+    struct NoncancelableSteps(Steps);
+    impl SetupSteps for NoncancelableSteps {
+        fn inspect(&self, step: SetupStep) -> StepResponse {
+            self.0.inspect(step)
+        }
+        fn execute(
+            &self,
+            step: SetupStep,
+            answer: StepAnswer,
+            cancellation: &StepCancellation,
+            lease: &FlowLock,
+            progress: &mut dyn FnMut(StepResponse),
+        ) -> StepResponse {
+            assert!(cancellation.begin());
+            let response = self.0.execute(step, answer, cancellation, lease, progress);
+            assert!(!cancellation.is_cancelled());
+            cancellation.finish();
+            response
+        }
+    }
+    struct BrokenOutput(bool);
+    impl Write for BrokenOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 |= bytes.starts_with(b"Applying setup");
+            if self.0 {
+                Err(io::ErrorKind::BrokenPipe.into())
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for paired in [false, true] {
+        let fixture = Fixture::new(State {
+            paired,
+            ..State::default()
+        });
+        let mut flow = OnboardingFlow::with_backend(
+            Box::new(NoncancelableSteps(Steps(fixture.state.clone()))),
+            &fixture.root.join("lock"),
+        )
+        .unwrap();
+        let result = render(
+            &mut flow,
+            &SetupOptions {
+                yes: true,
+                address: Some("192.0.2.1".into()),
+                mac: Some("02:11:22:33:44:55".into()),
+                ..SetupOptions::default()
+            },
+            false,
+            &mut io::empty(),
+            &mut BrokenOutput(false),
+        );
+        assert!(
+            matches!(result, Err(SetupError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe)
+        );
+        let state = fixture.state.lock().unwrap();
+        let completed = if paired {
+            SetupStep::Services
+        } else {
+            SetupStep::Pairing
+        };
+        assert_eq!(state.calls, [completed]);
+        assert!(state.paired);
+        assert_eq!(state.services, paired);
+        assert!(!state.plasma);
+        assert_eq!(
+            flow.snapshot().steps[completed as usize].1,
+            StepResponse::Complete
+        );
+    }
+}
+
+#[test]
 fn terminal_fresh_setup_and_repeat_use_the_same_flow() {
     let f = Fixture::new(State::default());
-    let (result, output) = f.run(&[], Some("192.0.2.1\n02:11:22:33:44:55\nHDMI_2\ny\ny\ny\n"));
+    let (result, output) = f.run(&[], Some("192.0.2.1\n02:11:22:33:44:55\nHDMI_2\ny\n"));
     result.unwrap();
     assert!(output.contains("Setup complete."));
+    assert_eq!(output.matches("Complete required setup?").count(), 1);
+    assert!(!output.contains("Continue?"));
     assert_eq!(f.state.lock().unwrap().calls, SetupStep::ORDER);
     f.state.lock().unwrap().calls.clear();
     let (result, output) = f.run(&[], None);
@@ -178,7 +263,10 @@ fn terminal_fresh_setup_and_repeat_use_the_same_flow() {
 }
 #[test]
 fn missing_input_cancellation_failure_and_partial_resume_remain_distinct() {
-    let f = Fixture::new(State::default());
+    let f = Fixture::new(State {
+        needs_dependencies: true,
+        ..State::default()
+    });
     let (result, _) = f.run(&["--non-interactive", "--yes"], None);
     assert_eq!(result.unwrap_err().exit_code(), 3);
     assert!(f.state.lock().unwrap().calls.is_empty());
@@ -187,11 +275,11 @@ fn missing_input_cancellation_failure_and_partial_resume_remain_distinct() {
     let (result, output) = f.run(&[], Some("192.0.2.1\n02:11:22:33:44:55\n\ny\nn\n"));
     assert_eq!(result.unwrap_err().exit_code(), 130);
     assert!(!output.contains("Setup complete."));
-    assert_eq!(f.state.lock().unwrap().calls, [SetupStep::Pairing]);
+    assert_eq!(f.state.lock().unwrap().calls, SetupStep::ORDER);
     f.state.lock().unwrap().fail = true;
     assert_eq!(f.run(&["--yes"], None).0.unwrap_err().exit_code(), 1);
     f.state.lock().unwrap().fail = false;
-    let (result, output) = f.run(&["--yes"], None);
+    let (result, output) = f.run(&["--yes", "--allow-build-dependencies"], None);
     result.unwrap();
     assert!(!output.contains("Pair a TV"));
 }
@@ -212,6 +300,24 @@ fn yes_never_approves_build_dependencies_implicitly() {
     let (result, _) = f.run(&["--yes", "--allow-build-dependencies"], None);
     result.unwrap();
     assert!(f.state.lock().unwrap().plasma);
+}
+
+#[test]
+fn routine_repair_requires_one_approval_before_any_mutation() {
+    let f = Fixture::new(State {
+        paired: true,
+        ..State::default()
+    });
+    assert_eq!(f.run(&[], None).0.unwrap_err().exit_code(), 3);
+    assert_eq!(f.run(&[], Some("n\n")).0.unwrap_err().exit_code(), 130);
+    assert!(f.state.lock().unwrap().calls.is_empty());
+    let (result, output) = f.run(&[], Some("y\n"));
+    result.unwrap();
+    assert_eq!(output.matches("Complete required setup?").count(), 1);
+    assert_eq!(
+        f.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Plasma]
+    );
 }
 #[test]
 fn noninteractive_explicit_tv_inputs_complete_without_reading_stdin() {

@@ -35,7 +35,7 @@ trap cleanup EXIT
 command -v gapplication >/dev/null || fail "gapplication is required for the GUI launch smoke test."
 command -v xdotool >/dev/null || fail "xdotool is required for the GUI launch smoke test."
 
-ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+GTK_A11Y=none ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$LAUNCH_BINARY" &
 GUI_PID=$!
 
@@ -56,7 +56,7 @@ done
 
 [ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "GUI did not present Overview."
 
-ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+GTK_A11Y=none ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$LAUNCH_BINARY" brightness
 kill -0 "$GUI_PID" 2>/dev/null || fail "Reactivation replaced the running GUI process."
 mapfile -t WINDOW_IDS < <(
@@ -64,7 +64,7 @@ mapfile -t WINDOW_IDS < <(
 )
 [ "${#WINDOW_IDS[@]}" -eq 1 ] || fail "Reactivation did not preserve one Overview window."
 
-ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
+GTK_A11Y=none ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 GDK_DEBUG=no-portals NO_AT_BRIDGE=1 \
     "$GUI_BINARY" --gapplication-replace &
 REPLACEMENT_PID=$!
 

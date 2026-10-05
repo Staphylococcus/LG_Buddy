@@ -11,6 +11,65 @@ use std::{
 
 mod helper_process;
 
+struct AuthorizedSteps {
+    steps: FakeSteps,
+    session: Arc<crate::setup::authorization::AuthorizationSession>,
+}
+
+impl SetupSteps for AuthorizedSteps {
+    fn authorization_session(
+        &self,
+    ) -> Option<Arc<crate::setup::authorization::AuthorizationSession>> {
+        Some(self.session.clone())
+    }
+
+    fn inspect(&self, step: SetupStep) -> StepResponse {
+        self.steps.inspect(step)
+    }
+
+    fn execute(
+        &self,
+        step: SetupStep,
+        answer: StepAnswer,
+        cancellation: &StepCancellation,
+        lease: &FlowLock,
+        progress: &mut dyn FnMut(StepResponse),
+    ) -> StepResponse {
+        self.steps
+            .execute(step, answer, cancellation, lease, progress)
+    }
+}
+
+#[test]
+fn completion_cancellation_and_drop_close_the_shared_authorization_session() {
+    for outcome in ["complete", "cancel", "drop"] {
+        let fixture = Fixture::new([
+            StepResponse::Complete,
+            action(),
+            StepResponse::NotApplicable,
+        ]);
+        let session = Arc::new(crate::setup::authorization::AuthorizationSession::default());
+        let mut flow = OnboardingFlow::with_backend(
+            Box::new(AuthorizedSteps {
+                steps: FakeSteps(fixture.state.clone()),
+                session: session.clone(),
+            }),
+            &fixture.lock(),
+        )
+        .unwrap();
+        let cancellation = flow.cancellation();
+        match outcome {
+            "complete" => assert_eq!(advance(&mut flow).outcome, FlowOutcome::Complete),
+            "cancel" => assert!(cancellation.cancel()),
+            _ => drop(flow),
+        }
+        assert!(!cancellation.can_cancel());
+        let error = session.services(Path::new("unused"), None).unwrap_err();
+        assert_eq!(error.to_string(), "setup authorization session is closed");
+        assert!(fixture.open().is_ok());
+    }
+}
+
 fn action() -> StepResponse {
     StepResponse::ActionRequired {
         explanation: "Set up this component.",
@@ -21,11 +80,41 @@ fn failure(retryable: bool) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Incomplete", "Try again."),
         diagnostic: "fixture error".into(),
+        recovery: crate::setup::recovery::SetupRecovery::new(
+            crate::setup::recovery::RecoveryCause::TemporaryFailure,
+            crate::setup::recovery::RepairBoundary::LocalSetup,
+            crate::setup::recovery::RecoveryAction::Retry,
+        ),
         retryable,
     }
 }
 fn index(step: SetupStep) -> usize {
     SetupStep::ORDER.iter().position(|id| *id == step).unwrap()
+}
+
+#[test]
+fn externally_changed_preference_pauses_before_any_repair() {
+    let fixture = Fixture::new([
+        StepResponse::Complete,
+        StepResponse::InputRequired(StepInput::UpdatePreference { revision: [0; 32] }),
+        StepResponse::NotApplicable,
+    ]);
+    let mut flow = fixture.open().unwrap();
+    let before = flow.snapshot();
+    fixture.state.lock().unwrap().observed[1] = action();
+    let after = flow.advance_until_pause(
+        before.token,
+        StepAnswer::CorrectUpdatePreference {
+            enabled: false,
+            revision: [0; 32],
+        },
+        &mut |_| {},
+    );
+    assert!(matches!(
+        after.current(),
+        Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+    ));
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
 }
 
 struct State {
@@ -122,6 +211,416 @@ impl Drop for Fixture {
 }
 fn advance(flow: &mut OnboardingFlow) -> FlowSnapshot {
     flow.advance(flow.snapshot().token, StepAnswer::Continue, &mut |_| {})
+}
+
+struct StalledSteps {
+    steps: FakeSteps,
+    helper_lease: Arc<Mutex<Option<Arc<std::fs::File>>>>,
+}
+impl SetupSteps for StalledSteps {
+    fn inspect(&self, step: SetupStep) -> StepResponse {
+        self.steps.inspect(step)
+    }
+    fn execute(
+        &self,
+        step: SetupStep,
+        answer: StepAnswer,
+        cancellation: &StepCancellation,
+        lease: &FlowLock,
+        progress: &mut dyn FnMut(StepResponse),
+    ) -> StepResponse {
+        if self.steps.0.lock().unwrap().calls.is_empty() {
+            assert!(cancellation.protect());
+            self.steps.0.lock().unwrap().calls.push(step);
+            *self.helper_lease.lock().unwrap() = Some(lease.file());
+            cancellation.finish();
+            let mut error = failure(true);
+            error.recovery = crate::setup::recovery::SetupRecovery::new(
+                crate::setup::recovery::RecoveryCause::Busy,
+                crate::setup::recovery::RepairBoundary::LocalSetup,
+                crate::setup::recovery::RecoveryAction::Recheck,
+            );
+            StepResponse::Blocked(error)
+        } else {
+            assert!(self.helper_lease.lock().unwrap().is_none());
+            self.steps
+                .execute(step, answer, cancellation, lease, progress)
+        }
+    }
+}
+
+#[test]
+fn stalled_execution_requires_a_fresh_lease_even_in_the_same_flow() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    let helper_lease = Arc::new(Mutex::new(None));
+    let mut flow = OnboardingFlow::with_backend(
+        Box::new(StalledSteps {
+            steps: FakeSteps(fixture.state.clone()),
+            helper_lease: helper_lease.clone(),
+        }),
+        &fixture.lock(),
+    )
+    .unwrap();
+    let stalled = flow.run(flow.snapshot().token, &mut |_| {});
+    assert!(matches!(
+        stalled.current(),
+        Some((SetupStep::Services, StepResponse::Blocked(_)))
+    ));
+    for _ in 0..3 {
+        let checked = flow.refresh();
+        assert!(matches!(
+            checked.current(),
+            Some((SetupStep::Services, StepResponse::Blocked(_)))
+        ));
+        flow.run(checked.token, &mut |_| {
+            panic!("no repair while helper is active")
+        });
+        flow.advance(checked.token, StepAnswer::Continue, &mut |_| {
+            panic!("no repair while helper is active")
+        });
+        assert!(fixture.open().is_err());
+    }
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    helper_lease.lock().unwrap().take();
+    let checked = flow.refresh();
+    assert!(matches!(
+        checked.current(),
+        Some((SetupStep::Services, StepResponse::ActionRequired { .. }))
+    ));
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    let done = flow.advance_until_pause(checked.token, StepAnswer::Continue, &mut |_| {});
+    assert_eq!(done.outcome, FlowOutcome::Complete);
+    assert_eq!(
+        fixture.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Services, SetupStep::Plasma]
+    );
+    assert!(fixture.open().is_ok());
+}
+
+#[test]
+fn modal_recheck_cannot_retry_a_still_active_helper() {
+    use crate::setup::{
+        gui::{OnboardingApplication, OnboardingBackend, OnboardingIntent},
+        published::{SetupSnapshot, SnapshotBackend},
+    };
+    struct Backend {
+        state: Arc<Mutex<State>>,
+        path: PathBuf,
+        helper_lease: Arc<Mutex<Option<Arc<std::fs::File>>>>,
+    }
+    impl SnapshotBackend for Backend {
+        fn snapshot(&self) -> Result<SetupSnapshot, StepFailure> {
+            unreachable!("modal does not read daemon publication")
+        }
+        fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+            unreachable!("modal does not publish assessment")
+        }
+    }
+    impl OnboardingBackend for Backend {
+        fn open(&self) -> Result<OnboardingFlow, StepFailure> {
+            OnboardingFlow::with_backend(
+                Box::new(StalledSteps {
+                    steps: FakeSteps(self.state.clone()),
+                    helper_lease: self.helper_lease.clone(),
+                }),
+                &self.path,
+            )
+        }
+    }
+    let fixture = Fixture::new([
+        StepResponse::Complete,
+        action(),
+        StepResponse::NotApplicable,
+    ]);
+    let backend = Backend {
+        state: fixture.state.clone(),
+        path: fixture.lock(),
+        helper_lease: Arc::new(Mutex::new(None)),
+    };
+    let mut app = OnboardingApplication::default();
+    let mut update = app.handle(OnboardingIntent::Open).unwrap();
+    while let Some(operation) = update.operation {
+        let result = operation.execute_with(&backend, &mut |_| {});
+        update = app.complete(&operation, result).unwrap();
+    }
+    for _ in 0..3 {
+        assert_eq!(
+            update.presentation.as_ref().unwrap().action,
+            Some("Recheck")
+        );
+        let operation = app
+            .handle(OnboardingIntent::Submit)
+            .unwrap()
+            .operation
+            .unwrap();
+        assert!(!operation.changes_setup());
+        let result = operation.execute_with(&backend, &mut |_| panic!("no mutation"));
+        update = app.complete(&operation, result).unwrap();
+        assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    }
+    backend.helper_lease.lock().unwrap().take();
+    let operation = app
+        .handle(OnboardingIntent::Submit)
+        .unwrap()
+        .operation
+        .unwrap();
+    let result = operation.execute_with(&backend, &mut |_| panic!("recheck is read-only"));
+    update = app.complete(&operation, result).unwrap();
+    assert_eq!(update.presentation.unwrap().action, Some("Continue"));
+    let operation = app
+        .handle(OnboardingIntent::Submit)
+        .unwrap()
+        .operation
+        .unwrap();
+    let result = operation.execute_with(&backend, &mut |_| {});
+    app.complete(&operation, result).unwrap();
+    assert_eq!(
+        app.status(),
+        crate::setup::assessment::SetupStatus::Complete
+    );
+    assert_eq!(
+        fixture.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Services]
+    );
+}
+
+#[test]
+fn failed_or_blocked_verification_pauses_without_an_automatic_reprobe() {
+    use std::sync::atomic::AtomicUsize;
+    struct TransientObservation {
+        steps: FakeSteps,
+        plasma_reads: Arc<AtomicUsize>,
+        response: StepResponse,
+    }
+    impl SetupSteps for TransientObservation {
+        fn inspect(&self, step: SetupStep) -> StepResponse {
+            // The third aggregate inspection verifies service repair. Only an
+            // explicit refresh should discover that the next probe recovers.
+            if step == SetupStep::Plasma && self.plasma_reads.fetch_add(1, Ordering::Relaxed) == 2 {
+                self.response.clone()
+            } else {
+                self.steps.inspect(step)
+            }
+        }
+        fn execute(
+            &self,
+            step: SetupStep,
+            answer: StepAnswer,
+            cancellation: &StepCancellation,
+            lease: &FlowLock,
+            progress: &mut dyn FnMut(StepResponse),
+        ) -> StepResponse {
+            self.steps
+                .execute(step, answer, cancellation, lease, progress)
+        }
+    }
+    for response in [
+        StepResponse::Failed(failure(true)),
+        StepResponse::Blocked(failure(false)),
+    ] {
+        let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut flow = OnboardingFlow::with_backend(
+            Box::new(TransientObservation {
+                steps: FakeSteps(fixture.state.clone()),
+                plasma_reads: reads.clone(),
+                response: response.clone(),
+            }),
+            &fixture.lock(),
+        )
+        .unwrap();
+        let snapshot = flow.run(flow.snapshot().token, &mut |_| {});
+        assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+        assert_eq!(snapshot.current(), Some(&(SetupStep::Plasma, response)));
+        assert_eq!(reads.load(Ordering::Relaxed), 3);
+        assert_eq!(flow.run(snapshot.token, &mut |_| {}), snapshot);
+        assert_eq!(reads.load(Ordering::Relaxed), 3);
+        let retry = flow.refresh();
+        assert_eq!(
+            flow.run(retry.token, &mut |_| {}).outcome,
+            FlowOutcome::Complete
+        );
+        assert_eq!(
+            fixture.state.lock().unwrap().calls,
+            [SetupStep::Services, SetupStep::Plasma]
+        );
+    }
+}
+
+#[test]
+fn progress_failure_respects_the_live_gate_and_stops_before_the_next_step() {
+    for cancelable in [true, false] {
+        let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.cancelable = cancelable;
+            state.commit_after_progress = cancelable;
+        }
+        let mut flow = fixture.open().unwrap();
+        let mut reports = 0;
+        let result = flow.try_run(flow.snapshot().token, &mut |_| {
+            assert!(fixture.open().is_err());
+            reports += 1;
+            Err("progress failed")
+        });
+        assert_eq!(result, Err("progress failed"));
+        assert_eq!(reports, 1);
+        assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+        if cancelable {
+            assert_eq!(flow.snapshot().outcome, FlowOutcome::Cancelled);
+            assert!(fixture.open().is_ok());
+        } else {
+            assert_eq!(flow.snapshot().steps[1].1, StepResponse::Complete);
+            assert_eq!(flow.snapshot().outcome, FlowOutcome::Incomplete);
+            assert!(fixture.open().is_err());
+        }
+        drop(flow);
+        assert!(fixture.open().is_ok());
+    }
+}
+
+#[test]
+fn routine_work_runs_in_order_without_frontend_step_selection() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    let mut flow = fixture.open().unwrap();
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
+    flow.refresh();
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
+    let mut progress = Vec::new();
+    let snapshot = flow.run(flow.snapshot().token, &mut |event| {
+        progress.push(event.step)
+    });
+    assert_eq!(snapshot.outcome, FlowOutcome::Complete);
+    assert_eq!(progress, [SetupStep::Services, SetupStep::Plasma]);
+    assert_eq!(fixture.state.lock().unwrap().calls, progress);
+    assert!(fixture.open().is_ok());
+}
+
+#[test]
+fn explicit_input_resumes_routine_work_but_dependencies_require_their_own_answer() {
+    let fixture = Fixture::new([
+        StepResponse::InputRequired(StepInput::Pairing { saved: None }),
+        action(),
+        action(),
+    ]);
+    let mut flow = fixture.open().unwrap();
+    flow.run(flow.snapshot().token, &mut |_| {});
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
+    fixture.state.lock().unwrap().results.extend([
+        StepResponse::Complete,
+        StepResponse::Complete,
+        StepResponse::InputRequired(StepInput::BuildDependencies {
+            explanation: "Install tools?",
+        }),
+    ]);
+    let snapshot = flow.advance_until_pause(
+        flow.snapshot().token,
+        StepAnswer::Pairing(
+            PairingRequest::parse(
+                "192.0.2.1",
+                "02:11:22:33:44:55",
+                crate::config::HdmiInput::Hdmi1,
+            )
+            .unwrap(),
+        ),
+        &mut |_| {},
+    );
+    assert!(matches!(
+        snapshot.current(),
+        Some((SetupStep::Plasma, StepResponse::InputRequired(_)))
+    ));
+    assert_eq!(fixture.state.lock().unwrap().calls, SetupStep::ORDER);
+    flow.run(snapshot.token, &mut |_| {});
+    assert_eq!(fixture.state.lock().unwrap().calls, SetupStep::ORDER);
+    let snapshot = flow.advance_until_pause(
+        flow.snapshot().token,
+        StepAnswer::InstallBuildDependencies,
+        &mut |_| {},
+    );
+    assert_eq!(snapshot.outcome, FlowOutcome::Complete);
+}
+
+#[test]
+fn automatic_work_stops_on_failure_or_blockage_and_retry_is_explicit() {
+    for response in [
+        StepResponse::Failed(failure(true)),
+        StepResponse::Blocked(failure(false)),
+    ] {
+        let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+        fixture
+            .state
+            .lock()
+            .unwrap()
+            .results
+            .push_back(response.clone());
+        let mut flow = fixture.open().unwrap();
+        let snapshot = flow.run(flow.snapshot().token, &mut |_| {});
+        assert_eq!(snapshot.current().unwrap().1, response);
+        flow.run(snapshot.token, &mut |_| {});
+        assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+        if matches!(response, StepResponse::Failed(_)) {
+            let snapshot = flow.refresh();
+            assert_eq!(
+                flow.run(snapshot.token, &mut |_| {}).outcome,
+                FlowOutcome::Complete
+            );
+        }
+    }
+}
+
+#[test]
+fn automatic_work_does_not_loop_when_readiness_is_not_verified() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    fixture.state.lock().unwrap().results.push_back(action());
+    let mut flow = fixture.open().unwrap();
+    let snapshot = flow.run(flow.snapshot().token, &mut |_| {});
+    assert!(matches!(
+        snapshot.current(),
+        Some((SetupStep::Services, StepResponse::Failed(_)))
+    ));
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+}
+
+#[test]
+fn automatic_work_stops_if_an_already_repaired_requirement_regresses() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    let mut flow = fixture.open().unwrap();
+    let snapshot = flow.run(flow.snapshot().token, &mut |event| {
+        if event.step == SetupStep::Plasma {
+            fixture.state.lock().unwrap().observed[index(SetupStep::Services)] = action();
+        }
+    });
+    assert!(matches!(
+        snapshot.current(),
+        Some((SetupStep::Services, StepResponse::Failed(_)))
+    ));
+    assert_eq!(
+        fixture.state.lock().unwrap().calls,
+        [SetupStep::Services, SetupStep::Plasma]
+    );
+}
+
+#[test]
+fn automatic_work_respects_cancellation_and_stale_actions() {
+    let fixture = Fixture::new([StepResponse::Complete, action(), action()]);
+    fixture.state.lock().unwrap().cancelable = true;
+    let mut flow = fixture.open().unwrap();
+    let stale = flow.snapshot().token;
+    flow.refresh();
+    flow.run(stale, &mut |_| panic!("stale work executed"));
+    flow.advance_until_pause(stale, StepAnswer::Continue, &mut |_| {
+        panic!("stale answer executed")
+    });
+    assert!(fixture.state.lock().unwrap().calls.is_empty());
+    let cancellation = flow.cancellation();
+    let snapshot = flow.run(flow.snapshot().token, &mut |_| {
+        assert!(fixture.open().is_err());
+        assert!(cancellation.cancel());
+        assert!(fixture.open().is_err());
+    });
+    assert_eq!(snapshot.outcome, FlowOutcome::Cancelled);
+    assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
+    assert!(fixture.open().is_ok());
 }
 
 #[test]
@@ -412,7 +911,8 @@ fn lock_probe_child() {
     }
     let _lock = result.unwrap();
     if mode == "hold" {
-        println!("LOCK_READY");
+        // Separate readiness from libtest's inline serial progress output.
+        println!("\nLOCK_READY");
         std::io::stdout().flush().unwrap();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).unwrap();

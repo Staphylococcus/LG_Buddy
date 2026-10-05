@@ -12,6 +12,7 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub(super) struct SetupContext {
@@ -21,6 +22,7 @@ pub(super) struct SetupContext {
     pub kwin_helper: PathBuf,
     pub lock_path: PathBuf,
     pub authorization: AuthorizationMode,
+    pub authorization_session: Arc<super::authorization::AuthorizationSession>,
 }
 
 impl SetupContext {
@@ -39,13 +41,26 @@ impl SetupContext {
             config,
             user_units: user_units_directory(&home, env::var_os("XDG_CONFIG_HOME")),
             system_root: PathBuf::from("/"),
-            kwin_helper: PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh"),
+            kwin_helper: installed_kwin_helper(&env::current_exe().map_err(context_failure)?),
             // A different config or caller-provided runtime override cannot
             // bypass another GUI/CLI flow for this user.
             lock_path: PathBuf::from(format!("/run/user/{uid}/lg-buddy-onboarding.lock")),
             authorization,
+            authorization_session: Arc::new(super::authorization::AuthorizationSession::new(
+                authorization,
+            )),
         })
     }
+}
+
+fn installed_kwin_helper(executable: &Path) -> PathBuf {
+    if let Some(prefix) = executable.parent().and_then(Path::parent) {
+        let helper = prefix.join("lib/lg-buddy/kwin/setup.sh");
+        if helper.is_file() {
+            return helper;
+        }
+    }
+    PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh")
 }
 
 fn user_units_directory(home: &Path, xdg_config_home: Option<OsString>) -> PathBuf {
@@ -59,6 +74,50 @@ fn user_units_directory(home: &Path, xdg_config_home: Option<OsString>) -> PathB
 pub(super) struct NativeSteps<C = SystemdUserServiceController> {
     pub context: SetupContext,
     pub controller: C,
+}
+
+pub(super) fn restart_verifier() -> Result<(), StepFailure> {
+    let context = SetupContext::from_env(AuthorizationMode::Noninteractive)?;
+    restart_verifier_with(&context, &SystemdUserServiceController::from_env())
+}
+
+pub(super) fn restart_verifier_with(
+    context: &SetupContext,
+    controller: &impl ServiceController,
+) -> Result<(), StepFailure> {
+    use super::recovery::{
+        RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+    };
+    let failure = |cause, boundary, action, detail: &str, diagnostic: String| StepFailure {
+        presentation: UserFacingError::new("Session service needs recovery", detail),
+        recovery: SetupRecovery::new(cause, boundary, action),
+        diagnostic,
+        retryable: true,
+    };
+    if context.system_root.join("etc/NIXOS").exists()
+        || context.system_root.join("run/ostree-booted").exists()
+        || controller.systemd_actions_disabled()
+    {
+        return Err(failure(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally, "Restart LG Buddy's session service through your system configuration or image, then recheck setup.", "session service is externally managed".into()));
+    }
+    let binding = controller
+        .user_service_config_path("LG_Buddy_screen.service")
+        .map_err(|error| {
+            failure(
+                Cause::MissingIntegration,
+                Boundary::LocalSetup,
+                Action::Repair,
+                "Repair LG Buddy's background services, then verify setup again.",
+                error.to_string(),
+            )
+        })?;
+    let normalized = |path: &Path| path.canonicalize().or_else(|_| std::path::absolute(path));
+    if !matches!((normalized(&binding), normalized(&context.config)), (Ok(binding), Ok(config)) if binding == config)
+    {
+        return Err(failure(Cause::InvalidConfiguration, Boundary::SystemConfiguration, Action::RepairExternally, "The session service is bound to another configuration. Correct its binding externally, then recheck setup.", "refusing to restart a differently bound session service".into()));
+    }
+    let lease = super::lock::FlowLock::acquire(&context.lock_path)?;
+    controller.with_command_lock(lease.file(), |controller| controller.restart_user_service("LG_Buddy_screen.service")).map_err(|error| failure(Cause::TemporaryFailure, Boundary::SessionService, Action::Retry, "The session service could not be restarted. Check Diagnostics, then retry verification.", error.to_string()))
 }
 
 impl NativeSteps {
@@ -85,11 +144,16 @@ impl<C: ServiceController> NativeSteps<C> {
             helper: &self.context.kwin_helper,
             authorization: self.context.authorization,
             command_lock: None,
+            authorization_session: Some(&self.context.authorization_session),
         }
     }
 }
 
 impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
+    fn authorization_session(&self) -> Option<Arc<super::authorization::AuthorizationSession>> {
+        Some(self.context.authorization_session.clone())
+    }
+
     fn inspect(&self, step: SetupStep) -> StepResponse {
         match step {
             SetupStep::Pairing => super::pairing::inspect(&self.context.config),
@@ -106,12 +170,30 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
         match (step, answer) {
+            (SetupStep::Pairing, StepAnswer::CorrectTv { request, revision }) => {
+                super::configuration::correct_tv(
+                    &self.context.config,
+                    request,
+                    revision,
+                    cancellation,
+                )
+            }
+            (SetupStep::Services, StepAnswer::CorrectUpdatePreference { enabled, revision }) => {
+                super::configuration::correct_updates(
+                    &self.context.config,
+                    enabled,
+                    revision,
+                    cancellation,
+                )
+            }
             (SetupStep::Pairing, StepAnswer::Pairing(request)) => {
                 super::pairing::execute(&self.context.config, Some(request), cancellation, progress)
             }
             (SetupStep::Services, StepAnswer::Continue) => {
-                self.controller
-                    .with_command_lock(lease.file(), |controller| {
+                self.controller.with_setup_authorization(
+                    lease.file(),
+                    self.context.authorization_session.clone(),
+                    |controller| {
                         super::provision::ServiceInstallation {
                             config: &self.context.config,
                             user_units: &self.context.user_units,
@@ -120,7 +202,8 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                             authorization: self.context.authorization,
                         }
                         .execute(cancellation, progress)
-                    })
+                    },
+                )
             }
             (SetupStep::Plasma, StepAnswer::Continue) => {
                 let mut step = self.plasma();
@@ -138,6 +221,11 @@ impl<C: ServiceController + Send> SetupSteps for NativeSteps<C> {
                     "Respond to the current setup request before continuing.",
                 ),
                 diagnostic: "answer does not match the setup step".into(),
+                recovery: super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::InputRequired,
+                    super::recovery::RepairBoundary::UserInput,
+                    super::recovery::RecoveryAction::ProvideInput,
+                ),
                 retryable: true,
             }),
         }
@@ -151,6 +239,11 @@ fn context_failure(error: impl ToString) -> StepFailure {
             "The user configuration and session could not be resolved.",
         ),
         diagnostic: error.to_string(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::InvalidEnvironment,
+            super::recovery::RepairBoundary::SystemConfiguration,
+            super::recovery::RecoveryAction::RepairExternally,
+        ),
         retryable: true,
     }
 }
@@ -158,6 +251,25 @@ fn context_failure(error: impl ToString) -> StepFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kwin_helper_follows_the_installed_executable_prefix() {
+        let prefix = env::temp_dir().join(format!("lg-buddy-kwin-prefix-{}", std::process::id()));
+        let helper = prefix.join("lib/lg-buddy/kwin/setup.sh");
+        assert_eq!(
+            installed_kwin_helper(&prefix.join("bin/lg-buddy")),
+            PathBuf::from("/usr/lib/lg-buddy/kwin/setup.sh")
+        );
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, "exit 2\n").unwrap();
+        for executable in ["lg-buddy", "lg-buddy-gui", ".lg-buddy-gui-wrapped"] {
+            assert_eq!(
+                installed_kwin_helper(&prefix.join("bin").join(executable)),
+                helper
+            );
+        }
+        std::fs::remove_dir_all(prefix).unwrap();
+    }
+
     #[test]
     fn user_units_follow_the_xdg_configuration_directory() {
         let home = Path::new("/home/user");

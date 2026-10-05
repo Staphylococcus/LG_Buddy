@@ -5,7 +5,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/lib/lg-buddy/kwin/setup.sh
+ExecStart=/usr/bin/lg-buddy kwin-setup
 TimeoutStartSec=180
 RemainAfterExit=yes
 

@@ -14,6 +14,8 @@ pub struct SetupOptions {
     pub address: Option<String>,
     pub mac: Option<String>,
     pub input: Option<HdmiInput>,
+    pub update_checks: Option<bool>,
+    pub restart_session_service: bool,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, ParseError> {
@@ -27,7 +29,8 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, 
             "--allow-build-dependencies" => {
                 options.allow_build_dependencies = true;
             }
-            "--tv-ip" | "--tv-mac" | "--input" => {
+            "--restart-session-service" => options.restart_session_service = true,
+            "--tv-ip" | "--tv-mac" | "--input" | "--update-checks" => {
                 let value = args
                     .next()
                     .filter(|value| !value.starts_with('-'))
@@ -41,6 +44,17 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParseOutcome, 
                                 "--input must be HDMI_1, HDMI_2, HDMI_3 or HDMI_4".into(),
                             )
                         })?)
+                    }
+                    "--update-checks" if options.update_checks.is_none() => {
+                        options.update_checks = Some(match value.as_str() {
+                            "enabled" => true,
+                            "disabled" => false,
+                            _ => {
+                                return Err(ParseError::Setup(
+                                    "--update-checks must be enabled or disabled".into(),
+                                ))
+                            }
+                        });
                     }
                     _ => return Err(ParseError::Setup(format!("duplicate option {arg}"))),
                 }
@@ -61,6 +75,8 @@ Usage: {program} setup [OPTIONS]
   --tv-ip ADDRESS              TV IPv4 address
   --tv-mac ADDRESS             TV network MAC address
   --input HDMI_1..HDMI_4        PC input (default: saved input or HDMI_1)
+  --update-checks VALUE        Correct an invalid preference: enabled or disabled
+  --restart-session-service    Restart the locally owned verifier before setup
   --yes, -y                    Approve pairing and required service/integration work
   --allow-build-dependencies   Also approve compiler/development package installation
   --non-interactive            Never read input or request a password
@@ -84,6 +100,12 @@ pub enum SetupError {
     Io(io::Error),
 }
 impl SetupError {
+    pub fn recovery(&self) -> Option<super::recovery::SetupRecovery> {
+        match self {
+            Self::Failed(error) => Some(error.recovery),
+            _ => None,
+        }
+    }
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Incomplete(_) => 3,
@@ -120,6 +142,17 @@ impl From<io::Error> for SetupError {
 
 pub(crate) fn run(options: SetupOptions, writer: &mut impl Write) -> Result<(), SetupError> {
     let interactive = !options.noninteractive && io::stdin().is_terminal();
+    if options.restart_session_service {
+        consent(
+            options.yes,
+            interactive,
+            &mut io::BufReader::new(io::stdin()),
+            writer,
+            "Restart LG Buddy's session service?",
+            "Use --yes to approve restarting the session service.",
+        )?;
+        super::environment::restart_verifier().map_err(SetupError::Failed)?;
+    }
     let mut flow = OnboardingFlow::open(if interactive {
         AuthorizationMode::Terminal
     } else {
@@ -135,6 +168,20 @@ pub(crate) fn run(options: SetupOptions, writer: &mut impl Write) -> Result<(), 
         writer,
     );
     drop(signals);
+    // CLI setup retains its own exit semantics; daemon verification is best effort.
+    if let Err(error) = crate::session_notifications::request_setup_assessment() {
+        if result.is_ok() {
+            writeln!(
+                writer,
+                "Session verification remains pending: {} {}",
+                error.presentation.summary(),
+                error.presentation.detail()
+            )?;
+            if error.recovery.cause == super::recovery::RecoveryCause::VerifierUnavailable {
+                writeln!(writer, "For a locally managed service, run `lg-buddy setup --yes --restart-session-service`; externally managed installations require recovery through their system configuration.")?;
+            }
+        }
+    }
     result
 }
 
@@ -146,6 +193,7 @@ pub(super) fn render(
     writer: &mut impl Write,
 ) -> Result<(), SetupError> {
     let cancellation = flow.cancellation();
+    let mut approved = options.yes;
     writeln!(writer, "LG Buddy setup")?;
     loop {
         let snapshot = flow.snapshot();
@@ -161,23 +209,41 @@ pub(super) fn render(
             .current()
             .expect("incomplete flow has remaining work");
         let answer = match response {
-            StepResponse::InputRequired(StepInput::Pairing { saved }) => {
+            StepResponse::InputRequired(
+                input @ (StepInput::Pairing { .. } | StepInput::CorrectTv { .. }),
+            ) => {
+                let (saved_address, saved_mac, saved_input, correction) = match input {
+                    StepInput::Pairing { saved } => (
+                        saved.map(|r| r.address().to_string()),
+                        saved.map(|r| r.mac().to_string()),
+                        saved.map(|r| r.input()),
+                        None,
+                    ),
+                    StepInput::CorrectTv {
+                        address,
+                        mac,
+                        input,
+                        revision,
+                    } => (
+                        Some(address.clone()),
+                        Some(mac.clone()),
+                        Some(*input),
+                        Some(*revision),
+                    ),
+                    _ => unreachable!(),
+                };
                 writeln!(
                     writer,
-                    "Pair a TV. Turn it on and approve the connection request on the TV."
+                    "{}",
+                    if correction.is_some() {
+                        "Correct the saved TV details. Credentials and unrelated settings will be retained."
+                    } else {
+                        "Pair a TV. Turn it on and approve the connection request on the TV."
+                    }
                 )?;
-                let address = options
-                    .address
-                    .clone()
-                    .or_else(|| saved.map(|s| s.address().to_string()));
-                let mac = options
-                    .mac
-                    .clone()
-                    .or_else(|| saved.map(|s| s.mac().to_string()));
-                let input = options
-                    .input
-                    .or_else(|| saved.map(|s| s.input()))
-                    .unwrap_or(HdmiInput::Hdmi1);
+                let address = options.address.clone().or(saved_address);
+                let mac = options.mac.clone().or(saved_mac);
+                let input = options.input.or(saved_input).unwrap_or(HdmiInput::Hdmi1);
                 let request = loop {
                     let (address, mac, input) = if interactive {
                         (
@@ -213,14 +279,53 @@ pub(super) fn render(
                     }
                 };
                 consent(
-                    options.yes,
+                    approved,
                     interactive,
                     reader,
                     writer,
-                    "Pair this TV?",
-                    "Use --yes to approve pairing.",
+                    "Complete required setup?",
+                    "Use --yes to approve pairing and the required setup work.",
                 )?;
-                StepAnswer::Pairing(request)
+                approved = true;
+                match correction {
+                    Some(revision) => StepAnswer::CorrectTv { request, revision },
+                    None => StepAnswer::Pairing(request),
+                }
+            }
+            StepResponse::InputRequired(StepInput::UpdatePreference { revision }) => {
+                let enabled = if let Some(enabled) = options.update_checks {
+                    enabled
+                } else if interactive {
+                    loop {
+                        match prompt(
+                            reader,
+                            writer,
+                            "Automatic update checks (enabled/disabled)",
+                            None,
+                        )?
+                        .as_str()
+                        {
+                            "enabled" => break true,
+                            "disabled" => break false,
+                            _ => writeln!(writer, "Choose enabled or disabled.")?,
+                        }
+                    }
+                } else {
+                    return Err(SetupError::Incomplete("Supply --update-checks enabled or disabled to correct the saved preference."));
+                };
+                consent(
+                    approved,
+                    interactive,
+                    reader,
+                    writer,
+                    "Save preference and complete required setup?",
+                    "Use --yes to approve the correction and required setup work.",
+                )?;
+                approved = true;
+                StepAnswer::CorrectUpdatePreference {
+                    enabled,
+                    revision: *revision,
+                }
             }
             StepResponse::ActionRequired {
                 explanation,
@@ -239,13 +344,14 @@ pub(super) fn render(
                     )?;
                 }
                 consent(
-                    options.yes,
+                    approved,
                     interactive,
                     reader,
                     writer,
-                    "Continue?",
+                    "Complete required setup?",
                     "Use --yes to approve the required setup work.",
                 )?;
+                approved = true;
                 StepAnswer::Continue
             }
             StepResponse::InputRequired(StepInput::BuildDependencies { explanation }) => {
@@ -265,7 +371,11 @@ pub(super) fn render(
                     return Err(SetupError::Failed(error.clone()));
                 }
                 writeln!(writer, "{}", SetupError::Failed(error.clone()))?;
-                consent(false, true, reader, writer, "Retry?", "")?;
+                let question = format!("{}?", error.recovery.check_label());
+                consent(false, true, reader, writer, &question, "")?;
+                if error.recovery.action != super::recovery::RecoveryAction::Retry {
+                    approved = false;
+                }
                 flow.refresh();
                 continue;
             }
@@ -275,17 +385,17 @@ pub(super) fn render(
         if cancellation.can_cancel() && super::terminal_signals::interrupted() {
             cancellation.cancel();
         }
-        let mut output_error = None;
-        flow.advance(snapshot.token, answer, &mut |event| {
+        let mut progress = |event: super::flow::FlowProgress| {
             if let StepResponse::Running { message, .. } = event.response {
-                if let Err(error) = writeln!(writer, "{message}").and_then(|()| writer.flush()) {
-                    output_error = Some(error);
-                    cancellation.cancel();
-                }
+                writeln!(writer, "{message}")?;
+                writer.flush()?;
             }
-        });
-        if let Some(error) = output_error {
-            return Err(error.into());
+            Ok::<_, io::Error>(())
+        };
+        if answer == StepAnswer::Continue {
+            flow.try_run(snapshot.token, &mut progress)?;
+        } else {
+            flow.try_advance_until_pause(snapshot.token, answer, &mut progress)?;
         }
     }
 }

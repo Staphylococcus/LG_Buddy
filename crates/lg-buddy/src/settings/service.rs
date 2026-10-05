@@ -60,6 +60,20 @@ pub enum UserUnitEnableOutcome {
 }
 
 pub trait ServiceController {
+    /// Inject a flow-owned permission session without changing controllers
+    /// that do not perform privileged subprocess work.
+    fn with_setup_authorization<T>(
+        &self,
+        lock: Arc<File>,
+        _session: Arc<crate::setup::authorization::AuthorizationSession>,
+        operation: impl FnOnce(&Self) -> T,
+    ) -> T
+    where
+        Self: Sized,
+    {
+        self.with_command_lock(lock, operation)
+    }
+
     /// Scope subprocess supervision to an onboarding operation. Controllers
     /// without subprocesses can use the default implementation.
     fn with_command_lock<T>(&self, _lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T
@@ -134,6 +148,20 @@ pub trait ServiceController {
         })
     }
 
+    fn repair_system_services_cancellable(
+        &self,
+        config: &Path,
+        authorization: crate::setup::flow::AuthorizationMode,
+        cancellation: &crate::setup::StepCancellation,
+        mutation: &mut dyn FnMut(),
+    ) -> Result<(), SettingsError> {
+        if !cancellation.protect() {
+            return Err(SettingsError::ActivationCancelled);
+        }
+        mutation();
+        self.repair_system_services(config, authorization)
+    }
+
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
         Ok(false)
     }
@@ -150,6 +178,7 @@ pub struct SystemdUserServiceController {
     command_path: PathBuf,
     skip_systemd_actions: bool,
     command_lock: Option<Arc<File>>,
+    authorization_session: Option<Arc<crate::setup::authorization::AuthorizationSession>>,
 }
 
 impl Default for SystemdUserServiceController {
@@ -166,6 +195,7 @@ impl SystemdUserServiceController {
                 .unwrap_or_else(|| PathBuf::from("systemctl")),
             skip_systemd_actions: env_truthy("LG_BUDDY_SKIP_SYSTEMD_ACTIONS"),
             command_lock: None,
+            authorization_session: None,
         }
     }
 
@@ -192,14 +222,10 @@ impl SystemdUserServiceController {
     }
 
     fn run_user_systemctl(&self, args: &[&str]) -> Result<(), SettingsError> {
-        let output =
-            crate::setup::lock::command_with_lock(&self.command_path, self.command_lock.as_ref())
-                .arg("--user")
-                .args(args)
-                .output()
-                .map_err(|err| SettingsError::Apply {
-                    message: format!("could not run systemctl: {err}"),
-                })?;
+        let mut command =
+            crate::setup::lock::command_with_lock(&self.command_path, self.command_lock.as_ref());
+        command.arg("--user").args(args);
+        let output = self.observe_mutation(command)?;
 
         if output.status.success() {
             Ok(())
@@ -214,9 +240,33 @@ impl SystemdUserServiceController {
             })
         }
     }
+
+    fn observe_mutation(
+        &self,
+        mut command: ProcessCommand,
+    ) -> Result<std::process::Output, SettingsError> {
+        if self.command_lock.is_none() {
+            return command.output().map_err(|error| SettingsError::Apply {
+                message: error.to_string(),
+            });
+        }
+        observe_setup_command(command, Duration::from_secs(90), self.command_lock.clone())
+    }
 }
 
 impl ServiceController for SystemdUserServiceController {
+    fn with_setup_authorization<T>(
+        &self,
+        lock: Arc<File>,
+        session: Arc<crate::setup::authorization::AuthorizationSession>,
+        operation: impl FnOnce(&Self) -> T,
+    ) -> T {
+        let mut controller = self.clone();
+        controller.command_lock = Some(lock);
+        controller.authorization_session = Some(session);
+        operation(&controller)
+    }
+
     fn with_command_lock<T>(&self, lock: Arc<File>, operation: impl FnOnce(&Self) -> T) -> T {
         let mut controller = self.clone();
         controller.command_lock = Some(lock);
@@ -292,34 +342,55 @@ impl ServiceController for SystemdUserServiceController {
         config: &Path,
         authorization: crate::setup::flow::AuthorizationMode,
     ) -> Result<(), SettingsError> {
-        let executable = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
-            "pkexec"
-        } else {
-            "sudo"
-        };
-        let mut command = if authorization == crate::setup::flow::AuthorizationMode::Interactive {
-            let mut command = crate::setup::lock::command_with_lock(
-                "/usr/bin/pkexec",
-                self.command_lock.as_ref(),
-            );
-            command.arg("--disable-internal-agent");
-            command
-        } else {
-            let mut command =
-                crate::setup::lock::command_with_lock("/usr/bin/sudo", self.command_lock.as_ref());
-            if authorization == crate::setup::flow::AuthorizationMode::Noninteractive {
-                command.arg("-n");
-            }
-            command
-        };
-        let output = command
-            .arg("/usr/lib/lg-buddy/setup-services")
-            .arg(config)
-            .output()
+        let local_session = crate::setup::authorization::AuthorizationSession::new(authorization);
+        let session = self
+            .authorization_session
+            .as_deref()
+            .unwrap_or(&local_session);
+        let output = session
+            .services(config, self.command_lock.as_ref())
             .map_err(|error| SettingsError::Activation {
                 message: error.to_string(),
             })?;
-        activation_result(executable, &output)
+        activation_result(
+            if authorization == crate::setup::flow::AuthorizationMode::Interactive {
+                "pkexec"
+            } else {
+                "sudo"
+            },
+            &output,
+        )
+    }
+
+    fn repair_system_services_cancellable(
+        &self,
+        config: &Path,
+        authorization: crate::setup::flow::AuthorizationMode,
+        cancellation: &crate::setup::StepCancellation,
+        mutation: &mut dyn FnMut(),
+    ) -> Result<(), SettingsError> {
+        let local_session = crate::setup::authorization::AuthorizationSession::new(authorization);
+        let session = self
+            .authorization_session
+            .as_deref()
+            .unwrap_or(&local_session);
+        let output = session
+            .services_cancellable(config, self.command_lock.as_ref(), cancellation, mutation)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::ConnectionAborted => SettingsError::ActivationCancelled,
+                io::ErrorKind::TimedOut => SettingsError::SetupInProgress,
+                _ => SettingsError::Activation {
+                    message: error.to_string(),
+                },
+            })?;
+        activation_result(
+            if authorization == crate::setup::flow::AuthorizationMode::Interactive {
+                "pkexec"
+            } else {
+                "sudo"
+            },
+            &output,
+        )
     }
 
     fn system_lifecycle_is_active(&self) -> Result<bool, SettingsError> {
@@ -336,17 +407,45 @@ impl ServiceController for SystemdUserServiceController {
             .ok_or_else(|| SettingsError::Activation {
                 message: "systemctl was not found in a trusted system location".to_string(),
             })?;
-        let output = crate::setup::lock::command_with_lock("pkexec", self.command_lock.as_ref())
+        let mut command =
+            crate::setup::lock::command_with_lock("pkexec", self.command_lock.as_ref());
+        command
             .arg("--disable-internal-agent")
             .arg(systemctl)
             .arg("start")
-            .arg("LG_Buddy_lifecycle.service")
-            .output()
-            .map_err(|error| SettingsError::Activation {
-                message: format!("could not request system lifecycle activation: {error}"),
-            })?;
+            .arg("LG_Buddy_lifecycle.service");
+        let output = self.observe_mutation(command)?;
 
         activation_result("pkexec", &output)
+    }
+}
+
+fn observe_setup_command(
+    mut command: ProcessCommand,
+    timeout: Duration,
+    lease: Option<Arc<File>>,
+) -> Result<std::process::Output, SettingsError> {
+    let child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| SettingsError::Apply {
+            message: error.to_string(),
+        })?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        drop(lease);
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result.map_err(|error| SettingsError::Apply {
+            message: error.to_string(),
+        }),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(SettingsError::SetupInProgress),
+        Err(error) => Err(SettingsError::Apply {
+            message: error.to_string(),
+        }),
     }
 }
 
@@ -495,6 +594,35 @@ fn format_command_failure(
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn a_stalled_systemctl_retains_exclusion_after_observation_returns() {
+        let root =
+            std::env::temp_dir().join(format!("lg-buddy-systemctl-stall-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let path = root.join("flow.lock");
+        let lease = crate::setup::lock::FlowLock::try_acquire(&path).unwrap();
+        let file = lease.file();
+        let mut command = crate::setup::lock::command_with_lock("bash", Some(&file));
+        command.args(["-c", "touch \"$1/ready\"; while [ ! -f \"$1/release\" ]; do sleep 0.01; done; touch \"$1/finished\"", "fixture"]).arg(&root);
+        assert!(matches!(
+            observe_setup_command(command, Duration::ZERO, Some(file)),
+            Err(SettingsError::SetupInProgress)
+        ));
+        drop(lease);
+        assert!(crate::setup::lock::FlowLock::try_acquire(&path).is_err());
+        std::fs::write(root.join("release"), "").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !root.join("finished").exists()
+            || crate::setup::lock::FlowLock::try_acquire(&path).is_err()
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn authorization_denial_is_distinct_from_cancellation_and_command_failure() {

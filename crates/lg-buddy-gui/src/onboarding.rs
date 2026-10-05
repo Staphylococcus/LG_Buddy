@@ -7,11 +7,14 @@ pub(crate) struct OnboardingView {
     dialog: adw::Dialog,
     description: gtk::Label,
     form: crate::pairing::PairingForm,
+    update_checks: gtk::DropDown,
+    suppress_update: Rc<Cell<bool>>,
     status: gtk::Label,
     primary: gtk::Button,
     cancel: gtk::Button,
     progress: gtk::Spinner,
     presented: Cell<bool>,
+    pending_close: Rc<Cell<bool>>,
 }
 impl OnboardingView {
     pub fn new(on_intent: Rc<dyn Fn(OnboardingIntent)>) -> Self {
@@ -29,6 +32,25 @@ impl OnboardingView {
         status.set_accessible_role(gtk::AccessibleRole::Alert);
         status.add_css_class("error");
         let form = crate::pairing::PairingForm::new(on_intent.clone());
+        let update_checks =
+            gtk::DropDown::from_strings(&["Choose preference", "Enabled", "Disabled"]);
+        update_checks
+            .update_property(&[gtk::accessible::Property::Label("Automatic update checks")]);
+        let suppress_update = Rc::new(Cell::new(false));
+        update_checks.connect_selected_notify({
+            let on_intent = on_intent.clone();
+            let suppress = suppress_update.clone();
+            move |row| {
+                if suppress.get() {
+                    return;
+                }
+                match row.selected() {
+                    1 => on_intent(OnboardingIntent::SetUpdateChecks(true)),
+                    2 => on_intent(OnboardingIntent::SetUpdateChecks(false)),
+                    _ => {}
+                }
+            }
+        });
         let primary = gtk::Button::new();
         primary.add_css_class("suggested-action");
         primary.connect_clicked({
@@ -54,6 +76,7 @@ impl OnboardingView {
         content.append(&description);
         content.append(&status);
         content.append(&form.root);
+        content.append(&update_checks);
         content.append(&progress);
         let clamp = adw::Clamp::builder()
             .maximum_size(600)
@@ -91,15 +114,23 @@ impl OnboardingView {
                 }
             }
         });
+        let pending_close = Rc::new(Cell::new(false));
+        dialog.connect_closed({
+            let pending_close = pending_close.clone();
+            move |_| pending_close.set(false)
+        });
         Self {
             dialog,
             description,
             form,
+            update_checks,
+            suppress_update,
             status,
             primary,
             cancel,
             progress,
             presented: Cell::new(false),
+            pending_close,
         }
     }
     pub fn render(
@@ -107,17 +138,41 @@ impl OnboardingView {
         parent: &adw::ApplicationWindow,
         presentation: Option<&OnboardingPresentation>,
     ) {
-        let Some(view) = presentation else {
+        let Some(view) = presentation.filter(|view| !view.is_gate) else {
             self.progress.stop();
             if self.presented.replace(false) {
-                self.dialog.force_close();
+                self.pending_close.set(true);
+                // Libadwaita 1.5 can ignore closure before its opening ticks.
+                // Retry on frames until closed, unless setup is reopened.
+                let pending_close = self.pending_close.clone();
+                self.dialog.add_tick_callback(move |dialog, _| {
+                    if pending_close.get() {
+                        dialog.force_close();
+                    }
+                    if pending_close.get() {
+                        gtk::glib::ControlFlow::Continue
+                    } else {
+                        gtk::glib::ControlFlow::Break
+                    }
+                });
             }
             return;
         };
+        self.pending_close.set(false);
         let had_form = self.form.root.is_visible();
         self.dialog.set_title(&view.title);
         self.description.set_text(&view.description);
         self.form.root.set_visible(view.pairing.is_some());
+        self.update_checks.set_visible(view.update_checks.is_some());
+        self.update_checks.set_sensitive(!view.busy);
+        self.suppress_update.set(true);
+        self.update_checks.set_selected(
+            view.update_checks
+                .as_ref()
+                .and_then(|choice| choice.enabled)
+                .map_or(0, |enabled| if enabled { 1 } else { 2 }),
+        );
+        self.suppress_update.set(false);
         if let Some(pairing) = &view.pairing {
             self.form.render(pairing, !view.busy);
         }
@@ -153,6 +208,7 @@ impl OnboardingView {
 
 #[cfg(test)]
 pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
+    use crate::controller_test_support::pump_until;
     use lg_buddy::setup::{flow::SetupStep, gui::OnboardingPresentation, StepInput, StepResponse};
     use std::cell::RefCell;
     let intents = Rc::new(RefCell::new(Vec::new()));
@@ -164,15 +220,47 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
         .application(application)
         .build();
     window.present();
+    pump_until(|| window.is_mapped());
+    view.render(&window, Some(&OnboardingPresentation::required(None)));
+    assert!(!view.presented.get());
+    assert!(window.visible_dialog().is_none());
     let pairing = OnboardingPresentation::for_step(
         SetupStep::Pairing,
         &StepResponse::InputRequired(StepInput::Pairing { saved: None }),
     );
     view.render(&window, Some(&pairing));
     assert_eq!(view.dialog.title(), "Pair a TV");
+    assert!(window.visible_dialog().is_some());
     assert!(view.form.root.is_visible());
     view.primary.emit_clicked();
     assert_eq!(intents.borrow_mut().pop(), Some(OnboardingIntent::Submit));
+    let correction = OnboardingPresentation::for_step(
+        SetupStep::Pairing,
+        &StepResponse::InputRequired(StepInput::CorrectTv {
+            address: "invalid saved address".into(),
+            mac: "02:11:22:33:44:55".into(),
+            input: lg_buddy::config::HdmiInput::Hdmi3,
+            revision: [0; 32],
+        }),
+    );
+    view.render(&window, Some(&correction));
+    assert!(view.form.root.is_visible());
+    assert_eq!(view.dialog.title(), "Correct TV details");
+    assert_eq!(view.primary.label().as_deref(), Some("Save TV details"));
+    assert!(intents.borrow().is_empty());
+    let preference = OnboardingPresentation::for_step(
+        SetupStep::Services,
+        &StepResponse::InputRequired(StepInput::UpdatePreference { revision: [0; 32] }),
+    );
+    view.render(&window, Some(&preference));
+    assert!(view.update_checks.is_visible());
+    assert_eq!(view.update_checks.selected(), 0);
+    assert!(intents.borrow().is_empty());
+    view.update_checks.set_selected(2);
+    assert_eq!(
+        intents.borrow_mut().pop(),
+        Some(OnboardingIntent::SetUpdateChecks(false))
+    );
     let services = OnboardingPresentation::for_step(
         SetupStep::Services,
         &StepResponse::ActionRequired {
@@ -193,7 +281,9 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     view.render(&window, Some(&running));
     assert!(view.progress.is_spinning());
     assert!(!view.cancel.is_sensitive());
-    view.dialog.close();
+    if view.cancel.is_sensitive() {
+        view.cancel.emit_clicked();
+    }
     assert!(intents.borrow().is_empty());
     let deps = OnboardingPresentation::for_step(
         SetupStep::Plasma,
@@ -203,9 +293,41 @@ pub(crate) fn run_renderer_scenarios(application: &adw::Application) {
     );
     view.render(&window, Some(&deps));
     assert_eq!(view.primary.label().as_deref(), Some("Install build tools"));
-    view.dialog.close();
+    view.cancel.emit_clicked();
     assert_eq!(intents.borrow_mut().pop(), Some(OnboardingIntent::Cancel));
     view.render(&window, None);
     assert!(!view.presented.get());
+    pump_until(|| window.visible_dialog().is_none());
+    window.close();
+}
+
+#[cfg(test)]
+pub(crate) fn run_rapid_completion(application: &adw::Application) {
+    use crate::controller_test_support::pump_until;
+    use lg_buddy::setup::{flow::SetupStep, StepInput, StepResponse};
+    let intents = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let window = adw::ApplicationWindow::builder()
+        .application(application)
+        .build();
+    window.present();
+    pump_until(|| window.is_mapped());
+    let pairing = OnboardingPresentation::for_step(
+        SetupStep::Pairing,
+        &StepResponse::InputRequired(StepInput::Pairing { saved: None }),
+    );
+    // Request dismissal before the first opening frame, then reopen setup.
+    let view = OnboardingView::new(Rc::new({
+        let intents = intents.clone();
+        move |intent| intents.borrow_mut().push(intent)
+    }));
+    view.render(&window, Some(&pairing));
+    view.render(&window, None);
+    view.render(&window, Some(&pairing));
+    pump_until(|| view.form.root.is_mapped());
+    assert!(view.presented.get());
+    assert!(window.visible_dialog().is_some());
+    view.render(&window, None);
+    pump_until(|| window.visible_dialog().is_none());
+    assert!(intents.borrow().is_empty());
     window.close();
 }

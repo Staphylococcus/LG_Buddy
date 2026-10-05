@@ -4,11 +4,17 @@ fn finish(
     update: OnboardingTransition,
     fixture: &fixtures::Fixture,
 ) -> OnboardingTransition {
-    let operation = update.operation.unwrap();
-    let result = operation.execute_with(fixture, &mut |progress| {
-        app.progress(&operation, progress);
-    });
-    app.complete(&operation, result).unwrap()
+    let mut update = update;
+    loop {
+        let operation = update.operation.unwrap();
+        let result = operation.execute_with(fixture, &mut |progress| {
+            assert!(app.progress(&operation, progress).is_some());
+        });
+        update = app.complete(&operation, result).unwrap();
+        if update.operation.is_none() {
+            return update;
+        }
+    }
 }
 #[test]
 fn pairing_services_dependencies_and_verified_completion_share_one_modal() {
@@ -23,13 +29,8 @@ fn pairing_services_dependencies_and_verified_completion_share_one_modal() {
     app.handle(OnboardingIntent::SetAddress("192.0.2.1".into()));
     app.handle(OnboardingIntent::SetMac("02:11:22:33:44:55".into()));
     let pair = app.handle(OnboardingIntent::Submit).unwrap();
-    let services = finish(&mut app, pair, &fixture);
-    assert_eq!(services.presentation.unwrap().title, "Background services");
+    let deps = finish(&mut app, pair, &fixture);
     assert_eq!(app.status(), SetupStatus::Incomplete);
-    let action = app.handle(OnboardingIntent::Submit).unwrap();
-    finish(&mut app, action, &fixture);
-    let action = app.handle(OnboardingIntent::Submit).unwrap();
-    let deps = finish(&mut app, action, &fixture);
     assert_eq!(
         deps.presentation.unwrap().action,
         Some("Install build tools")
@@ -48,6 +49,51 @@ fn pairing_services_dependencies_and_verified_completion_share_one_modal() {
     finish(&mut app, opening, &fixture);
     assert_eq!(fixture.calls.lock().unwrap().len(), calls);
 }
+
+#[test]
+fn corrective_input_uses_the_existing_modal_and_requires_explicit_values() {
+    for input in [
+        StepInput::CorrectTv {
+            address: "broken".into(),
+            mac: "02:11:22:33:44:55".into(),
+            input: crate::config::HdmiInput::Hdmi2,
+            revision: [1; 32],
+        },
+        StepInput::UpdatePreference { revision: [2; 32] },
+    ] {
+        let fixture = fixtures::Fixture::new(true, false);
+        let index = if matches!(input, StepInput::CorrectTv { .. }) {
+            0
+        } else {
+            1
+        };
+        fixture.responses.lock().unwrap()[index] = StepResponse::InputRequired(input);
+        let mut app = OnboardingApplication::default();
+        let opening = app.handle(OnboardingIntent::Open).unwrap();
+        let ready = finish(&mut app, opening, &fixture);
+        let presentation = ready.presentation.unwrap();
+        assert!(!presentation.is_gate);
+        assert!(presentation.recovery.unwrap().can_repair_here());
+        let invalid = app.handle(OnboardingIntent::Submit).unwrap();
+        assert!(invalid.operation.is_none());
+        assert!(invalid.presentation.unwrap().error.is_some());
+        if index == 0 {
+            assert_eq!(presentation.pairing.unwrap().address(), "broken");
+            app.handle(OnboardingIntent::SetAddress("192.0.2.42".into()));
+        } else {
+            assert_eq!(presentation.update_checks.unwrap().enabled, None);
+            app.handle(OnboardingIntent::SetUpdateChecks(false));
+        }
+        let correction = app.handle(OnboardingIntent::Submit).unwrap();
+        assert!(correction.operation.as_ref().unwrap().changes_setup());
+        finish(&mut app, correction, &fixture);
+        assert_eq!(app.status(), SetupStatus::Complete);
+        assert_eq!(
+            fixture.calls.lock().unwrap().first(),
+            Some(&SetupStep::ORDER[index])
+        );
+    }
+}
 #[test]
 fn cancel_reopen_rejects_old_results_and_only_repairs_remaining_steps() {
     let fixture = fixtures::Fixture::new(true, false);
@@ -60,10 +106,10 @@ fn cancel_reopen_rejects_old_results_and_only_repairs_remaining_steps() {
     drop(old);
     drop(opening);
     let opening = app.handle(OnboardingIntent::Open).unwrap();
-    let ready = finish(&mut app, opening, &fixture);
-    assert_eq!(ready.presentation.unwrap().title, "Background services");
-    let action = app.handle(OnboardingIntent::Submit).unwrap();
-    let operation = action.operation.unwrap();
+    let inspect = opening.operation.unwrap();
+    let result = inspect.execute_with(&fixture, &mut |_| {});
+    let ready = app.complete(&inspect, result).unwrap();
+    let operation = ready.operation.unwrap();
     // The UI can still show the old cancelable state when the live step has
     // crossed into a mutation. It must not close or queue cancellation.
     let result = operation.execute_with(&fixture, &mut |_| {
@@ -81,24 +127,73 @@ fn worker_failure_retries_with_a_fresh_flow_and_read_only_errors_stay_visible() 
     let failed = app.worker_stopped(&opening.operation.unwrap()).unwrap();
     assert!(failed.presentation.unwrap().error.is_some());
     let retry = app.handle(OnboardingIntent::Submit).unwrap();
-    finish(&mut app, retry, &fixture);
-    let action = app.handle(OnboardingIntent::Submit).unwrap();
+    let inspect = retry.operation.unwrap();
+    let result = inspect.execute_with(&fixture, &mut |_| {});
+    let action = app.complete(&inspect, result).unwrap();
+    drop(inspect);
     let failed = app.worker_stopped(&action.operation.unwrap()).unwrap();
     assert_eq!(failed.presentation.unwrap().action, Some("Retry"));
     let retry = app.handle(OnboardingIntent::Submit).unwrap();
     finish(&mut app, retry, &fixture);
-    assert_eq!(app.status(), SetupStatus::Incomplete);
+    assert_eq!(app.status(), SetupStatus::Complete);
+}
+
+#[test]
+fn recheck_returns_new_requirements_without_automatically_executing_them() {
+    use crate::setup::recovery::{RecoveryAction, RecoveryCause, RepairBoundary, SetupRecovery};
+    let fixture = fixtures::Fixture::new(true, false);
+    fixture.responses.lock().unwrap()[1] = StepResponse::Blocked(StepFailure {
+        presentation: UserFacingError::new(
+            "Externally managed",
+            "Repair externally, then recheck.",
+        ),
+        diagnostic: "fixture managed service".into(),
+        recovery: SetupRecovery::new(
+            RecoveryCause::ManagedInstallation,
+            RepairBoundary::SystemConfiguration,
+            RecoveryAction::RepairExternally,
+        ),
+        retryable: true,
+    });
+    let mut app = OnboardingApplication::default();
+    let opening = app.handle(OnboardingIntent::Open).unwrap();
+    let blocked = finish(&mut app, opening, &fixture);
+    assert_eq!(blocked.presentation.unwrap().action, Some("Recheck"));
+    fixture.responses.lock().unwrap()[1] = StepResponse::ActionRequired {
+        explanation: "Repair services",
+        requires_authorization: true,
+    };
+    let recheck = app.handle(OnboardingIntent::Submit).unwrap();
+    assert!(!recheck.operation.as_ref().unwrap().changes_setup());
+    let checked = finish(&mut app, recheck, &fixture);
+    assert_eq!(checked.presentation.unwrap().action, Some("Continue"));
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    let approved = app.handle(OnboardingIntent::Submit).unwrap();
+    finish(&mut app, approved, &fixture);
+    assert_eq!(*fixture.calls.lock().unwrap(), [SetupStep::Services]);
 }
 
 #[test]
 fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() {
+    cancellation_waits_for_worker(SetupStep::Pairing);
+    cancellation_waits_for_worker(SetupStep::Services);
+}
+
+fn cancellation_waits_for_worker(step: SetupStep) {
     use crate::setup::{flow::SetupSteps, lock::FlowLock, StepCancellation};
     use std::sync::mpsc;
-    struct PairingWait(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>);
-    impl SetupSteps for PairingWait {
+    struct StepWait(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>, SetupStep);
+    impl SetupSteps for StepWait {
         fn inspect(&self, step: SetupStep) -> StepResponse {
-            if step == SetupStep::Pairing {
-                StepResponse::InputRequired(StepInput::Pairing { saved: None })
+            if step == self.2 {
+                if step == SetupStep::Pairing {
+                    StepResponse::InputRequired(StepInput::Pairing { saved: None })
+                } else {
+                    StepResponse::ActionRequired {
+                        explanation: "Repair services.",
+                        requires_authorization: false,
+                    }
+                }
             } else {
                 StepResponse::NotApplicable
             }
@@ -118,8 +213,11 @@ fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() 
         }
     }
     struct Backend(Mutex<Option<OnboardingFlow>>);
-    impl crate::setup::assessment::AssessmentBackend for Backend {
-        fn assess(&self) -> Result<crate::setup::assessment::SetupAssessment, StepFailure> {
+    impl crate::setup::published::SnapshotBackend for Backend {
+        fn snapshot(&self) -> Result<crate::setup::published::SetupSnapshot, StepFailure> {
+            unreachable!("this test drives the flow directly")
+        }
+        fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
             unreachable!("this test drives the flow directly")
         }
     }
@@ -130,11 +228,14 @@ fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() 
     }
     let (started, start_rx) = mpsc::channel();
     let (release, release_rx) = mpsc::channel();
-    let root = std::env::temp_dir().join(format!("lg-buddy-cancel-gui-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "lg-buddy-cancel-gui-{}-{step:?}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("lock");
     let flow = OnboardingFlow::with_backend(
-        Box::new(PairingWait(started, Mutex::new(release_rx))),
+        Box::new(StepWait(started, Mutex::new(release_rx), step)),
         &path,
     )
     .unwrap();
@@ -146,15 +247,18 @@ fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() 
         .operation
         .unwrap();
     let result = operation.execute_with(&backend, &mut |_| {});
-    app.complete(&operation, result).unwrap();
+    let ready = app.complete(&operation, result).unwrap();
     drop(operation);
-    app.handle(OnboardingIntent::SetAddress("192.0.2.1".into()));
-    app.handle(OnboardingIntent::SetMac("02:11:22:33:44:55".into()));
-    let operation = app
-        .handle(OnboardingIntent::Submit)
-        .unwrap()
-        .operation
-        .unwrap();
+    let operation = if step == SetupStep::Pairing {
+        app.handle(OnboardingIntent::SetAddress("192.0.2.1".into()));
+        app.handle(OnboardingIntent::SetMac("02:11:22:33:44:55".into()));
+        app.handle(OnboardingIntent::Submit)
+            .unwrap()
+            .operation
+            .unwrap()
+    } else {
+        ready.operation.unwrap()
+    };
     let worker = operation.clone();
     let join = std::thread::spawn(move || worker.execute(&mut |_| {}));
     start_rx
@@ -173,4 +277,44 @@ fn accepted_running_cancellation_waits_for_the_worker_and_preserves_exclusion() 
         .is_none());
     assert!(FlowLock::acquire(&path).is_ok());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cancelling_before_automatic_work_is_dispatched_never_executes_repairs() {
+    let fixture = fixtures::Fixture::new(true, false);
+    let mut app = OnboardingApplication::default();
+    let inspect = app
+        .handle(OnboardingIntent::Open)
+        .unwrap()
+        .operation
+        .unwrap();
+    assert!(!inspect.changes_setup());
+    let result = inspect.execute_with(&fixture, &mut |_| {});
+    let ready = app.complete(&inspect, result).unwrap();
+    let run = ready.operation.unwrap();
+    assert!(run.changes_setup());
+    app.handle(OnboardingIntent::Cancel).unwrap();
+    let result = run.execute_with(&fixture, &mut |_| panic!("cancelled work ran"));
+    assert!(app.complete(&run, result).unwrap().presentation.is_none());
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    assert!(fixture.open().is_ok());
+}
+
+#[test]
+fn retry_resumes_routine_work_without_a_second_continue_prompt() {
+    let fixture = fixtures::Fixture::new(true, false);
+    fixture.responses.lock().unwrap()[1] = StepResponse::Failed(stopped());
+    let mut app = OnboardingApplication::default();
+    let opening = app.handle(OnboardingIntent::Open).unwrap();
+    let failed = finish(&mut app, opening, &fixture);
+    assert_eq!(failed.presentation.unwrap().action, Some("Retry"));
+    assert!(fixture.calls.lock().unwrap().is_empty());
+    fixture.responses.lock().unwrap()[1] = StepResponse::ActionRequired {
+        explanation: "Repair services.",
+        requires_authorization: true,
+    };
+    let retry = app.handle(OnboardingIntent::Submit).unwrap();
+    let done = finish(&mut app, retry, &fixture);
+    assert_eq!(done.presentation.unwrap().title, "Setup complete");
+    assert_eq!(*fixture.calls.lock().unwrap(), [SetupStep::Services]);
 }

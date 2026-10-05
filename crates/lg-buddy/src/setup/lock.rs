@@ -25,7 +25,21 @@ impl FlowLock {
             presentation: UserFacingError::new("Setup unavailable", if error.kind() == io::ErrorKind::WouldBlock {
                 "Another LG Buddy setup is already open. Finish or close it before starting another."
             } else { "The setup lock could not be acquired. Run LG Buddy in your user session." }),
-            diagnostic: error.to_string(), retryable: true,
+            diagnostic: error.to_string(),
+            recovery: if error.kind() == io::ErrorKind::WouldBlock {
+                super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::Busy,
+                    super::recovery::RepairBoundary::LocalSetup,
+                    super::recovery::RecoveryAction::Recheck,
+                )
+            } else {
+                super::recovery::SetupRecovery::new(
+                    super::recovery::RecoveryCause::InvalidEnvironment,
+                    super::recovery::RepairBoundary::SystemConfiguration,
+                    super::recovery::RecoveryAction::RepairExternally,
+                )
+            },
+            retryable: true,
         })
     }
 
@@ -66,7 +80,7 @@ impl FlowLock {
         open().map(|file| Self(Arc::new(file)))
     }
 
-    pub(super) fn file(&self) -> Arc<File> {
+    pub(crate) fn file(&self) -> Arc<File> {
         self.0.clone()
     }
 }
@@ -97,9 +111,17 @@ pub(crate) fn command_with_lock(program: impl AsRef<OsStr>, lock: Option<&Arc<Fi
     command
         .args(["-c", "\"$@\" &\nwait \"$!\"", "lg-buddy-setup"])
         .arg(program);
+    inherit_command_lock(&mut command, Some(lock));
+    command
+}
+
+/// Also used by the persistent, unprivileged authorization owner.
+pub(super) fn inherit_command_lock(command: &mut Command, lock: Option<&Arc<File>>) {
+    let Some(lock) = lock else { return };
     let lock = lock.clone();
     // Duplicate only in the child, after stdio setup. The supervisor inherits a
-    // descriptor >= 3; unrelated processes spawned by other threads do not.
+    // descriptor >= 10; unrelated processes spawned by other
+    // threads do not inherit it.
     unsafe {
         command.pre_exec(move || {
             // Mutating steps reject terminal cancellation; the owner handles
@@ -107,11 +129,10 @@ pub(crate) fn command_with_lock(program: impl AsRef<OsStr>, lock: Option<&Arc<Fi
             if libc::signal(libc::SIGINT, libc::SIG_IGN) == libc::SIG_ERR {
                 return Err(io::Error::last_os_error());
             }
-            if libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 3) == -1 {
+            if libc::fcntl(lock.as_raw_fd(), libc::F_DUPFD, 10) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    command
 }

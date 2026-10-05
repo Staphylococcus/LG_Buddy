@@ -132,6 +132,11 @@ The [GNOME/Plasma VM validation record](desktop-session-validation.md) documents
 desktop switching with a retained user manager, tested inhibition routes, a
 startup race, lifecycle recovery, and the boundary of native Wayland inhibition coverage.
 
+The [native setup recovery record](setup-recovery-validation.md) separately
+validates installed daemon assessment, notification activation, native repair
+and fresh-publication GUI admission. It names fixture boundaries and provides
+selectable disposable-VM checks; mock-backed GUI CI alone is not native proof.
+
 ### What belongs here
 
 - readable acceptance scenarios for the main flows
@@ -613,6 +618,39 @@ That loop covers most of the first two questions:
 The third question, user needs, should be covered by a small acceptance layer and selected smoke checks, not by trying to force every test into daily local runs.
 
 ### Shared terminal setup
+
+GTK setup scenarios run in fresh subprocesses with one toolkit-owning thread.
+Select `controller_test_support::startup_gate`, `post_repair_verification`,
+`gnome_repair_without_plasma`, `corrective_input`, `cancel_close_and_reopen`,
+`managed_block_recheck`, or `rapid_modal_completion` by name with
+`cargo test -p lg-buddy-gui <name> -- --nocapture`. A display and session bus
+are required, as for the full GTK suite. TV, Settings, Diagnostics and ordinary
+controller-worker tests are separate names; backend admission/flow/adapter
+tests remain in `lg-buddy`. Isolation does not substitute for the real-desktop
+validation recorded in `desktop-session-validation.md`.
+
+Daemon publication tests cover quick cached reads during blocked probes,
+coalesced requests, rejection of superseded results, and explicit inapplicability.
+`runtime_entrypoints` starts a real monitor on a private bus with missing config
+and verifies that its setup endpoint remains available, reads do not advance the
+assessment revision, and explicit reassessment publishes a new result without
+mutating installation. Application/GTK scenarios cover withheld normal operations,
+inline pairing and repair, daemon confirmation, cancellation, and later regating.
+Installed GUI transport tests use `test-setup-session.py` as an external session
+peer: it publishes fixture results independently, and never inspects on reads.
+They verify the central gate, preserved partial work, external repair publication,
+and ordinary complete/offline opens. Native service repair stays covered by Rust
+step/flow tests, separately from the installed transport fixture.
+Assessment/application tests distinguish transport failure from a new published
+requirement: failed reads and a restarted daemon's Unchecked placeholder retain
+the last assessment without clearing post-mutation verification. GTK scenarios
+and the installed journey inject repeated cached-read failures after admission
+and verify that normal navigation remains available without reopening setup.
+Recovery-contract tests distinguish input correction, local repair, verifier
+recovery, transient retry, missing payload, and managed/unsupported repair across
+step responses, GUI/CLI adapters and serialized publications. Legacy/unknown
+recovery facts cannot grant local repair; malformed facts fail safely. Native
+daemon endpoint tests verify that typed facts survive the session-bus boundary.
 
 `cargo test -p lg-buddy` covers the terminal adapter against the shared flow,
 including dependency consent, distinct exit results and signal cancellation gates.

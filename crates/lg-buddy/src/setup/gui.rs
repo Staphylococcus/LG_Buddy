@@ -22,12 +22,19 @@ pub enum OnboardingIntent {
     SetAddress(String),
     SetMac(String),
     SetInput(HdmiInput),
+    SetUpdateChecks(bool),
     Submit,
     Cancel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePreferencePresentation {
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingPresentation {
+    pub is_gate: bool,
     pub title: String,
     pub description: String,
     pub pairing: Option<PairingPresentation>,
@@ -35,12 +42,30 @@ pub struct OnboardingPresentation {
     pub can_cancel: bool,
     pub busy: bool,
     pub error: Option<UserFacingError>,
+    pub recovery: Option<super::recovery::SetupRecovery>,
+    pub update_checks: Option<UpdatePreferencePresentation>,
 }
 
 impl OnboardingPresentation {
+    pub fn required(error: Option<UserFacingError>) -> Self {
+        Self {
+            is_gate: true,
+            title: "Setup required".into(),
+            description: "Complete setup before using LG Buddy.".into(),
+            pairing: None,
+            action: Some("Complete setup"),
+            can_cancel: true,
+            busy: false,
+            error,
+            recovery: None,
+            update_checks: None,
+        }
+    }
+
     /// Render a backend response without deciding which step comes next.
     pub fn for_step(step: SetupStep, response: &StepResponse) -> Self {
         let mut view = Self {
+            is_gate: false,
             title: match step {
                 SetupStep::Pairing => "Pair a TV",
                 SetupStep::Services => "Background services",
@@ -53,8 +78,35 @@ impl OnboardingPresentation {
             can_cancel: true,
             busy: false,
             error: None,
+            recovery: response.recovery(),
+            update_checks: None,
         };
         match response {
+            StepResponse::InputRequired(StepInput::CorrectTv {
+                address,
+                mac,
+                input,
+                ..
+            }) => {
+                view.title = "Correct TV details".into();
+                view.description = "Confirm the corrected TV details. Existing credentials and unrelated settings are retained.".into();
+                view.pairing = Some(PairingPresentation::new(
+                    PairingDraft {
+                        address: address.clone(),
+                        mac: mac.clone(),
+                        input: *input,
+                    },
+                    PairingStage::Editing,
+                    None,
+                ));
+                view.action = Some("Save TV details");
+            }
+            StepResponse::InputRequired(StepInput::UpdatePreference { .. }) => {
+                view.title = "Update checks".into();
+                view.description = "The saved update-check preference is invalid. Choose whether LG Buddy should check for updates.".into();
+                view.update_checks = Some(UpdatePreferencePresentation { enabled: None });
+                view.action = Some("Save preference");
+            }
             StepResponse::InputRequired(StepInput::Pairing { saved }) => {
                 let draft = saved
                     .map(|r| PairingDraft {
@@ -92,7 +144,7 @@ impl OnboardingPresentation {
             }
             StepResponse::Failed(error) | StepResponse::Blocked(error) => {
                 view.error = Some(error.presentation.clone());
-                view.action = error.retryable.then_some("Retry");
+                view.action = error.retryable.then_some(error.recovery.check_label());
             }
             _ => {}
         }
@@ -100,6 +152,7 @@ impl OnboardingPresentation {
     }
     fn opening() -> Self {
         Self {
+            is_gate: false,
             title: "Complete setup".into(),
             description: "Checking what needs to be set up…".into(),
             pairing: None,
@@ -107,6 +160,8 @@ impl OnboardingPresentation {
             can_cancel: true,
             busy: true,
             error: None,
+            recovery: None,
+            update_checks: None,
         }
     }
 }
@@ -114,8 +169,10 @@ impl OnboardingPresentation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Open,
+    Run(FlowToken),
     Advance(FlowToken, StepAnswer),
-    Refresh,
+    Retry,
+    Recheck,
 }
 
 #[derive(Clone)]
@@ -145,13 +202,19 @@ pub struct OnboardingResult {
 }
 
 /// Environment selection is injected for isolated frontend integration tests.
-pub trait OnboardingBackend: super::assessment::AssessmentBackend {
+pub trait OnboardingBackend: super::published::SnapshotBackend {
     fn open(&self) -> Result<OnboardingFlow, StepFailure>;
 }
 pub struct EnvironmentOnboardingBackend;
-impl super::assessment::AssessmentBackend for EnvironmentOnboardingBackend {
-    fn assess(&self) -> Result<super::assessment::SetupAssessment, StepFailure> {
-        super::assessment::EnvironmentAssessmentBackend.assess()
+impl super::published::SnapshotBackend for EnvironmentOnboardingBackend {
+    fn snapshot(&self) -> Result<super::published::SetupSnapshot, StepFailure> {
+        crate::session_notifications::read_setup_snapshot()
+    }
+    fn request_reassessment(&self) -> Result<(String, u64), StepFailure> {
+        crate::session_notifications::request_setup_assessment()
+    }
+    fn restart_verifier(&self) -> Result<(), StepFailure> {
+        super::environment::restart_verifier()
     }
 }
 impl OnboardingBackend for EnvironmentOnboardingBackend {
@@ -161,6 +224,9 @@ impl OnboardingBackend for EnvironmentOnboardingBackend {
 }
 
 impl OnboardingOperation {
+    pub fn changes_setup(&self) -> bool {
+        !matches!(self.command, Command::Open | Command::Recheck)
+    }
     pub fn execute(
         &self,
         progress: &mut dyn FnMut(FlowProgress),
@@ -179,8 +245,15 @@ impl OnboardingOperation {
         let flow = slot.as_mut().ok_or_else(stopped)?;
         let snapshot = match &self.command {
             Command::Open => flow.snapshot(),
-            Command::Refresh => flow.refresh(),
-            Command::Advance(token, answer) => flow.advance(*token, answer.clone(), progress),
+            Command::Run(token) => flow.run(*token, progress),
+            Command::Recheck => flow.refresh(),
+            Command::Retry => {
+                let snapshot = flow.refresh();
+                flow.run(snapshot.token, progress)
+            }
+            Command::Advance(token, answer) => {
+                flow.advance_until_pause(*token, answer.clone(), progress)
+            }
         };
         Ok(OnboardingResult {
             snapshot,
@@ -205,6 +278,7 @@ pub struct OnboardingApplication {
     presentation: Option<OnboardingPresentation>,
     draft: PairingDraft,
     draft_loaded: bool,
+    update_checks: Option<bool>,
     next: u64,
     cancelling: bool,
     status: SetupStatus,
@@ -212,6 +286,9 @@ pub struct OnboardingApplication {
 }
 
 impl OnboardingApplication {
+    pub fn presentation(&self) -> Option<&OnboardingPresentation> {
+        self.presentation.as_ref()
+    }
     pub fn is_open(&self) -> bool {
         self.presentation.is_some()
     }
@@ -229,7 +306,9 @@ impl OnboardingApplication {
             self.flow = Some(Arc::new(Mutex::new(None)));
             self.draft = PairingDraft::default();
             self.draft_loaded = false;
+            self.update_checks = None;
             self.snapshot = None;
+            self.status = SetupStatus::Unchecked;
             self.cancellation = None;
             self.cancelling = false;
             self.presentation = Some(OnboardingPresentation::opening());
@@ -273,6 +352,35 @@ impl OnboardingApplication {
             }
             let (_, response) = snapshot.current()?;
             let answer = match response {
+                StepResponse::InputRequired(StepInput::CorrectTv { revision, .. }) => {
+                    match PairingRequest::parse(
+                        &self.draft.address,
+                        &self.draft.mac,
+                        self.draft.input,
+                    ) {
+                        Ok(request) => StepAnswer::CorrectTv {
+                            request,
+                            revision: *revision,
+                        },
+                        Err(error) => {
+                            self.presentation.as_mut().unwrap().error = Some(error);
+                            return Some(self.transition(None));
+                        }
+                    }
+                }
+                StepResponse::InputRequired(StepInput::UpdatePreference { revision }) => {
+                    let Some(enabled) = self.update_checks else {
+                        self.presentation.as_mut().unwrap().error = Some(UserFacingError::new(
+                            "Update preference required",
+                            "Choose whether to enable update checks.",
+                        ));
+                        return Some(self.transition(None));
+                    };
+                    StepAnswer::CorrectUpdatePreference {
+                        enabled,
+                        revision: *revision,
+                    }
+                }
                 StepResponse::InputRequired(StepInput::Pairing { .. }) => {
                     match PairingRequest::parse(
                         &self.draft.address,
@@ -291,11 +399,23 @@ impl OnboardingApplication {
                     StepAnswer::InstallBuildDependencies
                 }
                 StepResponse::Failed(error) | StepResponse::Blocked(error) if error.retryable => {
-                    return Some(self.start(Command::Refresh))
+                    let command = if error.recovery.action == super::recovery::RecoveryAction::Retry
+                    {
+                        Command::Retry
+                    } else {
+                        Command::Recheck
+                    };
+                    return Some(self.start(command));
                 }
                 _ => return None,
             };
             return Some(self.start(Command::Advance(snapshot.token, answer)));
+        }
+        if let OnboardingIntent::SetUpdateChecks(enabled) = intent {
+            self.presentation.as_ref()?.update_checks.as_ref()?;
+            self.update_checks = Some(enabled);
+            self.present_snapshot();
+            return Some(self.transition(None));
         }
         self.presentation.as_ref()?.pairing.as_ref()?;
         match intent {
@@ -312,13 +432,9 @@ impl OnboardingApplication {
         operation: &OnboardingOperation,
         progress: FlowProgress,
     ) -> Option<OnboardingTransition> {
-        if self.active.as_ref() != Some(operation)
-            || self.cancelling
-            || !self
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.token == progress.token)
-        {
+        // One operation can span several snapshot revisions. Its identity
+        // rejects late progress; answer tokens are still checked by the flow.
+        if self.active.as_ref() != Some(operation) || self.cancelling {
             return None;
         }
         self.presentation = Some(OnboardingPresentation::for_step(
@@ -361,6 +477,18 @@ impl OnboardingApplication {
                     return Some(self.close());
                 }
                 self.snapshot = Some(result.snapshot);
+                // Opening only inspects. Install the cancellation handle before
+                // dispatching automatic work so even the first step can stop.
+                if operation.command == Command::Open
+                    && self.snapshot.as_ref().is_some_and(|snapshot| {
+                        matches!(
+                            snapshot.current(),
+                            Some((_, StepResponse::ActionRequired { .. }))
+                        )
+                    })
+                {
+                    return Some(self.start(Command::Run(self.snapshot.as_ref().unwrap().token)));
+                }
                 self.present_snapshot();
             }
             Err(error) => {
@@ -422,6 +550,7 @@ impl OnboardingApplication {
         let snapshot = self.snapshot.as_ref().unwrap();
         if snapshot.outcome == FlowOutcome::Complete {
             self.presentation = Some(OnboardingPresentation {
+                is_gate: false,
                 title: "Setup complete".into(),
                 description: "Your TV and the required background services are ready.".into(),
                 pairing: None,
@@ -429,9 +558,16 @@ impl OnboardingApplication {
                 can_cancel: true,
                 busy: false,
                 error: None,
+                recovery: None,
+                update_checks: None,
             });
         } else if let Some((step, response)) = snapshot.current() {
             let mut view = OnboardingPresentation::for_step(*step, response);
+            if view.update_checks.is_some() {
+                view.update_checks = Some(UpdatePreferencePresentation {
+                    enabled: self.update_checks,
+                });
+            }
             if let Some(pairing) = &view.pairing {
                 if !self.draft_loaded {
                     self.draft = PairingDraft {
@@ -459,6 +595,11 @@ fn stopped() -> StepFailure {
             "Retry to check what remains to be set up.",
         ),
         diagnostic: "onboarding worker stopped".into(),
+        recovery: super::recovery::SetupRecovery::new(
+            super::recovery::RecoveryCause::TemporaryFailure,
+            super::recovery::RepairBoundary::LocalSetup,
+            super::recovery::RecoveryAction::Retry,
+        ),
         retryable: true,
     }
 }

@@ -35,7 +35,8 @@ PY
 }
 
 journey_pair() {
-    observe_gui_state --activate-control "Pair a TV"
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --activate-control "Complete setup"
     observe_gui_state --expected-tvs-state pairing
     observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
     observe_gui_state --focus-control "HDMI input" --window-id "$WINDOW_ID"
@@ -51,8 +52,7 @@ journey_close() {
 journey_diagnostics() {
     local label="$1"
     observe_gui_state --focus-control "Main Menu" --window-id "$WINDOW_ID"
-    # Activate the first menu entry through normal keyboard navigation. GTK
-    # 4.14 does not expose Gio menu-item labels through AT-SPI.
+    # GTK 4.14 does not expose Gio menu-item labels through AT-SPI.
     xdotool key --window "$WINDOW_ID" Return
     xdotool key Home Return
     observe_gui_state --expected-diagnostics-state report
@@ -182,129 +182,117 @@ SH
     TV_FIXTURE_PID=$!
     journey_tv_scenario stateful
 
-    # An installed app with no TV offers pairing and diagnostics, without tabs.
+    # Incomplete installation gates normal pages; opening never mutates it.
     : > "$CONFIG_FILE"
-    rm -f "$token"
+    rm -f "$token" "$WORK_DIR/services/setup-ready"
+    start_setup_session --services-ready "$WORK_DIR/services/setup-ready" \
+        --read-error-marker "$WORK_DIR/setup-read-error"
     start_gui enabled "" "" normal
-    observe_gui_state --expected-tvs-state empty
-    journey_diagnostics before-pairing
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --expected-text "Main Menu"
+    journey_diagnostics before-pairing gate
     [ ! -s "$CONFIG_FILE" ] || fail "Diagnostics changed the fresh configuration."
-    observe_gui_state --activate-control "Pair a TV"
-    observe_gui_state --expected-tvs-state pairing
-    observe_gui_state --activate-control Cancel
-    observe_gui_state --expected-tvs-state empty
+    journey_close "cancelled initial setup"
 
     journey_tv_scenario pairing-rejected
+    start_gui enabled "" "" normal
     journey_pair
     observe_gui_state --expected-text "Connection declined on TV"
-    observe_gui_state --activate-control Cancel
-    observe_gui_state --expected-tvs-state empty
+    journey_close "rejected pairing"
     [ ! -s "$CONFIG_FILE" ] && [ ! -e "$token" ] || fail "Rejected pairing saved a profile or credential."
 
     journey_tv_scenario stall
+    start_gui enabled "" "" normal
     journey_pair
     observe_gui_state --expected-text "Verifying TV access"
     journey_close "interrupted first-run pairing"
     [ ! -s "$CONFIG_FILE" ] && [ ! -e "$token" ] || fail "Interrupted pairing saved incomplete state."
     journey_tv_scenario stateful
     start_gui enabled "" "" normal
-    observe_gui_state --expected-tvs-state empty
     journey_pair
     journey_setting tv.ip 127.0.0.1
     journey_setting screen.idle_blank enabled
     journey_setting system.sleep_wake_policy enabled
     observe_gui_state --expected-text "Background services"
+    observe_gui_state --expected-text "Cancel"
     journey_capture onboarding-services
-    observe_gui_state --activate-control Cancel
-    observe_gui_state --select-page Settings
-    observe_gui_state --expected-text "Complete setup"
-    journey_capture incomplete-setup-settings
-    observe_gui_state --activate-control "Complete setup"
-    observe_gui_state --expected-text "Background services"
-    observe_gui_state --activate-control Cancel
-    # Native service repair is exercised by the backend/helper tests. This
-    # installed transport journey keeps its isolated Settings service adapter.
-    observe_gui_state --activate-control 'Idle blanking'
-    journey_setting screen.idle_blank disabled
-    observe_gui_state --expected-toggle 'Idle blanking=off'
-    observe_gui_state --activate-control 'Idle blanking'
-    journey_setting screen.idle_blank enabled
-    observe_gui_state --expected-toggle 'Idle blanking=on'
-    observe_gui_state --activate-control 'TV sleep & wake'
-    journey_setting system.sleep_wake_policy disabled
-    observe_gui_state --expected-toggle 'TV sleep & wake=off'
-    observe_gui_state --activate-control 'TV sleep & wake'
-    journey_setting system.sleep_wake_policy enabled
-    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
-    "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Default idle blanking did not activate its service."
-    "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Default sleep/wake did not activate its service."
+    journey_close "paired TV with incomplete services"
     cp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot"
     cp "$token" "$WORK_DIR/paired-token.snapshot"
-    journey_diagnostics paired
-    cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Diagnostics changed configuration."
-    cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Diagnostics changed credentials."
+    cp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot"
+    start_gui enabled "" "" normal
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --expected-absent-text "TV address"
+    cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Opening recovery requested authorization."
 
-    # Settings apply/retry remains independent of the setup flow.
+    # This transport fixture simulates an external repair publication. Native
+    # service repair, authorization and whole-flow verification have Rust coverage.
+    "$LG_BUDDY_SYSTEMCTL" --user start LG_Buddy_screen.service
+    "$LG_BUDDY_SYSTEMCTL" start LG_Buddy_lifecycle.service
+    touch "$WORK_DIR/services/setup-ready"
+    publish_setup_assessment
+    observe_gui_state --select-page TVs
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 --expected-tv-name OLED42C2
+    # Cached transport failure is not a newly assessed incomplete installation.
+    touch "$WORK_DIR/setup-read-error"
+    local read_failures=0
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        read_failures="$(cat "$WORK_DIR/setup-read-error.observed" 2>/dev/null || true)"
+        [ "${read_failures:-0}" -lt 3 ] || break
+        sleep 0.05
+    done
+    [ "${read_failures:-0}" -ge 3 ] || fail "GUI did not exercise failed cached reads."
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 \
+        --expected-tv-name OLED42C2 --expected-absent-text "Setup required"
+    observe_gui_state --select-page Settings
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
+    rm "$WORK_DIR/setup-read-error"
+    cmp "$CONFIG_FILE" "$WORK_DIR/paired-config.snapshot" || fail "Recovery changed saved settings."
+    cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Recovery paired an existing TV again."
+    journey_diagnostics paired
+    # Correct malformed saved details inside the gate, retaining the credential.
+    sed -i 's/^tvs_primary_ip=.*/tvs_primary_ip=broken/' "$CONFIG_FILE"
+    publish_setup_assessment
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --activate-control 'Complete setup'
+    observe_gui_state --expected-text 'Correct TV details'
+    observe_gui_state --edit-pairing-address 127.0.0.1 --edit-pairing-mac 02:00:00:00:00:10 --window-id "$WINDOW_ID"
+    observe_gui_state --activate-control 'Save TV details'
+    observe_gui_state --select-page TVs
+    observe_gui_state --expected-tvs-state configured --expected-tv-address 127.0.0.1 --expected-tv-name OLED42C2
+    cmp "$token" "$WORK_DIR/paired-token.snapshot" || fail "Correction changed the existing credential."
+    observe_gui_state --select-page Settings
+    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
+
+    # Settings apply/retry remains available for a verified installation.
     touch "$WORK_DIR/services/screen-fails"
     observe_gui_state --edit-settings-timeout 720 --window-id "$WINDOW_ID"
     xdotool key --window "$WINDOW_ID" Return
     journey_setting screen.idle_timeout 720
     observe_gui_state --expected-text 'Retry apply'
     rm "$WORK_DIR/services/screen-fails"
-    # A saved value and the earlier activation do not prove this retry worked.
     : > "$WORK_DIR/services/successful-calls"
     observe_gui_state --activate-control 'Retry apply Idle timeout'
     for ((attempt = 0; attempt < 100; attempt++)); do
         grep -qx 'user restart LG_Buddy_screen.service' "$WORK_DIR/services/successful-calls" && break
         sleep 0.1
     done
-    grep -qx 'user restart LG_Buddy_screen.service' "$WORK_DIR/services/successful-calls" || fail "Retry apply did not successfully restart the screen service."
+    grep -qx 'user restart LG_Buddy_screen.service' "$WORK_DIR/services/successful-calls" || fail "Retry apply did not restart the screen service."
     observe_gui_state --expected-settings-state ready --expected-settings-timeout 720 --expected-absent-text 'Retry apply'
-    observe_gui_state --select-page TVs
-    observe_gui_state --activate-control 'Unpair TV…'
-    observe_gui_state --expected-tvs-state unpair
-    observe_gui_state --activate-control Unpair
-    observe_gui_state --expected-tvs-state empty
-    journey_setting screen.idle_timeout 720
-    rm -f "$WORK_DIR/services/active-system-LG_Buddy_lifecycle.service" "$WORK_DIR/services/active-user-LG_Buddy_screen.service"
-    touch "$WORK_DIR/services/screen-fails"
-    printf 'decline\n' > "$WORK_DIR/services/auth-mode"
-    journey_pair
-    journey_setting tv.ip 127.0.0.1
-    observe_gui_state --expected-text "Background services"
-    observe_gui_state --activate-control Cancel
-    observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
-    journey_setting screen.idle_blank enabled
-    journey_setting system.sleep_wake_policy enabled
-    ! "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Failed activation reported the screen service active."
-    ! "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Declined activation reported the lifecycle service active."
-    journey_close "paired TV with deferred service setup"
-    cp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot"
+    journey_close "repaired installation and Settings retry"
+
+    # A new daemon publication of incomplete services must restore the gate.
+    rm "$WORK_DIR/services/setup-ready"
+    publish_setup_assessment
     start_gui enabled "" "" normal
-    observe_gui_state --select-page Settings
-    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
-    cmp "$WORK_DIR/services/authorizations" "$WORK_DIR/authorizations.snapshot" || fail "Relaunch unexpectedly requested activation again."
-    rm "$WORK_DIR/services/screen-fails"
-    printf 'accept\n' > "$WORK_DIR/services/auth-mode"
-    # Package-managed screen services do not need the shell installer's pointer.
-    mv "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path" "$WORK_DIR/config-path.saved"
-    # Switching off/on exercises the Settings activation adapter with retained
-    # preferences, independently of onboarding's native service repair.
-    observe_gui_state --activate-control 'Idle blanking'
-    journey_setting screen.idle_blank disabled
-    observe_gui_state --activate-control 'Idle blanking'
-    journey_setting screen.idle_blank enabled
-    mv "$WORK_DIR/config-path.saved" "$LG_BUDDY_INSTALL_ROOT/usr/lib/lg-buddy/config-path"
-    observe_gui_state --activate-control 'TV sleep & wake'
-    journey_setting system.sleep_wake_policy disabled
-    observe_gui_state --activate-control 'TV sleep & wake'
-    journey_setting system.sleep_wake_policy enabled
+    observe_gui_state --expected-tvs-state setup-required
+    observe_gui_state --expected-text "Main Menu"
     journey_setting screen.idle_timeout 720
-    observe_gui_state --expected-toggle 'Idle blanking=on' --expected-toggle 'TV sleep & wake=on'
-    "$LG_BUDDY_SYSTEMCTL" --user is-active LG_Buddy_screen.service || fail "Settings retry did not activate idle blanking."
-    "$LG_BUDDY_SYSTEMCTL" is-active LG_Buddy_lifecycle.service || fail "Settings retry did not activate sleep/wake."
-    journey_close "successful activation from Settings"
+    touch "$WORK_DIR/services/setup-ready"
+    publish_setup_assessment
+    observe_gui_state --select-page Settings
+    observe_gui_state --expected-settings-state ready --expected-settings-timeout 720
+    journey_close "later incomplete installation repaired"
 
     # An offline saved TV remains a configured application after relaunch.
     kill "$TV_FIXTURE_PID"

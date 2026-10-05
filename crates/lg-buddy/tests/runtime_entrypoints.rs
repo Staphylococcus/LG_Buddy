@@ -1,3 +1,5 @@
+#[path = "support/setup_notifications.rs"]
+mod setup_notifications;
 mod support;
 #[allow(dead_code)] // Shared process fixture; methods it does not use belong to the cucumber binary.
 #[path = "cucumber_support/webos.rs"]
@@ -52,6 +54,261 @@ fn native_config(
     )
     .unwrap();
     (tv, config)
+}
+
+#[test]
+fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_not_assess() {
+    let bus = MockSessionBusIdleMonitor::new("setup-snapshot-bus");
+    let config = TestConfigFile::new("setup-missing-config");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+        .arg("monitor")
+        .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+        .env("LG_BUDDY_CONFIG", config.path())
+        .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
+        .env_remove("WAYLAND_SOCKET")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
+    let proxy = connection.with_proxy(
+        "io.github.Staphylococcus.LGBuddy",
+        "/io/github/Staphylococcus/LGBuddy/Session",
+        Duration::from_millis(200),
+    );
+    let read = || -> Option<lg_buddy::setup::published::SetupSnapshot> {
+        let (json,): (String,) = proxy
+            .method_call(
+                "io.github.Staphylococcus.LGBuddy.Session1",
+                "GetSetupAssessment",
+                (),
+            )
+            .ok()?;
+        serde_json::from_str(&json).ok()
+    };
+    wait_until(Duration::from_secs(3), || {
+        read().is_some_and(|snapshot| {
+            snapshot.status == lg_buddy::setup::assessment::SetupStatus::Incomplete
+        })
+    });
+    let snapshot = read().unwrap();
+    assert!(!snapshot.requirements.is_empty());
+    assert!(snapshot.requirements.iter().all(|requirement| {
+        requirement.needs_attention
+            && requirement.recovery.cause != lg_buddy::setup::recovery::RecoveryCause::Unknown
+    }));
+    for _ in 0..3 {
+        let started = Instant::now();
+        assert_eq!(read().unwrap(), snapshot);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+    let (instance, revision): (String, u64) = proxy
+        .method_call(
+            "io.github.Staphylococcus.LGBuddy.Session1",
+            "RequestSetupAssessment",
+            (),
+        )
+        .unwrap();
+    assert_eq!(instance, snapshot.instance);
+    assert!(revision > snapshot.revision);
+    wait_until(Duration::from_secs(3), || {
+        read().is_some_and(|snapshot| snapshot.revision >= revision)
+    });
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!config.path().exists());
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn setup_notification_keeps_reads_fast_and_only_trusted_action_opens_ordinary_gui() {
+    use std::os::unix::fs::PermissionsExt;
+    let _env = TestEnv::new();
+    let bus = MockSessionBusIdleMonitor::new("setup-attention-bus");
+    let system = MockSystemLogind::new("setup-attention-logind");
+    let config = TestConfigFile::new("setup-attention-config");
+    let runtime = RuntimeStateLayout::new("setup-attention-runtime");
+    let directory = runtime.session_dir();
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let launched = directory.join("gui-arguments");
+    let gui = ExecutableScript::new(
+        "setup-attention-gui",
+        "lg-buddy-gui",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$XDG_ACTIVATION_TOKEN\" \"$DESKTOP_STARTUP_ID\" >> '{}'\n",
+            launched.display()
+        ),
+    );
+    let agent = setup_notifications::NotificationAgent::new(bus.address());
+    struct RunningChild(std::process::Child);
+    impl Drop for RunningChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let start = |config: &std::path::Path| {
+        RunningChild(
+            std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+                .arg("monitor")
+                .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+                .env("DBUS_SYSTEM_BUS_ADDRESS", system.address())
+                .env("LG_BUDDY_CONFIG", config)
+                .env("LG_BUDDY_GUI", gui.path())
+                .env("XDG_RUNTIME_DIR", &directory)
+                .env("XDG_SESSION_ID", "test-session")
+                .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
+                .env_remove("WAYLAND_SOCKET")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let child = start(config.path());
+    let delivery = agent
+        .deliveries
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(delivery.summary, "LG Buddy needs attention");
+    assert!(!delivery.body.is_empty());
+    assert_eq!(
+        delivery.actions,
+        [
+            "default",
+            "Complete setup",
+            "complete-setup",
+            "Complete setup"
+        ]
+    );
+    let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
+    let proxy = connection.with_proxy(
+        "io.github.Staphylococcus.LGBuddy",
+        "/io/github/Staphylococcus/LGBuddy/Session",
+        Duration::from_millis(200),
+    );
+    let read = || -> lg_buddy::setup::published::SetupSnapshot {
+        let (json,): (String,) = proxy
+            .method_call(
+                "io.github.Staphylococcus.LGBuddy.Session1",
+                "GetSetupAssessment",
+                (),
+            )
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    };
+    let snapshot = read();
+    assert_eq!(
+        snapshot.status,
+        lg_buddy::setup::assessment::SetupStatus::Incomplete
+    );
+    for _ in 0..3 {
+        let started = Instant::now();
+        assert_eq!(read(), snapshot);
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+    agent.release_delivery();
+    let ledger = directory.join("lg-buddy-setup-attention.json");
+    wait_until(Duration::from_secs(2), || {
+        fs::read(&ledger)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|data| data["outstanding"]["id"].as_u64() == Some(delivery.id as u64))
+    });
+    drop(child);
+    let restarted = start(config.path());
+    assert_eq!(
+        agent.closes.recv_timeout(Duration::from_secs(2)).unwrap(),
+        delivery.id
+    );
+    assert!(agent
+        .deliveries
+        .recv_timeout(Duration::from_secs(1))
+        .is_err());
+    agent.invoke(&delivery);
+    thread::sleep(Duration::from_millis(300));
+    assert!(!launched.exists());
+    drop(restarted);
+
+    let new_config = TestConfigFile::new("setup-attention-new-config");
+    let child = start(new_config.path());
+    let delivery = agent
+        .deliveries
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let snapshot = read();
+    agent.release_delivery();
+    // Same path/interface/ID/action, but not the notification service owner.
+    setup_notifications::send_token(
+        &connection,
+        &delivery.sender,
+        delivery.id,
+        "untrusted-token",
+    );
+    setup_notifications::send_action(&connection, &delivery.sender, delivery.id, "default");
+    thread::sleep(Duration::from_millis(400));
+    assert!(!launched.exists());
+    let expected = "0\ntrusted-token\ntrusted-token\n";
+    agent.invoke_default_with_token(&delivery, "trusted-token");
+    wait_until(Duration::from_secs(3), || {
+        fs::read_to_string(&launched).ok().as_deref() == Some(expected)
+    });
+    assert_eq!(fs::read_to_string(&launched).unwrap(), expected);
+    assert_eq!(
+        agent.closes.recv_timeout(Duration::from_secs(2)).unwrap(),
+        delivery.id
+    );
+    agent.invoke(&delivery);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(fs::read_to_string(&launched).unwrap(), expected);
+    assert_eq!(read(), snapshot);
+    assert!(!config.path().exists());
+    assert!(!new_config.path().exists());
+    drop(child);
+    let mut restarted = start(new_config.path());
+    assert!(agent
+        .deliveries
+        .recv_timeout(Duration::from_secs(2))
+        .is_err());
+    assert!(restarted.0.try_wait().unwrap().is_none());
+    assert!(!config.path().exists());
+}
+
+#[test]
+fn session_discovery_does_not_publish_unlock_before_observer_baseline() {
+    let _env = TestEnv::new();
+    let system = MockSystemLogind::new("setup-attention-discovery");
+    system.reset();
+    system.set_locked_hint(true);
+    system.queue_locked_hint_signal(false);
+    let mut bus =
+        lg_buddy::session_bus::DbusSessionBusClient::new_address(system.address()).unwrap();
+    for _ in 0..2 {
+        lg_buddy::sources::linux::logind::resolve_current_graphical_session(
+            &mut bus,
+            Some("test-session"),
+            unsafe { libc::geteuid() },
+        )
+        .unwrap();
+    }
+    let connection = dbus::blocking::Connection::new_address(system.address()).unwrap();
+    let proxy = connection.with_proxy(
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1/session/_test_session",
+        Duration::from_secs(1),
+    );
+    let (locked,): (dbus::arg::Variant<bool>,) = proxy
+        .method_call(
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            ("org.freedesktop.login1.Session", "LockedHint"),
+        )
+        .unwrap();
+    assert!(
+        locked.0,
+        "session discovery must not release the queued unlock"
+    );
 }
 
 #[test]

@@ -42,9 +42,10 @@ not load configuration, call a TV, invoke the CLI, or decide workflow state.
 
 The shared setup contract is documented in [Shared onboarding and setup
 completion](onboarding.md). CLI and GUI consume its backend-owned steps and
-flow. The GUI reuses the pairing modal as a segmented wrapper, entered from
-the unchanged **Pair a TV** prompt or the Settings **Complete setup** row.
-An independent read-only startup assessment supplies the current setup status.
+flow. The GUI's central **Complete setup** gate replaces normal pages when the
+session daemon's published assessment is incomplete or unavailable. Cached
+reads never trigger inspections, and only daemon-verified completion admits
+the functional UI.
 Steps return uniform structured outcomes and own domain error handling and
 recovery. The flow composes those outcomes and forwards requests; it does not
 interpret step-specific errors or implement their fallback policies.
@@ -55,8 +56,9 @@ the flow and frontends respect that decision.
 Startup assessment composes the same granular status checks used by step
 execution, so service and integration readiness rules have a single owner.
 
-The contract is in-process Rust data. It is not JSON, a widget tree, a daemon
-protocol, or a versioned transport. The composition root may construct the
+Presentation and flow contracts are in-process Rust data, not widget trees.
+The daemon's assessment snapshot is the narrow exception: JSON data over the
+existing Session1 D-Bus endpoint. The composition root may construct the
 application and renderer together, but product decisions remain in the
 application modules.
 
@@ -87,7 +89,7 @@ crates/lg-buddy-gui/src/
   overview.rs                    Overview widgets and slider rendering
   tvs.rs                         TV details, adaptive list, and unpair dialog
   pairing.rs                     reusable TV connection form
-  onboarding.rs                  shared setup modal and step rendering
+  onboarding.rs                  setup modal dialog and step rendering
   settings.rs                    native settings rows and editors
 ```
 
@@ -181,26 +183,30 @@ single details/blank view. Selection is application state. A separate bounded
 model-name read may replace the profile heading, but it does not rewrite the
 profile.
 
-The zero-TV blank state exposes **Pair a TV**, which opens the shared onboarding
-modal. The extracted form forwards address, MAC and input edits to
+The central **Setup required** gate has one **Complete setup** action. Cached
+assessment reads never open a flow. The splash retains the normal window header
+and menu with navigation hidden. The action opens the shared modal dialog, which
+embeds the pairing form when pairing is required. The form forwards address, MAC and input edits to
 `setup::gui::OnboardingApplication`. Workers keep the `OnboardingFlow` alive
 between responses, including authorization and additional dependency consent.
-Only the flow decides which step comes next and when setup is complete.
+Only the flow decides which step comes next. GUI admission additionally requires
+the daemon's verified published Complete result.
 
 Pairing verifies the TV and saves its profile before the service and integration
 steps. Cancellation consults the live flow gate. Accepted cancellation retains
-completed work; noncancelable mutations keep the modal and application open.
-Closing the modal refreshes TV, Overview and Settings state, including when a
-later step was cancelled. No post-pairing behavior-toggle queue remains.
+completed work; noncancelable mutations keep the application open. Closing the
+gate closes the GUI without admitting normal views. Successful daemon
+verification refreshes TV, Overview and Settings state. No post-pairing
+behavior-toggle queue remains.
 
-The Settings **Complete setup** row consumes backend `SetupStatus`. Flow
-observations and independent assessment update that status. Checks refresh on
-window reactivation, entering Settings, and after setup or configuration mutations.
-Older results cannot overwrite a newer flow observation. Both entry points open the same modal and re-inspect current state.
+There is no Settings completion row. One asynchronous cached read precedes
+initial window presentation; subsequent cache reads retain the current view
+until a new result arrives. Repair triggers reassessment after work settles,
+with an instance/revision barrier rejecting an older Complete result.
 
 Fresh graphical installation deploys binaries and repair payloads, creates an
-empty configuration only when absent, and opens the existing **Pair a TV**
-prompt. Onboarding owns subsequent service setup. Existing-installation refresh
+empty configuration only when absent, and opens the central setup gate.
+Onboarding owns subsequent service setup. Existing-installation refresh
 and release-upgrade paths retain their deployment responsibilities.
 
 Settings is built from the existing registry-backed `SettingsStore`. It shows
@@ -336,14 +342,14 @@ The renderer keeps user focus meaningful. The brightness deep link can request
 brightness focus after reactivation; a deferred initial focus request yields
 to an explicit focus choice made by the user or by navigation. Settings keeps
 an entry draft and caret stable while a completion refreshes the row. Pairing
-focuses the address field when the dialog opens, and TVs restores focus after
+focuses the address field when its setup segment opens, and TVs restores focus after
 unpair confirmation closes. Native dialog dismissal routes through the same
 application intent as an explicit Cancel action.
 
 Onboarding displays the backend's progress message and a spinner while work
 runs. Dismissal follows the step's live cancellation gate. Pairing success
-advances to remaining setup in the same modal; closing it reloads the other
-views from the saved state.
+advances to remaining setup in the same modal dialog. Daemon verification
+admits and refreshes normal views; cancelling unfinished setup returns to the splash.
 
 ## Workers, stale completions, cancellation, and persistence
 
@@ -367,7 +373,7 @@ when the models can shut down. Cancellation stops accepting new work and invalid
 reads. A TV write or settings mutation already accepted by a worker is not
 undone by closing; the window may close while the controller keeps the
 application alive until that worker settles, then ignores any stale UI
-transition. During onboarding, both modal dismissal and application quit
+transition. During onboarding, both window close and application quit
 consult the live step gate. A noncancelable step rejects the request and keeps
 the window open. Accepted cancellation waits for running work to settle before
 closing, preserving completed steps and the flow's exclusion lock.

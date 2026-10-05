@@ -1,4 +1,7 @@
 //! Native service installation/repair. Context is supplied by the flow.
+use super::recovery::{
+    RecoveryAction as Action, RecoveryCause as Cause, RepairBoundary as Boundary, SetupRecovery,
+};
 use super::{StepCancellation, StepFailure, StepResponse};
 use crate::presentation::brightness::UserFacingError;
 use crate::settings::{
@@ -49,22 +52,40 @@ fn file(path: PathBuf, contents: impl Into<String>, mode: u32) -> FileSpec {
 
 impl<C: ServiceController> ServiceInstallation<'_, C> {
     pub(crate) fn inspect(&self) -> StepResponse {
-        if self.system_root.join("etc/NIXOS").exists()
-            || self.system_root.join("run/ostree-booted").exists()
-        {
-            return StepResponse::Blocked(failure(
-                "This installation does not support automatic service setup.",
-                "declaratively managed or immutable system",
-                false,
-            ));
-        }
         match self.ready() {
             Ok(true) => StepResponse::Complete,
+            Ok(false)
+                if self.declarative_installation()
+                    || self.system_root.join("run/ostree-booted").exists() =>
+            {
+                match self.unmet_requirements() {
+                    Ok(requirements) => {
+                        let owner = if self.declarative_installation() {
+                            "Update the NixOS system and user service configuration, build it, and activate it."
+                        } else {
+                            "Repair the LG Buddy package and service configuration through your immutable system's image or supported package mechanism."
+                        };
+                        StepResponse::Blocked(failure(
+                            &format!("Unmet requirements: {}. {owner} Confirm the loaded services use this setup configuration, then recheck.", requirements.join("; ")),
+                            "managed service requirements are incomplete",
+                            SetupRecovery::new(Cause::ManagedInstallation, Boundary::SystemConfiguration, Action::RepairExternally),
+                        ))
+                    }
+                    Err(error) => StepResponse::Failed(settings_failure(
+                        "Service setup could not be checked.",
+                        error,
+                    )),
+                }
+            }
             Ok(false) if self.controller.systemd_actions_disabled() => {
                 StepResponse::Blocked(failure(
-                    "Service changes are disabled.",
+                    "Service changes are disabled. Enable them outside setup, then recheck.",
                     "systemd mutations disabled",
-                    false,
+                    SetupRecovery::new(
+                        Cause::UnsupportedInstallation,
+                        Boundary::SystemConfiguration,
+                        Action::RepairExternally,
+                    ),
                 ))
             }
             Ok(false) => match self.system_ready() {
@@ -72,15 +93,18 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     explanation: "Install or repair LG Buddy's background services.",
                     requires_authorization: !system_ready,
                 },
-                Err(error) => StepResponse::Failed(failure(
+                Err(error) => StepResponse::Failed(settings_failure(
                     "Service setup could not be checked.",
                     error,
-                    true,
                 )),
             },
-            Err(error) => {
-                StepResponse::Failed(failure("Service setup could not be checked.", error, true))
+            Err(SettingsError::InvalidValue { key, .. }) if key == "updates.auto_check" => {
+                super::configuration::update_input(self.config)
             }
+            Err(error) => StepResponse::Failed(settings_failure(
+                "Service setup could not be checked.",
+                error,
+            )),
         }
     }
 
@@ -89,24 +113,29 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
         cancellation: &StepCancellation,
         progress: &mut dyn FnMut(StepResponse),
     ) -> StepResponse {
-        if !cancellation.begin() {
+        if !cancellation.can_cancel() {
             return if cancellation.is_cancelled() {
                 StepResponse::Cancelled
             } else {
                 StepResponse::Blocked(failure(
                     "This attempt has already started.",
                     "duplicate service setup attempt",
-                    false,
+                    SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Wait),
                 ))
             };
         }
         progress(StepResponse::Running {
-            message: "Setting up LG Buddy background services…",
-            cancelable: false,
+            message: "Preparing LG Buddy background services…",
+            cancelable: true,
         });
         let before = self.inspect();
         let response = if matches!(before, StepResponse::ActionRequired { .. }) {
-            match self.repair() {
+            match self.repair_cancellable(cancellation, &mut || {
+                progress(StepResponse::Running {
+                    message: "Setting up LG Buddy background services…",
+                    cancelable: false,
+                })
+            }) {
                 Ok(()) => match self.inspect() {
                     StepResponse::Complete => StepResponse::Complete,
                     StepResponse::Failed(error) | StepResponse::Blocked(error) => {
@@ -115,24 +144,26 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                     _ => StepResponse::Failed(failure(
                         "Service setup did not become ready.",
                         "verification after service repair failed",
-                        true,
+                        SetupRecovery::new(Cause::Unverified, Boundary::LocalSetup, Action::Retry),
                     )),
                 },
                 Err(SettingsError::ActivationCancelled) => StepResponse::Cancelled,
                 Err(SettingsError::AuthorizationFailed { message }) => {
                     super::authorization_failed(message)
                 }
-                Err(error) => StepResponse::Failed(failure(
+                Err(error) => StepResponse::Failed(settings_failure(
                     "Service setup could not be completed.",
                     error,
-                    true,
                 )),
             }
         } else {
             before
         };
-        cancellation.finish();
-        response
+        if cancellation.finish_and_was_cancelled() {
+            StepResponse::Cancelled
+        } else {
+            response
+        }
     }
 
     fn desired_timer(&self) -> Result<bool, SettingsError> {
@@ -141,6 +172,9 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             .effective_by_name("updates.auto_check")?
             .required_value()?
             == SettingValue::Enum("enabled"))
+    }
+    fn declarative_installation(&self) -> bool {
+        self.system_root.join("etc/NIXOS").exists()
     }
     fn override_contents(&self) -> Result<String, SettingsError> {
         let config = fs::canonicalize(self.config).map_err(io_error)?;
@@ -253,16 +287,22 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
                 Err(error) => return Err(io_error(error)),
             }
         }
-        Ok(files_match(&self.system_files()?)?
-            && self.controller.system_unit_is_enabled(STARTUP)?
-            && self.controller.system_unit_is_enabled(LIFECYCLE)?
-            && self.controller.system_lifecycle_is_active()?
-            && self.binding_matches(self.controller.system_service_config_path(STARTUP))?
-            && self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?)
+        // Declarative units need not match the imperative installer's files.
+        // Their loaded configuration bindings and service states still must match.
+        Ok(
+            (self.declarative_installation() || files_match(&self.system_files()?)?)
+                && self.controller.system_unit_is_enabled(STARTUP)?
+                && self.controller.system_unit_is_enabled(LIFECYCLE)?
+                && self.controller.system_lifecycle_is_active()?
+                && self.binding_matches(self.controller.system_service_config_path(STARTUP))?
+                && self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?,
+        )
     }
     fn ready(&self) -> Result<bool, SettingsError> {
         let timer = self.desired_timer()?;
-        if !files_match(&self.user_files()?)? || !self.system_ready()? {
+        if (!self.declarative_installation() && !files_match(&self.user_files()?)?)
+            || !self.system_ready()?
+        {
             return Ok(false);
         }
         if !self.binding_matches(self.controller.user_service_config_path(SCREEN))?
@@ -278,6 +318,92 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             && self.controller.user_unit_is_enabled(TIMER)? == timer
             && self.controller.user_service_is_active(TIMER)? == timer)
     }
+    fn unmet_requirements(&self) -> Result<Vec<&'static str>, SettingsError> {
+        let mut missing = Vec::new();
+        if !self.declarative_installation() {
+            if !files_match(&self.system_files()?)? {
+                missing.push(
+                    "system service files and lifecycle hooks must match the installed package",
+                );
+            }
+            if !files_match(&self.user_files()?)? {
+                missing.push(
+                    "screen and update-check user unit files must match the installed package",
+                );
+            }
+        }
+        for path in LEGACY_HANDLERS {
+            match fs::symlink_metadata(self.system_root.join(path)) {
+                Ok(_) => {
+                    missing.push("remove legacy wake/sleep services and hooks");
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        for (ready, requirement) in [
+            (
+                self.controller.system_unit_is_enabled(STARTUP)?,
+                "enable LG_Buddy.service",
+            ),
+            (
+                self.controller.system_unit_is_enabled(LIFECYCLE)?,
+                "enable LG_Buddy_lifecycle.service",
+            ),
+            (
+                self.controller.system_lifecycle_is_active()?,
+                "start LG_Buddy_lifecycle.service",
+            ),
+            (
+                self.binding_matches(self.controller.system_service_config_path(STARTUP))?,
+                "bind LG_Buddy.service to this configuration",
+            ),
+            (
+                self.binding_matches(self.controller.system_service_config_path(LIFECYCLE))?,
+                "bind LG_Buddy_lifecycle.service to this configuration",
+            ),
+            (
+                self.binding_matches(self.controller.user_service_config_path(SCREEN))?,
+                "bind LG_Buddy_screen.service to this configuration",
+            ),
+            (
+                self.binding_matches(
+                    self.controller
+                        .user_service_config_path("LG_Buddy_update_check.service"),
+                )?,
+                "bind LG_Buddy_update_check.service to this configuration",
+            ),
+            (
+                self.controller.user_unit_is_enabled(SCREEN)?,
+                "enable LG_Buddy_screen.service",
+            ),
+            (
+                self.controller.user_service_is_active(SCREEN)?,
+                "start LG_Buddy_screen.service",
+            ),
+        ] {
+            if !ready {
+                missing.push(requirement);
+            }
+        }
+        let timer = self.desired_timer()?;
+        if self.controller.user_unit_is_enabled(TIMER)? != timer {
+            missing.push(if timer {
+                "enable LG_Buddy_update_check.timer"
+            } else {
+                "disable LG_Buddy_update_check.timer"
+            });
+        }
+        if self.controller.user_service_is_active(TIMER)? != timer {
+            missing.push(if timer {
+                "start LG_Buddy_update_check.timer"
+            } else {
+                "stop LG_Buddy_update_check.timer"
+            });
+        }
+        Ok(missing)
+    }
     fn binding_matches(
         &self,
         declared: Result<PathBuf, SettingsError>,
@@ -290,14 +416,28 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
             .as_ref()
             == Some(&expected))
     }
+    #[cfg(test)]
     fn repair(&self) -> Result<(), SettingsError> {
+        self.repair_cancellable(&StepCancellation::default(), &mut || {})
+    }
+    fn repair_cancellable(
+        &self,
+        cancellation: &StepCancellation,
+        mutation: &mut dyn FnMut(),
+    ) -> Result<(), SettingsError> {
         let timer = self.desired_timer()?;
         if !self.system_ready()? {
-            self.controller.repair_system_services(
+            self.controller.repair_system_services_cancellable(
                 &fs::canonicalize(self.config).map_err(io_error)?,
                 self.authorization,
+                cancellation,
+                mutation,
             )?;
         }
+        if !cancellation.protect() {
+            return Err(SettingsError::ActivationCancelled);
+        }
+        mutation();
         let stale_binding =
             !self.binding_matches(self.controller.user_service_config_path(SCREEN))?;
         let files = self.user_files()?;
@@ -340,12 +480,51 @@ impl<C: ServiceController> ServiceInstallation<'_, C> {
     }
 }
 
-fn failure(message: &str, diagnostic: impl ToString, retryable: bool) -> StepFailure {
+fn failure(message: &str, diagnostic: impl ToString, recovery: SetupRecovery) -> StepFailure {
     StepFailure {
         presentation: UserFacingError::new("Service setup incomplete", message),
         diagnostic: diagnostic.to_string(),
-        retryable,
+        recovery,
+        retryable: matches!(
+            recovery.action,
+            Action::Retry | Action::Recheck | Action::RepairExternally
+        ),
     }
+}
+fn settings_failure(message: &str, error: SettingsError) -> StepFailure {
+    let recovery = match &error {
+        SettingsError::SetupInProgress => {
+            SetupRecovery::new(Cause::Busy, Boundary::LocalSetup, Action::Recheck)
+        }
+        SettingsError::InvalidValue { .. }
+        | SettingsError::MissingRequiredSetting { .. }
+        | SettingsError::ReadConfig {
+            kind: io::ErrorKind::InvalidData,
+            ..
+        } => SetupRecovery::new(
+            Cause::InvalidConfiguration,
+            Boundary::UserInput,
+            Action::CorrectConfiguration,
+        ),
+        SettingsError::ReadConfig {
+            kind: io::ErrorKind::PermissionDenied,
+            ..
+        } => SetupRecovery::new(
+            Cause::InvalidEnvironment,
+            Boundary::SystemConfiguration,
+            Action::RepairExternally,
+        ),
+        _ => SetupRecovery::new(Cause::TemporaryFailure, Boundary::LocalSetup, Action::Retry),
+    };
+    let mut failure = failure(message, &error, recovery);
+    if matches!(error, SettingsError::SetupInProgress) {
+        failure.presentation =
+            UserFacingError::new("Setup helper still active", &error.to_string());
+    }
+    // Corrective editing is a separate follow-up; reinspection remains available
+    // after the configuration is corrected outside this flow.
+    failure.retryable = true;
+    failure
 }
 fn io_error(error: impl ToString) -> SettingsError {
     SettingsError::Activation {

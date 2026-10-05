@@ -29,6 +29,7 @@ ACCESSIBILITY_PYTHON=""
 TV_FIXTURE_PID=""
 GITHUB_FIXTURE_PID=""
 SYSTEMD_CONFIG_FIXTURE_PID=""
+SETUP_SESSION_PID=""
 
 fail() {
     echo "$1" >&2
@@ -44,7 +45,7 @@ cleanup() {
         kill "$GUI_PID"
         wait "$GUI_PID" 2>/dev/null || true
     fi
-    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID" "$SYSTEMD_CONFIG_FIXTURE_PID"; do
+    for fixture_pid in "$TV_FIXTURE_PID" "$GITHUB_FIXTURE_PID" "$SYSTEMD_CONFIG_FIXTURE_PID" "$SETUP_SESSION_PID"; do
         if [ -n "$fixture_pid" ] && kill -0 "$fixture_pid" 2>/dev/null; then
             kill "$fixture_pid" 2>/dev/null || true
             wait "$fixture_pid" 2>/dev/null || true
@@ -204,9 +205,9 @@ finish_gui() {
 }
 
 send_closing_mnemonic() {
-    # The key-down event closes the window, so xdotool may see BadWindow while
-    # sending key-up. The following behavior and bounded process wait verify it.
-    xdotool key --window "$WINDOW_ID" "$1" 2>/dev/null || true
+    # Keep key-up directed at the X session even if key-down destroys the window.
+    xdotool windowfocus --sync "$WINDOW_ID"
+    xdotool key "$1"
 }
 
 start_accessibility_bus() {
@@ -262,6 +263,33 @@ observe_gui_state() {
         --timeout 30 "$@"
 }
 
+start_setup_session() {
+    if [ -n "$SETUP_SESSION_PID" ]; then
+        kill "$SETUP_SESSION_PID"
+        wait "$SETUP_SESSION_PID" 2>/dev/null || true
+    fi
+    rm -f "$WORK_DIR/setup-ready"
+    "$ACCESSIBILITY_PYTHON" "$SCRIPT_DIR/test-setup-session.py" --config "$CONFIG_FILE" \
+        --ready-file "$WORK_DIR/setup-ready" "$@" > "$WORK_DIR/setup-session.output" 2>&1 &
+    SETUP_SESSION_PID=$!
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [ ! -f "$WORK_DIR/setup-ready" ] || return 0
+        if ! kill -0 "$SETUP_SESSION_PID" 2>/dev/null; then
+            cat "$WORK_DIR/setup-session.output" >&2
+            fail "Setup session fixture exited."
+        fi
+        sleep 0.05
+    done
+    cat "$WORK_DIR/setup-session.output" >&2
+    fail "Setup session fixture did not publish its initial result."
+}
+
+publish_setup_assessment() {
+    gdbus call --session --dest io.github.Staphylococcus.LGBuddy \
+        --object-path /io/github/Staphylococcus/LGBuddy/Session \
+        --method io.github.Staphylococcus.LGBuddy.Session1.RequestSetupAssessment >/dev/null
+}
+
 if [ "${LG_BUDDY_GUI_JOURNEY_ONLY:-0}" = 1 ]; then
     start_accessibility_bus
     source "$SCRIPT_DIR/test-release-gui-journey.sh"
@@ -273,15 +301,19 @@ fi
 # from TVs returns to the same window and focuses the slider after the read.
 reset_tv_state 50 20 true "$GET_BRIGHTNESS" 2000 false
 start_accessibility_bus
+start_setup_session
 cp "$CONFIG_FILE" "$WORK_DIR/current-config.env"
 sed -i 's/^tvs_primary_platform=lg_webos$/tvs_primary_platform=bscpylgtv/' "$CONFIG_FILE"
 cp "$CONFIG_FILE" "$WORK_DIR/stale-config.env"
+publish_setup_assessment
 start_gui enabled "" "" normal
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-text "saved TV configuration needs migration"
-observe_gui_state --select-page Settings
-observe_gui_state --expected-settings-state ready
 send_closing_mnemonic Escape
-finish_gui "migration gate with Settings still available"
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
+finish_gui "migration recovery gate"
 cmp "$CONFIG_FILE" "$WORK_DIR/stale-config.env" || fail "Migration gate changed configuration."
 python3 - "$STATE_FILE" <<'PY_STALE'
 import json, sys
@@ -289,6 +321,7 @@ state = json.load(open(sys.argv[1]))
 assert state["connection_count"] == 0 and not state["request_uris"], state
 PY_STALE
 cp "$WORK_DIR/current-config.env" "$CONFIG_FILE"
+publish_setup_assessment
 start_gui enabled "" "" normal
 NORMAL_GUI_PID="$GUI_PID"
 NORMAL_WINDOW_ID="$WINDOW_ID"
@@ -417,41 +450,41 @@ done
 cp "$CONFIG_FILE" "$WORK_DIR/before-unpair.env"
 observe_gui_state --activate-control "Unpair TV…"
 observe_gui_state --expected-tvs-state unpair
-xdotool key --window "$WINDOW_ID" Escape
+send_closing_mnemonic Escape
 observe_gui_state --expected-tvs-state configured --expected-tv-address "$TV_ADDRESS" --expected-tv-name OLED42C2
 cmp -s "$CONFIG_FILE" "$WORK_DIR/before-unpair.env" || fail "Cancelling Unpair changed the configuration."
 [ -f "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Cancelling Unpair removed the credential."
 observe_gui_state --activate-control "Unpair TV…"
 observe_gui_state --expected-tvs-state unpair
 observe_gui_state --activate-control Unpair
-observe_gui_state --expected-tvs-state empty
-[ ! -e "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Unpair left the native credential."
-observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-tvs-state pairing
+[ ! -e "$WORK_DIR/tvs/primary/access-token.json" ] || fail "Unpair left the native credential."
 observe_gui_state --activate-control Cancel
-observe_gui_state --expected-tvs-state empty
-send_closing_mnemonic Escape
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
 finish_gui "input editing and confirmed unpairing"
 cp "$WORK_DIR/before-management.env" "$CONFIG_FILE"
 
-# An absent profile has a standard empty state and never contacts the TV.
+# An absent profile opens the setup gate and never contacts the TV.
 export LG_BUDDY_CONFIG="$WORK_DIR/no-config.env"
 cp "$STATE_FILE" "$WORK_DIR/before-empty.json"
 start_gui enabled "" "" normal
-observe_gui_state --expected-tvs-state empty
-observe_gui_state --activate-control "Pair a TV"
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control "Complete setup"
 observe_gui_state --expected-tvs-state pairing
 xdotool key --window "$WINDOW_ID" Return
 observe_gui_state --expected-tvs-state pairing-invalid
-xdotool key --window "$WINDOW_ID" Escape
-observe_gui_state --expected-tvs-state empty
-# A second opening starts with a fresh form and uses the header's Cancel button.
-observe_gui_state --activate-control "Pair a TV"
-observe_gui_state --expected-tvs-state pairing
-observe_gui_state --activate-control Cancel
-observe_gui_state --expected-tvs-state empty
 send_closing_mnemonic Escape
-finish_gui "empty TVs view"
+observe_gui_state --expected-tvs-state setup-required
+gapplication action io.github.staphylococcus.LGBuddy quit
+finish_gui "invalid setup form cancellation"
+# A second opening remains at the gate until the user chooses setup.
+start_gui enabled "" "" normal
+observe_gui_state --expected-tvs-state setup-required
+observe_gui_state --activate-control Close
+finish_gui "setup gate cancellation"
 python3 - "$WORK_DIR/before-empty.json" "$STATE_FILE" <<'PY_EMPTY'
 import json, sys
 before, after = [json.load(open(path)) for path in sys.argv[1:]]
@@ -462,6 +495,7 @@ export LG_BUDDY_CONFIG="$CONFIG_FILE"
 
 # A failed optional model read retains the local TV details.
 reset_tv_state 50 20 false "$GET_MODEL" 0 true
+publish_setup_assessment
 start_gui enabled
 wait_for_requests "$GET_MODEL" 1
 observe_gui_state --select-page TVs
@@ -534,12 +568,11 @@ PY
 # Cancelling the loading window never writes a value.
 reset_tv_state 37 20 false "$GET_BRIGHTNESS" 2000 false
 start_gui
+# Window presentation precedes setup admission; cancel an actual pending TV read.
+wait_for_requests "$GET_BRIGHTNESS" 1
 xdotool windowfocus --sync "$WINDOW_ID"
 send_closing_mnemonic Escape
 finish_gui "loading cancellation"
-# Wait for the delayed brightness read before checking for writes. Other read
-# workers may still be finishing when the next scenario resets the state.
-wait_for_requests "$GET_BRIGHTNESS" 1
 python3 - "$STATE_FILE" <<'PY'
 import json
 import sys
@@ -555,6 +588,8 @@ stop_behavior_tv
 if [ -n "$TV_FIXTURE" ]; then
     source "$SCRIPT_DIR/test-release-gui-journey.sh"
     run_installed_gui_journey
+    # The journey publishes for its own config; restore the outer scenario's peer.
+    start_setup_session
 fi
 
 if [ "${LG_BUDDY_TEST_PLATFORM_CONTRACT:-0}" = "1" ]; then

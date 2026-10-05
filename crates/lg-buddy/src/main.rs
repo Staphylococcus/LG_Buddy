@@ -6,7 +6,12 @@ use lg_buddy::{help, parse_args, run_command, version, ParseOutcome};
 fn main() -> ExitCode {
     let program = env::args().next().unwrap_or_else(|| "lg-buddy".to_string());
 
-    match parse_args(env::args().skip(1)) {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments.first().is_some_and(|arg| arg == "kwin-setup") {
+        return ExitCode::from(lg_buddy::setup::run_kwin_setup(&arguments[1..]));
+    }
+
+    match parse_args(arguments) {
         Ok(ParseOutcome::Help(topic)) => {
             print!("{}", help(&program, topic));
             ExitCode::SUCCESS

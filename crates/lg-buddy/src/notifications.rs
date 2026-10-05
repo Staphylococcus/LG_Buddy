@@ -1,6 +1,7 @@
 use crate::session_bus::{BusSignal, BusValue};
 use dbus::arg::PropMap;
 use dbus::blocking::Connection as DbusConnection;
+use std::borrow::Borrow;
 use std::fmt;
 use std::time::Duration;
 
@@ -56,6 +57,10 @@ pub struct NotificationId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NotificationSignal {
+    ActivationToken {
+        id: NotificationId,
+        token: String,
+    },
     ActionInvoked {
         id: NotificationId,
         action_key: String,
@@ -93,6 +98,15 @@ pub(crate) fn parse_notification_signal(signal: &BusSignal) -> Option<Notificati
     }
 
     match signal.member.as_str() {
+        "ActivationToken" => {
+            let [BusValue::U32(id), BusValue::String(token)] = signal.body.as_slice() else {
+                return None;
+            };
+            Some(NotificationSignal::ActivationToken {
+                id: NotificationId(*id),
+                token: token.clone(),
+            })
+        }
         "ActionInvoked" => {
             let [BusValue::U32(id), BusValue::String(action_key)] = signal.body.as_slice() else {
                 return None;
@@ -135,6 +149,18 @@ impl std::error::Error for NotificationError {}
 pub trait Notifier {
     fn capabilities(&self) -> Result<NotificationCapabilities, NotificationError>;
     fn notify(&self, notification: &Notification) -> Result<NotificationId, NotificationError>;
+    fn close(&self, _id: NotificationId) -> Result<(), NotificationError> {
+        Err(NotificationError::Transport(
+            "notification close is unavailable".into(),
+        ))
+    }
+}
+
+pub(crate) fn for_owner<'a>(connection: &'a DbusConnection, owner: &str) -> impl Notifier + 'a {
+    NotificationDispatcher::new(DbusNotificationTransport {
+        connection,
+        destination: owner.into(),
+    })
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -149,6 +175,11 @@ impl Notifier for FreedesktopNotifier {
     fn notify(&self, notification: &Notification) -> Result<NotificationId, NotificationError> {
         let transport = DbusNotificationTransport::connect()?;
         NotificationDispatcher::new(transport).notify(notification)
+    }
+
+    fn close(&self, id: NotificationId) -> Result<(), NotificationError> {
+        let transport = DbusNotificationTransport::connect()?;
+        NotificationDispatcher::new(transport).close(id)
     }
 }
 
@@ -184,6 +215,11 @@ impl NotificationRequest {
 trait NotificationTransport {
     fn get_capabilities(&self) -> Result<Vec<String>, NotificationError>;
     fn notify(&self, request: NotificationRequest) -> Result<NotificationId, NotificationError>;
+    fn close(&self, _id: NotificationId) -> Result<(), NotificationError> {
+        Err(NotificationError::Transport(
+            "notification close is unavailable".into(),
+        ))
+    }
 }
 
 struct NotificationDispatcher<T> {
@@ -207,10 +243,15 @@ impl<T: NotificationTransport> Notifier for NotificationDispatcher<T> {
         self.transport
             .notify(NotificationRequest::from_notification(notification))
     }
+
+    fn close(&self, id: NotificationId) -> Result<(), NotificationError> {
+        self.transport.close(id)
+    }
 }
 
-struct DbusNotificationTransport {
-    connection: DbusConnection,
+struct DbusNotificationTransport<C = DbusConnection> {
+    connection: C,
+    destination: String,
 }
 
 impl DbusNotificationTransport {
@@ -218,15 +259,18 @@ impl DbusNotificationTransport {
         Ok(Self {
             connection: DbusConnection::new_session()
                 .map_err(|err| NotificationError::Transport(err.to_string()))?,
+            destination: NOTIFICATION_SERVICE.into(),
         })
     }
 }
 
-impl NotificationTransport for DbusNotificationTransport {
+impl<C: Borrow<DbusConnection>> NotificationTransport for DbusNotificationTransport<C> {
     fn get_capabilities(&self) -> Result<Vec<String>, NotificationError> {
-        let proxy =
-            self.connection
-                .with_proxy(NOTIFICATION_SERVICE, NOTIFICATION_PATH, METHOD_TIMEOUT);
+        let proxy = self.connection.borrow().with_proxy(
+            &self.destination,
+            NOTIFICATION_PATH,
+            METHOD_TIMEOUT,
+        );
         let (capabilities,): (Vec<String>,) = proxy
             .method_call(NOTIFICATION_INTERFACE, "GetCapabilities", ())
             .map_err(|err| NotificationError::Transport(err.to_string()))?;
@@ -235,9 +279,11 @@ impl NotificationTransport for DbusNotificationTransport {
     }
 
     fn notify(&self, request: NotificationRequest) -> Result<NotificationId, NotificationError> {
-        let proxy =
-            self.connection
-                .with_proxy(NOTIFICATION_SERVICE, NOTIFICATION_PATH, METHOD_TIMEOUT);
+        let proxy = self.connection.borrow().with_proxy(
+            &self.destination,
+            NOTIFICATION_PATH,
+            METHOD_TIMEOUT,
+        );
         let hints: PropMap = PropMap::new();
         let (id,): (u32,) = proxy
             .method_call(
@@ -257,6 +303,17 @@ impl NotificationTransport for DbusNotificationTransport {
             .map_err(|err| NotificationError::Transport(err.to_string()))?;
 
         Ok(NotificationId(id))
+    }
+
+    fn close(&self, id: NotificationId) -> Result<(), NotificationError> {
+        let proxy = self.connection.borrow().with_proxy(
+            &self.destination,
+            NOTIFICATION_PATH,
+            METHOD_TIMEOUT,
+        );
+        proxy
+            .method_call::<(), _, _, _>(NOTIFICATION_INTERFACE, "CloseNotification", (id.0,))
+            .map_err(|err| NotificationError::Transport(err.to_string()))
     }
 }
 
