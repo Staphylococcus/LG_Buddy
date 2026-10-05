@@ -49,6 +49,7 @@ SEQUENCE_LOG="$WORK_DIR/sequence.log"
 GUI_WRAPPER="$WORK_DIR/lg-buddy-gui"
 PROBE="$WORK_DIR/gui-runtime-probe"
 REAL_FLOCK="$(command -v flock)"
+TEST_FLOCK="$STUB_DIR/flock"
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -109,6 +110,7 @@ run_fresh_install() {
     local package_manager_fails="${5:-0}"
     local command_path="${6:-$PATH}"
     local install_flock="${7:-0}"
+    local flock_path="${8:-$REAL_FLOCK}"
     local root="$WORK_DIR/$scenario/root"
     local home="$WORK_DIR/$scenario/home"
 
@@ -144,6 +146,7 @@ EOF
         export LG_BUDDY_FAKE_INSTALL_FLOCK="$install_flock"
         export LG_BUDDY_REAL_FLOCK="$REAL_FLOCK"
         export LG_BUDDY_STUB_DIR="$STUB_DIR"
+        export LG_BUDDY_TEST_FLOCK_PATH="$flock_path"
         if [ "$auto_install" = "1" ]; then
             export LG_BUDDY_AUTO_INSTALL_DEPS="yes"
         else
@@ -239,8 +242,17 @@ done < <(printf '%s\n' "$PATH" | tr ':' '\n')
 
 touch "$DEPENDENCIES_INSTALLED"
 rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
+ISOLATED_PATH_OUTPUT="$WORK_DIR/isolated-path.output"
+if ! run_fresh_install isolated-path "$ISOLATED_PATH_OUTPUT" 0 1 0 "$FILTERED_PATH" 0 "$REAL_FLOCK"; then
+    cat "$ISOLATED_PATH_OUTPUT"
+    echo "Install failed when flock existed outside the isolated PATH." >&2
+    exit 1
+fi
+[ ! -e "$PACKAGE_LOG" ]
+[ -x "$WORK_DIR/isolated-path/root/usr/bin/lg-buddy" ]
+
 FLOCK_UNAVAILABLE_OUTPUT="$WORK_DIR/flock-unavailable.output"
-if run_fresh_install flock-unavailable "$FLOCK_UNAVAILABLE_OUTPUT" 0 1 1 "$FILTERED_PATH"; then
+if run_fresh_install flock-unavailable "$FLOCK_UNAVAILABLE_OUTPUT" 0 1 1 "$FILTERED_PATH" 0 "$TEST_FLOCK"; then
     echo "Install unexpectedly continued after util-linux installation failed." >&2
     exit 1
 fi
@@ -252,7 +264,7 @@ grep -Fq "$EXPECTED_FLOCK_MANUAL" "$FLOCK_UNAVAILABLE_OUTPUT"
 
 FLOCK_UNSATISFIED_OUTPUT="$WORK_DIR/flock-unsatisfied.output"
 rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
-if run_fresh_install flock-unsatisfied "$FLOCK_UNSATISFIED_OUTPUT" 1 1 0 "$FILTERED_PATH"; then
+if run_fresh_install flock-unsatisfied "$FLOCK_UNSATISFIED_OUTPUT" 1 1 0 "$FILTERED_PATH" 0 "$TEST_FLOCK"; then
     echo "Install unexpectedly accepted util-linux without flock." >&2
     exit 1
 fi
@@ -262,7 +274,7 @@ grep -Fq 'util-linux was installed but flock is still unavailable' "$FLOCK_UNSAT
 
 FLOCK_SUCCESS_OUTPUT="$WORK_DIR/flock-success.output"
 rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
-if ! run_fresh_install flock-success "$FLOCK_SUCCESS_OUTPUT" 0 1 0 "$FILTERED_PATH" 1; then
+if ! run_fresh_install flock-success "$FLOCK_SUCCESS_OUTPUT" 0 1 0 "$FILTERED_PATH" 1 "$TEST_FLOCK"; then
     cat "$FLOCK_SUCCESS_OUTPUT"
     echo "Install failed after installing required util-linux." >&2
     exit 1

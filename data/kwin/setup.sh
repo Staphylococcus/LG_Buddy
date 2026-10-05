@@ -11,6 +11,7 @@ fi
 
 payload_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 runtime=/usr/bin/lg-buddy
+flock_binary=/usr/bin/flock
 foreground=0
 allow_dependencies=0
 noninteractive=0
@@ -318,7 +319,7 @@ load_installed() {
 
 lock_setup() {
     local status=0
-    flock -n 9 || status=$?
+    "$flock_binary" -n 9 || status=$?
     if [ "$status" -eq 127 ]; then
         echo "LG Buddy KWin setup requires flock (provided by util-linux)." >&2
         return 1

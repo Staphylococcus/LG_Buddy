@@ -327,7 +327,8 @@ check_dep() {
 }
 
 require_flock() {
-    if command -v flock >/dev/null 2>&1; then
+    local flock_path="${LG_BUDDY_TEST_FLOCK_PATH:-/usr/bin/flock}"
+    if [ -x "$flock_path" ]; then
         echo "  [OK]      flock (KWin setup)"
         return 0
     fi
@@ -339,7 +340,7 @@ require_flock() {
         print_manual_install_command
         exit 1
     fi
-    if ! command -v flock >/dev/null 2>&1; then
+    if [ ! -x "$flock_path" ]; then
         echo "Error: util-linux was installed but flock is still unavailable." >&2
         MISSING_PKGS=(util-linux)
         print_manual_install_command
