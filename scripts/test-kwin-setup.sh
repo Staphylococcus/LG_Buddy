@@ -7,7 +7,7 @@ set -e
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
 # Missing util-linux must fail as an ordinary setup error, not authorization denial.
-if missing_flock_output="$(flock_binary="$fixture/missing-flock"; exec 9>"$fixture/lock"; lock_setup 2>&1)"; then
+if missing_flock_output="$(PATH="$fixture"; exec 9>"$fixture/lock"; lock_setup 2>&1)"; then
     echo "KWin setup accepted a missing flock command." >&2
     exit 1
 fi
