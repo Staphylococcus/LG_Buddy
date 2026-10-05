@@ -21,6 +21,7 @@ supported reduced coverage; an applicable unmet setup requirement remains pendin
 The native installer installs an optional `LG_Buddy_kwin.service` user unit and
 the bridge payload under `/usr/lib/lg-buddy/kwin`. Session activation can load an
 already installed plugin; it never provisions or requests authorization.
+The helper uses `flock` from `util-linux` to serialize setup and removal.
 Explicit foreground setup tries:
 
 1. A compatible bundled prebuilt.

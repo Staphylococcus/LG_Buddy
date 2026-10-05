@@ -6,6 +6,12 @@ source "$repo/data/kwin/setup.sh"
 set -e
 fixture="$(mktemp -d)"
 trap 'rm -rf -- "$fixture"' EXIT
+# Missing util-linux must fail as an ordinary setup error, not authorization denial.
+if missing_flock_output="$(flock() { return 127; }; exec 9>"$fixture/lock"; lock_setup 2>&1)"; then
+    echo "KWin setup accepted a missing flock command." >&2
+    exit 1
+fi
+grep -Fq 'requires flock (provided by util-linux)' <<<"$missing_flock_output"
 # An already-authorized helper failure must not look like authorization denial.
 for code in 126 127; do
     (

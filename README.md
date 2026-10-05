@@ -63,10 +63,11 @@ are strongly recommended so the saved address stays valid and the TV remains
 ready to respond.
 
 Official bundles include the GTK desktop app and CLI together. The installer
-checks for GTK 4.14 and libadwaita 1.5 or newer, offers to install missing
-packages on Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies
-the requirements before proceeding. The prebuilt binaries require glibc 2.39
-or newer—the Ubuntu 24.04 runtime baseline.
+installs `util-linux` if `flock` is missing, and checks for GTK 4.14 and
+libadwaita 1.5 or newer. It offers to install missing GTK packages on
+Debian/Ubuntu, Fedora, and Arch with your confirmation, and verifies the
+requirements before proceeding. The prebuilt binaries require glibc 2.39 or
+newer—the Ubuntu 24.04 runtime baseline.
 The installed runtime does not require Python, pip, or bscpylgtv.
 TV Sleep & Wake activation requires `pkexec` and
 a desktop authorization agent. You can also install the prerequisites manually:
@@ -77,19 +78,19 @@ a desktop authorization agent. You can also install the prerequisites manually:
 ### Debian, Ubuntu, and Pop!_OS
 
 ```bash
-sudo apt install libgtk-4-1 libadwaita-1-0 pkexec
+sudo apt install libgtk-4-1 libadwaita-1-0 pkexec util-linux
 ```
 
 ### Fedora
 
 ```bash
-sudo dnf install gtk4 libadwaita polkit
+sudo dnf install gtk4 libadwaita polkit util-linux
 ```
 
 ### Arch Linux
 
 ```bash
-sudo pacman -S gtk4 libadwaita polkit
+sudo pacman -S gtk4 libadwaita polkit util-linux
 ```
 
 </details>

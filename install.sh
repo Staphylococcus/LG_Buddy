@@ -326,6 +326,28 @@ check_dep() {
     fi
 }
 
+require_flock() {
+    if command -v flock >/dev/null 2>&1; then
+        echo "  [OK]      flock (KWin setup)"
+        return 0
+    fi
+
+    echo "Installing required util-linux (provides flock)..."
+    if [ -z "$PM" ] || ! run_privileged "${INSTALL_CMD[@]}" util-linux; then
+        echo "Error: could not install required util-linux." >&2
+        MISSING_PKGS=(util-linux)
+        print_manual_install_command
+        exit 1
+    fi
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "Error: util-linux was installed but flock is still unavailable." >&2
+        MISSING_PKGS=(util-linux)
+        print_manual_install_command
+        exit 1
+    fi
+    echo "  [OK]      flock (KWin setup)"
+}
+
 detect_package_manager() {
     if command -v apt &>/dev/null; then
         PM="apt"
@@ -777,6 +799,7 @@ check_install_prerequisites() {
     echo "Checking prerequisites..."
     MISSING_PKGS=()
     detect_package_manager
+    require_flock
     check_gui_runtime_prerequisites
     if [ "$FRESH_SETUP_MODE" -eq 1 ] && [ "$HEADLESS" -eq 0 ]; then
         check_dep "pkexec (required for TV Sleep & Wake)" "$(pkexec_package)" "pkexec_available"

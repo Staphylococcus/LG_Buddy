@@ -316,6 +316,16 @@ load_installed() {
     return 0
 }
 
+lock_setup() {
+    local status=0
+    flock -n 9 || status=$?
+    if [ "$status" -eq 127 ]; then
+        echo "LG Buddy KWin setup requires flock (provided by util-linux)." >&2
+        return 1
+    fi
+    return "$status"
+}
+
 main() {
     # Once authorized, operation failures must not resemble pkexec's 126/127.
     case "${1:-}" in --system-*) system_action "$@" || return 1; return 0 ;; esac
@@ -326,7 +336,7 @@ main() {
         if [ -d "$state_dir" ]; then
             log_file="$state_dir/setup.log"
             exec 9>"$state_dir/setup.lock"
-            flock -n 9 || return 1
+            lock_setup || return 1
             remove_previous || return $?
         fi
         rm -rf -- "$cache_dir"
@@ -354,7 +364,7 @@ main() {
     mkdir -p -- "$state_dir/plugins" "$cache_dir" || return 1
     chmod 700 "$state_dir" "$cache_dir" || return 1
     exec 9>"$state_dir/setup.lock"
-    flock -n 9 || return 1
+    lock_setup || return 1
     # Recheck after taking ownership; another setup may just have completed.
     if inspect_session; then return 0; else status=$?; fi
     [ "$status" -eq 3 ] || return "$status"

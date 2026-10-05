@@ -303,6 +303,7 @@ fn modal_recheck_cannot_retry_a_still_active_helper() {
         gui::{OnboardingApplication, OnboardingBackend, OnboardingIntent},
         published::{SetupSnapshot, SnapshotBackend},
     };
+    use std::time::{Duration, Instant};
     struct Backend {
         state: Arc<Mutex<State>>,
         path: PathBuf,
@@ -359,6 +360,21 @@ fn modal_recheck_cannot_retry_a_still_active_helper() {
         assert_eq!(fixture.state.lock().unwrap().calls, [SetupStep::Services]);
     }
     backend.helper_lease.lock().unwrap().take();
+    // A parallel subprocess may briefly inherit the old descriptor before exec.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match FlowLock::try_acquire(&backend.path) {
+            Ok(lease) => {
+                drop(lease);
+                break;
+            }
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                assert!(Instant::now() < deadline, "helper retained the setup lock");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
     let operation = app
         .handle(OnboardingIntent::Submit)
         .unwrap()

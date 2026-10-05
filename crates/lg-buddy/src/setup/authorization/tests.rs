@@ -103,6 +103,8 @@ printf 'helper diagnostic' >&2
 [ "${2:-}" != fail ] || exit 1
 "#,
         );
+        // Lock Bash's fd 9 through the test binary; the shell retains the
+        // locked open-file description after the child exits.
         fs::write(
             fixture.0.join("plasma.sh"),
             format!(
@@ -113,7 +115,7 @@ foreground=0
 allow_dependencies=0
 main() {{
     exec 9>'{root}/plasma.lock'
-    flock -n 9 || return 1
+    LG_BUDDY_PLASMA_LOCK_CHILD=1 '{test_exe}' --exact setup::authorization::tests::plasma_lock_child --quiet >/dev/null || return 1
     [ "$1" = --foreground ] || return 1
     printf '%s\n' "$*" >> '{root}/plasma-options'
     for option in "${{@:2}}"; do
@@ -131,7 +133,8 @@ main() {{
     privileged --system-install 1000 root id source
 }}
 "#,
-                root = fixture.0.display()
+                root = fixture.0.display(),
+                test_exe = std::env::current_exe().unwrap().display()
             ),
         )
         .unwrap();
@@ -436,11 +439,25 @@ fn terminal_services_and_plasma_share_parent_scoped_sudo_permission() {
 }
 
 #[test]
+fn plasma_lock_child() {
+    if std::env::var_os("LG_BUDDY_PLASMA_LOCK_CHILD").is_none() {
+        return;
+    }
+    assert_eq!(
+        unsafe { libc::flock(9, libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "{}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[test]
 fn terminal_prompt_child() {
     let Some(root) = std::env::var_os("LG_BUDDY_TERMINAL_AUTHORIZATION_ROOT") else {
         return;
     };
-    let fixture = Fixture(root.into());
+    // The parent owns this directory, including when an assertion fails here.
+    let fixture = std::mem::ManuallyDrop::new(Fixture(root.into()));
     let session = fixture.session_for_mode(AuthorizationMode::Terminal, None);
     assert!(session
         .services(Path::new("config"), None)
@@ -453,7 +470,6 @@ fn terminal_prompt_child() {
         .status
         .success());
     session.close();
-    std::mem::forget(fixture);
 }
 
 #[test]
@@ -801,12 +817,12 @@ fn authorization_owner_child() {
     let Some(root) = std::env::var_os("LG_BUDDY_AUTHORIZATION_TEST_ROOT") else {
         return;
     };
-    let fixture = Fixture(root.into());
+    // The parent owns this directory, including if this child exits early.
+    let fixture = std::mem::ManuallyDrop::new(Fixture(root.into()));
     let lease = super::super::lock::FlowLock::try_acquire(&fixture.0.join("flow.lock")).unwrap();
     let session = fixture.session(Some(&lease.file()));
     let _ = session.plasma(&fixture.0.join("plasma.sh"), false, None);
-    // The parent kills this owner during the call; only it owns fixture cleanup.
-    std::mem::forget(fixture);
+    // The parent kills this owner during the call and cleans up the fixture.
 }
 
 #[test]

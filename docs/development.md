@@ -9,6 +9,8 @@ Compiling the Rust runtime requires:
 - a Rust toolchain with `cargo`
 - a working C toolchain
 
+KWin setup also requires `flock` from `util-linux`.
+
 Compiling and testing the GTK frontend additionally requires:
 
 - GTK 4.10 or newer development files

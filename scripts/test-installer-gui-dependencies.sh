@@ -23,14 +23,20 @@ case "$PACKAGE_MANAGER" in
     apt)
         EXPECTED_ARGS="install -y libgtk-4-1 libadwaita-1-0"
         EXPECTED_MANUAL="sudo apt install libgtk-4-1 libadwaita-1-0"
+        EXPECTED_FLOCK_ARGS="install -y util-linux"
+        EXPECTED_FLOCK_MANUAL="sudo apt install util-linux"
         ;;
     dnf)
         EXPECTED_ARGS="install -y gtk4 libadwaita"
         EXPECTED_MANUAL="sudo dnf install gtk4 libadwaita"
+        EXPECTED_FLOCK_ARGS="install -y util-linux"
+        EXPECTED_FLOCK_MANUAL="sudo dnf install util-linux"
         ;;
     pacman)
         EXPECTED_ARGS="-S --noconfirm gtk4 libadwaita"
         EXPECTED_MANUAL="sudo pacman -S gtk4 libadwaita"
+        EXPECTED_FLOCK_ARGS="-S --noconfirm util-linux"
+        EXPECTED_FLOCK_MANUAL="sudo pacman -S util-linux"
         ;;
     *) usage ;;
 esac
@@ -42,6 +48,7 @@ PACKAGE_LOG="$WORK_DIR/package-manager.log"
 SEQUENCE_LOG="$WORK_DIR/sequence.log"
 GUI_WRAPPER="$WORK_DIR/lg-buddy-gui"
 PROBE="$WORK_DIR/gui-runtime-probe"
+REAL_FLOCK="$(command -v flock)"
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -65,6 +72,9 @@ if [ "${LG_BUDDY_FAKE_PACKAGE_MANAGER_FAIL:-0}" = "1" ]; then
 fi
 if [ "${LG_BUDDY_FAKE_INSTALL_SATISFIES:-1}" = "1" ]; then
     : >"${LG_BUDDY_DEPENDENCIES_INSTALLED:?}"
+fi
+if [ "${LG_BUDDY_FAKE_INSTALL_FLOCK:-0}" = "1" ]; then
+    ln -s "${LG_BUDDY_REAL_FLOCK:?}" "${LG_BUDDY_STUB_DIR:?}/flock"
 fi
 EOF
 
@@ -97,6 +107,8 @@ run_fresh_install() {
     local auto_install="$3"
     local install_satisfies="$4"
     local package_manager_fails="${5:-0}"
+    local command_path="${6:-$PATH}"
+    local install_flock="${7:-0}"
     local root="$WORK_DIR/$scenario/root"
     local home="$WORK_DIR/$scenario/home"
 
@@ -108,7 +120,7 @@ tvs_primary_input=HDMI_1
 tvs_primary_platform=lg_webos
 EOF
     (
-        export PATH="$STUB_DIR:$PATH"
+        export PATH="$STUB_DIR:$command_path"
         export HOME="$home"
         export XDG_CONFIG_HOME="$home/.config"
         unset LG_BUDDY_CONFIG
@@ -129,6 +141,9 @@ EOF
         export LG_BUDDY_REAL_GUI="$GUI_BINARY"
         export LG_BUDDY_FAKE_INSTALL_SATISFIES="$install_satisfies"
         export LG_BUDDY_FAKE_PACKAGE_MANAGER_FAIL="$package_manager_fails"
+        export LG_BUDDY_FAKE_INSTALL_FLOCK="$install_flock"
+        export LG_BUDDY_REAL_FLOCK="$REAL_FLOCK"
+        export LG_BUDDY_STUB_DIR="$STUB_DIR"
         if [ "$auto_install" = "1" ]; then
             export LG_BUDDY_AUTO_INSTALL_DEPS="yes"
         else
@@ -204,6 +219,56 @@ fi
 [ "$(grep -F -c package-manager "$SEQUENCE_LOG")" -eq 1 ]
 [ -x "$WORK_DIR/success/root/usr/bin/lg-buddy" ]
 [ -x "$WORK_DIR/success/root/usr/bin/lg-buddy-gui" ]
+
+# Reproduce an installation environment with no flock, while keeping the
+# package manager and other prerequisites available for the installer.
+FILTERED_PATH=""
+path_index=0
+while IFS= read -r path_entry; do
+    [ -n "$path_entry" ] || continue
+    mirror_dir="$WORK_DIR/without-flock/path-$path_index"
+    mkdir -p "$mirror_dir"
+    for command_path_entry in "$path_entry"/*; do
+        [ -e "$command_path_entry" ] || continue
+        [ "$(basename "$command_path_entry")" = flock ] && continue
+        ln -s "$command_path_entry" "$mirror_dir/$(basename "$command_path_entry")"
+    done
+    FILTERED_PATH="${FILTERED_PATH:+$FILTERED_PATH:}$mirror_dir"
+    path_index=$((path_index + 1))
+done < <(printf '%s\n' "$PATH" | tr ':' '\n')
+
+touch "$DEPENDENCIES_INSTALLED"
+rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
+FLOCK_UNAVAILABLE_OUTPUT="$WORK_DIR/flock-unavailable.output"
+if run_fresh_install flock-unavailable "$FLOCK_UNAVAILABLE_OUTPUT" 0 1 1 "$FILTERED_PATH"; then
+    echo "Install unexpectedly continued after util-linux installation failed." >&2
+    exit 1
+fi
+grep -Fq 'Installing required util-linux (provides flock)' "$FLOCK_UNAVAILABLE_OUTPUT"
+grep -Fq 'could not install required util-linux' "$FLOCK_UNAVAILABLE_OUTPUT"
+grep -Fq "$EXPECTED_FLOCK_MANUAL" "$FLOCK_UNAVAILABLE_OUTPUT"
+[ "$(cat "$PACKAGE_LOG")" = "$EXPECTED_FLOCK_ARGS" ]
+[ -z "$(find "$WORK_DIR/flock-unavailable/root" -mindepth 1 -print -quit)" ]
+
+FLOCK_UNSATISFIED_OUTPUT="$WORK_DIR/flock-unsatisfied.output"
+rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
+if run_fresh_install flock-unsatisfied "$FLOCK_UNSATISFIED_OUTPUT" 1 1 0 "$FILTERED_PATH"; then
+    echo "Install unexpectedly accepted util-linux without flock." >&2
+    exit 1
+fi
+grep -Fq 'util-linux was installed but flock is still unavailable' "$FLOCK_UNSATISFIED_OUTPUT"
+[ "$(cat "$PACKAGE_LOG")" = "$EXPECTED_FLOCK_ARGS" ]
+[ -z "$(find "$WORK_DIR/flock-unsatisfied/root" -mindepth 1 -print -quit)" ]
+
+FLOCK_SUCCESS_OUTPUT="$WORK_DIR/flock-success.output"
+rm -f "$PACKAGE_LOG" "$SEQUENCE_LOG"
+if ! run_fresh_install flock-success "$FLOCK_SUCCESS_OUTPUT" 0 1 0 "$FILTERED_PATH" 1; then
+    cat "$FLOCK_SUCCESS_OUTPUT"
+    echo "Install failed after installing required util-linux." >&2
+    exit 1
+fi
+[ "$(cat "$PACKAGE_LOG")" = "$EXPECTED_FLOCK_ARGS" ]
+[ -x "$WORK_DIR/flock-success/root/usr/bin/lg-buddy" ]
 
 # The real candidate checks its loaded libraries without a graphical session.
 env -u DISPLAY -u WAYLAND_DISPLAY "$GUI_BINARY" --check-runtime
