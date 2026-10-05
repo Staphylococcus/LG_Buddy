@@ -178,3 +178,42 @@ failures; all passed in the serialized full run. These are not evidence of a
 fixed production lifecycle defect, and this record does not claim remote CI
 results. Serial validation also exposed and fixed the existing lock-test child
 readiness framing, which otherwise deadlocked on libtest's progress prefix.
+
+## 1.10.0 native KWin provisioner recheck
+
+Recorded 2026-10-05 after [#297](https://github.com/Staphylococcus/LG_Buddy/pull/297)
+moved provisioning into Rust. Installed source was
+`917c8ace6d1294ae9f37ff199982da9801ff5e61`: the merged `ee775717` product tree
+plus the 1.10.0 version preparation. Subsequent changes to this record do not
+change that product tree.
+
+The existing disposable Fedora 44 VM ran native Plasma/KWin 6.7.5, Qt 6.11.2,
+GTK 4.22.5 and libadwaita 1.9.4. Both production GNU debug executables were built
+with version 1.10.0 and the full source commit, then deployed through the real
+installer as the desktop user. Native systemd, KDE Polkit and the installed
+session daemon were used; only the TV transport used the loopback webOS fixture.
+This is source-candidate desktop acceptance, not a claim that the final official
+musl/GNU release archive was installed in this VM.
+
+Installed SHA-256:
+
+```text
+Runtime: e0a2d539bcf1cbe6753fd29e400d44d03b1bcd9a9ce6a5b7c16453b276ede732
+GUI:     c241f13b9db74451f99c1f139c09cce4f9d44ef22e67eb12e224842b7fd7a6b4
+```
+
+| Case | Native result |
+| --- | --- |
+| Local build | With the loaded/installed bridge removed and no compatible artifact, the existing modal repaired background services, reused the native authorization grant for Plasma, compiled the plugin, installed/loaded it and admitted the GUI only after daemon revision 2 Complete. The build log recorded CMake configuration and successful C++ compilation. |
+| Cache reuse | A fresh daemon revision 3 identified missing Plasma integration after bridge removal. The existing CTA/modal and native KDE authorization installed/loaded the cached artifact; revision 4 Complete admitted normal navigation. The new build log was empty. |
+| Prebuilt reuse | A compatible artifact from the candidate's native local build was staged as root-owned prebuilt input and the cache moved aside. Bridge removal produced revision 5 Incomplete; native GUI repair reached revision 6 Complete with an empty build log. This checks the prebuilt delivery path, not a different compiler baseline. |
+| Passive login loader | With the bridge unloaded but its installed artifact present, restarting the actual `LG_Buddy_kwin.service` ran `/usr/bin/lg-buddy kwin-setup`, returned status 0 and loaded the matching bridge. The `kwinrc` digest did not change. |
+| Cached GUI open | Normal installed GUI activation admitted navigation while retaining the exact daemon instance, revision 6 and Complete result. Opening did not reassess. |
+
+The live bridge reported KWin `6.7.5` and source identity
+`398e5cca76ee4d99befb4e57702b8d9f4f5d8d4a338e609d916c1b8a2b616dba`.
+The installed plugin was root-owned, mode 0644. Each repair runner exited with
+`outcome: passed`, a fresh completion publication and no owned GUI remaining.
+The TV fixture was stopped and the disposable VM shut down after evidence
+collection. These checks complement the earlier desktop matrix; they do not
+extend its physical-TV, Atomic or NixOS Plasma coverage.
