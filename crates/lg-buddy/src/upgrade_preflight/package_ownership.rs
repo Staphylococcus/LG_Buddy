@@ -208,14 +208,20 @@ impl PackageDatabase {
                 },
                 Database {
                     name: "rpm",
-                    // Query only the owning package NAME(s) — one line per
-                    // owner. `rpm -qf`'s default output (the NEVRA, e.g.
-                    // `lg-buddy-1.10.0-1.fc42.x86_64`) is not reliable:
-                    // package names contain '-', so the name cannot be
-                    // split off, and a single file's default output may
-                    // omit the release/arch. `%{NAME}` is exact.
+                    // `-q --path --qf '%{NAME}\n' <path>`: query the
+                    // *database* for the owning package, whether or not
+                    // the file is currently installed (a `%ghost` /
+                    // deleted file still resolves to its owner — `rpm`
+                    // looks the path up in the DB, it does not stat the
+                    // filesystem). Output is one owning package NAME per
+                    // line (`%{NAME}`, since package names contain '-'
+                    // and can't be split off a default NEVRA). This
+                    // replaces `-qf`: `-qf` also exits 1 when the file
+                    // simply doesn't exist on disk, which #304 must not
+                    // read as "unowned" (it will preflight destinations
+                    // that don't exist yet).
                     exec: "/usr/bin/rpm",
-                    args: &["-qf", "--qf", "%{NAME}\\n"],
+                    args: &["-q", "--path", "--qf", "%{NAME}\\n"],
                     family: PackageFamily::Rpm,
                     // rpm loads a per-user macro layer
                     // (`~/.config/rpm/macros`, via `HOME` /
@@ -334,20 +340,38 @@ impl PackageDatabase {
                             }
                         }
                         PackageFamily::Rpm => {
-                            // `rpm -qf --qf '%{NAME}\n'`: 0 = owned (one
-                            // package name per line on stdout), 1 = not
-                            // owned by any package, 2 = db/error.
-                            if code == 0 {
-                                match parse_rpm_names(&stdout, db.family) {
-                                    Ok(owners) => all_owners.extend(owners),
-                                    Err(reason) => {
-                                        errors.push(format!("rpm: {reason} for {}", path.display()))
-                                    }
-                                }
-                            } else if code == 1 {
-                                // "does not belong to any package".
+                            // `rpm -q --path --qf '%{NAME}\n' <path>`: query the
+                            // database for the owning package *whether or not
+                            // the file is installed*. The verdict is content,
+                            // not the exit code — the C-locale markers are
+                            // authoritative:
+                            //   * a valid package NAME on stdout = owned
+                            //     (even for a `%ghost` / deleted file);
+                            //   * `file …: No such file or directory`
+                            //     (lstat failed, no DB entry) or
+                            //     `file … is not owned by any package`
+                            //     (lstat ok, no DB entry) = definitively
+                            //     unowned;
+                            //   * any other output (including a non-zero
+                            //     exit with no recognized marker) = `Err`.
+                            //
+                            // We deliberately do NOT use exit 1 as the
+                            // "unowned" signal: `rpm -qf`/`-q --path` also
+                            // exits 1 when the file simply does not exist
+                            // on disk, and a broken database can yield a
+                            // non-zero exit with an unrecognized message —
+                            // both must fail closed, not read as "unowned".
+                            if let Ok(owners) = parse_rpm_names(&stdout, db.family) {
+                                all_owners.extend(owners);
+                            } else if stderr.contains("No such file or directory")
+                                || stderr.contains("is not owned by any package")
+                            {
+                                // No DB entry for this path: unowned.
                             } else {
-                                errors.push(format!("rpm exited {code} for {}", path.display()));
+                                errors.push(format!(
+                                    "rpm -q --path gave unexpected output for {} (exit {code})",
+                                    path.display()
+                                ));
                             }
                         }
                         PackageFamily::Pacman => {
@@ -526,10 +550,12 @@ pub fn parse_dpkg_owners<'a>(
 /// name containing `-` is not mis-split). A single owned file yields a
 /// single owner; more than one line is a genuine conflict.
 ///
-/// This is only called after `rpm` reported *success*, so at least one
-/// valid name is expected: an empty / all-blank output is an error, not
-/// "zero owners" (which would read as `Unowned`). Any line that is not a
-/// valid package name is also an error (fail closed).
+/// This is called *unconditionally* on the rpm stdout (the content — a
+/// valid package name — is the "owned" signal, not the exit code). A
+/// non-empty, all-valid output is an owner list; an empty / all-blank
+/// output means "no name", in which case the caller decides (a
+/// documented no-match marker on stderr → unowned; otherwise an error).
+/// Any line that is not a valid package name is an error (fail closed).
 fn parse_rpm_names(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwner>, String> {
     let mut owners = Vec::new();
     for line in stdout.lines() {
@@ -691,7 +717,7 @@ mod tests {
         Database {
             name: "rpm",
             exec: "/usr/bin/rpm",
-            args: &["-qf", "--qf", "%{NAME}\\n"],
+            args: &["-q", "--path", "--qf", "%{NAME}\\n"],
             family: PackageFamily::Rpm,
             env_remove: &["HOME", "XDG_CONFIG_HOME", "RPM_CONFIGDIR"],
         }
@@ -1046,9 +1072,69 @@ mod tests {
 
     #[test]
     fn owner_of_rpm_empty_success_fails_closed() {
-        // `rpm -qf` that exits 0 with no names on stdout is malformed, not
-        // "unowned".
+        // `rpm -q --path` that exits 0 with no names on stdout is malformed,
+        // not "unowned".
         let db = fixture(rpm_db(), ran(0, "", ""));
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_rpm_unowned_via_missing_file_marker() {
+        // The whole point of the `--path` switch: a path with no DB entry
+        // and *no on-disk file* must still report unowned (exit 1, the
+        // `No such file or directory` marker). This is the #304 preflight
+        // case — a destination path that does not exist yet.
+        let db = fixture(
+            rpm_db(),
+            ran(1, "", "file /usr/bin/lg-buddy: No such file or directory\n"),
+        );
+        assert_eq!(
+            db.owner_of(Path::new("/usr/bin/lg-buddy")).unwrap(),
+            PathOwnership::Unowned
+        );
+    }
+
+    #[test]
+    fn owner_of_rpm_unowned_via_not_owned_marker() {
+        // A present-but-unowned file: lstat succeeds, no DB entry, so rpm
+        // reports `is not owned by any package` (exit 1). Unowned.
+        let db = fixture(
+            rpm_db(),
+            ran(
+                1,
+                "",
+                "file /usr/bin/lg-buddy is not owned by any package\n",
+            ),
+        );
+        assert_eq!(
+            db.owner_of(Path::new("/usr/bin/lg-buddy")).unwrap(),
+            PathOwnership::Unowned
+        );
+    }
+
+    #[test]
+    fn owner_of_rpm_unexpected_output_fails_closed() {
+        // A non-zero rpm exit with output that matches *neither* the owned
+        // case nor a documented no-match marker (e.g. a broken database:
+        // `cannot open Packages database`) must fail closed, not read as
+        // unowned.
+        let db = fixture(
+            rpm_db(),
+            ran(
+                2,
+                "",
+                "error: cannot open Packages database in /var/lib/rpm\n",
+            ),
+        );
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_rpm_missing_file_exit1_not_conflated_with_broken_db() {
+        // Regression for the exit-code blocker: exit 1 alone is not the
+        // "unowned" signal. The same exit 1 with an *unrecognized* stderr
+        // (neither no-match marker) is an Err, not Unowned.
+        let db = fixture(rpm_db(), ran(1, "", "some unexpected failure\n"));
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
     }
 
