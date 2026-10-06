@@ -54,8 +54,9 @@ pub use observation::{
     PathFacts, PathKind, ServiceManagerFacts, SystemdManagerObservation,
 };
 pub use package_ownership::{
-    DpkgProbeOutcome, InstallationOwnership, PackageDatabase, PackageDatabaseError,
-    PackageFamily, PackageOwner, PathOwnership, installation_ownership, parse_dpkg_owners,
+    Database, InstallationOwnership, PackageDatabase, PackageDatabaseError, PackageFamily,
+    PackageOwner, PathOwnership, ProbeFn, ProbeOutcome, installation_ownership,
+    parse_dpkg_owners,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
