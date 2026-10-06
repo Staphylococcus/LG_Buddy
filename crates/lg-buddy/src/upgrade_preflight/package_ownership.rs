@@ -15,9 +15,9 @@
 // "cannot safely proceed", so a probe that cannot run can never be mistaken
 // for a clean slate.
 //
-// #301 ships the `dpkg` probe only. `rpm -qf` is *data* added by #135 (a new
-// probe path plus the `Rpm` family it reports); it is not a second probe here.
-// The `Rpm` family is carried as forward data — zero logic at #301.
+// #301 ships the `dpkg` probe only. The `Rpm` family is a forward
+// placeholder: #135 adds the `rpm -qf` probe *path* that populates it — a
+// probe-shape extension, not data alone.
 //
 // Two questions, deliberately kept separate. The *general* path-level answer
 // (arbitrary path) does not reveal the *installation-level* answer (is the
@@ -111,8 +111,9 @@ impl std::error::Error for PackageDatabaseError {}
 /// and the *observation* (what the tool printed) stays swappable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DpkgProbeOutcome {
-    /// The `dpkg` tool ran. `code` is its exit status, `lines` its stdout
-    /// (one `pkg: /path` line per owning package).
+    /// The `dpkg` tool ran. `code` is its exit status, `lines` its stdout —
+    /// ownership records (`pkg1, pkg2: /path`, comma-separated owner list)
+    /// and optional diversion records for the matched files.
     Ran { code: i32, lines: Vec<String> },
     /// The `dpkg` tool could not be run at all (absent or exec failure).
     Absent,
@@ -134,9 +135,20 @@ impl std::fmt::Debug for PackageDatabase {
 
 impl PackageDatabase {
     /// The default probe: a real `dpkg -S` against the host's database.
+    ///
+    /// `LC_ALL=C.UTF-8` (and clearing `LANGUAGE`) pins the output to the
+    /// documented, reproducible C-locale form — the man page recommends this
+    /// when machine-parsing, because diversion records are otherwise printed
+    /// with *localized* prefixes.
     pub fn system() -> Self {
         Self::with_probe(|path| {
-            match Command::new("dpkg").arg("-S").arg(path).output() {
+            let output = Command::new("dpkg")
+                .arg("-S")
+                .arg(path)
+                .env("LC_ALL", "C.UTF-8")
+                .env_remove("LANGUAGE")
+                .output();
+            match output {
                 Ok(output) => DpkgProbeOutcome::Ran {
                     code: output.status.code().unwrap_or(-1),
                     lines: String::from_utf8_lossy(&output.stdout)
@@ -149,9 +161,10 @@ impl PackageDatabase {
         })
     }
 
-    /// A probe backed by an injectable `dpkg` runner (a test fixture, or #135's
-    /// additional family). The runner returns the *raw* tool outcome;
-    /// `owner_of` applies the exit-code semantics.
+    /// A probe backed by an injectable `dpkg` runner (a test fixture). The
+    /// runner returns the *raw* tool outcome; `owner_of` applies the
+    /// exit-code semantics. #135's `rpm` path is a new runner shape (its
+    /// outcome type, exit codes, and output grammar differ), not a fixture.
     pub fn with_probe(runner: impl Fn(&Path) -> DpkgProbeOutcome + Send + Sync + 'static) -> Self {
         Self {
             probe: Box::new(runner),
@@ -163,10 +176,12 @@ impl PackageDatabase {
     /// is an `Err`, which the guard treats as "cannot proceed".
     pub fn owner_of(&self, path: &Path) -> Result<PathOwnership, PackageDatabaseError> {
         match (self.probe)(path) {
-            // `dpkg -S` exit 0: owned. stdout holds one `pkg: /path` line per
-            // owning package (several only in a genuine conflict).
+            // `dpkg -S` exit 0: the matched files are owned. A successful run
+            // with output we cannot parse is *not* "unowned" — it fails
+            // closed, matching the contract above.
             DpkgProbeOutcome::Ran { code: 0, lines } => {
-                Ok(parse_dpkg_owners(lines.iter().map(String::as_str)))
+                parse_dpkg_owners(lines.iter().map(String::as_str), path)
+                    .map_err(|reason| PackageDatabaseError::ProbeFailed(reason))
             }
             // `dpkg -S` exit 1: "no path found matching pattern" — a
             // *definitive* "no dpkg package owns this" answer, i.e. unowned by
@@ -174,13 +189,15 @@ impl PackageDatabase {
             DpkgProbeOutcome::Ran { code: 1, .. } => Ok(PathOwnership::Unowned),
             // Any other exit is a database/tool error we must NOT read as
             // "unowned" — fail closed.
-            DpkgProbeOutcome::Ran { code, .. } => Err(PackageDatabaseError::ProbeFailed(
-                format!("dpkg -S exited {code} for {}", path.display()),
-            )),
+            DpkgProbeOutcome::Ran { code, .. } => Err(PackageDatabaseError::ProbeFailed(format!(
+                "dpkg -S exited {code} for {}",
+                path.display()
+            ))),
             // The tool could not be run: fail closed, never assume unowned.
-            DpkgProbeOutcome::Absent => Err(PackageDatabaseError::ProbeFailed(
-                format!("dpkg unavailable for {}", path.display()),
-            )),
+            DpkgProbeOutcome::Absent => Err(PackageDatabaseError::ProbeFailed(format!(
+                "dpkg unavailable for {}",
+                path.display()
+            ))),
         }
     }
 }
@@ -240,26 +257,61 @@ impl InstallationOwnership {
     }
 }
 
-/// Parse `dpkg -S <path>` stdout lines into a `PathOwnership`. Each line is
-/// `package: /path`; a package may appear on several lines (it owns multiple
-/// files) or several packages may claim the same file (a genuine conflict).
-/// Deduplicates by package name, preserving first-seen order. Lines without
-/// the `: ` separator are not ownership records and are ignored rather than
-/// inventing an owner. `dpkg -S` reports the name only, not the version.
-pub fn parse_dpkg_owners<'a>(lines: impl Iterator<Item = &'a str>) -> PathOwnership {
-    let mut seen: Vec<String> = Vec::new();
+/// Parse `dpkg -S <path>` stdout (C-locale form, as pinned by the probe) into
+/// a `PathOwnership`. The documented output is one ownership record —
+/// `pkgname1, pkgname2: pathname`, owning packages comma-separated — plus
+/// zero or more diversion records. Any other line, a blank line, or an
+/// ownership record naming a different path is an error: a successful run
+/// with output we cannot read must fail closed, never read as `Unowned`
+/// (which only exit code 1 may report).
+pub fn parse_dpkg_owners<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    path: &Path,
+) -> Result<PathOwnership, String> {
+    let expected = path.to_string_lossy().into_owned();
+    let mut owners: Vec<String> = Vec::new();
+    let mut saw_record = false;
     for line in lines {
-        let name = match line.trim().split_once(": ") {
-            Some((name, _)) => name.trim(),
-            None => continue,
-        };
-        if name.is_empty() || seen.iter().any(|existing| existing == name) {
+        let line = line.trim();
+        if line.is_empty() {
+            return Err("blank line in successful dpkg -S output".into());
+        }
+        // Documented diversion records (`diversion by pkg from: …`,
+        // `diversion by pkg to: …`, `local diversion from: …`,
+        // `local diversion to: …`; C-locale form) carry no ownership.
+        if line.starts_with("diversion by ") || line.starts_with("local diversion ") {
             continue;
         }
-        seen.push(name.to_string());
+        // Ownership record: `pkg1, pkg2: pathname`. The owner list cannot
+        // contain ':', so the first ": " delimits it.
+        let (list, record_path) = line
+            .split_once(": ")
+            .ok_or_else(|| format!("unparseable dpkg -S record: {line}"))?;
+        // The record must be the path we queried; a different one means dpkg
+        // did not answer our question — not something to accept.
+        if record_path != expected {
+            return Err(format!(
+                "dpkg -S reported {record_path} for query {}",
+                path.display()
+            ));
+        }
+        // Owning packages are separated by ", " (comma + space).
+        for owner in list.split(", ") {
+            let owner = owner.trim();
+            if !is_package_name(owner) {
+                return Err(format!("invalid package name in dpkg -S record: {owner}"));
+            }
+            if !owners.iter().any(|existing| existing == owner) {
+                owners.push(owner.to_string());
+            }
+        }
+        saw_record = true;
     }
-    ownership_from_owners(
-        seen
+    if !saw_record {
+        return Err("no ownership record in successful dpkg -S output".into());
+    }
+    Ok(ownership_from_owners(
+        owners
             .into_iter()
             .map(|name| PackageOwner {
                 family: PackageFamily::Dpkg,
@@ -267,7 +319,16 @@ pub fn parse_dpkg_owners<'a>(lines: impl Iterator<Item = &'a str>) -> PathOwners
                 version: None,
             })
             .collect(),
-    )
+    ))
+}
+
+/// A dpkg package name: starts with an ASCII alphanumeric, then ASCII
+/// alphanumerics plus `+`, `.`, `-`. Anything else is not a package name, so
+/// a line that pretends to be an ownership record is rejected.
+fn is_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
 }
 
 /// Combine a list of owners into a `PathOwnership`. Empty -> `Unowned`; one ->
@@ -306,15 +367,22 @@ mod tests {
     #[test]
     fn parse_dpkg_single_owner() {
         let ownership = parse_dpkg_owners(
-            ["lg-buddy: /usr/bin/lg-buddy", "lg-buddy: /usr/lib/lg-buddy/x"].iter().copied(),
-        );
+            ["lg-buddy: /usr/bin/lg-buddy"].iter().copied(),
+            Path::new("/usr/bin/lg-buddy"),
+        )
+        .unwrap();
         assert_eq!(ownership, PathOwnership::Owned(dpkg_owner("lg-buddy")));
     }
 
     #[test]
-    fn parse_dpkg_conflicting_owners() {
-        let ownership =
-            parse_dpkg_owners(["alpha: /usr/bin/x", "beta: /usr/bin/x"].iter().copied());
+    fn parse_dpkg_comma_separated_multiowner_is_conflicting() {
+        // Documented format: `pkg1, pkg2: pathname` — one record carrying
+        // several owners, NOT one line per package.
+        let ownership = parse_dpkg_owners(
+            ["alpha, beta: /usr/bin/x"].iter().copied(),
+            Path::new("/usr/bin/x"),
+        )
+        .unwrap();
         let PathOwnership::Conflicting(owners) = &ownership else {
             panic!("expected conflicting");
         };
@@ -324,23 +392,57 @@ mod tests {
     }
 
     #[test]
-    fn parse_dpkg_deduplicates_repeated_package() {
-        // One package owning two files is still a single owner.
+    fn parse_dpkg_diversion_records_are_ignored() {
+        // Documented C-locale diversion records carry no ownership.
+        let lines = [
+            "lg-buddy: /usr/bin/lg-buddy",
+            "diversion by lg-buddy from: /usr/bin/lg-buddy",
+            "diversion by lg-buddy to: /usr/lib/diverted",
+            "local diversion from: /usr/bin/old",
+            "local diversion to: /usr/bin/new",
+        ];
         let ownership =
-            parse_dpkg_owners(["lg-buddy: /usr/bin/a", "lg-buddy: /usr/bin/b"].iter().copied());
+            parse_dpkg_owners(lines.iter().copied(), Path::new("/usr/bin/lg-buddy")).unwrap();
+        assert_eq!(ownership, PathOwnership::Owned(dpkg_owner("lg-buddy")));
+    }
+
+    #[test]
+    fn parse_dpkg_deduplicates_repeated_package() {
+        // A package appearing on two records is still a single owner.
+        let ownership = parse_dpkg_owners(
+            ["lg-buddy: /usr/bin/x", "lg-buddy: /usr/bin/x"]
+                .iter()
+                .copied(),
+            Path::new("/usr/bin/x"),
+        )
+        .unwrap();
         assert!(matches!(ownership, PathOwnership::Owned(_)));
     }
 
     #[test]
-    fn parse_dpkg_empty_or_garbage_is_unowned() {
-        assert_eq!(parse_dpkg_owners([""].iter().copied()), PathOwnership::Unowned);
+    fn parse_dpkg_unexpected_output_fails_closed() {
+        // A successful run with no parsable record is NOT "unowned" — that is
+        // exit 1's exclusive job; this must error.
+        assert!(parse_dpkg_owners([].iter().copied(), Path::new("/x")).is_err());
         let garbage = ["not a record", "no colon here"];
-        assert_eq!(parse_dpkg_owners(garbage.iter().copied()), PathOwnership::Unowned);
-        let mixed = ["nope", "lg-buddy: /usr/bin/lg-buddy"];
-        assert_eq!(
-            parse_dpkg_owners(mixed.iter().copied()),
-            PathOwnership::Owned(dpkg_owner("lg-buddy"))
-        );
+        assert!(parse_dpkg_owners(garbage.iter().copied(), Path::new("/x")).is_err());
+        // A record naming a different path did not answer our query.
+        let wrong = ["lg-buddy: /usr/bin/other"];
+        assert!(parse_dpkg_owners(wrong.iter().copied(), Path::new("/usr/bin/x")).is_err());
+    }
+
+    #[test]
+    fn owner_of_exit0_unparseable_fails_closed() {
+        // Blocker: successful-but-malformed output must not fail open to
+        // Unowned.
+        let db = fixture(DpkgProbeOutcome::Ran {
+            code: 0,
+            lines: vec!["".into()],
+        });
+        assert!(matches!(
+            db.owner_of(Path::new("/usr/bin/lg-buddy")),
+            Err(PackageDatabaseError::ProbeFailed(_))
+        ));
     }
 
     #[test]
@@ -370,7 +472,7 @@ mod tests {
     fn owner_of_conflicting() {
         let db = fixture(DpkgProbeOutcome::Ran {
             code: 0,
-            lines: vec!["alpha: /usr/bin/x".into(), "beta: /usr/bin/x".into()],
+            lines: vec!["alpha, beta: /usr/bin/x".into()],
         });
         let result = db.owner_of(Path::new("/usr/bin/x")).unwrap();
         assert!(matches!(result, PathOwnership::Conflicting(_)));
