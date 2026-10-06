@@ -542,6 +542,10 @@ perform_privileged_runtime_installation() {
         run_system_mutation_command rm -rf -- "$KWIN_INSTALL_DIR"
         run_system_mutation_command install -d "$KWIN_INSTALL_DIR"
         run_system_mutation_command cp -R "$KWIN_PAYLOAD_DIR/." "$KWIN_INSTALL_DIR/"
+        # Updater staging is private; the root-owned installed payload must be
+        # readable by the desktop user for inspection, loading, and local builds.
+        run_system_mutation_command find "$KWIN_INSTALL_DIR" -type d -exec chmod 755 {} +
+        run_system_mutation_command find "$KWIN_INSTALL_DIR" -type f -exec chmod 644 {} +
         run_system_mutation_command chmod 755 "$KWIN_INSTALL_DIR/setup.sh" "$KWIN_INSTALL_DIR/build.sh"
     fi
     system_upgrade_message "Installing LG Buddy desktop entry..."
