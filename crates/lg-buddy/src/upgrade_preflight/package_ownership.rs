@@ -122,15 +122,22 @@ impl std::error::Error for PackageDatabaseError {}
 pub enum ProbeOutcome {
     /// The tool ran. `code` is its exit status; `stdout` / `stderr` carry
     /// the output (both are kept: some tools report the unowned case on
-    /// stderr, e.g. `pacman -Qo`).
+    /// stderr, e.g. `pacman -Qq --owns`).
     Ran {
         code: i32,
         stdout: String,
         stderr: String,
     },
-    /// The tool could not be run at all (absent, exec failure, or the
-    /// executable is not present on this host).
+    /// This database is genuinely *absent* on the host (the executable was
+    /// not found, so it is not part of the answer). The other databases
+    /// still answer; only a host with *no* databases at all fails closed.
     Unavailable,
+    /// The database is present but the probe *failed to run* it (exec
+    /// error, permission denied, …) — a failure, NOT "absent". Aggregation
+    /// treats this as an error, never as a clean "unowned": a db that
+    /// exists but can't execute must not let a secondary db's "unowned"
+    /// stand on its own.
+    Failed(String),
 }
 
 /// A single database entry: an absolute executable path (never
@@ -210,8 +217,11 @@ impl PackageDatabase {
                 },
                 Database {
                     name: "pacman",
+                    // `-Qq --owns <path>`: with `--quiet`, `--owns` prints
+                    // only the owning package name(s), one per line (no
+                    // human-readable sentence to parse).
                     exec: "/usr/bin/pacman",
-                    args: &["-Qo", "--"],
+                    args: &["-Qq", "--owns"],
                     family: PackageFamily::Pacman,
                     env_remove: &[],
                 },
@@ -229,10 +239,16 @@ impl PackageDatabase {
                         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                     },
-                    // Missing executable (a host without this database) is a
-                    // *probe* unavailable, not a verdict — the other
-                    // databases still answer.
-                    Err(_) => ProbeOutcome::Unavailable,
+                    // Classify the spawn failure: only a genuinely *missing*
+                    // executable means "this host has no such database".
+                    // Any other error (permission denied, exec format, …)
+                    // means the database is present but unrunnable — a probe
+                    // *failure*, never "absent" (which would let a secondary
+                    // db's "unowned" stand alone).
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        ProbeOutcome::Unavailable
+                    }
+                    Err(err) => ProbeOutcome::Failed(format!("{0}: {err}", db.exec)),
                 }
             },
         )
@@ -270,6 +286,13 @@ impl PackageDatabase {
         for db in &self.databases {
             match (self.probe)(db, path) {
                 ProbeOutcome::Unavailable => continue,
+                ProbeOutcome::Failed(reason) => {
+                    // A database that exists but cannot run is a failure —
+                    // record it and keep probing; the aggregate is then an
+                    // `Err` (fail closed), never a clean "unowned".
+                    errors.push(reason);
+                    continue;
+                }
                 ProbeOutcome::Ran {
                     code,
                     stdout,
@@ -300,10 +323,11 @@ impl PackageDatabase {
                             }
                         }
                         PackageFamily::Rpm => {
-                            // `rpm -qf`: 0 = owned (NEVRA on stdout),
-                            // 1 = not owned by any package, 2 = db/error.
+                            // `rpm -qf --qf '%{NAME}\n'`: 0 = owned (one
+                            // package name per line on stdout), 1 = not
+                            // owned by any package, 2 = db/error.
                             if code == 0 {
-                                match parse_rpm_nevra(&stdout, db.family) {
+                                match parse_rpm_names(&stdout, db.family) {
                                     Ok(owners) => all_owners.extend(owners),
                                     Err(reason) => {
                                         errors.push(format!("rpm: {reason} for {}", path.display()))
@@ -316,42 +340,31 @@ impl PackageDatabase {
                             }
                         }
                         PackageFamily::Pacman => {
-                            // `pacman -Qo`: the owned/unowned verdict is
-                            // carried in the *output text*, not the exit
-                            // code, so match the documented strings
-                            // (C-locale-pinned). The owned form is
-                            // `<path> is owned by <pkg> <ver>` (stdout);
-                            // the unowned form is `No package owns <path>`
-                            // (stderr). Anything else fails closed — never
-                            // guess.
-                            let output = format!("{stdout}\n{stderr}");
-                            let owned_line =
-                                output.lines().find(|l| l.trim().contains(" is owned by "));
-                            if let Some(line) = owned_line {
-                                // `<path> is owned by <pkg> [<ver>]`
-                                let tail = line.trim().split(" is owned by ").nth(1).unwrap_or("");
-                                let mut parts = tail.rsplitn(2, ' ');
-                                let version = parts.next();
-                                let name = parts.next().unwrap_or("");
-                                if name.is_empty() || !is_pacman_name(name) {
-                                    errors.push(format!(
-                                        "pacman: unparseable owner in {line} for {}",
-                                        path.display()
-                                    ));
-                                } else {
-                                    all_owners.push(PackageOwner {
-                                        family: db.family,
-                                        name: name.to_string(),
-                                        version: version
-                                            .filter(|v| !v.is_empty())
-                                            .map(str::to_string),
-                                    });
+                            // `pacman -Qq --owns`: with `--quiet`, `--owns`
+                            // prints *only* the owning package name(s), one
+                            // per line — no human-readable sentence to
+                            // parse, and the queried path is not echoed
+                            // back, so there is no "did the record name the
+                            // path we asked for?" hole.
+                            //
+                            // Verdict: exit 0 with names on stdout =
+                            // owned. A non-zero exit whose stderr carries
+                            // the documented `No package owns` marker =
+                            // unowned. Any other non-zero output is
+                            // unverified — fail closed (we do not trust a
+                            // specific unowned exit code we cannot
+                            // confirm here).
+                            if code == 0 {
+                                match parse_pacman_names(&stdout, db.family) {
+                                    Ok(owners) => all_owners.extend(owners),
+                                    Err(reason) => errors
+                                        .push(format!("pacman: {reason} for {}", path.display())),
                                 }
-                            } else if output.contains("No package owns") {
-                                // Documented unowned form (on stderr).
+                            } else if stderr.contains("No package owns") {
+                                // Documented unowned marker (stderr).
                             } else {
                                 errors.push(format!(
-                                    "pacman: unexpected output for {}",
+                                    "pacman exited {code} with unexpected output for {}",
                                     path.display()
                                 ));
                             }
@@ -500,9 +513,13 @@ pub fn parse_dpkg_owners<'a>(
 /// the probe) into owners. The query prints one owning package *name* per
 /// line (we asked for `%{NAME}` specifically, not the default NEVRA, so a
 /// name containing `-` is not mis-split). A single owned file yields a
-/// single owner; more than one line is a genuine conflict. Any line that is
-/// not a valid package name is an error (fail closed).
-fn parse_rpm_nevra(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwner>, String> {
+/// single owner; more than one line is a genuine conflict.
+///
+/// This is only called after `rpm` reported *success*, so at least one
+/// valid name is expected: an empty / all-blank output is an error, not
+/// "zero owners" (which would read as `Unowned`). Any line that is not a
+/// valid package name is also an error (fail closed).
+fn parse_rpm_names(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwner>, String> {
     let mut owners = Vec::new();
     for line in stdout.lines() {
         let name = line.trim();
@@ -515,6 +532,45 @@ fn parse_rpm_nevra(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwn
         if !owners.iter().any(|existing| existing == name) {
             owners.push(name.to_string());
         }
+    }
+    if owners.is_empty() {
+        return Err("no package name in successful rpm -qf output".into());
+    }
+    Ok(owners
+        .into_iter()
+        .map(|name| PackageOwner {
+            family,
+            name,
+            version: None,
+        })
+        .collect())
+}
+
+/// Parse `pacman -Qq --owns` stdout (C-locale form, as pinned by the
+/// probe) into owners. With `--quiet`, `--owns` prints one owning package
+/// *name* per line (no path, no version, no human-readable sentence). A
+/// single owned file yields a single owner; more than one line is a
+/// genuine conflict. This is only called after a successful run, so at
+/// least one valid name is expected: empty / invalid output is an error
+/// (fail closed), never "zero owners".
+fn parse_pacman_names(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwner>, String> {
+    let mut owners = Vec::new();
+    for line in stdout.lines() {
+        let name = line.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !is_pacman_name(name) {
+            return Err(format!(
+                "invalid package name in pacman -Qq --owns output: {line}"
+            ));
+        }
+        if !owners.iter().any(|existing| existing == name) {
+            owners.push(name.to_string());
+        }
+    }
+    if owners.is_empty() {
+        return Err("no package name in successful pacman -Qq --owns output".into());
     }
     Ok(owners
         .into_iter()
@@ -530,6 +586,17 @@ fn parse_rpm_nevra(stdout: &str, family: PackageFamily) -> Result<Vec<PackageOwn
 /// (e.g. `mingw-w64-x86_64-ntldd`). Anything else is rejected, so a line
 /// that pretends to be an ownership record cannot be accepted.
 fn is_pacman_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_'))
+}
+
+/// An rpm package name: ASCII alphanumerics plus `+`, `.`, `-`, `_`
+/// (e.g. `mingw-w64-x86_64-ntldd`, `kde-filesystem`).
+fn is_rpm_name(name: &str) -> bool {
     name.chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric())
@@ -577,17 +644,6 @@ fn is_package_id(owner: &str) -> bool {
     }
 }
 
-/// rpm package-name grammar (subset of the documented `NEVRA` name
-/// portion): ASCII alphanumerics plus `+`, `.`, `-`, `_`.
-fn is_rpm_name(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_'))
-}
-
 /// Combine a list of owners into a `PathOwnership`. Empty -> `Unowned`;
 /// one -> `Owned`; two or more -> `Conflicting`.
 fn ownership_from_owners(owners: Vec<PackageOwner>) -> PathOwnership {
@@ -633,7 +689,7 @@ mod tests {
         Database {
             name: "pacman",
             exec: "/usr/bin/pacman",
-            args: &["-Qo", "--"],
+            args: &["-Qq", "--owns"],
             family: PackageFamily::Pacman,
             env_remove: &[],
         }
@@ -802,18 +858,20 @@ mod tests {
     fn parse_rpm_single_name() {
         // The probe asks for `%{NAME}` only, so the output is one plain
         // package name per line (no version/release/arch to mis-split).
-        let owners = parse_rpm_nevra("lg-buddy\n", PackageFamily::Rpm).unwrap();
+        let owners = parse_rpm_names("lg-buddy\n", PackageFamily::Rpm).unwrap();
         assert_eq!(owners, vec![owner(PackageFamily::Rpm, "lg-buddy")]);
     }
 
     #[test]
     fn parse_rpm_rejects_garbage() {
-        // Empty -> no owners (an exit-1 `Unowned` case yields no stdout).
-        assert!(parse_rpm_nevra("", PackageFamily::Rpm).unwrap().is_empty());
+        // Empty / all-blank stdout from a *successful* rpm is an error, not
+        // "zero owners" (which would read as `Unowned`).
+        assert!(parse_rpm_names("", PackageFamily::Rpm).is_err());
+        assert!(parse_rpm_names("   \n", PackageFamily::Rpm).is_err());
         // A line that is not a valid package name fails closed.
-        assert!(parse_rpm_nevra("-weird\n", PackageFamily::Rpm).is_err());
+        assert!(parse_rpm_names("-weird\n", PackageFamily::Rpm).is_err());
         // A dash-leading name is invalid; a plain name with dashes is fine.
-        assert!(parse_rpm_nevra("mingw-w64-x86_64-ntldd\n", PackageFamily::Rpm).is_ok());
+        assert!(parse_rpm_names("mingw-w64-x86_64-ntldd\n", PackageFamily::Rpm).is_ok());
     }
 
     // --- aggregation across databases ---------------------------------
@@ -850,17 +908,16 @@ mod tests {
 
     #[test]
     fn owner_of_pacman_owned() {
-        let db = fixture(
-            pacman_db(),
-            ran(0, "/usr/bin/nano is owned by nano 7.2-1\n", ""),
-        );
+        // `-Qq --owns` prints only the owning package name (no path, no
+        // version).
+        let db = fixture(pacman_db(), ran(0, "nano\n", ""));
         let result = db.owner_of(Path::new("/usr/bin/nano")).unwrap();
         let PathOwnership::Owned(o) = &result else {
             panic!("expected Owned, got {result:?}");
         };
         assert_eq!(o.family, PackageFamily::Pacman);
         assert_eq!(o.name, "nano");
-        assert_eq!(o.version.as_deref(), Some("7.2-1"));
+        assert_eq!(o.version.as_deref(), None);
     }
 
     #[test]
@@ -920,6 +977,47 @@ mod tests {
         let db = fixture(dpkg_db(), ran(2, "", ""));
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
         let db = fixture(rpm_db(), ran(2, "", ""));
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_present_db_that_cannot_run_fails_closed() {
+        // A database that exists but fails to *run* (ProbeOutcome::Failed)
+        // must not let a secondary db's "unowned" stand alone: it records a
+        // probe failure and the aggregate is an Err, never a clean Unowned.
+        let db = multi_fixture(
+            vec![dpkg_db(), rpm_db(), pacman_db()],
+            vec![
+                ProbeOutcome::Failed("dpkg: permission denied".into()),
+                ProbeOutcome::Unavailable,
+                ran(1, "", "error: No package owns /usr/bin/lg-buddy\n"),
+            ],
+        );
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_pacman_empty_success_fails_closed() {
+        // `pacman -Qq --owns` that exits 0 with no names on stdout is
+        // malformed, not "unowned".
+        let db = fixture(pacman_db(), ran(0, "", ""));
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_pacman_unverified_exit_fails_closed() {
+        // A non-zero pacman exit that does NOT carry the documented
+        // `No package owns` marker is unverified -> fail closed (we do not
+        // trust a specific unowned exit code we cannot confirm here).
+        let db = fixture(pacman_db(), ran(1, "", "some other error\n"));
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_rpm_empty_success_fails_closed() {
+        // `rpm -qf` that exits 0 with no names on stdout is malformed, not
+        // "unowned".
+        let db = fixture(rpm_db(), ran(0, "", ""));
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
     }
 
