@@ -57,7 +57,8 @@ impl PackageFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageOwner {
     pub family: PackageFamily,
-    /// The owning package name (e.g. `lg-buddy`, `LG_Buddy`).
+    /// The owning package id — the package name, optionally
+    /// architecture-qualified (e.g. `lg-buddy`, `libc6:amd64`).
     pub name: String,
     /// The owning package version string, when the tool reported one.
     pub version: Option<String>,
@@ -134,7 +135,15 @@ impl std::fmt::Debug for PackageDatabase {
 }
 
 impl PackageDatabase {
-    /// The default probe: a real `dpkg -S` against the host's database.
+    /// The default probe: a real `dpkg-query -S` against the host's database.
+    ///
+    /// Security: the probe result can eventually authorize privileged
+    /// mutation, so the probe must not trust the inherited process
+    /// environment. The executable is addressed by absolute path (never
+    /// resolved through `PATH`), and the `DPKG_*` database-location knobs
+    /// (`DPKG_ROOT`, `DPKG_ADMINDIR`) are removed so an attacker-controlled
+    /// environment cannot redirect which database is queried. A fake `dpkg`
+    /// that exits 1 must not be able to forge "unowned".
     ///
     /// `LC_ALL=C.UTF-8` (and clearing `LANGUAGE`) pins the output to the
     /// documented, reproducible C-locale form — the man page recommends this
@@ -142,9 +151,11 @@ impl PackageDatabase {
     /// with *localized* prefixes.
     pub fn system() -> Self {
         Self::with_probe(|path| {
-            let output = Command::new("dpkg")
+            let output = Command::new("/usr/bin/dpkg-query")
                 .arg("-S")
                 .arg(path)
+                .env_remove("DPKG_ROOT")
+                .env_remove("DPKG_ADMINDIR")
                 .env("LC_ALL", "C.UTF-8")
                 .env_remove("LANGUAGE")
                 .output();
@@ -181,7 +192,7 @@ impl PackageDatabase {
             // closed, matching the contract above.
             DpkgProbeOutcome::Ran { code: 0, lines } => {
                 parse_dpkg_owners(lines.iter().map(String::as_str), path)
-                    .map_err(|reason| PackageDatabaseError::ProbeFailed(reason))
+                    .map_err(PackageDatabaseError::ProbeFailed)
             }
             // `dpkg -S` exit 1: "no path found matching pattern" — a
             // *definitive* "no dpkg package owns this" answer, i.e. unowned by
@@ -190,12 +201,12 @@ impl PackageDatabase {
             // Any other exit is a database/tool error we must NOT read as
             // "unowned" — fail closed.
             DpkgProbeOutcome::Ran { code, .. } => Err(PackageDatabaseError::ProbeFailed(format!(
-                "dpkg -S exited {code} for {}",
+                "dpkg-query -S exited {code} for {}",
                 path.display()
             ))),
             // The tool could not be run: fail closed, never assume unowned.
             DpkgProbeOutcome::Absent => Err(PackageDatabaseError::ProbeFailed(format!(
-                "dpkg unavailable for {}",
+                "dpkg-query unavailable for {}",
                 path.display()
             ))),
         }
@@ -282,8 +293,10 @@ pub fn parse_dpkg_owners<'a>(
         if line.starts_with("diversion by ") || line.starts_with("local diversion ") {
             continue;
         }
-        // Ownership record: `pkg1, pkg2: pathname`. The owner list cannot
-        // contain ':', so the first ": " delimits it.
+        // Ownership record: `pkg1, pkg2: pathname`, owners comma-separated.
+        // An owner id may carry a single ":" (the architecture qualifier, e.g.
+        // `libc6:amd64`) but never ": ", so the first ": " delimits the owner
+        // list from the path.
         let (list, record_path) = line
             .split_once(": ")
             .ok_or_else(|| format!("unparseable dpkg -S record: {line}"))?;
@@ -298,8 +311,8 @@ pub fn parse_dpkg_owners<'a>(
         // Owning packages are separated by ", " (comma + space).
         for owner in list.split(", ") {
             let owner = owner.trim();
-            if !is_package_name(owner) {
-                return Err(format!("invalid package name in dpkg -S record: {owner}"));
+            if !is_package_id(owner) {
+                return Err(format!("invalid package id in dpkg -S record: {owner}"));
             }
             if !owners.iter().any(|existing| existing == owner) {
                 owners.push(owner.to_string());
@@ -322,13 +335,39 @@ pub fn parse_dpkg_owners<'a>(
     ))
 }
 
-/// A dpkg package name: starts with an ASCII alphanumeric, then ASCII
-/// alphanumerics plus `+`, `.`, `-`. Anything else is not a package name, so
-/// a line that pretends to be an ownership record is rejected.
-fn is_package_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+/// A dpkg *package id*: an ASCII-alphanumeric package name (then alphanumerics
+/// plus `+`, `.`, `-`) with an optional `:<architecture>` qualifier
+/// (e.g. `libc6:amd64`). Multi-arch output reports the architecture-qualified
+/// id; two owners of the same name on different arches are distinct packages,
+/// so they stay separate owners (and a genuine conflict when they claim one
+/// file). Anything else is rejected, so a line that pretends to be an
+/// ownership record cannot be accepted.
+fn is_package_id(owner: &str) -> bool {
+    let (name, arch) = match owner.split_once(':') {
+        Some((name, arch)) => (name, Some(arch)),
+        None => (owner, None),
+    };
+    let valid_name = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .skip(1)
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    if !valid_name {
+        return false;
+    }
+    // An architecture qualifier, if present, is a lowercase-alphanumeric
+    // token (e.g. `amd64`, `i386`, `arm64`) with no further ':'.
+    match arch {
+        Some(arch) => !arch.is_empty()
+            && !arch.contains(':')
+            && arch
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        None => true,
+    }
 }
 
 /// Combine a list of owners into a `PathOwnership`. Empty -> `Unowned`; one ->
@@ -372,6 +411,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ownership, PathOwnership::Owned(dpkg_owner("lg-buddy")));
+    }
+
+    #[test]
+    fn parse_dpkg_arch_qualified_owner_is_owned() {
+        // Multi-arch output reports architecture-qualified ids
+        // (`libc6:amd64`); these are valid owners, not parse failures.
+        let ownership =
+            parse_dpkg_owners(["libc6:amd64: /usr/lib/x86_64-linux-gnu/libc.so.6"].iter().copied(), Path::new("/usr/lib/x86_64-linux-gnu/libc.so.6"))
+                .unwrap();
+        assert_eq!(ownership, PathOwnership::Owned(dpkg_owner("libc6:amd64")));
+    }
+
+    #[test]
+    fn parse_dpkg_arch_conflict_is_conflicting() {
+        // Two owners of the same base name on different arches are distinct
+        // packages; one record carrying both is a genuine conflict.
+        let ownership = parse_dpkg_owners(
+            ["libfoo:i386, libfoo:amd64: /usr/bin/x"].iter().copied(),
+            Path::new("/usr/bin/x"),
+        )
+        .unwrap();
+        let PathOwnership::Conflicting(owners) = &ownership else {
+            panic!("expected conflicting");
+        };
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0].name, "libfoo:i386");
+        assert_eq!(owners[1].name, "libfoo:amd64");
+    }
+
+    #[test]
+    fn is_package_id_rejects_malformed_qualifiers() {
+        // A qualifier is a bare lowercase-arch token. Empty, double-colon,
+        // and uppercase qualifiers are not valid ids and fail closed.
+        assert!(!is_package_id("libc6:"));      // empty arch
+        assert!(!is_package_id("libc6:amd64:x")); // extra colon
+        assert!(!is_package_id("libc6:AMD64"));   // uppercase
+        assert!(is_package_id("libc6:amd64"));    // valid
+        assert!(is_package_id("lg-buddy"));        // plain, no arch
     }
 
     #[test]
