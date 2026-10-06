@@ -142,8 +142,10 @@ pub enum ProbeOutcome {
 
 /// A single database entry: an absolute executable path (never
 /// `PATH`-resolved — see `system`), its arguments, the family it belongs
-/// to, and environment variables to remove before running (the database
-/// location knobs: `DPKG_ROOT` / `DPKG_ADMINDIR`).
+/// to, and environment variables to remove before running (the knobs that
+/// could redirect which database is queried: `DPKG_ROOT` / `DPKG_ADMINDIR`
+/// for dpkg; `HOME` / `XDG_CONFIG_HOME` / `RPM_CONFIGDIR` for rpm, which
+/// would otherwise load a per-user macro layer and re-point `%_dbpath`).
 #[derive(Debug, Clone)]
 pub struct Database {
     pub name: &'static str,
@@ -184,9 +186,11 @@ impl PackageDatabase {
     /// mutation, so the probe must not trust the inherited process
     /// environment. Every executable is addressed by absolute path (never
     /// resolved through `PATH`), and per-database environment knobs are
-    /// removed (`DPKG_ROOT` / `DPKG_ADMINDIR`) so an attacker-controlled
-    /// environment cannot redirect which database is queried. A fake
-    /// `dpkg-query` that exits 1 must not be able to forge "unowned".
+    /// removed — `DPKG_ROOT` / `DPKG_ADMINDIR` for dpkg, and
+    /// `HOME` / `XDG_CONFIG_HOME` / `RPM_CONFIGDIR` for rpm (its per-user
+    /// macro layer) — so an attacker-controlled environment cannot
+    /// redirect which database is queried. A fake `dpkg-query` that exits
+    /// 1 must not be able to forge "unowned".
     ///
     /// `LC_ALL=C.UTF-8` (and clearing `LANGUAGE`) pins output to the
     /// documented, reproducible C-locale form — `dpkg`'s man page
@@ -213,7 +217,14 @@ impl PackageDatabase {
                     exec: "/usr/bin/rpm",
                     args: &["-qf", "--qf", "%{NAME}\\n"],
                     family: PackageFamily::Rpm,
-                    env_remove: &[],
+                    // rpm loads a per-user macro layer
+                    // (`~/.config/rpm/macros`, via `HOME` /
+                    // `XDG_CONFIG_HOME`; `RPM_CONFIGDIR` re-points it)
+                    // after the vendor/host settings, and `%_dbpath` is a
+                    // runtime macro. Removing the user layer neutralizes
+                    // that override while leaving `/etc/rpm` +
+                    // `/usr/lib/rpm` (and the default db path) intact.
+                    env_remove: &["HOME", "XDG_CONFIG_HOME", "RPM_CONFIGDIR"],
                 },
                 Database {
                     name: "pacman",
@@ -682,7 +693,7 @@ mod tests {
             exec: "/usr/bin/rpm",
             args: &["-qf", "--qf", "%{NAME}\\n"],
             family: PackageFamily::Rpm,
-            env_remove: &[],
+            env_remove: &["HOME", "XDG_CONFIG_HOME", "RPM_CONFIGDIR"],
         }
     }
     fn pacman_db() -> Database {
@@ -978,6 +989,26 @@ mod tests {
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
         let db = fixture(rpm_db(), ran(2, "", ""));
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn system_probe_neutralizes_user_database_config() {
+        // Security regression: the default probe must strip the environment
+        // knobs that would let an unprivileged caller point rpm / dpkg at a
+        // different database. Without this, a fake user macro file could
+        // make `rpm -qf` read an attacker db and forge "unowned".
+        let db = PackageDatabase::system();
+        let rpm = db.databases.iter().find(|d| d.name == "rpm").unwrap();
+        assert_eq!(
+            rpm.env_remove,
+            &["HOME", "XDG_CONFIG_HOME", "RPM_CONFIGDIR"]
+        );
+        let dpkg = db
+            .databases
+            .iter()
+            .find(|d| d.name == "dpkg-query")
+            .unwrap();
+        assert_eq!(dpkg.env_remove, &["DPKG_ROOT", "DPKG_ADMINDIR"]);
     }
 
     #[test]
