@@ -39,6 +39,7 @@ impl InstallerPathPolicy {
 
 
 mod observation;
+mod package_ownership;
 mod path_safety;
 mod preflight;
 mod trust_placement;
@@ -51,6 +52,10 @@ use preflight::{
 pub use observation::{
     FilesystemFacts, HostPreflightFacts, InstalledLayout, ObservationFailure, OsFilesystemFacts,
     PathFacts, PathKind, ServiceManagerFacts, SystemdManagerObservation,
+};
+pub use package_ownership::{
+    DpkgProbeOutcome, InstallationOwnership, PackageDatabase, PackageDatabaseError,
+    PackageFamily, PackageOwner, PathOwnership, installation_ownership, parse_dpkg_owners,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
