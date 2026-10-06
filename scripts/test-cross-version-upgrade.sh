@@ -203,9 +203,11 @@ python3 "$SCRIPT_DIR/release_bundle_manifest.py" validate \
     --expected-commit "$CANDIDATE_COMMIT"
 assert_executable "$CANDIDATE_GUI"
 
-# The v1.4 updater treats new docs payloads as data and extracts them mode 600.
-# Exercise the candidate install exactly as that updater hands it off.
+# Verified updaters extract docs payloads as private data, including the KWin
+# tree. Installed support files must be readable after root takes ownership.
 chmod 600 "$CANDIDATE_GUI" "$CANDIDATE_ICON"
+find "$CANDIDATE_BUNDLE/docs/kwin" -type d -exec chmod 700 {} +
+find "$CANDIDATE_BUNDLE/docs/kwin" -type f -exec chmod 600 {} +
 
 INSTALL_ROOT="$WORK_DIR/root"
 HOME_DIR="$WORK_DIR/home"
@@ -284,6 +286,7 @@ CONFIG_FILE="$XDG_CONFIG_HOME/lg-buddy/config.env"
 INSTALLED_BINARY="$INSTALL_ROOT/usr/bin/lg-buddy"
 INSTALLED_GUI="$INSTALL_ROOT/usr/bin/lg-buddy-gui"
 INSTALLED_POINTER="$INSTALL_ROOT/usr/lib/lg-buddy/config-path"
+INSTALLED_KWIN_DIR="$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
 SYSTEM_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy.service"
 LIFECYCLE_SERVICE="$INSTALL_ROOT/etc/systemd/system/LG_Buddy_lifecycle.service"
 TMPFILES_CONFIG="$INSTALL_ROOT/etc/tmpfiles.d/lg_buddy.conf"
@@ -486,7 +489,19 @@ cmp -s "$CANDIDATE_BUNDLE/LG_Buddy_Brightness.desktop" "$USER_DESKTOP_ENTRY"
 cmp -s "$CANDIDATE_ICON" "$INSTALLED_ICON"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_screen.service" "$USER_SCREEN_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/docs/kwin/LG_Buddy_kwin.service" "$HOME_DIR/.config/systemd/user/LG_Buddy_kwin.service"
-diff -r "$CANDIDATE_BUNDLE/docs/kwin" "$INSTALL_ROOT/usr/lib/lg-buddy/kwin"
+diff -r "$CANDIDATE_BUNDLE/docs/kwin" "$INSTALLED_KWIN_DIR"
+# Inspect modes rather than test -r: the installing account can read private
+# files that become inaccessible to the desktop user after privileged copying.
+BAD_KWIN_MODE="$(find "$INSTALLED_KWIN_DIR" -type d ! -perm 755 -print -quit)"
+[ -z "$BAD_KWIN_MODE" ] || fail "Installed KWin directory mode is not 755: $BAD_KWIN_MODE"
+BAD_KWIN_MODE="$(find "$INSTALLED_KWIN_DIR" -type f \
+    ! -path "$INSTALLED_KWIN_DIR/setup.sh" ! -path "$INSTALLED_KWIN_DIR/build.sh" \
+    ! -perm 644 -print -quit)"
+[ -z "$BAD_KWIN_MODE" ] || fail "Installed KWin data file mode is not 644: $BAD_KWIN_MODE"
+for helper in setup.sh build.sh; do
+    [ "$(stat -c '%a' "$INSTALLED_KWIN_DIR/$helper")" = 755 ] \
+        || fail "Installed KWin helper mode is not 755: $helper"
+done
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.service" "$USER_UPDATE_SERVICE"
 cmp -s "$CANDIDATE_BUNDLE/systemd/LG_Buddy_update_check.timer" "$USER_UPDATE_TIMER"
 grep -F -q 'exec /usr/bin/lg-buddy nm-pre-down' "$NM_LIFECYCLE_HOOK"
