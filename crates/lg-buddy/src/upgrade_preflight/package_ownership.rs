@@ -343,29 +343,28 @@ impl PackageDatabase {
                             // `rpm -q --path --qf '%{NAME}\n' <path>`: query the
                             // database for the owning package *whether or not
                             // the file is installed*. The verdict is content,
-                            // not the exit code — the C-locale markers are
-                            // authoritative:
+                            // not the exit code:
                             //   * a valid package NAME on stdout = owned
-                            //     (even for a `%ghost` / deleted file);
-                            //   * `file …: No such file or directory`
-                            //     (lstat failed, no DB entry) or
-                            //     `file … is not owned by any package`
-                            //     (lstat ok, no DB entry) = definitively
-                            //     unowned;
-                            //   * any other output (including a non-zero
-                            //     exit with no recognized marker) = `Err`.
+                            //     (even for a `%ghost` / deleted / excluded
+                            //     file, e.g. an `--excludedocs` doc);
+                            //   * no name on stdout AND stderr is *exactly*
+                            //     the documented one-line no-match message for
+                            //     *this* path = definitively unowned;
+                            //   * anything else (extra lines, a different
+                            //     path, an unrecognized message, a broken
+                            //     database) = `Err` (fail closed).
                             //
                             // We deliberately do NOT use exit 1 as the
-                            // "unowned" signal: `rpm -qf`/`-q --path` also
-                            // exits 1 when the file simply does not exist
-                            // on disk, and a broken database can yield a
-                            // non-zero exit with an unrecognized message —
-                            // both must fail closed, not read as "unowned".
+                            // "unowned" signal, and we do NOT accept the bare
+                            // substrings `No such file or directory` /
+                            // `is not owned by any package`: RPM can emit
+                            // `No such file or directory` for *other*
+                            // failures too, so the whole stderr must be
+                            // exactly the documented message about the
+                            // queried path or the probe fails closed.
                             if let Ok(owners) = parse_rpm_names(&stdout, db.family) {
                                 all_owners.extend(owners);
-                            } else if stderr.contains("No such file or directory")
-                                || stderr.contains("is not owned by any package")
-                            {
+                            } else if rpm_reports_unowned(path, &stderr) {
                                 // No DB entry for this path: unowned.
                             } else {
                                 errors.push(format!(
@@ -640,6 +639,34 @@ fn is_rpm_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_'))
+}
+
+/// Strict "unowned" verdict for `rpm -q --path` (see the `Rpm` branch).
+///
+/// `rpm`'s no-match output is *exactly* one line, and it is one of two
+/// C-locale forms (upstream `lib/query.cc`, `RPMQV_PATH`):
+///   * the path does not exist on disk (lstat failed, no DB entry):
+///     `error: file <queried-path>: No such file or directory`
+///     (an `RPMLOG_ERR`, so it carries the `error:` prefix);
+///   * the path exists but no package owns it (lstat ok, no DB entry):
+///     `file <queried-path> is not owned by any package`
+///     (an `RPMLOG_NOTICE`, so it has *no* severity prefix).
+///
+/// Both name the exact queried path, and that is what keeps this fail
+/// closed: `No such file or directory` also appears in unrelated RPM
+/// failures (e.g. `error: open of ... failed: No such file or directory`
+/// when an `.rpm` file is missing), so we only accept the one line
+/// formatted as the documented message *about the path we queried* — any
+/// extra line, a different path, or an unrecognized message is a probe
+/// error, not "unowned".
+fn rpm_reports_unowned(queried: &Path, stderr: &str) -> bool {
+    let p = queried.to_string_lossy();
+    let lines: Vec<&str> = stderr.lines().filter(|l| !l.is_empty()).collect();
+    matches!(
+        lines.as_slice(),
+        [error_line] if *error_line == format!("error: file {p}: No such file or directory")
+            || *error_line == format!("file {p} is not owned by any package")
+    )
 }
 
 /// A dpkg/rpm *package id*: an ASCII-alphanumeric package name (then
@@ -1083,10 +1110,15 @@ mod tests {
         // The whole point of the `--path` switch: a path with no DB entry
         // and *no on-disk file* must still report unowned (exit 1, the
         // `No such file or directory` marker). This is the #304 preflight
-        // case — a destination path that does not exist yet.
+        // case — a destination path that does not exist yet. rpm logs this
+        // via `RPMLOG_ERR`, so the line carries the `error:` prefix.
         let db = fixture(
             rpm_db(),
-            ran(1, "", "file /usr/bin/lg-buddy: No such file or directory\n"),
+            ran(
+                1,
+                "",
+                "error: file /usr/bin/lg-buddy: No such file or directory\n",
+            ),
         );
         assert_eq!(
             db.owner_of(Path::new("/usr/bin/lg-buddy")).unwrap(),
@@ -1097,7 +1129,8 @@ mod tests {
     #[test]
     fn owner_of_rpm_unowned_via_not_owned_marker() {
         // A present-but-unowned file: lstat succeeds, no DB entry, so rpm
-        // reports `is not owned by any package` (exit 1). Unowned.
+        // reports `is not owned by any package` (exit 1, `RPMLOG_NOTICE`,
+        // no severity prefix). Unowned.
         let db = fixture(
             rpm_db(),
             ran(
@@ -1115,9 +1148,8 @@ mod tests {
     #[test]
     fn owner_of_rpm_unexpected_output_fails_closed() {
         // A non-zero rpm exit with output that matches *neither* the owned
-        // case nor a documented no-match marker (e.g. a broken database:
-        // `cannot open Packages database`) must fail closed, not read as
-        // unowned.
+        // case nor the exact documented no-match message must fail closed,
+        // not read as unowned. A broken database emits its own message.
         let db = fixture(
             rpm_db(),
             ran(
@@ -1130,11 +1162,54 @@ mod tests {
     }
 
     #[test]
-    fn owner_of_rpm_missing_file_exit1_not_conflated_with_broken_db() {
-        // Regression for the exit-code blocker: exit 1 alone is not the
-        // "unowned" signal. The same exit 1 with an *unrecognized* stderr
-        // (neither no-match marker) is an Err, not Unowned.
-        let db = fixture(rpm_db(), ran(1, "", "some unexpected failure\n"));
+    fn owner_of_rpm_unrelated_no_such_file_fails_closed() {
+        // The strictness blocker: rpm also emits `No such file or
+        // directory` for *other* failures (e.g. `open of <x>.rpm failed:`
+        // when a `.rpm` file is missing). That is NOT an unowned verdict
+        // for the queried path, so it must fail closed even though it
+        // contains the substring.
+        let db = fixture(
+            rpm_db(),
+            ran(
+                1,
+                "",
+                "error: open of /some/package.rpm failed: No such file or directory\n",
+            ),
+        );
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_rpm_extra_stderr_line_fails_closed() {
+        // The documented no-match message is *exactly one line*. If it
+        // appears alongside any other stderr line (an extra error), the
+        // probe cannot confirm it is only the no-match message, so fail
+        // closed — never read the extra line's sibling as "unowned".
+        let db = fixture(
+            rpm_db(),
+            ran(
+                1,
+                "",
+                "file /usr/bin/lg-buddy is not owned by any package\n\
+                 warning: something else also happened\n",
+            ),
+        );
+        assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
+    }
+
+    #[test]
+    fn owner_of_rpm_no_match_about_a_different_path_fails_closed() {
+        // The no-match message must name *the path we queried*. A
+        // no-match line about some other path (an internal rpm file) is
+        // not a verdict about our path, so fail closed.
+        let db = fixture(
+            rpm_db(),
+            ran(
+                1,
+                "",
+                "file /usr/lib/rpm/internal/thing is not owned by any package\n",
+            ),
+        );
         assert!(db.owner_of(Path::new("/usr/bin/lg-buddy")).is_err());
     }
 
