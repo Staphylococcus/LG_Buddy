@@ -19,6 +19,20 @@ jobs:
   kwin-bridges:
     uses: ./.github/workflows/kwin-bridge.yml
 
+  nix-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.8/install
+      - name: Evaluate public package outputs
+        run: nix flake check --no-build --all-systems
+      - name: Build and exercise the installed package
+        run: nix build --print-build-logs --no-link --cores 2 --max-jobs 2 .#checks.x86_64-linux.package
+
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

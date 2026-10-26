@@ -135,6 +135,11 @@ The resulting binary will be at:
 ./target/release/lg-buddy
 ```
 
+The [Nix package](nix.md) builds both binaries with pinned dependencies, installs
+their assets and setup inspection helper, and wraps the GTK companion. Its flake
+check runs runtime library tests and exercises the installed GUI through both the
+wrapper and a profile symlink on a private bus and virtual display.
+
 ## Install a Locally Built Binary
 
 The installer below is for release-bundle layouts. For `.deb` and `.rpm`
