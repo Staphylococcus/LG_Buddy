@@ -82,7 +82,7 @@ impl DiagnosticsReport {
         }
 
         let mut body = String::new();
-        for finding in findings.iter().take(MAX_SESSION_FINDINGS) {
+        for finding in findings.iter().rev().take(MAX_SESSION_FINDINGS) {
             let finding = safe_text(finding, MAX_SESSION_FINDING_BYTES);
             if finding.is_empty() {
                 continue;
@@ -95,8 +95,17 @@ impl DiagnosticsReport {
             return self;
         }
 
-        self.sections
-            .push(DiagnosticSection::log("GUI session events", body));
+        // Keep the latest application failure ahead of potentially full
+        // service/setup logs so the overall report limit cannot hide it.
+        let first_log = self
+            .sections
+            .iter()
+            .position(|section| section.kind == SectionKind::Logs)
+            .unwrap_or(self.sections.len());
+        self.sections.insert(
+            first_log,
+            DiagnosticSection::log("GUI session events", body),
+        );
         self.text = render_report(&self.collected_at, &self.sections);
         self
     }
@@ -286,6 +295,31 @@ mod tests {
         assert!(!snapshot.contains("past"));
         assert!(logs.contains("past service action"));
         assert!(logs.contains("past GUI action"));
+    }
+
+    #[test]
+    fn full_logs_do_not_hide_the_latest_gui_failure() {
+        let mut findings = (0..12)
+            .map(|index| format!("old event {index}: {}", "x".repeat(900)))
+            .collect::<Vec<_>>();
+        findings.push("latest loader failure".into());
+        let report = DiagnosticsReport::new(
+            0,
+            vec![
+                DiagnosticSection::new("Snapshot", "current state"),
+                DiagnosticSection::log("KWin setup", "x".repeat(MAX_SECTION_BYTES)),
+                DiagnosticSection::log("User services", "y".repeat(MAX_SECTION_BYTES)),
+                DiagnosticSection::log("System services", "z".repeat(MAX_SECTION_BYTES)),
+                DiagnosticSection::log("Other logs", "w".repeat(MAX_SECTION_BYTES)),
+            ],
+        )
+        .with_session_findings(&findings);
+        assert!(report.text().contains("latest loader failure"));
+        assert!(
+            report.text().find("GUI session events").unwrap()
+                < report.text().find("KWin setup").unwrap()
+        );
+        assert!(report.text().len() <= MAX_REPORT_BYTES);
     }
 
     #[test]

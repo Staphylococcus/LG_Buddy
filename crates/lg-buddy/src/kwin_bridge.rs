@@ -73,6 +73,53 @@ fn plugin_directory(exists: impl Fn(&str) -> bool) -> Option<&'static str> {
     .find(|directory| exists(&format!("{directory}/kwin/plugins")))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KWinInfo {
+    pub version: String,
+    pub qt_version: String,
+    pub plugin_directory: Option<&'static str>,
+    pub owner: String,
+}
+
+/// Read the running compositor without loading or provisioning a bridge.
+pub(crate) fn inspect() -> Result<Option<KWinInfo>, SessionBusError> {
+    inspect_with(&mut new_session_bus_client()?, |path| {
+        std::path::Path::new(path).is_dir()
+    })
+}
+
+fn inspect_with(
+    bus: &mut impl SessionBusClient,
+    exists: impl Fn(&str) -> bool,
+) -> Result<Option<KWinInfo>, SessionBusError> {
+    if !bus.name_has_owner(KWIN)? {
+        return Ok(None);
+    }
+    let owner = get_name_owner(bus, KWIN)?;
+    let reply = bus.call_method(BusMethodCall::new(
+        &owner,
+        "/KWin",
+        KWIN,
+        "supportInformation",
+    ))?;
+    let info = reply.single_string()?;
+    if !info.lines().any(|line| line == "Operation Mode: Wayland") {
+        return Ok(None);
+    }
+    let version = version_field(info, "KWin version:")?.to_owned();
+    let qt_version = version_field(info, "Qt Version:")?.to_owned();
+    let plugin_directory = plugin_directory(exists);
+    if get_name_owner(bus, KWIN)? != owner {
+        return Err(invalid("KWin changed while inspecting integration"));
+    }
+    Ok(Some(KWinInfo {
+        version,
+        qt_version,
+        plugin_directory,
+        owner,
+    }))
+}
+
 fn check(bus: &mut impl SessionBusClient, owner: &str) -> Result<String, SessionBusError> {
     if !bus.name_has_owner(SERVICE)? || get_name_owner(bus, SERVICE)? != owner {
         return Err(invalid("KWin source is absent"));
@@ -99,35 +146,27 @@ fn check(bus: &mut impl SessionBusClient, owner: &str) -> Result<String, Session
 pub fn run(command: KWinBridgeCommand, writer: &mut impl Write) -> io::Result<()> {
     let result = (|| -> Result<Option<String>, SessionBusError> {
         let mut bus = new_session_bus_client()?;
+        if command == KWinBridgeCommand::Info {
+            return inspect_with(&mut bus, |path| std::path::Path::new(path).is_dir()).map(
+                |info| {
+                    info.map(|info| {
+                        format!(
+                            "{}\t{}\t{}\t{}",
+                            info.version,
+                            info.qt_version,
+                            info.plugin_directory.unwrap_or("unsupported"),
+                            info.owner,
+                        )
+                    })
+                },
+            );
+        }
         if !bus.name_has_owner(KWIN)? {
-            return if command == KWinBridgeCommand::Info {
-                Ok(None)
-            } else {
-                Err(invalid("KWin is absent"))
-            };
+            return Err(invalid("KWin is absent"));
         }
         let owner = get_name_owner(&mut bus, KWIN)?;
         match command {
-            KWinBridgeCommand::Info => {
-                let reply = bus.call_method(BusMethodCall::new(
-                    &owner,
-                    "/KWin",
-                    KWIN,
-                    "supportInformation",
-                ))?;
-                let info = reply.single_string()?;
-                if !info.lines().any(|line| line == "Operation Mode: Wayland") {
-                    return Ok(None);
-                }
-                let version = version_field(info, "KWin version:")?;
-                let qt = version_field(info, "Qt Version:")?;
-                let directory = plugin_directory(|path| std::path::Path::new(path).is_dir())
-                    .unwrap_or("unsupported");
-                if get_name_owner(&mut bus, KWIN)? != owner {
-                    return Err(invalid("KWin changed while inspecting integration"));
-                }
-                Ok(Some(format!("{version}\t{qt}\t{directory}\t{owner}")))
-            }
+            KWinBridgeCommand::Info => unreachable!("read-only inspection handled above"),
             KWinBridgeCommand::Check => check(&mut bus, &owner).map(Some),
             KWinBridgeCommand::Load(id) => {
                 let loaded = bus
@@ -165,6 +204,116 @@ pub fn run(command: KWinBridgeCommand, writer: &mut impl Write) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_bus::{BusReply, BusSignal, BusSignalMatch};
+    use std::time::Duration;
+
+    struct InfoBus {
+        present: bool,
+        reply: BusValue,
+        changed_owner: bool,
+        calls: Vec<String>,
+    }
+
+    impl InfoBus {
+        fn new() -> Self {
+            Self {
+                present: true,
+                reply: BusValue::String(
+                    "Operation Mode: Wayland\nKWin version: 6.7.4\nQt Version: 6.10.2\n".into(),
+                ),
+                changed_owner: false,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl SessionBusClient for InfoBus {
+        fn name_has_owner(&mut self, name: &str) -> Result<bool, SessionBusError> {
+            assert_eq!(name, KWIN);
+            Ok(self.present)
+        }
+
+        fn call_method(&mut self, call: BusMethodCall<'_>) -> Result<BusReply, SessionBusError> {
+            let value = match call.member {
+                "GetNameOwner" => BusValue::String(
+                    if self.changed_owner && !self.calls.is_empty() {
+                        ":1.24"
+                    } else {
+                        ":1.23"
+                    }
+                    .into(),
+                ),
+                "supportInformation" => {
+                    assert_eq!(call.destination, ":1.23");
+                    assert_eq!(call.path, "/KWin");
+                    assert_eq!(call.interface, KWIN);
+                    assert!(call.body.is_empty());
+                    self.reply.clone()
+                }
+                _ => panic!("inspection must not load, unload or provision a plugin"),
+            };
+            self.calls.push(call.member.to_owned());
+            Ok(BusReply::new(vec![value]))
+        }
+
+        fn add_signal_match(&mut self, _: BusSignalMatch<'_>) -> Result<(), SessionBusError> {
+            panic!("inspection must not subscribe")
+        }
+
+        fn process(&mut self, _: Duration) -> Result<Option<BusSignal>, SessionBusError> {
+            panic!("inspection must not consume session events")
+        }
+    }
+
+    #[test]
+    fn read_only_inspection_works_without_a_loaded_bridge() {
+        let mut bus = InfoBus::new();
+        let info = inspect_with(&mut bus, |path| {
+            path == "/usr/lib64/qt6/plugins/kwin/plugins"
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(info.version, "6.7.4");
+        assert_eq!(info.qt_version, "6.10.2");
+        assert_eq!(info.plugin_directory, Some("/usr/lib64/qt6/plugins"));
+        assert_eq!(
+            bus.calls,
+            ["GetNameOwner", "supportInformation", "GetNameOwner"]
+        );
+        assert_eq!(
+            inspect_with(&mut bus, |_| false)
+                .unwrap()
+                .unwrap()
+                .plugin_directory,
+            None
+        );
+        bus.present = false;
+        bus.calls.clear();
+        assert_eq!(
+            inspect_with(&mut bus, |_| panic!("no compositor")),
+            Ok(None)
+        );
+        assert!(bus.calls.is_empty());
+    }
+
+    #[test]
+    fn inspection_rejects_changed_owners_and_invalid_replies() {
+        let mut bus = InfoBus::new();
+        bus.changed_owner = true;
+        assert!(inspect_with(&mut bus, |_| false)
+            .unwrap_err()
+            .to_string()
+            .contains("changed"));
+        bus.changed_owner = false;
+        bus.reply = BusValue::U32(1);
+        assert!(inspect_with(&mut bus, |_| false).is_err());
+        bus.reply = BusValue::String(
+            "Operation Mode: Wayland\nKWin version: bad\nQt Version: 6.10.2\n".into(),
+        );
+        assert!(inspect_with(&mut bus, |_| false).is_err());
+        bus.reply = BusValue::String("Operation Mode: X11\n".into());
+        assert_eq!(inspect_with(&mut bus, |_| false), Ok(None));
+    }
 
     #[test]
     fn plugin_ids_cannot_escape_the_plugin_directory_or_target_other_plugins() {

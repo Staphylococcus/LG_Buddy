@@ -169,12 +169,17 @@ pub struct DiagnosticsApplication {
 }
 
 impl DiagnosticsApplication {
-    /// Only application-owned user-facing summaries belong here. Protocol
-    /// frames and arbitrary subprocess/configuration output must not be retained.
+    /// Retain only bounded, sanitized application findings, including setup
+    /// failure detail that may be unavailable in a persistent setup log.
     pub(crate) fn record_failure(&mut self, context: &str, message: &str) {
-        let finding: String = format!("{context}: {message}").chars().take(1024).collect();
-        if self.recent_findings.contains(&finding) {
-            return;
+        let finding =
+            crate::diagnostics::sanitize_session_finding(&format!("{context}: {message}"));
+        if let Some(index) = self
+            .recent_findings
+            .iter()
+            .position(|previous| previous == &finding)
+        {
+            self.recent_findings.remove(index);
         }
         self.recent_findings.push(finding);
         if self.recent_findings.len() > 12 {
@@ -437,6 +442,32 @@ mod tests {
         assert!(failed.presentation().can_export());
         assert!(failed.presentation().error().is_some());
         assert_eq!(failed.presentation().report_text(), copy.clipboard_text());
+    }
+
+    #[test]
+    fn failure_details_are_redacted_before_retention_and_truncation() {
+        let mut app = DiagnosticsApplication::default();
+        app.record_failure(
+            "Setup",
+            &format!(
+                "{} token=private-value",
+                "long compiler output ".repeat(200)
+            ),
+        );
+        app.record_failure("Setup", "loader error\nclient-key=private-pairing-value");
+        assert!(app
+            .recent_findings
+            .iter()
+            .all(|finding| finding.len() <= 1024));
+        assert!(!app.recent_findings.join("\n").contains("private"));
+        let opened = app.handle_intent(DiagnosticsIntent::Open).unwrap();
+        let loaded = app
+            .complete_read(opened.read_operation().unwrap(), Ok(report("fixture")))
+            .unwrap();
+        let text = loaded.presentation().report_text().unwrap();
+        assert!(text.contains("loader error"));
+        assert!(text.contains("Credential-bearing output omitted"));
+        assert!(!text.contains("long compiler output"));
     }
 
     #[test]

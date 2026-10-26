@@ -8,6 +8,7 @@ use crate::command;
 mod desktop;
 mod inhibition;
 mod journal;
+mod kwin;
 mod monitor;
 mod report;
 mod services;
@@ -15,6 +16,10 @@ mod settings;
 mod tv;
 
 pub use report::{DiagnosticSection, DiagnosticsReport};
+
+pub(crate) fn sanitize_session_finding(finding: &str) -> String {
+    report::safe_text(finding, report::MAX_SESSION_FINDING_BYTES)
+}
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,6 +43,7 @@ impl EnvironmentDiagnosticsCollector {
             tv::collect(),
             application::collect(),
         ]);
+        sections.extend(kwin::collect());
         sections.extend(journal::collect());
         DiagnosticsReport::new(collected_at, sections)
     }

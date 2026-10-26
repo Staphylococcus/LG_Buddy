@@ -332,6 +332,13 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
     );
     fs::write(config.path(), &original).unwrap();
     let runtime = RuntimeStateLayout::new("monitor-diagnostics-runtime");
+    let state = config.path().with_extension("diagnostic-state");
+    let setup_log = state.join("lg-buddy/kwin/setup.log");
+    fs::create_dir_all(setup_log.parent().unwrap()).unwrap();
+    let setup_history =
+        "This is setup history\nCMake: KWin headers unavailable\ntoken=private-setup-value\n";
+    fs::write(&setup_log, setup_history).unwrap();
+    env.set("XDG_STATE_HOME", &state);
     env.set("DBUS_SESSION_BUS_ADDRESS", bus.address());
     env.set("LG_BUDDY_CONFIG", config.path());
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
@@ -430,6 +437,8 @@ fn running_monitor_reports_activity_and_the_same_inhibition_evaluation_without_n
     child.kill().unwrap();
     child.wait().unwrap();
     assert_eq!(fs::read_to_string(config.path()).unwrap(), original);
+    assert_eq!(fs::read_to_string(setup_log).unwrap(), setup_history);
+    fs::remove_dir_all(state).unwrap();
 }
 
 #[test]
@@ -445,7 +454,7 @@ fn monitor_diagnostics_collector_child() {
     );
     assert!(report.text().contains("KWin: absent"), "{}", report.text());
     assert!(!report.text().contains("No active blanking evaluation"));
-    assert!(!report.text().contains("This is setup history"));
+    assert!(!report.text().contains("private-setup-value"));
 
     assert_eq!(
         report
@@ -462,6 +471,8 @@ fn monitor_diagnostics_collector_child() {
             "Services",
             "TV observation",
             "Application and build",
+            "KWin compositor",
+            "KWin setup (historical)",
             "User services (current boot, latest 40 entries)",
             "System services (current boot, latest 40 entries)",
         ]
@@ -470,6 +481,11 @@ fn monitor_diagnostics_collector_child() {
     assert!(snapshot.contains("Current snapshot"));
     assert!(snapshot.contains("PowerDevil: available; inhibiting"));
     assert!(!snapshot.contains("current boot, latest 40 entries"));
+    assert!(snapshot.contains("Plasma integration is not applicable"));
+    assert!(!snapshot.contains("This is setup history"));
+    assert!(logs.contains("This is setup history"));
+    assert!(logs.contains("CMake: KWin headers unavailable"));
+    assert!(logs.contains("Modified at:"));
     assert!(logs.contains("User services (current boot, latest 40 entries)"));
     assert!(
         report.text().contains("source: gnome; available: true"),

@@ -423,8 +423,14 @@ impl Application {
             .as_ref()
             .and_then(|view| view.error.as_ref())
         {
-            self.diagnostics
-                .record_failure("Setup", &format!("{} {}", error.summary(), error.detail()));
+            let mut detail = format!("{} {}", error.summary(), error.detail());
+            if let Some(diagnostic) = &update.diagnostic {
+                detail.push('\n');
+                detail.push_str(diagnostic);
+            }
+            self.diagnostics.record_failure("Setup", &detail);
+        } else if let Some(diagnostic) = &update.diagnostic {
+            self.diagnostics.record_failure("Setup", diagnostic);
         }
         let mut transition = if update.presentation.is_none() && self.admitted {
             // Pairing may have completed before a later step was cancelled.
@@ -979,6 +985,70 @@ mod tests {
             .unwrap();
         assert!(text.contains("TV connection"));
         assert!(!text.contains("raw private protocol"));
+    }
+
+    #[test]
+    fn setup_failure_detail_without_a_log_reaches_copy_and_saved_report_safely() {
+        use crate::diagnostics::DiagnosticSection;
+        use crate::diagnostics_view::{DiagnosticsBackend, EnvironmentDiagnosticsBackend};
+        use crate::setup::gui::OnboardingPresentation;
+        let (mut app, _) = Application::open();
+        app.onboarding_transition(OnboardingTransition {
+            diagnostic: Some("KWin setup exited 1: CMake could not find KWin headers\nclient-key=private-pairing-value\nhttps://private.example/build\n".into()),
+            presentation: Some(OnboardingPresentation::required(Some(
+                crate::presentation::brightness::UserFacingError::new(
+                    "Plasma setup incomplete", "Plasma integration could not be set up.",
+                ),
+            ))),
+            operation: None,
+        });
+        let opened = app
+            .handle_diagnostics_intent(DiagnosticsIntent::Open)
+            .unwrap();
+        let loaded = app.complete_diagnostics_read(
+            opened.diagnostics().unwrap().read_operation().unwrap(),
+            Ok(DiagnosticsReport::new(0, vec![DiagnosticSection::new(
+                "KWin compositor", "running KWin version: 6.7.4\nrunning Qt version: 6.10.2\nQt plugin directory: /usr/lib64/qt6/plugins\n",
+            )])),
+        ).unwrap();
+        let visible = loaded
+            .diagnostics()
+            .unwrap()
+            .presentation()
+            .report_text()
+            .unwrap();
+        assert!(visible.contains("Plasma setup incomplete"));
+        assert!(visible.contains("CMake could not find KWin headers"));
+        assert!(visible.contains("running KWin version: 6.7.4"));
+        assert!(!visible.contains("private-pairing-value"));
+        assert!(!visible.contains("private.example"));
+        let copied = app
+            .handle_diagnostics_intent(DiagnosticsIntent::Copy)
+            .unwrap();
+        assert_eq!(
+            copied.diagnostics().unwrap().clipboard_text(),
+            Some(visible)
+        );
+        let root = std::env::temp_dir().join(format!(
+            "lg-buddy-setup-diagnostic-export-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("diagnostics.txt");
+        let choosing = app
+            .handle_diagnostics_intent(DiagnosticsIntent::Save)
+            .unwrap();
+        let saving = app
+            .handle_diagnostics_intent(DiagnosticsIntent::SaveDestination {
+                request: choosing.diagnostics().unwrap().save_request().unwrap(),
+                path: Some(path.clone()),
+            })
+            .unwrap();
+        let operation = saving.diagnostics().unwrap().save_operation().unwrap();
+        EnvironmentDiagnosticsBackend.save(operation).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), visible);
+        app.complete_diagnostics_save(operation, Ok(())).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn pairing() -> (Application, ApplicationTransition, PairingOperation) {
