@@ -58,6 +58,7 @@ rustPlatform.buildRustPackage {
     extension_dir="$out/share/gnome-shell/extensions/$extension_uuid"
     install -Dm644 "data/gnome-shell/$extension_uuid/metadata.json" "$extension_dir/metadata.json"
     install -Dm644 "data/gnome-shell/$extension_uuid/extension.js" "$extension_dir/extension.js"
+    install -Dm644 "data/gnome-shell/$extension_uuid/brightness.js" "$extension_dir/brightness.js"
     substituteInPlace "$extension_dir/extension.js" \
       --replace-fail "['lg-buddy', ...args]" "['$out/bin/lg-buddy', ...args]"
   '';

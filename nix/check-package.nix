@@ -32,6 +32,8 @@ runCommand "lg-buddy-package-check" {
   test -s ${package}/share/icons/hicolor/scalable/apps/io.github.staphylococcus.LGBuddy.svg
   grep -F "['${package}/bin/lg-buddy', ...args]" \
     ${package}/share/gnome-shell/extensions/lg-buddy-brightness@staphylococcus.github.io/extension.js
+  cmp ${../data/gnome-shell}/lg-buddy-brightness@staphylococcus.github.io/brightness.js \
+    ${package}/share/gnome-shell/extensions/lg-buddy-brightness@staphylococcus.github.io/brightness.js
   grep -Fx 'runtime=${package}/bin/lg-buddy' ${package}/lib/lg-buddy/kwin/setup.sh
   # Packaging the helper must not change the source fingerprint expected by setup.
   for source in CMakeLists.txt main.cpp metadata.json; do
