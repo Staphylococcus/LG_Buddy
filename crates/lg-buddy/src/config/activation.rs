@@ -283,7 +283,13 @@ pub(super) fn run(arguments: &[String]) -> io::Result<()> {
             publish_user(Path::new(config), &record, (source != "-").then(|| Path::new(source)), Path::new("/"))
         }
         [command, config] if command == "publish-machine" => publish_machine(Path::new("/"), Path::new(config)),
-        [command, config] if command == "refresh-user" => refresh_user(Path::new(config), &SystemdUserServiceController::from_env(), Path::new("/")),
+        [command, config] if command == "refresh-user" => {
+            let record = super::user_binding_path_from_env().ok_or_else(|| invalid("user config home is unavailable"))?;
+            if binding::read(&record, unsafe { libc::geteuid() })?.as_deref() != Some(Path::new(config)) {
+                return Err(invalid("user config selection changed; reconcile the declaration before refreshing services"));
+            }
+            refresh_user(Path::new(config), &SystemdUserServiceController::from_env(), Path::new("/"))
+        }
         _ => Err(invalid("expected config-binding publish-user CONFIG GENERATION|-; publish-machine CONFIG; or refresh-user CONFIG")),
     }
 }

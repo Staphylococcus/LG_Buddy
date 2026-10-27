@@ -211,7 +211,8 @@ later step can be retried without resetting preferences or pairing.
 Publication and service refresh are deliberately separate. A module publishes
 first, then reloads/activates its matching unit declarations, then calls
 `refresh-user` in a reachable user manager. The helper verifies the screen
-service's effective config binding and restarts only an already-active
+service's effective config binding against the still-current user selection and
+restarts only an already-active
 `LG_Buddy_screen.service`, after releasing publication locks. It never enables
 units, starts an inactive graphical session, or restarts the boot/shutdown
 oneshot. Lifecycle policy is already re-read by the lifecycle monitor and each

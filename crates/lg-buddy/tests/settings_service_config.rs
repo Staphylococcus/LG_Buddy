@@ -107,6 +107,11 @@ esac
     assert!(run("refresh-user", None).status.success());
     assert!(!restarted.exists());
     fs::remove_file(&inactive).unwrap();
+    let selector = directory.join("xdg/lg-buddy/config-path");
+    fs::write(&selector, format!("{}/another.env\n", directory.display())).unwrap();
+    assert!(!run("refresh-user", None).status.success());
+    assert!(!restarted.exists());
+    fs::write(&selector, format!("{}\n", config.path().display())).unwrap();
     drop(systemd);
     let wrong = SystemdEnvironment::new(
         vec![format!("LG_BUDDY_CONFIG={}/other.env", directory.display())],
