@@ -17,9 +17,8 @@ use crate::backend::{
     BackendProbe, BackendResolution, BackendSelectionError, SystemBackendProbe,
 };
 use crate::config::{
-    load_config, load_current_config, normalize_idle_timeout_secs, parse_config_entries,
-    parse_idle_timeout_secs, resolve_config_path_from_env, ConfigPathError, ScreenBackend,
-    ScreenIdleBlankPolicy, DEFAULT_IDLE_TIMEOUT,
+    load_config, load_current_config, normalize_idle_timeout_secs, parse_idle_timeout_secs,
+    resolve_config_path_from_env, ConfigPathError, ScreenBackend, DEFAULT_IDLE_TIMEOUT,
 };
 use crate::events::{EventSource, RuntimeEvent};
 use crate::inhibition::Inhibition;
@@ -780,13 +779,20 @@ fn screen_idle_blank_enabled_from_config() -> Result<bool, SessionRunnerError> {
             config_path.display()
         ),
     })?;
-    let entries = parse_config_entries(&contents);
-    let policy = entries
-        .get("screen_idle_blank")
-        .and_then(|value| value.parse::<ScreenIdleBlankPolicy>().ok())
-        .unwrap_or(ScreenIdleBlankPolicy::Enabled);
-
-    Ok(policy.is_enabled())
+    let policy = crate::settings::SettingsStore::from_reader_with_declarations(
+        crate::settings::ConfigEnvReader::parse(&config_path, &contents),
+    )
+    .and_then(|store| store.effective_by_name("screen.idle_blank"))
+    .map_err(|err| SessionRunnerError::Failed {
+        backend: ScreenBackend::Auto,
+        message: err.to_string(),
+    })?;
+    // Retain the existing enabled fallback for an invalid saved preference;
+    // invalid declarations fail at load instead of bypassing management.
+    Ok(policy
+        .value()
+        .and_then(crate::settings::SettingValue::as_enum)
+        != Some("disabled"))
 }
 
 fn run_passive_session_agent<W: Write>(_writer: &mut W) -> Result<(), SessionRunnerError> {

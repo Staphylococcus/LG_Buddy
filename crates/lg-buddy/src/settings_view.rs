@@ -400,7 +400,7 @@ impl SettingsBackend for EnvironmentSettingsBackend {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SettingsApplicationState {
-    Loading(SettingsReadOperation),
+    Loading,
     Ready,
     Failed,
 }
@@ -414,6 +414,7 @@ struct PendingMutation {
 #[derive(Debug)]
 pub struct SettingsApplication {
     state: SettingsApplicationState,
+    pending_read: Option<SettingsReadOperation>,
     next_operation_id: u64,
     presentation: SettingsPresentation,
     controls_available: bool,
@@ -431,7 +432,8 @@ impl SettingsApplication {
         let presentation = SettingsPresentation::loading();
         (
             Self {
-                state: SettingsApplicationState::Loading(operation),
+                state: SettingsApplicationState::Loading,
+                pending_read: Some(operation),
                 next_operation_id: 1,
                 presentation: presentation.clone(),
                 controls_available: true,
@@ -556,9 +558,10 @@ impl SettingsApplication {
         operation: SettingsReadOperation,
         result: Result<SettingsReadSnapshot, SettingsReadError>,
     ) -> Option<SettingsTransition> {
-        if !matches!(self.state, SettingsApplicationState::Loading(active) if active == operation) {
+        if self.pending_read != Some(operation) {
             return None;
         }
+        self.pending_read = None;
 
         if self.closed {
             return self
@@ -893,7 +896,8 @@ impl SettingsApplication {
     fn begin_read(&mut self) -> SettingsTransition {
         let operation = SettingsReadOperation::new(self.next_operation_id);
         self.next_operation_id += 1;
-        self.state = SettingsApplicationState::Loading(operation);
+        self.state = SettingsApplicationState::Loading;
+        self.pending_read = Some(operation);
         self.presentation.mark_loading();
         self.transition(Some(operation), None, None)
     }
@@ -907,10 +911,13 @@ impl SettingsApplication {
         if previous_row.managed_by().is_some() {
             return None;
         }
-        if matches!(self.state, SettingsApplicationState::Loading(_)) {
+        // A newly submitted edit supersedes an older read. Completion of an
+        // already submitted edit must leave a newer read's token intact.
+        if self.pending_read.take().is_some() {
             let update_check = self.presentation.update_check().clone();
             self.presentation = SettingsPresentation::ready(self.presentation.groups().to_vec());
             *self.presentation.update_check_mut() = update_check;
+            self.state = SettingsApplicationState::Ready;
         }
         let operation = SettingsMutationOperation::new(self.next_operation_id, setting, request);
         self.next_operation_id += 1;
@@ -930,6 +937,9 @@ impl SettingsApplication {
     }
 
     fn start_queued_mutation(&mut self) -> Option<SettingsMutationOperation> {
+        if self.pending_mutation.is_some() {
+            return None;
+        }
         let pending = self.queued_mutations.pop_front()?;
         let operation = pending.operation.clone();
         self.pending_mutation = Some(pending);
@@ -947,7 +957,12 @@ impl SettingsApplication {
                 queued.previous_row = self.presentation.row(queued.operation.setting())?.clone();
             }
         }
-        let operation = self.start_queued_mutation();
+        let operation = if self.pending_read.is_some() {
+            self.state = SettingsApplicationState::Loading;
+            None
+        } else {
+            self.start_queued_mutation()
+        };
         // A completion must not replace a newer submitted value in the editor.
         for queued in operation.iter().chain(
             self.queued_mutations
@@ -1609,6 +1624,85 @@ screen_backend=wayland\n",
             row(ready.presentation().groups(), "Updates", "Update channel").value_label(),
             "Stable"
         );
+    }
+
+    #[test]
+    fn newer_read_survives_failed_mutation_completion() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(
+            opening.read_operation().unwrap(),
+            Ok(groups("screen_idle_timeout=600\n")),
+        )
+        .unwrap();
+        let pending = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleTimeout,
+                value: "450".into(),
+            })
+            .unwrap();
+        let refresh = app.profile_changed();
+        app.complete_mutation(
+            pending.mutation_operation().unwrap(),
+            Err(SettingsMutationFailure::Persistence(
+                SettingsError::WriteConfig {
+                    path: "/tmp/config.env".into(),
+                    message: "write failed".into(),
+                },
+            )),
+        )
+        .unwrap();
+        assert!(app.handle_intent(SettingsIntent::Refresh).is_none());
+        let fresh = app
+            .complete_read(
+                refresh.read_operation().unwrap(),
+                Ok(groups("screen_idle_timeout=300\n")),
+            )
+            .unwrap();
+        assert_eq!(
+            fresh
+                .presentation()
+                .row(BehaviorSetting::ScreenIdleTimeout)
+                .unwrap()
+                .editor(),
+            &SettingsEditor::Number { text: "300".into() }
+        );
+        assert!(matches!(
+            fresh.presentation().status(),
+            SettingsStatus::Ready
+        ));
+        assert!(!app.is_mutating());
+    }
+
+    #[test]
+    fn a_new_edit_supersedes_an_older_read() {
+        let (mut app, opening) = SettingsApplication::open();
+        app.complete_read(
+            opening.read_operation().unwrap(),
+            Ok(groups("screen_idle_timeout=600\n")),
+        )
+        .unwrap();
+        let refresh = app.profile_changed();
+        let pending = app
+            .handle_intent(SettingsIntent::Commit {
+                setting: BehaviorSetting::ScreenIdleTimeout,
+                value: "450".into(),
+            })
+            .unwrap();
+        assert!(pending.mutation_operation().is_some());
+        assert!(app
+            .complete_read(
+                refresh.read_operation().unwrap(),
+                Ok(groups("screen_idle_timeout=300\n"))
+            )
+            .is_none());
+        assert_eq!(
+            app.presentation()
+                .row(BehaviorSetting::ScreenIdleTimeout)
+                .unwrap()
+                .editor(),
+            &SettingsEditor::Number { text: "600".into() }
+        );
+        assert!(app.is_mutating());
     }
 
     #[test]

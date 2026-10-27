@@ -413,54 +413,125 @@ fn late_mutation_completion_cannot_replace_a_newly_declared_row() {
             panic!("no stop")
         }
     }
-    let f = Fixture::new();
-    let (mut app, opening) = SettingsApplication::open();
-    app.complete_read(
-        opening.read_operation().unwrap(),
-        Ok(SettingsPresentation::from_store(&f.store())
-            .groups()
-            .to_vec()),
-    )
-    .unwrap();
-    let pending = app
-        .handle_intent(SettingsIntent::Commit {
-            setting: BehaviorSetting::ScreenIdleTimeout,
-            value: "450".into(),
-        })
-        .unwrap();
-    let operation = pending.mutation_operation().unwrap().clone();
-    let refresh = app.profile_changed();
-    let mutation = SettingsMutation::set(&f.store(), "screen.idle_timeout", "450").unwrap();
-    let saved = crate::settings::execute_settings_mutation(
-        &f.config,
-        mutation,
-        &SettingsApplier::new(NotInstalled),
-        &mut |_| {},
-    )
-    .unwrap();
-    f.declare(
-        DeclarativeSource::Nix,
-        serde_json::json!({"screen.idle_timeout":300}),
-    );
-    app.complete_read(
-        refresh.read_operation().unwrap(),
-        Ok(SettingsPresentation::from_store(&f.store())
-            .groups()
-            .to_vec()),
-    )
-    .unwrap();
-    app.complete_mutation(&operation, Ok(saved)).unwrap();
-    let row = app
-        .presentation()
-        .row(BehaviorSetting::ScreenIdleTimeout)
-        .unwrap();
-    assert_eq!(row.managed_by(), Some(DeclarativeSource::Nix));
-    assert_eq!(
-        row.editor(),
-        &crate::presentation::settings::SettingsEditor::Number { text: "300".into() }
-    );
-    assert!(!row.editor_enabled());
-    assert!(!row.reset_action().unwrap().enabled());
+    for read_first in [false, true] {
+        for queue_edit in [false, true] {
+            let f = Fixture::new();
+            let (mut app, opening) = SettingsApplication::open();
+            app.complete_read(
+                opening.read_operation().unwrap(),
+                Ok(SettingsPresentation::from_store(&f.store())
+                    .groups()
+                    .to_vec()),
+            )
+            .unwrap();
+            let pending = app
+                .handle_intent(SettingsIntent::Commit {
+                    setting: BehaviorSetting::ScreenIdleTimeout,
+                    value: "450".into(),
+                })
+                .unwrap();
+            let operation = pending.mutation_operation().unwrap().clone();
+            if queue_edit {
+                let queued = app
+                    .handle_intent(SettingsIntent::Commit {
+                        setting: BehaviorSetting::UpdatesChannel,
+                        value: "prerelease".into(),
+                    })
+                    .unwrap();
+                assert!(queued.mutation_operation().is_none());
+            }
+            // This write commits before management is published. Only delivery
+            // of its completion is delayed across the newer read.
+            let mutation = SettingsMutation::set(&f.store(), "screen.idle_timeout", "450").unwrap();
+            let saved = crate::settings::execute_settings_mutation(
+                &f.config,
+                mutation,
+                &SettingsApplier::new(NotInstalled),
+                &mut |_| {},
+            )
+            .unwrap();
+            {
+                let _guard = crate::pairing_store::PairingLock::for_config(&f.config).unwrap();
+                let generation = f.root.join("generation.json");
+                fs::write(
+                    &generation,
+                    r#"{"version":1,"source":"nix","settings":{"screen.idle_timeout":300}}"#,
+                )
+                .unwrap();
+                fs::set_permissions(&generation, fs::Permissions::from_mode(0o400)).unwrap();
+                let pending = f.root.join("declarative.pending");
+                symlink(&generation, &pending).unwrap();
+                fs::rename(pending, &f.overlay).unwrap();
+            }
+            let refresh = app.profile_changed();
+            let groups = SettingsPresentation::from_store(&f.store())
+                .groups()
+                .to_vec();
+            let done = if read_first {
+                let read = app
+                    .complete_read(refresh.read_operation().unwrap(), Ok(groups))
+                    .unwrap();
+                assert!(
+                    read.mutation_operation().is_none(),
+                    "a read cannot start a second writer"
+                );
+                app.complete_mutation(&operation, Ok(saved)).unwrap()
+            } else {
+                let completed = app.complete_mutation(&operation, Ok(saved)).unwrap();
+                assert!(
+                    completed.mutation_operation().is_none(),
+                    "queued edits wait for the newer read"
+                );
+                app.complete_read(refresh.read_operation().unwrap(), Ok(groups))
+                    .unwrap()
+            };
+            let row = app
+                .presentation()
+                .row(BehaviorSetting::ScreenIdleTimeout)
+                .unwrap();
+            assert_eq!(row.managed_by(), Some(DeclarativeSource::Nix));
+            assert_eq!(
+                row.editor(),
+                &crate::presentation::settings::SettingsEditor::Number { text: "300".into() }
+            );
+            assert!(!row.editor_enabled());
+            assert!(!row.reset_action().unwrap().enabled());
+            assert!(row.retry_apply_action().is_none());
+            assert_eq!(
+                app.presentation().managed_notice_source(),
+                Some(DeclarativeSource::Nix)
+            );
+            assert_eq!(
+                f.store().raw_storage_value("screen_idle_timeout"),
+                Some("450")
+            );
+            if queue_edit {
+                let next = done.mutation_operation().unwrap();
+                assert_eq!(next.key_name(), "updates.channel");
+                let mutation =
+                    SettingsMutation::set(&f.store(), next.key_name(), "prerelease").unwrap();
+                let outcome = crate::settings::execute_settings_mutation(
+                    &f.config,
+                    mutation,
+                    &SettingsApplier::new(NoRuntime),
+                    &mut |_| {},
+                )
+                .unwrap();
+                app.complete_mutation(next, Ok(outcome)).unwrap();
+                assert_eq!(
+                    f.store()
+                        .effective_by_name("updates.channel")
+                        .unwrap()
+                        .required_value()
+                        .unwrap(),
+                    SettingValue::Enum("prerelease")
+                );
+            } else {
+                assert!(done.mutation_operation().is_none());
+            }
+            assert!(!app.is_mutating());
+        }
+    }
 }
 
 #[test]

@@ -59,6 +59,9 @@ fn native_config(
 #[test]
 fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_not_assess() {
     let bus = MockSessionBusIdleMonitor::new("setup-snapshot-bus");
+    bus.set_shell_available(true);
+    bus.set_screen_saver_available(true);
+    bus.set_idle_monitor_available(true);
     let config = TestConfigFile::new("setup-missing-config");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
         .arg("monitor")
@@ -115,6 +118,7 @@ fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_n
         read().is_some_and(|snapshot| snapshot.revision >= revision)
     });
     assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(bus.user_active_watch_count(), 0);
     assert!(!config.path().exists());
     child.kill().unwrap();
     child.wait().unwrap();
@@ -492,6 +496,67 @@ fn monitor_diagnostics_collector_child() {
         "{}",
         report.text()
     );
+}
+
+#[test]
+fn restarted_monitor_uses_declared_idle_blanking_in_both_directions() {
+    let _env = TestEnv::new();
+    for enabled in [true, false] {
+        let bus = MockSessionBusIdleMonitor::new("declarative-monitor-bus");
+        bus.set_shell_available(true);
+        bus.set_screen_saver_available(true);
+        bus.set_idle_monitor_available(true);
+        let logind = MockSystemLogind::new("declarative-monitor-logind");
+        logind.reset();
+        let (tv, config) = native_config("declarative-monitor-config", "HDMI_2", false);
+        config.append_line(if enabled {
+            "screen_idle_blank=disabled"
+        } else {
+            "screen_idle_blank=enabled"
+        });
+        let original = fs::read(config.path()).unwrap();
+        let token = config
+            .path()
+            .parent()
+            .unwrap()
+            .join("tvs/primary/access-token.json");
+        let credential = fs::read(&token).unwrap();
+        let binding = lg_buddy::config::declarative::binding_path(config.path()).unwrap();
+        fs::write(
+            &binding,
+            serde_json::to_vec(&serde_json::json!({
+                "version":1, "source":"nix", "settings": {
+                    "screen.idle_blank":enabled, "screen.idle_timeout":1
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let runtime = RuntimeStateLayout::new("declarative-monitor-runtime");
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+            .arg("monitor")
+            .env("LG_BUDDY_CONFIG", config.path())
+            .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
+            .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+            .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
+            .env("XDG_SESSION_ID", "test-session")
+            .env("LG_BUDDY_SCREEN_BACKEND", "gnome")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
+            .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
+            .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "2.5")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(bus.user_active_watch_count() > 0, enabled);
+        assert_eq!(tv.snapshot().screen_on, !enabled);
+        if !enabled {
+            assert_eq!(tv.snapshot().connection_count, 0);
+            runtime.assert_session_marker_absent();
+        }
+        assert_eq!(fs::read(config.path()).unwrap(), original);
+        assert_eq!(fs::read(&token).unwrap(), credential);
+    }
 }
 
 #[test]
