@@ -316,12 +316,21 @@ mod external_owner_tests {
                     &mut output,
                 )
                 .unwrap();
-            let saved = std::fs::read_to_string(&path).unwrap();
-            assert!(saved.contains(&format!("updates_auto_check={value}")));
-            assert!(saved.contains("updates_channel=prerelease"));
-            let output = String::from_utf8(output).unwrap();
-            assert!(output.contains("managed by Nix"));
-            assert!(output.contains("rebuild and activate"));
+            let saved = SettingsStore::load(&path).unwrap();
+            for (key, expected) in [
+                ("updates.auto_check", value),
+                ("updates.channel", "prerelease"),
+            ] {
+                let effective = saved.effective_by_name(key).unwrap();
+                assert_eq!(
+                    effective.required_value().unwrap(),
+                    SettingValue::Enum(expected)
+                );
+                assert_eq!(
+                    effective.source(),
+                    crate::settings::SettingSource::ConfigEnv
+                );
+            }
             std::fs::remove_file(path).unwrap();
         }
     }

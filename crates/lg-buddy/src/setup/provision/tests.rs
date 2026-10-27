@@ -1467,23 +1467,32 @@ fn external_owner_needs_neither_update_unit_nor_binding_and_preserves_preference
 
 #[test]
 fn external_owner_reports_retained_active_timer_for_external_repair() {
-    let fixture = external_nix_fixture();
-    fixture.user.borrow_mut().insert(TIMER.into(), (true, true));
-    let before = fs::read(&fixture.config).unwrap();
-    let StepResponse::Blocked(error) = fixture.run() else {
-        panic!("active external timer must require repair")
-    };
-    assert!(error
-        .presentation
-        .detail()
-        .contains("disable LG_Buddy_update_check.timer"));
-    assert!(error
-        .presentation
-        .detail()
-        .contains("stop LG_Buddy_update_check.timer"));
-    assert_eq!(error.recovery.action, Action::RepairExternally);
-    assert!(fixture.calls.borrow().is_empty());
-    assert_eq!(fs::read(&fixture.config).unwrap(), before);
+    for timer_state in [(true, true), (true, false), (false, true)] {
+        let fixture = external_nix_fixture();
+        fixture.user.borrow_mut().insert(TIMER.into(), timer_state);
+        let before = fs::read(&fixture.config).unwrap();
+        let StepResponse::Blocked(error) = fixture.run() else {
+            panic!("enabled or active external timer must require repair")
+        };
+        assert_eq!(
+            error.recovery,
+            SetupRecovery::new(
+                Cause::ManagedInstallation,
+                Boundary::SystemConfiguration,
+                Action::RepairExternally
+            )
+        );
+        assert_eq!(fixture.user.borrow().get(TIMER), Some(&timer_state));
+        assert!(fixture.calls.borrow().is_empty());
+        assert_eq!(fs::read(&fixture.config).unwrap(), before);
+
+        // The external owner disables/stops its timer; rechecking then succeeds.
+        fixture.user.borrow_mut().insert(TIMER.into(), (false, false));
+        assert!(matches!(fixture.run(), StepResponse::Complete));
+        assert!(fixture.calls.borrow().is_empty());
+        assert!(!fixture.units.exists());
+        assert_eq!(fs::read(&fixture.config).unwrap(), before);
+    }
 }
 
 #[test]

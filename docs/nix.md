@@ -94,8 +94,9 @@ and once through the GTK wrapper. Both paths exercise activation, the brightness
 deep link, single-instance replacement and clean application exit.
 
 The ownership smoke runs outside the build sandbox against the built store
-executable and a profile alias. It verifies check/background/notification guidance,
-installer refusal and absence of generated configuration or update cache. Build
+executable and a profile alias. It verifies successful check/background/notification
+commands, installer refusal and unchanged user state, both without configuration
+and with invalid, inactive update preferences. Build
 namespaces can expose the store owner as an unmapped UID; those observations do
 not qualify as a trusted root-owned runtime.
 

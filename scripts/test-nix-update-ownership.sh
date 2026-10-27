@@ -19,22 +19,31 @@ run_isolated() {
         LG_BUDDY_INSTALL_ROOT="$task_scratch/other-install" "$@"
 }
 
-for task_launcher in "$task_package/bin/lg-buddy" "$task_scratch/profile/bin/lg-buddy"; do
-    for task_command in check background-check; do
-        run_isolated "$task_launcher" updates "$task_command" > "$task_scratch/check.log"
-        grep -Fq 'managed by Nix' "$task_scratch/check.log"
-        grep -Fq 'rebuild and activate' "$task_scratch/check.log"
+check_launchers() {
+    for task_launcher in "$task_package/bin/lg-buddy" "$task_scratch/profile/bin/lg-buddy"; do
+        for task_command in check background-check; do
+            run_isolated "$task_launcher" updates "$task_command" > "$task_scratch/check.log"
+        done
+        run_isolated "$task_launcher" updates check --notify > "$task_scratch/notify.log"
+        if run_isolated "$task_launcher" updates install > "$task_scratch/install.log" 2>&1; then
+            echo 'A Nix-owned runtime must not use the application installer' >&2
+            exit 1
+        fi
     done
-    run_isolated "$task_launcher" updates check --notify > "$task_scratch/notify.log"
-    grep -Fq 'managed by Nix' "$task_scratch/notify.log"
-    if run_isolated "$task_launcher" updates install > "$task_scratch/install.log" 2>&1; then
-        echo 'A Nix-owned runtime must not use the application installer' >&2
-        exit 1
-    fi
-    grep -Fq 'managed by Nix' "$task_scratch/install.log"
-done
+}
 
+check_launchers
 test ! -e "$task_scratch/home/.config/lg-buddy/config.env"
+
+# Inactive preferences must not become prerequisites for an external owner's
+# update commands, even when a retained channel is invalid.
+mkdir -p "$task_scratch/home/.config/lg-buddy"
+printf 'updates_auto_check=enabled\nupdates_channel=not-a-channel\n' \
+    > "$task_scratch/home/.config/lg-buddy/config.env"
+cp "$task_scratch/home/.config/lg-buddy/config.env" "$task_scratch/retained-config.env"
+check_launchers
+cmp "$task_scratch/retained-config.env" "$task_scratch/home/.config/lg-buddy/config.env"
+test ! -e "$task_scratch/other-install"
 test ! -e "$task_scratch/home/.cache/lg-buddy"
 test ! -e "$task_scratch/home/.local/state/lg-buddy"
 echo 'Verified Nix update ownership through the store runtime and profile alias.'

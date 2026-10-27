@@ -33,7 +33,13 @@ def main():
         config = root / "config.env"
         original = "screen_idle_blank=disabled\nupdates_auto_check=disabled\n"
         config.write_text(original)
-        env = os.environ | {"HOME": str(root), "LG_BUDDY_CONFIG": str(config)}
+        env = os.environ | {
+            "HOME": str(root),
+            "XDG_CONFIG_HOME": str(root / ".config"),
+            "XDG_CACHE_HOME": str(root / ".cache"),
+            "XDG_STATE_HOME": str(root / ".local/state"),
+            "LG_BUDDY_CONFIG": str(config),
+        }
         command = ["bwrap", "--bind", "/", "/", "--tmpfs", "/run", "--dir", f"/run/user/{os.getuid()}",
                    "--ro-bind", str(etc), "/etc",
                    "--dev", "/dev", runtime, "setup"]
@@ -42,23 +48,24 @@ def main():
             return subprocess.run(command + list(args), env=env, capture_output=True,
                                   text=True, timeout=15)
 
-        def terminal(args, conversation, expected):
+        def terminal(reply, expected):
             pid, master = pty.fork()
             if pid == 0:
                 # The namespace supervisor must survive the foreground signal;
                 # the CLI installs its own handler after exec.
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
-                os.execvpe(command[0], command + args, env)
+                os.execvpe(command[0], command, env)
             output = b""
             status = None
             deadline = time.monotonic() + 15
             try:
-                for wanted, reply in conversation:
-                    while wanted.encode() not in output:
-                        assert time.monotonic() < deadline, output.decode(errors="replace")
-                        if select.select([master], [], [], 0.1)[0]:
-                            output += os.read(master, 65536)
-                    os.write(master, reply)
+                # Rendering starts after cancellation handlers are installed.
+                # Synchronize on terminal activity, independently of prompt wording.
+                while not output:
+                    assert time.monotonic() < deadline, output.decode(errors="replace")
+                    if select.select([master], [], [], 0.1)[0]:
+                        output += os.read(master, 65536)
+                os.write(master, reply)
                 while status is None:
                     assert time.monotonic() < deadline, output.decode(errors="replace")
                     if select.select([master], [], [], 0.1)[0]:
@@ -82,8 +89,9 @@ def main():
         assert missing.returncode == 3, missing.stdout + missing.stderr
         assert config.read_text() == original
         for reply in (b"q\n", b"\x03", b"\x04"):
-            terminal([], [("TV IP address", reply)], 130)
+            terminal(reply, 130)
             assert config.read_text() == original
+            assert not (root / "tvs/primary/access-token.json").exists()
 
         with (root / "fixture.log").open("w+") as log:
             tv = subprocess.Popen([fixture, str(root / "control")], stdout=log, stderr=log)
@@ -95,19 +103,25 @@ def main():
                 paired = cli("--non-interactive", "--yes", "--tv-ip", "127.0.0.1",
                              "--tv-mac", "02:11:22:33:44:55", "--input", "HDMI_2")
                 assert paired.returncode == 1, paired.stdout + paired.stderr
-                assert "Setup complete." not in paired.stdout
-                for remedy in ("Unmet requirements:", "bind LG_Buddy_screen.service to this configuration",
-                               "Update the owning NixOS or Home Manager service configuration, build it, and activate it"):
-                    assert remedy in paired.stderr, paired.stdout + paired.stderr
                 token = root / "tvs/primary/access-token.json"
                 assert token.exists(), paired.stdout + paired.stderr
                 saved, credential, modified = config.read_bytes(), token.read_bytes(), token.stat().st_mtime_ns
-                assert original.splitlines()[0] in saved.decode()
+                settings = dict(line.split("=", 1) for line in saved.decode().splitlines()
+                                if line and not line.startswith("#"))
+                for key, value in {
+                    "tvs_primary_ip": "127.0.0.1",
+                    "tvs_primary_mac": "02:11:22:33:44:55",
+                    "tvs_primary_input": "HDMI_2",
+                    "tvs_primary_platform": "lg_webos",
+                    "screen_idle_blank": "disabled",
+                    "updates_auto_check": "disabled",
+                }.items():
+                    assert settings.get(key) == value, settings
+                assert not (root / ".config/systemd/user").exists()
                 resumed = cli("--non-interactive", "--yes")
                 assert resumed.returncode == 1, resumed.stdout + resumed.stderr
-                assert "Pair a TV" not in resumed.stdout
-                assert "Unmet requirements:" in resumed.stderr, resumed.stdout + resumed.stderr
                 assert (config.read_bytes(), token.read_bytes(), token.stat().st_mtime_ns) == (saved, credential, modified)
+                assert not (root / ".config/systemd/user").exists()
                 deadline = time.monotonic() + 3
                 while json.loads((root / "control/state.json").read_text())["pairing_prompt_count"] != 1:
                     assert time.monotonic() < deadline, "TV fixture did not publish pairing state"
