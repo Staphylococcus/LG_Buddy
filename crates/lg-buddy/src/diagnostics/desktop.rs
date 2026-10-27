@@ -49,6 +49,14 @@ fn diagnostic_configured_backend(
     override_value: Option<&str>,
     store: Option<&SettingsStore>,
 ) -> Result<ScreenBackend, &'static str> {
+    if store
+        .and_then(|s| s.effective_by_name("screen.backend").ok())
+        .is_some_and(|s| s.managed_by().is_some())
+    {
+        return setting_value(store.unwrap(), "screen.backend")
+            .and_then(|v| v.parse().ok())
+            .ok_or("declared backend is invalid");
+    }
     if let Some(value) = override_value {
         return value
             .parse()

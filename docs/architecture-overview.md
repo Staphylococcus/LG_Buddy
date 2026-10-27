@@ -1091,7 +1091,7 @@ Important environment overrides:
 - `LG_BUDDY_CONFIG`
   - explicit config file path
 - `LG_BUDDY_SCREEN_BACKEND`
-  - force backend selection
+  - force backend selection unless `screen.backend` is managed declaratively
 - `LG_BUDDY_GUI`
   - override the matching `lg-buddy-gui` path for relocation and tests
 - `LG_BUDDY_SYSTEM_RUNTIME_DIR`
@@ -1102,6 +1102,10 @@ Important environment overrides:
   - override the `systemctl` command path used by shutdown logic
 
 These exist mainly so the runtime can be tested without mutating real system paths or depending on globally installed commands.
+
+[Generated declarations](defaults-and-configuration.md#declaratively-managed-settings)
+take precedence for managed behavior keys and share the config/mutation boundary
+across GUI, CLI, monitor and lifecycle consumers.
 
 ## Testing Shape
 

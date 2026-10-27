@@ -611,6 +611,11 @@ impl ApplyStrategy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsError {
     ConfigPath(ConfigPathError),
+    ManagedSetting {
+        key: String,
+        path: PathBuf,
+        source: crate::config::declarative::DeclarativeSource,
+    },
     ReadConfig {
         path: PathBuf,
         kind: io::ErrorKind,
@@ -665,6 +670,8 @@ impl fmt::Display for SettingsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ConfigPath(err) => write!(f, "{err}"),
+            Self::ManagedSetting { key, path, .. } => write!(f,
+                "setting `{key}` is managed declaratively by {}; change the owning declarative configuration and activate it, or remove its declaration before editing it here", path.display()),
             Self::ReadConfig { path, message, .. } => {
                 write!(
                     f,
@@ -741,6 +748,7 @@ impl std::error::Error for SettingsError {
             | Self::MissingRequiredSetting { .. }
             | Self::UnsupportedOperation { .. }
             | Self::RegistryInvariant(_) => None,
+            Self::ManagedSetting { .. } => None,
         }
     }
 }

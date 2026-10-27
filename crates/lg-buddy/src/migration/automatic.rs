@@ -94,6 +94,19 @@ fn inspect(path: &Path, contents: Option<&str>) -> Result<Inspection, AutomaticM
     {
         return Ok(Inspection::Ready(MigrationOutcome::Unconfigured));
     }
+    let declared = crate::config::declarative::Declarations::load(path)
+        .map_err(|_| AutomaticMigrationError::InvalidConfiguration)?
+        .map(|d| d.effective_contents(contents));
+    let effective = declared.as_deref().unwrap_or(contents);
+    if stale_config_reasons(effective).is_empty() {
+        return Ok(Inspection::Ready(MigrationOutcome::Current(
+            CurrentConfig {
+                path: path.into(),
+                config: parse_current_config(effective)
+                    .map_err(|_| AutomaticMigrationError::InvalidConfiguration)?,
+            },
+        )));
+    }
     match inspect_config(path, contents)
         .map_err(|_| AutomaticMigrationError::InvalidConfiguration)?
     {
@@ -209,8 +222,9 @@ fn migrate_with(
     }
     let current = CurrentConfig {
         path: path.into(),
-        config: parse_current_config(&reloaded)
-            .map_err(|_| AutomaticMigrationError::CommittedReloadFailed)?,
+        config: crate::config::load_current_config(path)
+            .map_err(|_| AutomaticMigrationError::CommittedReloadFailed)?
+            .config,
     };
     Ok(MigrationOutcome::Converted {
         current,

@@ -648,6 +648,26 @@ impl SettingsApplication {
         }
         self.pending_mutation = None;
 
+        // A newer read can establish management while an earlier worker is
+        // completing. Its saved-value result must not replace declared data.
+        if self
+            .presentation
+            .row(operation.setting())
+            .is_some_and(|row| row.managed_by().is_some())
+        {
+            self.presentation.set_row_state(
+                operation.setting(),
+                SettingsEditStatus::Unchanged,
+                None,
+                false,
+            );
+            self.state = SettingsApplicationState::Ready;
+            return self.finish_mutation(
+                Some(operation.setting()),
+                result.err().map(|failure| failure.error().to_string()),
+            );
+        }
+
         match result {
             Ok(outcome) => {
                 let effective = outcome.change().effective_setting();
@@ -884,6 +904,9 @@ impl SettingsApplication {
         request: SettingsMutationRequest,
     ) -> Option<SettingsTransition> {
         let previous_row = self.presentation.row(setting)?.clone();
+        if previous_row.managed_by().is_some() {
+            return None;
+        }
         if matches!(self.state, SettingsApplicationState::Loading(_)) {
             let update_check = self.presentation.update_check().clone();
             self.presentation = SettingsPresentation::ready(self.presentation.groups().to_vec());
@@ -1485,11 +1508,12 @@ screen_backend=wayland\n",
             let definition = SETTINGS_REGISTRY.get_by_name(key).unwrap();
             assert_eq!(rendered.title(), *title);
             if *key == "screen.backend" {
-                assert!(rendered.description().contains("Saved override: Wayland"));
-                assert!(matches!(
+                assert_eq!(
                     rendered.editor(),
-                    SettingsEditor::AutomaticIntegration { .. }
-                ));
+                    &SettingsEditor::AutomaticIntegration {
+                        configured: Some("wayland".into())
+                    }
+                );
                 assert!(rendered.reset_action().is_none());
             } else {
                 assert_eq!(rendered.description(), definition.description());

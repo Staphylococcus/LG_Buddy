@@ -181,8 +181,8 @@ exposes public settings without `screen.backend` and does not resolve a backend.
 The complete internal registry remains available to diagnostics, so hiding a
 compatibility key does not hide an active legacy override from a support report.
 
-Explicit legacy CLI commands retain their contract: `get` returns the saved or
-default value, `describe screen.backend` identifies compatibility-only use,
+Explicit legacy CLI commands retain their contract: `get` returns the effective
+value, `describe screen.backend` identifies compatibility-only use,
 `set` accepts `auto`, `gnome` and `wayland`, and `unset` removes the
 override to restore `auto`. Mutation output, exit behavior and save-before-apply
 semantics are retained. On service-apply failure the new value stays saved and
@@ -193,6 +193,10 @@ neither it nor the explicit setting description resolves the composed source set
 Saved retired swayidle values remain visible as invalid raw configuration until
 user daemon startup converts them. No resolved desktop choice is written on login
 or source recovery.
+
+[Declaratively managed keys](defaults-and-configuration.md#declaratively-managed-settings)
+use the declared value ahead of saved/default and environment overrides; local
+set/unset and GUI transitions reject those keys before application.
 
 `inhibition.rs` defines `PushInhibitionAdapter`: its worker maintains one source's
 state, and `evaluate()` returns a Boolean permission with matching diagnostics

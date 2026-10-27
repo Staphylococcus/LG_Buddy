@@ -2,8 +2,8 @@
 
 The flake provides the package foundation for the v2.1.0 NixOS integration in
 [issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253). It does not yet
-provide the NixOS or Home Manager modules or read-only declaratively managed
-settings (#255). Installing this package alone
+provide the NixOS or Home Manager modules. The shared read-only declaration
+engine is available; the public modules will supply its generated data. Installing this package alone
 does not complete LG Buddy setup or establish supported NixOS integration.
 
 ## Build and inspect
@@ -84,6 +84,8 @@ nix flake check --no-build --all-systems
 nix build --print-build-logs --no-link .#checks.x86_64-linux.package
 bash scripts/test-nix-update-ownership.sh \
   "$(nix eval --raw .#packages.x86_64-linux.lg-buddy.outPath)"
+python3 scripts/test-declarative-settings.py \
+  "$(nix eval --raw .#packages.x86_64-linux.lg-buddy.outPath)/bin/lg-buddy" --nix
 ```
 
 The package build runs the Rust runtime library suite. The installed-package
@@ -102,4 +104,4 @@ not qualify as a trusted root-owned runtime.
 
 These checks verify packaging and installed launch behavior. Native NixOS
 pairing, lifecycle, Plasma integration and generation rollback remain part of
-the full #253 acceptance, after #255 and the module implementation.
+the full #253 acceptance, after the module implementation.

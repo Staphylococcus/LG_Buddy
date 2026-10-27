@@ -140,6 +140,7 @@ impl StagedConfig {
         hook: &mut dyn FnMut(Point) -> io::Result<()>,
     ) -> Result<bool, ConfigWriteError> {
         let renamed = hook(Point::ConfigRename)
+            .and_then(|_| crate::config::declarative::validate_changes(path, original, rendered))
             .and_then(|_| fs::rename(&self.0, path))
             .and_then(|_| hook(Point::RenameResult));
         if renamed.is_err() {

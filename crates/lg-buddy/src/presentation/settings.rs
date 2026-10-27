@@ -85,6 +85,7 @@ pub struct SettingsGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsRow {
     setting: BehaviorSetting,
+    managed_by: Option<crate::config::declarative::DeclarativeSource>,
     title: String,
     description: String,
     value_label: String,
@@ -109,6 +110,21 @@ pub struct SettingsAction {
 }
 
 impl SettingsPresentation {
+    pub fn managed_notice_source(&self) -> Option<crate::config::declarative::DeclarativeSource> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.rows.iter())
+            .filter(|row| self.row_visible(row.setting))
+            .find_map(|row| row.managed_by)
+    }
+
+    pub fn managed_notice(&self) -> Option<&'static str> {
+        self.managed_notice_source().map(|source| match source {
+            crate::config::declarative::DeclarativeSource::Nix => "Some settings are disabled because they are managed declaratively in your nix configuration",
+            crate::config::declarative::DeclarativeSource::Generic => "Some settings are disabled because they are managed declaratively in your configuration",
+        })
+    }
+
     pub(crate) fn loading() -> Self {
         Self {
             status: SettingsStatus::Loading {
@@ -194,6 +210,12 @@ impl SettingsPresentation {
     /// Keep dependent settings intact while only presenting controls that apply.
     /// Missing or invalid blanking values retain the controls for diagnosis.
     pub fn row_visible(&self, setting: BehaviorSetting) -> bool {
+        if self
+            .row(setting)
+            .is_some_and(|row| row.managed_by().is_some())
+        {
+            return true;
+        }
         if matches!(
             setting,
             BehaviorSetting::UpdatesAutoCheck | BehaviorSetting::UpdatesChannel
@@ -280,7 +302,7 @@ impl SettingsPresentation {
         {
             row.edit_status = status;
             row.feedback = feedback;
-            row.retry_apply_action = retry_apply.then(|| {
+            row.retry_apply_action = (retry_apply && row.managed_by.is_none()).then(|| {
                 SettingsAction::new(
                     "Retry apply",
                     row.editor_enabled,
@@ -409,6 +431,9 @@ impl SettingsEditor {
 }
 
 impl SettingsRow {
+    pub fn managed_by(&self) -> Option<crate::config::declarative::DeclarativeSource> {
+        self.managed_by
+    }
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -470,6 +495,7 @@ impl SettingsRow {
     }
 
     pub(crate) fn set_editor_enabled(&mut self, enabled: bool) {
+        let enabled = enabled && self.managed_by.is_none();
         self.editor_enabled = enabled;
         if let Some(action) = &mut self.reset_action {
             action.set_enabled(enabled);
@@ -574,9 +600,10 @@ pub(crate) fn row_from_effective(setting: &EffectiveSetting) -> SettingsRow {
 
     SettingsRow {
         setting: behavior_setting,
+        managed_by: setting.managed_by(),
         title: setting_title(setting.key_name()).to_string(),
         description: if behavior_setting == BehaviorSetting::ScreenBackend {
-            format!("Saved override: {current_value_label}. Automatic integration discovers the available desktop interfaces on each login and keeps your behavior settings.")
+            format!("Configured integration: {current_value_label}. Automatic integration discovers the available desktop interfaces on each login and keeps your behavior settings.")
         } else {
             definition.description().to_string()
         },
@@ -590,11 +617,16 @@ pub(crate) fn row_from_effective(setting: &EffectiveSetting) -> SettingsRow {
         problem,
         editor,
         commit_policy,
-        editor_enabled: true,
+        editor_enabled: setting.managed_by().is_none(),
         edit_status: SettingsEditStatus::Unchanged,
         feedback: None,
-        reset_action: (behavior_setting != BehaviorSetting::ScreenBackend)
-            .then(|| SettingsAction::new("Reset", true, SettingsIntent::Reset(behavior_setting))),
+        reset_action: (behavior_setting != BehaviorSetting::ScreenBackend).then(|| {
+            SettingsAction::new(
+                "Reset",
+                setting.managed_by().is_none(),
+                SettingsIntent::Reset(behavior_setting),
+            )
+        }),
         retry_apply_action: None,
     }
 }
@@ -686,6 +718,12 @@ fn value_label(key: &str, value: SettingValue) -> String {
 
 fn source_label(source: SettingSource) -> &'static str {
     match source {
+        SettingSource::Declarative(crate::config::declarative::DeclarativeSource::Nix) => {
+            "Managed by Nix configuration"
+        }
+        SettingSource::Declarative(crate::config::declarative::DeclarativeSource::Generic) => {
+            "Managed declaratively"
+        }
         SettingSource::Default => "Default",
         SettingSource::ConfigEnv => "Saved configuration",
         SettingSource::LegacyConfigEnv => "Legacy configuration",

@@ -90,11 +90,6 @@ impl MonitorDiagnostics {
         );
         if let Some(configured) = state.configured {
             writeln!(context, "configured integration: {}", configured.as_str()).unwrap();
-            if std::env::var_os("LG_BUDDY_SCREEN_BACKEND").is_some() {
-                context.push_str(
-                    "configuration origin: LG_BUDDY_SCREEN_BACKEND environment override\n",
-                );
-            }
             if configured != ScreenBackend::Auto {
                 writeln!(context, "legacy override: {}; native activity discovery is restricted until an explicit switch to automatic integration", configured.as_str()).unwrap();
             }

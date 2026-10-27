@@ -46,7 +46,8 @@ The structured settings CLI is an access layer over that same file, not a second
 storage location. A dotted setting key such as `screen.restore_policy` maps to
 the existing `config.env` key `screen_restore_policy`. This keeps manual config
 editing, `configure.sh`, installer preservation, and `lg-buddy settings` on one
-durable source of truth.
+durable user-preference store. Generated declarations can manage selected
+behavior keys through the overlay described below.
 
 Public CLI discovery lists behavior and TV settings. The legacy `screen.backend`
 key is excluded from `settings list` and unqualified `settings describe`, but
@@ -102,6 +103,75 @@ Avoid adding installer-only state for product behavior. Environment variables
 can still be useful for tests, release-bundle smoke checks, and non-interactive
 packaging flows, but they should write or preserve `config.env` when they
 represent durable user preference.
+
+## Declaratively managed settings
+
+A generated overlay can authoritatively manage individual behavior settings.
+For a selected canonical config `/path/config.env`, its binding is
+`/path/config.env.declarative.json`. The binding may be a symlink to a generated
+file, including a Nix store path; readers resolve it afresh on every load.
+Ordinary config-selector symlink protections are unchanged.
+
+```json
+{
+  "version": 1,
+  "source": "nix",
+  "settings": {
+    "screen.idle_timeout": 300,
+    "screen.honor_idle_inhibitors": true
+  }
+}
+```
+
+Omit `source`, or use `generic`, for other declarative generators. Attribution
+selects presentation text; it grants no installation or file-mutation authority.
+The application reads validated data and never evaluates Nix or sources shell
+code. Integers, strings and toggle booleans are validated by the existing setting
+registry. Unknown or duplicate keys, unknown fields, unsupported schema versions,
+invalid values and non-scalar data are rejected. Data must be a regular file of
+at most 64 KiB, owned by root or the selected config's owner, without group/other
+write permission.
+The binding and its directory must also belong to root or the config owner;
+unsafe directory redirection permissions are rejected.
+
+The supported keys are `screen.backend`, `screen.idle_blank`,
+`screen.honor_idle_inhibitors`, `screen.idle_timeout`, `screen.restore_policy`,
+`system.sleep_wake_policy`, `updates.auto_check` and `updates.channel`.
+TV connection fields and native credentials remain user-owned and cannot be
+declared here.
+
+For declared keys, precedence is declaration, then saved preference, then
+default. The declaration also takes precedence over the legacy backend and idle
+timeout environment overrides. The underlying preference is never replaced by
+the declared value. CLI reads expose the effective value/source; set/unset and
+GUI edits/resets are rejected before publication or service activation. Other
+keys remain writable. Editors, pairing and migration publication retain the
+existing writer/ownership checks and cannot overwrite managed preferences.
+
+In Settings, managed values remain visible and their controls and reset actions
+are disabled. A Nix-attributed overlay shows:
+
+> Some settings are disabled because they are managed declaratively in your nix configuration
+
+Other generators receive a generic declarative-management notice. Removing a
+key restores saved/default resolution and editing. An empty settings object or
+removal of the binding removes management; the last displayed managed key also
+removes the notice. A dangling binding, unreadable target or malformed configured
+overlay is an error, never permission to edit.
+
+Generators should publish complete generations through atomic replacement of
+the stable binding and serialize publication with existing config writers using
+the selected config's `.<filename>.pairing.lock` (the same `flock` inode; retain
+its owner and never replace it). Readers never copy declarations into user state.
+After publication, activation must restart/reload affected session services so
+their startup-time policy changes; GUI refresh and per-action lifecycle readers
+load the new generation directly. Declaration removal uses the same publication
+and activation boundary. Migration that would change a managed preference is
+refused rather than silently rewriting it; convert legacy configuration before
+introducing such a declaration.
+
+The public NixOS/Home Manager modules and native rebuild/rollback qualification
+remain the final integration stage in #253.
 
 ## Installer Behavior
 

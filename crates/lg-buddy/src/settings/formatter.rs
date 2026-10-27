@@ -38,8 +38,8 @@ impl SettingsFormatter {
                 setting.key_name(),
                 format_effective_value(setting),
                 setting.source().as_str(),
-                setting.definition().mutability().as_str(),
-                format_operations(setting.definition().supported_operations(), ",")
+                effective_mutability(setting),
+                effective_operations(setting, ",")
             )
             .map_err(output_error)?;
         }
@@ -157,12 +157,12 @@ impl SettingsFormatter {
         writeln!(writer, "  source: {}", setting.source().as_str()).map_err(output_error)?;
         writeln!(writer, "  default: {}", definition.default_value_label())
             .map_err(output_error)?;
-        writeln!(writer, "  mutability: {}", definition.mutability().as_str())
+        writeln!(writer, "  mutability: {}", effective_mutability(setting))
             .map_err(output_error)?;
         writeln!(
             writer,
             "  supported operations: {}",
-            format_operations(definition.supported_operations(), ", ")
+            effective_operations(setting, ", ")
         )
         .map_err(output_error)?;
 
@@ -204,6 +204,25 @@ fn format_operations(operations: &[SettingOperation], separator: &str) -> String
         .map(|operation| operation.as_str())
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+fn effective_mutability(setting: &EffectiveSetting) -> &'static str {
+    if setting.managed_by().is_some() {
+        "read-only"
+    } else {
+        setting.definition().mutability().as_str()
+    }
+}
+
+fn effective_operations(setting: &EffectiveSetting, separator: &str) -> String {
+    if setting.managed_by().is_some() {
+        format_operations(
+            &[SettingOperation::Get, SettingOperation::Describe],
+            separator,
+        )
+    } else {
+        format_operations(setting.definition().supported_operations(), separator)
+    }
 }
 
 pub(super) fn format_effective_value(setting: &EffectiveSetting) -> String {

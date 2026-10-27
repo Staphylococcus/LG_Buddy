@@ -29,6 +29,8 @@ use crate::RunError;
 pub fn backend_start() -> Result<PathBuf, RunError> {
     let config_path =
         crate::config::resolve_config_path_from_env().map_err(RunError::ConfigPath)?;
+    crate::config::declarative::Declarations::load(&config_path)
+        .map_err(|e| RunError::Config(crate::config::ConfigError::Io(e)))?;
     // euid check so a non-owner user daemon still fails loudly on a real I/O migration
     // error; upgrade to an owner_for_write probe if root becomes the only caller.
     if unsafe { libc::geteuid() } == 0 {

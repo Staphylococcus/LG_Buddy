@@ -101,6 +101,11 @@ impl ConfigEnvEditor {
                     "configuration changed since it was read; reload and retry",
                 ));
             }
+            crate::config::declarative::validate_changes(
+                guard.target(),
+                current.as_deref().unwrap_or_default(),
+                self.render().as_bytes(),
+            )?;
             atomic_write_config(guard.target(), self.render().as_bytes())
         })();
         result.map_err(|err| SettingsError::WriteConfig {
@@ -194,6 +199,17 @@ pub(super) fn atomic_write_config(path: &Path, contents: &[u8]) -> io::Result<()
         }
         file.sync_all()?;
         drop(file);
+        crate::config::declarative::validate_changes(
+            &path,
+            &fs::read(&path).or_else(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    Ok(Vec::new())
+                } else {
+                    Err(e)
+                }
+            })?,
+            contents,
+        )?;
         // Publication is the final fallible step: errors leave the old bytes
         // intact, and success means readers can see the complete new contents.
         fs::rename(&temp_path, &path)
@@ -224,6 +240,14 @@ impl SettingsMutation {
         let definition = SETTINGS_REGISTRY.get_by_name(key)?;
         definition.ensure_operation_supported(SettingOperation::Set)?;
         let old = store.effective_definition(definition);
+        if let SettingSource::Declarative(source) = old.source() {
+            return Err(SettingsError::ManagedSetting {
+                key: key.into(),
+                path: crate::config::declarative::binding_path(store.path())
+                    .map_err(|e| crate::config::declarative::settings_error(store.path(), e))?,
+                source,
+            });
+        }
         let new_value = definition.parse_value(value)?;
 
         Ok(Self {
@@ -239,6 +263,14 @@ impl SettingsMutation {
         let definition = SETTINGS_REGISTRY.get_by_name(key)?;
         definition.ensure_operation_supported(SettingOperation::Unset)?;
         let old = store.effective_definition(definition);
+        if let SettingSource::Declarative(source) = old.source() {
+            return Err(SettingsError::ManagedSetting {
+                key: key.into(),
+                path: crate::config::declarative::binding_path(store.path())
+                    .map_err(|e| crate::config::declarative::settings_error(store.path(), e))?,
+                source,
+            });
+        }
 
         Ok(Self {
             definition,
@@ -358,6 +390,7 @@ pub(crate) fn persist_settings_mutation(
     mutation: SettingsMutation,
 ) -> Result<SettingsChange, SettingsError> {
     let guard = settings_guard(path)?;
+    crate::config::declarative::ensure_mutable(guard.target(), mutation.key_name())?;
     let mut editor = ConfigEnvEditor::load(guard.target())?;
     let file_changed = match mutation.action() {
         SettingsMutationAction::Set => {
@@ -404,11 +437,12 @@ pub(crate) fn persist_settings_mutation(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsStore {
     reader: ConfigEnvReader,
+    declarations: Option<crate::config::declarative::Declarations>,
 }
 
 impl SettingsStore {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
-        ConfigEnvReader::load(path).map(Self::from_reader)
+        Self::from_reader_with_declarations(ConfigEnvReader::load(path)?)
     }
 
     pub fn load_from_env() -> Result<Self, SettingsError> {
@@ -417,7 +451,19 @@ impl SettingsStore {
     }
 
     pub fn from_reader(reader: ConfigEnvReader) -> Self {
-        Self { reader }
+        Self {
+            reader,
+            declarations: None,
+        }
+    }
+
+    pub fn from_reader_with_declarations(reader: ConfigEnvReader) -> Result<Self, SettingsError> {
+        let declarations = crate::config::declarative::Declarations::load(reader.path())
+            .map_err(|e| crate::config::declarative::settings_error(reader.path(), e))?;
+        Ok(Self {
+            reader,
+            declarations,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -438,6 +484,18 @@ impl SettingsStore {
     }
 
     pub fn effective_definition(&self, definition: &'static SettingDefinition) -> EffectiveSetting {
+        if let Some((declarations, value)) = self
+            .declarations
+            .as_ref()
+            .and_then(|d| d.value(definition.key_name()).map(|v| (d, v)))
+        {
+            return EffectiveSetting {
+                definition,
+                value: Some(value),
+                source: SettingSource::Declarative(declarations.source),
+                invalid_value: None,
+            };
+        }
         let raw_value = self.reader.raw_setting_value(definition);
 
         if let Some((raw_value, source)) = raw_value {
@@ -607,6 +665,13 @@ impl EffectiveSetting {
         self.source
     }
 
+    pub fn managed_by(&self) -> Option<crate::config::declarative::DeclarativeSource> {
+        match self.source {
+            SettingSource::Declarative(source) => Some(source),
+            _ => None,
+        }
+    }
+
     pub fn invalid_value(&self) -> Option<&str> {
         self.invalid_value.as_deref()
     }
@@ -614,6 +679,7 @@ impl EffectiveSetting {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingSource {
+    Declarative(crate::config::declarative::DeclarativeSource),
     Default,
     ConfigEnv,
     LegacyConfigEnv,
@@ -625,6 +691,12 @@ pub enum SettingSource {
 impl SettingSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Declarative(crate::config::declarative::DeclarativeSource::Nix) => {
+                "declarative (nix)"
+            }
+            Self::Declarative(crate::config::declarative::DeclarativeSource::Generic) => {
+                "declarative"
+            }
             Self::Default => "default",
             Self::ConfigEnv => "config.env",
             Self::LegacyConfigEnv => "legacy config.env",

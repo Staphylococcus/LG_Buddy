@@ -38,7 +38,8 @@ pub(super) fn load(path: &Path) -> Result<(SettingsStore, ConfigEnvEditor, [u8; 
     }
     let version = Sha256::digest(contents.as_bytes()).into();
     Ok((
-        SettingsStore::from_reader(ConfigEnvReader::parse(path, &contents)),
+        SettingsStore::from_reader_with_declarations(ConfigEnvReader::parse(path, &contents))
+            .map_err(external_failure)?,
         editor,
         version,
     ))

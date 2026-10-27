@@ -151,13 +151,34 @@ impl BackendProbe for SystemBackendProbe {
 
 pub fn configured_backend_from_env_or_config() -> Result<ScreenBackend, BackendSelectionError> {
     let override_value = env::var("LG_BUDDY_SCREEN_BACKEND").ok();
-    let config_backend = match resolve_config_path_from_env() {
-        Ok(path) => load_config(&path).ok().map(|config| config.screen_backend),
+    let path = match resolve_config_path_from_env() {
+        Ok(path) => Some(path),
         Err(ConfigPathError::NotConfigured) => None,
         Err(error) => return Err(BackendSelectionError::ConfigPath(error.to_string())),
     };
+    configured_backend_from_path(override_value.as_deref(), path.as_deref())
+}
 
-    configured_backend_from_sources(override_value.as_deref(), config_backend)
+pub(crate) fn configured_backend_from_path(
+    override_value: Option<&str>,
+    path: Option<&std::path::Path>,
+) -> Result<ScreenBackend, BackendSelectionError> {
+    let config_backend = match path {
+        Some(path) => {
+            let declarations = crate::config::declarative::Declarations::load(path)
+                .map_err(|e| BackendSelectionError::ConfigPath(e.to_string()))?;
+            if let Some(value) = declarations
+                .and_then(|d| d.value("screen.backend"))
+                .and_then(crate::settings::SettingValue::as_enum)
+            {
+                return configured_backend_from_sources(None, value.parse().ok());
+            }
+            load_config(path).ok().map(|config| config.screen_backend)
+        }
+        None => None,
+    };
+
+    configured_backend_from_sources(override_value, config_backend)
 }
 
 pub fn configured_backend_from_sources(

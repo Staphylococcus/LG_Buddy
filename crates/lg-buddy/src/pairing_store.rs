@@ -118,6 +118,16 @@ impl PairingStore {
 
     fn unpair(self, expected: &crate::tvs::TvProfile) -> Result<(), PairingStoreError> {
         self.check_unpair_preconditions(expected)?;
+        let original = self.snapshot.as_deref().unwrap_or_default();
+        crate::config::declarative::validate_changes(
+            &self.config_path,
+            original,
+            &remove_primary_config_keys(original),
+        )
+        .map_err(|source| PairingStoreError::ConfigWrite {
+            path: self.config_path.clone(),
+            source,
+        })?;
         self.remove_token()?;
 
         let result = (|| {
@@ -177,6 +187,26 @@ impl PairingStore {
             });
         }
 
+        let original = self.snapshot.as_deref().unwrap_or_default();
+        let original_text =
+            std::str::from_utf8(original).map_err(|source| PairingStoreError::ConfigRead {
+                path: self.config_path.clone(),
+                source: io::Error::new(io::ErrorKind::InvalidData, source),
+            })?;
+        let (contents, _) = render_first_primary_config(original_text, address, mac, input);
+        let effective = crate::settings::SettingsStore::from_reader_with_declarations(
+            ConfigEnvReader::parse(&self.config_path, original_text),
+        )
+        .map_err(|error| PairingStoreError::ConfigRead {
+            path: self.config_path.clone(),
+            source: io::Error::other(error),
+        })?;
+        let requested = requested_behaviors(&effective);
+        crate::config::declarative::validate_changes(&self.config_path, original, &contents)
+            .map_err(|source| PairingStoreError::ConfigWrite {
+                path: self.config_path.clone(),
+                source,
+            })?;
         let token_path = self.token_store.token_path().to_path_buf();
         if let Err(source) = self.token_store.persist_locked(token, &self._lock) {
             let cleanup = self.cleanup_created_dirs();
@@ -201,13 +231,6 @@ impl PairingStore {
                 });
             }
 
-            let original = self.snapshot.as_deref().unwrap_or_default();
-            let original =
-                std::str::from_utf8(original).map_err(|source| PairingStoreError::ConfigRead {
-                    path: self.config_path.clone(),
-                    source: io::Error::new(io::ErrorKind::InvalidData, source),
-                })?;
-            let (contents, requested) = render_first_primary_config(original, address, mac, input);
             atomic_write_config(
                 &self.config_path,
                 &contents,
@@ -858,18 +881,7 @@ fn render_first_primary_config(
 ) -> (Vec<u8>, Vec<BehaviorSetting>) {
     let store = ConfigEnvReader::parse("config.env", original).into_store();
     let mut editor = ConfigEnvEditor::parse("config.env", original);
-    let mut requested = Vec::new();
-    for setting in [
-        BehaviorSetting::ScreenIdleBlank,
-        BehaviorSetting::SystemSleepWakePolicy,
-    ] {
-        let effective = store
-            .effective_by_name(setting.key_name())
-            .expect("known behavior");
-        if effective.value() == Some(SettingValue::Enum("enabled")) {
-            requested.push(setting);
-        }
-    }
+    let requested = requested_behaviors(&store);
     // Pairing persists desired behavior unchanged. Readiness is checked separately.
     for (key, value) in [
         ("tvs_primary_ip", SettingValue::Ipv4(address)),
@@ -883,12 +895,35 @@ fn render_first_primary_config(
     (contents, requested)
 }
 
+fn requested_behaviors(store: &crate::settings::SettingsStore) -> Vec<BehaviorSetting> {
+    [
+        BehaviorSetting::ScreenIdleBlank,
+        BehaviorSetting::SystemSleepWakePolicy,
+    ]
+    .into_iter()
+    .filter(|setting| {
+        store
+            .effective_by_name(setting.key_name())
+            .expect("known behavior")
+            .value()
+            == Some(SettingValue::Enum("enabled"))
+    })
+    .collect()
+}
+
 fn atomic_write_config(
     path: &Path,
     contents: &[u8],
     owner: &SystemUser,
     existed: bool,
 ) -> Result<(), PairingStoreError> {
+    let before = read_config_snapshot(path)?.unwrap_or_default();
+    crate::config::declarative::validate_changes(path, &before, contents).map_err(|source| {
+        PairingStoreError::ConfigWrite {
+            path: path.into(),
+            source,
+        }
+    })?;
     let mode = if existed {
         #[cfg(unix)]
         {
@@ -949,6 +984,12 @@ fn atomic_write_config(
                 source,
             })?;
         drop(file);
+        crate::config::declarative::validate_changes(path, &before, contents).map_err(
+            |source| PairingStoreError::ConfigWrite {
+                path: path.into(),
+                source,
+            },
+        )?;
         fs::rename(&temp, path).map_err(|source| PairingStoreError::ConfigWrite {
             path: path.to_path_buf(),
             source,

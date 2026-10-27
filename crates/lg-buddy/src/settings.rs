@@ -95,6 +95,7 @@ impl<C: ServiceController> SettingsApplier<C> {
     }
 
     pub fn apply(&self, change: &SettingsChange) -> Result<SettingsApplyOutcome, SettingsError> {
+        crate::config::declarative::ensure_mutable(change.path(), change.mutation().key_name())?;
         match change.mutation().definition().apply_strategy() {
             ApplyStrategy::RestartUserScreenService => {
                 screen::apply_service_restart(&self.service_controller)

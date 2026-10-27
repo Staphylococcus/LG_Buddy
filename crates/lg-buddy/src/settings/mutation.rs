@@ -50,6 +50,8 @@ pub(crate) fn execute_gui_settings_mutation<C: ServiceController>(
     progress: &mut dyn FnMut(SettingsMutationStage),
 ) -> Result<SettingsMutationOutcome, SettingsMutationFailure> {
     progress(SettingsMutationStage::Validating);
+    crate::config::declarative::ensure_mutable(path, mutation.key_name())
+        .map_err(SettingsMutationFailure::Validation)?;
     if mutation.key_name() == "screen.backend"
         && mutation
             .new_value()

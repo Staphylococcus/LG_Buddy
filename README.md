@@ -124,8 +124,8 @@ features available, or use [external idle automation](docs/user-guide.md#externa
 The shell installer supports conventional Linux installations with writable
 system locations. A [public Nix package](docs/nix.md) provides the build foundation
 for NixOS integration planned for 2.1.0. Store-owned installations defer updates
-to Nix. Public NixOS and Home Manager modules and declaratively managed settings
-are still in progress;
+to Nix, and generated declarations can make individual settings read-only while
+preserving user preferences. Public NixOS and Home Manager modules are still in progress;
 see [issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253).
 
 ## Install

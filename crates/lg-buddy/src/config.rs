@@ -10,6 +10,7 @@ use std::{collections::HashMap, io};
 const CONFIG_DIR_NAME: &str = "lg-buddy";
 const CONFIG_FILE_NAME: &str = "config.env";
 pub mod binding;
+pub mod declarative;
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;
 pub const MAX_IDLE_TIMEOUT: u64 = 86_400;
 
@@ -649,7 +650,10 @@ pub fn load_current_config(path: &Path) -> Result<CurrentConfig, ConfigLoadError
             ConfigLoadError::Unreadable(err)
         }
     })?;
-    let config = parse_current_config(&contents)?;
+    let effective = declarative::Declarations::load(path)
+        .map_err(ConfigLoadError::Unreadable)?
+        .map(|declarations| declarations.effective_contents(&contents));
+    let config = parse_current_config(effective.as_deref().unwrap_or(&contents))?;
     Ok(CurrentConfig {
         path: path.to_path_buf(),
         config,
@@ -658,7 +662,9 @@ pub fn load_current_config(path: &Path) -> Result<CurrentConfig, ConfigLoadError
 
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     let contents = fs::read_to_string(path)?;
-    parse_config(&contents)
+    let effective = declarative::Declarations::load(path)?
+        .map(|declarations| declarations.effective_contents(&contents));
+    parse_config(effective.as_deref().unwrap_or(&contents))
 }
 
 pub fn parse_config(contents: &str) -> Result<Config, ConfigError> {
