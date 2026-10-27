@@ -97,7 +97,7 @@ def main():
                 assert paired.returncode == 1, paired.stdout + paired.stderr
                 assert "Setup complete." not in paired.stdout
                 for remedy in ("Unmet requirements:", "bind LG_Buddy_screen.service to this configuration",
-                               "Update the NixOS system and user service configuration, build it, and activate it"):
+                               "Update the owning NixOS or Home Manager service configuration, build it, and activate it"):
                     assert remedy in paired.stderr, paired.stdout + paired.stderr
                 token = root / "tvs/primary/access-token.json"
                 assert token.exists(), paired.stdout + paired.stderr
