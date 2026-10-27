@@ -1120,11 +1120,8 @@ impl PairingLock {
                 ),
             });
         }
-        let mut name = std::ffi::OsString::from(".");
-        name.push(target.file_name().unwrap());
-        name.push(LOCK_FILE_SUFFIX);
         let mut guard = Self::acquire(
-            target.with_file_name(name),
+            Self::marker_path(&target),
             target.parent().unwrap().into(),
             uid,
             gid,
@@ -1135,6 +1132,13 @@ impl PairingLock {
 
     pub(crate) fn target(&self) -> &Path {
         &self.config_path
+    }
+
+    pub(crate) fn marker_path(target: &Path) -> PathBuf {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(target.file_name().unwrap());
+        name.push(LOCK_FILE_SUFFIX);
+        target.with_file_name(name)
     }
 
     fn acquire(

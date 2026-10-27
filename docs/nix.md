@@ -49,6 +49,13 @@ state, outside the Nix store. Do not use the mutable-root shell installer to
 integrate this package into NixOS. Final module installation, rebuild/activation,
 rollback and removal instructions will accompany the corresponding integration.
 
+The runtime now supplies the [binding and activation protocol](defaults-and-configuration.md#publication-and-service-activation)
+for those modules. It publishes regular machine/user discovery records even
+before first pairing, and validates/serializes declaration replacement or
+removal. The future module activation must publish first, load matching units,
+then refresh an active user monitor; publication alone is not service activation.
+The package still supplies no public modules or host activation.
+
 LG Buddy's direct Python dependency is a test input; the GTK dependency closure
 can include Python transitively. Retired `swayidle` and dialog tools are not
 runtime dependencies.

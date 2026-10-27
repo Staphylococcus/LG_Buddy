@@ -98,13 +98,6 @@ impl Declarations {
             Err(e) => return Err(e),
             Ok(metadata) => metadata,
         };
-        let target = fs::canonicalize(&path)
-            .map_err(|e| invalid(&path, format!("declaration target is unavailable: {e}")))?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&target)?;
-        let metadata = file.metadata()?;
         let owner = fs::metadata(config)
             .or_else(|_| fs::metadata(config.parent().unwrap_or(Path::new("."))))
             .map(|m| m.uid())
@@ -116,18 +109,30 @@ impl Declarations {
         {
             return Err(invalid(&path, "declaration binding and directory must belong to root or the config owner without unsafe redirection permissions"));
         }
+        Self::read_generation(&path, owner).map(Some)
+    }
+
+    /// Shared validation for an activation candidate and an installed binding.
+    pub(super) fn read_generation(path: &Path, owner: u32) -> io::Result<Self> {
+        let target = fs::canonicalize(path)
+            .map_err(|e| invalid(path, format!("declaration target is unavailable: {e}")))?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&target)?;
+        let metadata = file.metadata()?;
         if !metadata.is_file()
             || ![0, owner].contains(&metadata.uid())
             || metadata.mode() & 0o022 != 0
             || metadata.len() > MAX_BYTES
         {
-            return Err(invalid(&path, "expected bounded regular data owned by root or the config owner, without group/other writes"));
+            return Err(invalid(path, "expected bounded regular data owned by root or the config owner, without group/other writes"));
         }
         let mut bytes = Vec::new();
         file.by_ref().take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-        let current = fs::metadata(&path)?;
+        let current = fs::metadata(path)?;
         if bytes.len() as u64 > MAX_BYTES
-            || fs::canonicalize(&path)? != target
+            || fs::canonicalize(path)? != target
             || (
                 current.dev(),
                 current.ino(),
@@ -143,11 +148,11 @@ impl Declarations {
             )
         {
             return Err(invalid(
-                &path,
+                path,
                 "declaration changed while it was read; retry",
             ));
         }
-        Self::parse(path, &bytes).map(Some)
+        Self::parse(path.to_path_buf(), &bytes)
     }
 
     fn parse(path: PathBuf, bytes: &[u8]) -> io::Result<Self> {

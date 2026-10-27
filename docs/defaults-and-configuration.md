@@ -170,6 +170,61 @@ and activation boundary. Migration that would change a managed preference is
 refused rather than silently rewriting it; convert legacy configuration before
 introducing such a declaration.
 
+### Publication and service activation
+
+Declarative integrations use the installed runtime's activation protocol:
+
+```sh
+# Machine activation, as root; CONFIG is a canonical absolute user-state path.
+lg-buddy config-binding publish-machine CONFIG
+
+# User activation, as the selected config's owner.
+lg-buddy config-binding publish-user CONFIG GENERATION.json
+# After the matching user units have been loaded/reloaded:
+lg-buddy config-binding refresh-user CONFIG
+```
+
+`publish-machine` writes the root-owned regular `/etc/lg-buddy/config-path`
+record. `publish-user` writes the invoking user's regular
+`$XDG_CONFIG_HOME/lg-buddy/config-path` record (or the ordinary HOME fallback)
+and atomically replaces the config's declaration binding with a symlink to the
+validated generation. Do not install these selector records through symlinked
+file declarations. Existing selector protections remain in force. All entry
+points must use the same canonical CONFIG; units also declare it explicitly in
+`LG_BUDDY_CONFIG`. Conflicting existing selections require explicit migration.
+
+Both commands accept an absent config. Machine publication creates no user
+directories or state. User publication may create private parent directories and
+inert writer-lock markers, but creates no config, TV profile or credentials.
+Normal first-run pairing remains responsible for user state. Generations contain
+only the supported behavior settings, never credentials or copied preferences.
+They must be complete read-only files. A source symlink is resolved to its
+specific generation before publication; readers continue to reload the stable
+binding rather than caching a Nix store target.
+
+User publication validates the candidate before changing discovery or policy,
+then revalidates under the same config-writer lock used by pairing/settings.
+It also serializes activation of the user's selector. Repeat publication is
+idempotent and retains existing selector/lock inodes. An interrupted or failed
+later step can be retried without resetting preferences or pairing.
+
+Publication and service refresh are deliberately separate. A module publishes
+first, then reloads/activates its matching unit declarations, then calls
+`refresh-user` in a reachable user manager. The helper verifies the screen
+service's effective config binding and restarts only an already-active
+`LG_Buddy_screen.service`, after releasing publication locks. It never enables
+units, starts an inactive graphical session, or restarts the boot/shutdown
+oneshot. Lifecycle policy is already re-read by the lifecycle monitor and each
+event handler. A fresh or offline session picks up the generation when it starts.
+If a live refresh fails, the published generation remains authoritative; retry
+refresh rather than rewriting saved settings or reporting successful activation.
+
+For removal, use `publish-user CONFIG -` under the same ordering, followed by
+refresh for an active session. This removes only the declaration binding;
+preferences, credentials and the user's config selection remain. Republishing
+an earlier immutable generation provides declaration rollback. This does not
+roll back writable user data or qualify a native NixOS generation rollback.
+
 The public NixOS/Home Manager modules and native rebuild/rollback qualification
 remain the final integration stage in #253.
 

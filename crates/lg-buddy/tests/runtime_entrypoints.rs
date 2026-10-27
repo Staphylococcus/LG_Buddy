@@ -521,9 +521,9 @@ fn restarted_monitor_uses_declared_idle_blanking_in_both_directions() {
             .unwrap()
             .join("tvs/primary/access-token.json");
         let credential = fs::read(&token).unwrap();
-        let binding = lg_buddy::config::declarative::binding_path(config.path()).unwrap();
+        let generation = config.path().with_file_name("generation.json");
         fs::write(
-            &binding,
+            &generation,
             serde_json::to_vec(&serde_json::json!({
                 "version":1, "source":"nix", "settings": {
                     "screen.idle_blank":enabled, "screen.idle_timeout":1
@@ -532,10 +532,26 @@ fn restarted_monitor_uses_declared_idle_blanking_in_both_directions() {
             .unwrap(),
         )
         .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o444)).unwrap();
+        let config_home = config.path().parent().unwrap().join("xdg");
+        let publication = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+            .args(["config-binding", "publish-user"])
+            .arg(config.path())
+            .arg(&generation)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("SUDO_USER")
+            .env_remove("SUDO_UID")
+            .output()
+            .unwrap();
+        assert!(publication.status.success(), "{publication:?}");
         let runtime = RuntimeStateLayout::new("declarative-monitor-runtime");
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
             .arg("monitor")
-            .env("LG_BUDDY_CONFIG", config.path())
+            .env_remove("LG_BUDDY_CONFIG")
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("SUDO_USER")
+            .env_remove("SUDO_UID")
             .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
             .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
             .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())

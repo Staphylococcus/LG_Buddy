@@ -89,7 +89,8 @@ jobs:
             setup::kwin::native::tests::system_install_validates_artifacts_and_preserves_existing_files \
             setup::kwin::native::tests::legacy_lock_migration_preserves_foreign_owned_files \
             pairing_store::migration::tests::migration_preserves_config_access_metadata \
-            config::declarative::tests::root_reads_user_owned_declarations_without_materializing_or_bypassing_management; do
+            config::declarative::tests::root_reads_user_owned_declarations_without_materializing_or_bypassing_management \
+            config::activation::tests::root_machine_publication_never_creates_or_claims_user_state; do
             "$test_binary" --list --format=terse | grep -Fx "$test: test"
             sudo env TMPDIR="$privileged_test_dir" "$test_binary" "$test" --exact
           done

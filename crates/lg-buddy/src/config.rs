@@ -9,6 +9,7 @@ use std::{collections::HashMap, io};
 
 const CONFIG_DIR_NAME: &str = "lg-buddy";
 const CONFIG_FILE_NAME: &str = "config.env";
+mod activation;
 pub mod binding;
 pub mod declarative;
 pub const DEFAULT_IDLE_TIMEOUT: u64 = 300;

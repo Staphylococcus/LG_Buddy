@@ -26,6 +26,103 @@ struct SystemdEnvironment {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+#[test]
+fn declarative_publication_then_refresh_uses_loaded_binding_and_retains_failed_activation() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let config = TestConfigFile::new("declarative-activation-service");
+    config.write_contents("screen_idle_timeout=600\n");
+    let directory = config.path().parent().unwrap();
+    let generation = directory.join("generation.json");
+    fs::write(
+        &generation,
+        br#"{"version":1,"settings":{"screen.idle_timeout":300}}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&generation, fs::Permissions::from_mode(0o444)).unwrap();
+    let restarted = directory.join("restarted");
+    let fail = directory.join("fail");
+    let inactive = directory.join("inactive");
+    let systemctl = ExecutableScript::new(
+        "declarative-refresh",
+        "systemctl",
+        r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+case "$2" in
+  is-active) [ ! -f "$LG_BUDDY_TEST_INACTIVE" ] ;;
+  restart)
+    [ "$3" = LG_Buddy_screen.service ]
+    "$LG_BUDDY_TEST_RUNTIME" settings get screen.idle_timeout > "$LG_BUDDY_TEST_RESTARTED"
+    [ ! -f "$LG_BUDDY_TEST_FAIL" ] ;;
+  *) exit 99 ;;
+esac
+"#,
+    );
+    let mut env = TestEnv::new();
+    env.remove("SUDO_USER");
+    env.remove("SUDO_UID");
+    env.remove("LG_BUDDY_CONFIG");
+    env.remove("XDG_RUNTIME_DIR");
+    env.set("XDG_CONFIG_HOME", directory.join("xdg"));
+    env.set("LG_BUDDY_SYSTEMCTL", systemctl.path());
+    env.set("LG_BUDDY_TEST_RUNTIME", env!("CARGO_BIN_EXE_lg-buddy"));
+    env.set("LG_BUDDY_TEST_RESTARTED", &restarted);
+    env.set("LG_BUDDY_TEST_FAIL", &fail);
+    env.set("LG_BUDDY_TEST_INACTIVE", &inactive);
+    let run = |operation: &str, generation: Option<&std::path::Path>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"));
+        command
+            .args(["config-binding", operation])
+            .arg(config.path());
+        if let Some(path) = generation {
+            command.arg(path);
+        }
+        command.output().unwrap()
+    };
+    assert!(run("publish-user", Some(&generation)).status.success());
+    let binding = vec![format!("LG_BUDDY_CONFIG={}", config.path().display())];
+    let systemd = SystemdEnvironment::new(binding, vec![], vec![], true);
+    env.set("DBUS_SESSION_BUS_ADDRESS", &systemd.address);
+    fs::write(&fail, b"").unwrap();
+    assert!(!run("refresh-user", None).status.success());
+    assert_eq!(
+        fs::read_to_string(&restarted)
+            .unwrap()
+            .trim()
+            .parse::<u64>()
+            .unwrap(),
+        300
+    );
+    assert_eq!(
+        fs::read(config.path()).unwrap(),
+        b"screen_idle_timeout=600\n"
+    );
+    fs::remove_file(&fail).unwrap();
+    assert!(run("refresh-user", None).status.success());
+    fs::remove_file(&restarted).unwrap();
+    fs::write(&inactive, b"").unwrap();
+    assert!(run("refresh-user", None).status.success());
+    assert!(!restarted.exists());
+    fs::remove_file(&inactive).unwrap();
+    drop(systemd);
+    let wrong = SystemdEnvironment::new(
+        vec![format!("LG_BUDDY_CONFIG={}/other.env", directory.display())],
+        vec![],
+        vec![],
+        true,
+    );
+    env.set("DBUS_SESSION_BUS_ADDRESS", &wrong.address);
+    assert!(!run("refresh-user", None).status.success());
+    assert!(!restarted.exists());
+    assert_eq!(
+        fs::read(config.path()).unwrap(),
+        b"screen_idle_timeout=600\n"
+    );
+}
+
 impl SystemdEnvironment {
     fn new(
         environment: Vec<String>,

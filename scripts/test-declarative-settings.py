@@ -52,9 +52,12 @@ def main():
                 target = root / f"generation-{len(list(root.glob('generation-*')))}.json"
                 target.write_text(json.dumps(document))
                 target.chmod(0o400)
-            pending = root / "declaration.pending"
-            pending.symlink_to(target)
-            pending.replace(binding)
+            run("config-binding", "publish-user", str(config), str(target))
+            selector = root / ".config/lg-buddy/config-path"
+            assert not selector.is_symlink()
+            assert Path(selector.read_text().strip()) == config
+            # The public launcher has no service-specific environment override.
+            environment.pop("LG_BUDDY_CONFIG", None)
 
         before = config.read_bytes()
         publish({"screen.idle_timeout": 300})
@@ -83,7 +86,7 @@ def main():
         assert int(run("settings", "get", "screen.idle_timeout")) == 600
         run("settings", "set", "screen.idle_timeout", "900")
         assert int(run("settings", "get", "screen.idle_timeout")) == 900
-        binding.unlink()
+        run("config-binding", "publish-user", str(config), "-")
         assert int(run("settings", "get", "screen.idle_timeout")) == 900
     print("PASS: declarative CLI reads, mutation refusal, retained state and generation replacement.")
 

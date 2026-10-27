@@ -173,28 +173,15 @@ pub(crate) fn validate_destination(path: &Path, owner: u32, boundary: &Path) -> 
     Ok(())
 }
 
-fn write(path: &Path, config: &Path, owner: u32, boundary: &Path) -> io::Result<()> {
+pub(super) fn write(path: &Path, config: &Path, owner: u32, boundary: &Path) -> io::Result<()> {
     validate_destination(path, owner, boundary)?;
     if let Some(existing) = read(path, owner)? {
         if existing == config && fs::metadata(path)?.mode() & 0o7777 == 0o644 {
             return Ok(());
         }
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("config binding has no parent"))?;
-    let missing: Vec<_> = parent
-        .ancestors()
-        .take_while(|path| !path.exists())
-        .collect();
-    for directory in missing.into_iter().rev() {
-        // Never grant group/other writes, even with a permissive umask.
-        // Existing directories retain their administrator-selected modes.
-        fs::DirBuilder::new().mode(0o755).create(directory)?;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
-        fs::File::open(directory)?.sync_all()?;
-        fs::File::open(directory.parent().unwrap())?.sync_all()?;
-    }
+    ensure_parent(path)?;
+    let parent = path.parent().unwrap();
     validate_destination(path, owner, boundary)?;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let (temporary, mut output) = loop {
@@ -225,6 +212,23 @@ fn write(path: &Path, config: &Path, owner: u32, boundary: &Path) -> io::Result<
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+pub(super) fn ensure_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("config binding has no parent"))?;
+    let missing: Vec<_> = parent
+        .ancestors()
+        .take_while(|path| !path.exists())
+        .collect();
+    for directory in missing.into_iter().rev() {
+        fs::DirBuilder::new().mode(0o755).create(directory)?;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?;
+        fs::File::open(directory)?.sync_all()?;
+        fs::File::open(directory.parent().unwrap())?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Preserve a custom config for later launches by this user, without consulting
@@ -266,10 +270,18 @@ fn migrate(root: &Path, config: &Path) -> io::Result<()> {
     write(&path, config, owner, root)
 }
 
-/// Private installer protocol. The root argument supports isolated installer tests;
-/// ordinary runtime machine discovery always uses the real /etc location.
+/// Private installer/activation protocol. Only legacy installer operations accept
+/// an isolated root; declarative machine publication always uses the real /etc.
 pub fn run_installer_command(arguments: &[String]) -> io::Result<()> {
     match arguments {
+        [command, ..]
+            if matches!(
+                command.as_str(),
+                "publish-user" | "publish-machine" | "refresh-user"
+            ) =>
+        {
+            super::activation::run(arguments)
+        }
         [command, root] if command == "inspect" => {
             if let Some(config) = installed(Path::new(root))? {
                 validate_target(
