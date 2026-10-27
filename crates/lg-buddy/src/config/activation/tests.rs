@@ -82,12 +82,17 @@ impl ServiceController for Services {
             Ok(self.config.clone())
         }
     }
-    fn user_service_is_active(&self, unit: &str) -> Result<bool, SettingsError> {
-        assert_eq!(unit, SCREEN);
-        Ok(self.active)
+    fn user_service_is_active(&self, _: &str) -> Result<bool, SettingsError> {
+        panic!("refresh must delegate the active-state decision to the manager")
     }
-    fn restart_user_service(&self, unit: &str) -> Result<(), SettingsError> {
+    fn restart_user_service(&self, _: &str) -> Result<(), SettingsError> {
+        panic!("refresh must not use ordinary restart")
+    }
+    fn try_restart_user_service(&self, unit: &str) -> Result<(), SettingsError> {
         assert_eq!(unit, SCREEN);
+        if !self.active {
+            return Ok(());
+        }
         let _lock = PairingLock::for_config(&self.config)
             .expect("refresh must release the publication lock");
         self.restarts.set(self.restarts.get() + 1);

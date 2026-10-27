@@ -45,6 +45,7 @@ fn declarative_publication_then_refresh_uses_loaded_binding_and_retains_failed_a
     let restarted = directory.join("restarted");
     let fail = directory.join("fail");
     let inactive = directory.join("inactive");
+    let stop_during_refresh = directory.join("stop-during-refresh");
     let systemctl = ExecutableScript::new(
         "declarative-refresh",
         "systemctl",
@@ -53,8 +54,11 @@ set -eu
 [ "$1" = --user ]
 case "$2" in
   is-active) [ ! -f "$LG_BUDDY_TEST_INACTIVE" ] ;;
-  restart)
+  restart|try-restart)
     [ "$3" = LG_Buddy_screen.service ]
+    # A session stop may complete after observation, before the manager acts.
+    [ ! -f "$LG_BUDDY_TEST_STOP_DURING_REFRESH" ] || touch "$LG_BUDDY_TEST_INACTIVE"
+    if [ "$2" = try-restart ] && [ -f "$LG_BUDDY_TEST_INACTIVE" ]; then exit 0; fi
     "$LG_BUDDY_TEST_RUNTIME" settings get screen.idle_timeout > "$LG_BUDDY_TEST_RESTARTED"
     [ ! -f "$LG_BUDDY_TEST_FAIL" ] ;;
   *) exit 99 ;;
@@ -72,6 +76,7 @@ esac
     env.set("LG_BUDDY_TEST_RESTARTED", &restarted);
     env.set("LG_BUDDY_TEST_FAIL", &fail);
     env.set("LG_BUDDY_TEST_INACTIVE", &inactive);
+    env.set("LG_BUDDY_TEST_STOP_DURING_REFRESH", &stop_during_refresh);
     let run = |operation: &str, generation: Option<&std::path::Path>| {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"));
         command
@@ -106,6 +111,22 @@ esac
     fs::write(&inactive, b"").unwrap();
     assert!(run("refresh-user", None).status.success());
     assert!(!restarted.exists());
+    fs::remove_file(&inactive).unwrap();
+    fs::write(&stop_during_refresh, b"").unwrap();
+    assert!(run("refresh-user", None).status.success());
+    assert!(
+        inactive.exists(),
+        "the concurrent session stop must have happened"
+    );
+    assert!(
+        !restarted.exists(),
+        "refresh must leave the stopped monitor inactive"
+    );
+    assert_eq!(
+        fs::read(config.path()).unwrap(),
+        b"screen_idle_timeout=600\n"
+    );
+    fs::remove_file(&stop_during_refresh).unwrap();
     fs::remove_file(&inactive).unwrap();
     let selector = directory.join("xdg/lg-buddy/config-path");
     fs::write(&selector, format!("{}/another.env\n", directory.display())).unwrap();

@@ -244,7 +244,7 @@ fn refresh_user(
         let _lock = PairingLock::for_config(config).map_err(io::Error::other)?;
         Declarations::load(config)?;
     }
-    // Verify the loaded unit before using a negative is-active result. An
+    // Verify the loaded unit before requesting a conditional restart. An
     // unavailable manager or unverifiable binding must report a failed refresh.
     let selected = services
         .user_service_config_path(SCREEN)
@@ -262,17 +262,13 @@ fn refresh_user(
             "screen service does not use the declared config; activate the matching units first",
         ));
     }
-    if services
-        .user_service_is_active(SCREEN)
-        .map_err(io::Error::other)?
-    {
-        // Publication locks have been released. Restart only this active user
-        // service: never enable units, start an offline session or power-cycle
-        // the machine boot/shutdown oneshot.
-        services
-            .restart_user_service(SCREEN)
-            .map_err(io::Error::other)?;
-    }
+    // Publication locks have been released. The manager decides whether this
+    // unit is still active, including if session shutdown raced with refresh.
+    // Never enable units, start an inactive session or run the boot/shutdown
+    // oneshot from this policy refresh.
+    services
+        .try_restart_user_service(SCREEN)
+        .map_err(io::Error::other)?;
     Ok(())
 }
 

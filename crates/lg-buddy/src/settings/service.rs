@@ -111,6 +111,14 @@ pub trait ServiceController {
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError>;
 
+    /// Let the manager restart only a currently active unit. A separate
+    /// activity check followed by ordinary restart can start a stopped unit.
+    fn try_restart_user_service(&self, _service: &str) -> Result<(), SettingsError> {
+        Err(SettingsError::Activation {
+            message: "conditional user service restart is unavailable".into(),
+        })
+    }
+
     fn stop_user_service(&self, _service: &str) -> Result<(), SettingsError> {
         Err(SettingsError::Activation {
             message: "user service stop is unavailable".into(),
@@ -313,6 +321,10 @@ impl ServiceController for SystemdUserServiceController {
 
     fn restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
         self.run_user_systemctl(&["restart", service])
+    }
+
+    fn try_restart_user_service(&self, service: &str) -> Result<(), SettingsError> {
+        self.run_user_systemctl(&["try-restart", service])
     }
 
     fn stop_user_service(&self, service: &str) -> Result<(), SettingsError> {
