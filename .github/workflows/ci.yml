@@ -677,23 +677,24 @@ jobs:
   bundle-smoke-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
-    needs: [bundle-build, bundle-smoke-suites, debian-package, rpm-package, dnf-update-fedora44, rpm-update-fedora43-refusal, release-assets]
+    needs: [bundle-build, bundle-smoke-suites, bundle-supported-distros, debian-package, rpm-package, dnf-update-fedora44, rpm-update-fedora43-refusal, release-assets]
     # Keep the required check failing when production or any suite fails,
     # times out, or is skipped, even after an upstream failure.
     if: ${{ always() }}
     steps:
-      - name: Require every bundle and native package smoke suite to pass
+      - name: Require every bundle, distribution and native package smoke suite to pass
         env:
           BUILD_RESULT: ${{ needs.bundle-build.result }}
           SMOKE_RESULT: ${{ needs.bundle-smoke-suites.result }}
+          DISTRO_RESULT: ${{ needs.bundle-supported-distros.result }}
           DEBIAN_RESULT: ${{ needs.debian-package.result }}
           RPM_RESULT: ${{ needs.rpm-package.result }}
           DNF_RESULT: ${{ needs.dnf-update-fedora44.result }}
           RPM_REFUSAL_RESULT: ${{ needs.rpm-update-fedora43-refusal.result }}
           ASSETS_RESULT: ${{ needs.release-assets.result }}
         run: |
-          if [ "$BUILD_RESULT" != success ] || [ "$SMOKE_RESULT" != success ] || [ "$DEBIAN_RESULT" != success ] || [ "$RPM_RESULT" != success ] || [ "$DNF_RESULT" != success ] || [ "$RPM_REFUSAL_RESULT" != success ] || [ "$ASSETS_RESULT" != success ]; then
-            echo "Bundle build: $BUILD_RESULT; smoke suites: $SMOKE_RESULT; Debian package: $DEBIAN_RESULT; RPM package: $RPM_RESULT; DNF update: $DNF_RESULT; Fedora 43 refusal: $RPM_REFUSAL_RESULT; release assets: $ASSETS_RESULT" >&2
+          if [ "$BUILD_RESULT" != success ] || [ "$SMOKE_RESULT" != success ] || [ "$DISTRO_RESULT" != success ] || [ "$DEBIAN_RESULT" != success ] || [ "$RPM_RESULT" != success ] || [ "$DNF_RESULT" != success ] || [ "$RPM_REFUSAL_RESULT" != success ] || [ "$ASSETS_RESULT" != success ]; then
+            echo "Bundle build: $BUILD_RESULT; smoke suites: $SMOKE_RESULT; supported distributions: $DISTRO_RESULT; Debian package: $DEBIAN_RESULT; RPM package: $RPM_RESULT; DNF update: $DNF_RESULT; Fedora 43 refusal: $RPM_REFUSAL_RESULT; release assets: $ASSETS_RESULT" >&2
             exit 1
           fi
 
