@@ -1,64 +1,178 @@
-# Nix package
+# NixOS and Home Manager
 
-The flake provides the package foundation for the v2.1.0 NixOS integration in
-[issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253). It does not yet
-provide the NixOS or Home Manager modules. The shared read-only declaration
-engine is available; the public modules will supply its generated data. Installing this package alone
-does not complete LG Buddy setup or establish supported NixOS integration.
+The flake exports `nixosModules.lg-buddy` and `homeManagerModules.lg-buddy`
+(with `default` aliases), plus matching CLI/GTK packages for `x86_64-linux` and
+`aarch64-linux`. These are the public declarations for the v2.1 NixOS route.
+Native desktop, physical-TV and generation-lifecycle qualification remains open
+in [#253](https://github.com/Staphylococcus/LG_Buddy/issues/253); development
+module availability does not establish that final support claim.
 
-## Build and inspect
+## Install both layers
 
-With Nix's `nix-command` and `flakes` features enabled, run from this checkout:
+Use the NixOS module for boot/shutdown, sleep/wake, NetworkManager and machine
+config discovery. Use Home Manager for the selected user's graphical-session
+monitor, user discovery and read-only settings. Home Manager alone does not
+install machine files or complete system integration. The machine supports one
+selected desktop user's config; it does not install global per-user services.
 
-```bash
-nix build .#lg-buddy
-./result/bin/lg-buddy --version
-./result/bin/lg-buddy-gui --version
+The following flake fragment uses the unreleased `dev` branch, pinned by the
+consumer's lock file. Choose an appropriate revision when adopting it.
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    lg-buddy.url = "github:Staphylococcus/LG_Buddy/dev";
+  };
+
+  outputs = { nixpkgs, home-manager, lg-buddy, ... }: {
+    nixosConfigurations.desktop = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix # Hardware, boot and the rest of your host configuration.
+        lg-buddy.nixosModules.default
+        home-manager.nixosModules.home-manager
+        {
+          networking.networkmanager.enable = true;
+          users.users.alice.isNormalUser = true;
+          services.lg-buddy = {
+            enable = true;
+            user = "alice";
+            # Defaults to this user's home + /.config/lg-buddy/config.env.
+            # configPath = "/home/alice/.config/lg-buddy/config.env";
+          };
+          home-manager.useGlobalPkgs = true;
+          home-manager.useUserPackages = true;
+          home-manager.users.alice = { osConfig, ... }: {
+            imports = [ lg-buddy.homeManagerModules.default ];
+            home.stateVersion = "26.05"; # Keep your existing value on an existing home.
+            services.lg-buddy = {
+              enable = true;
+              package = osConfig.services.lg-buddy.package;
+              configPath = osConfig.services.lg-buddy.configPath;
+              settings = {
+                screen.idle_timeout = 300;
+                screen.honor_idle_inhibitors = "enabled";
+                system.sleep_wake_policy = "enabled";
+              };
+            };
+          };
+        }
+      ];
+    };
+  };
+}
 ```
 
-`packages.<system>.lg-buddy` and `packages.<system>.default` expose the same
-package for `x86_64-linux` and `aarch64-linux`. CI builds and launches the x86_64
-package; it evaluates the aarch64 output without claiming a native aarch64 test.
-`flake.lock` pins nixpkgs and `Cargo.lock` pins Rust dependencies. The package can
-also be called with a consumer's package set through `nix/package.nix`, supplying
-`src` and optionally `buildCommit`.
+Run `sudo nixos-rebuild switch --flake .#desktop`, then enter a graphical session
+and launch **LG Buddy** from the application menu, or run `lg-buddy`. Pair through
+the normal GUI or `lg-buddy setup`. There is no config-restoration prerequisite:
+activation publishes discovery before a config or native credentials exist.
+The monitor serves setup before pairing; the lifecycle daemon can retry until
+valid writable state exists. The boot oneshot stays active without contacting
+a TV when no config exists, allowing later shutdown to use newly paired state.
 
-Both executables are built from the same source. The package version comes from
-Cargo, and flake builds embed the source revision (including a dirty revision
-when available). These development builds retain the `dev` release channel;
-packaging does not turn a checkout into an official release.
+Both modules must select the same package and canonical absolute `configPath`.
+Integrated Home Manager checks this and the selected username. The default
+packages build this source with the consumer's package set. A custom XDG config
+home or config location must also be selected by the machine declaration.
+The runtime refuses symlinked/unsafe config paths and conflicting old selectors;
+it never makes the writable config a store file. Preserve an existing valid
+selection when migrating an installation.
 
-## Package contents and boundaries
+For standalone Home Manager, import `lg-buddy.homeManagerModules.default` into
+your existing `homeConfigurations.<name>` and set `services.lg-buddy.enable`,
+`package` and `configPath` to match the separately activated NixOS module. Apply
+with `home-manager switch --flake .#<name>` after the machine rebuild. Its user
+activation never writes `/etc` or runs machine TV power commands.
 
-The output contains the CLI, a GTK-wrapped GUI companion, desktop entry, icon,
-GNOME brightness extension and KWin setup inspection payload. Launchers and
-helpers point at their matching store package. The CLI remains an ELF so its
-companion discovery and executable ownership checks see the installed runtime.
-GTK resources are supplied by the GUI wrapper.
+## Declared settings and state
 
-The KWin source payload is preserved unchanged, including its build fingerprint.
-This package does not build, activate or load a native KWin plugin. Optional
-Plasma integration and its matching KWin/Qt build belong to the later module
-slice; the downstream metadata patch must not be copied without keeping the
-runtime and bridge identities consistent.
+`services.lg-buddy.settings` contains only these optional keys. Every value
+defaults to `null`, meaning the key remains editable and uses saved/default
+resolution. Names and values match the settings CLI.
 
-There are no system/user unit activations, NetworkManager hooks, update timers,
-configuration selectors, generated settings or pairing credentials in this
-package slice. User settings and native TV credentials remain writable user
-state, outside the Nix store. Do not use the mutable-root shell installer to
-integrate this package into NixOS. Final module installation, rebuild/activation,
-rollback and removal instructions will accompany the corresponding integration.
+| Key | Values |
+| --- | --- |
+| `screen.backend` | `auto`, `gnome`, `wayland` (legacy preference; normally leave unmanaged) |
+| `screen.idle_blank` | `enabled`, `disabled` |
+| `screen.honor_idle_inhibitors` | `enabled`, `disabled` |
+| `screen.idle_timeout` | Integer, 1–86400 seconds |
+| `screen.restore_policy` | `conservative`, `aggressive` |
+| `system.sleep_wake_policy` | `enabled`, `disabled` |
+| `updates.auto_check` | `enabled`, `disabled` (retained preference; externally managed updates do not run checks) |
+| `updates.channel` | `stable`, `prerelease` (retained preference; Nix chooses the installed version) |
 
-The runtime now supplies the [binding and activation protocol](defaults-and-configuration.md#publication-and-service-activation)
-for those modules. It publishes regular machine/user discovery records even
-before first pairing, and validates/serializes declaration replacement or
-removal. The future module activation must publish first, load matching units,
-then refresh an active user monitor; publication alone is not service activation.
-The package still supplies no public modules or host activation.
+Home Manager generates validated version-1 JSON with Nix attribution. It
+publishes the immutable generation through the runtime's
+[binding protocol](defaults-and-configuration.md#publication-and-service-activation),
+then reloads the matching units and conditionally refreshes an active monitor.
+Existing monitor changes use that conditional refresh rather than Home Manager's
+ordinary restart. An inactive graphical session stays inactive. Offline
+activation defers loading the policy until the next session; a reachable manager
+whose reload/refresh fails makes activation fail and can be retried.
 
-LG Buddy's direct Python dependency is a test input; the GTK dependency closure
-can include Python transitively. Retired `swayidle` and dialog tools are not
-runtime dependencies.
+Declared rows are disabled in Settings with the conditional Nix notice; CLI
+writes to those keys fail. Undeclared rows remain editable. The JSON contains no
+TV profiles, addresses, MACs or credentials. Preferences and native tokens remain
+user-owned writable files and are neither copied into Nix nor rolled back by it.
+
+To remove a managed value, omit it or set it to `null` and activate again.
+Removing all values removes the declaration binding, restoring saved/default
+resolution. Reapplying an older declaration restores its policy while retaining
+writable preferences and credentials.
+
+## Optional Plasma bridge
+
+On a host with `services.desktopManager.plasma6.enable = true`, set:
+
+```nix
+services.lg-buddy.plasma.enable = true;
+```
+
+The NixOS module builds the plugin with that host package set's KWin/Qt (KWin
+6.4 or newer), using the exact unchanged source payload from the selected LG
+Buddy package. It installs the plugin and a system `kwinrc` default enabling
+`lg_buddy_inhibition`. An explicit per-user `kwinrc` override still wins. Remove
+obsolete downstream bridge packages or user overrides before switching.
+
+Start a new Plasma session after installing or updating KWin/the bridge. A
+rebuild does not replace code inside an already-running compositor. Successful
+live build-identity/getter checks establish setup readiness; build success alone
+does not. The Nix loader check uses a private headless compositor; native Plasma
+session and physical-TV qualification remain #253 work. Without the bridge,
+KWin's native inhibition is absent and applicable setup remains incomplete;
+GNOME does not need this plugin. See [KWin integration](kwin-integration.md).
+
+## Existing installations and removal
+
+Remove the old downstream LG Buddy declarations before enabling these modules.
+Do not import both sets of service definitions. The machine module masks obsolete
+global update units and clears their global enablement links. Home Manager masks
+the update service and timer at user priority, covering shadowing user files, then
+stops retained active instances. Other units and saved update preferences are
+untouched. Existing unmanaged files with the same unit names use Home Manager's
+normal collision/backup handling: inspect them, preserve a backup, and use your
+usual `home-manager switch -b <backup-suffix>` or NixOS
+`home-manager.backupFileExtension` policy. The module does not force-delete them.
+
+To uninstall, keep the Home Manager module imported, set its `enable = false`
+and activate once. The previous generation's receipt lets activation remove its
+own declaration and stop its monitor while preserving the user selector,
+preferences and credentials. Then remove the import and package input if desired.
+Removing the import without this activation also removes the cleanup hook; use
+the [publication protocol](defaults-and-configuration.md#publication-and-service-activation)
+to clear any retained declaration before garbage collection removes its target.
+
+Disable the NixOS module and rebuild to remove machine integration. Ordinary
+rebuilds and removal do not stop/restart the boot/shutdown oneshot, avoiding an
+unintended TV power action. An already-active oneshot retains its shutdown
+behavior until the next boot. Never use the mutable-root installer/uninstaller
+to manage these Nix declarations.
 
 ## Updates belong to Nix
 
@@ -82,33 +196,56 @@ Setup does not require update-check units or activate a timer for a Nix-owned
 runtime, even when automatic checks were previously enabled. If an old timer is
 still enabled or running, setup asks you to disable and stop it through its
 owning configuration. It does not rewrite managed units or clear preferences.
-The forthcoming public modules will express the unit policy declaratively.
+Home Manager masks both update units and stops any retained active instances. It preserves saved update preferences.
 
-## Validation
+## Update and rollback
 
-```bash
+Update the consumer's LG Buddy flake input and activate its owning configuration:
+
+```sh
+nix flake update lg-buddy
+sudo nixos-rebuild switch --flake .#desktop
+# For separately managed homes, follow with:
+home-manager switch --flake .#<name>
+```
+
+A lock update alone does not activate the installed package. Use the owning
+NixOS/Home Manager generation rollback mechanism to return to a previous
+package/declaration, then recheck setup; a changed Plasma bridge needs a new
+session. User data is retained independently, so generation rollback is not a
+backup or a promise of arbitrary writable-data downgrade compatibility. Keep
+backups before migrating old user data. Incompatible data must be repaired or
+restored through the application's documented recovery flow.
+
+## Build and validation
+
+```sh
+nix build .#lg-buddy
 nix flake check --no-build --all-systems
 nix build --print-build-logs --no-link .#checks.x86_64-linux.package
+nix build --print-build-logs --no-link .#checks.x86_64-linux.module-evaluation .#checks.x86_64-linux.modules
+nix build --print-build-logs --no-link .#checks.x86_64-linux.kwin
 bash scripts/test-nix-update-ownership.sh \
   "$(nix eval --raw .#packages.x86_64-linux.lg-buddy.outPath)"
 python3 scripts/test-declarative-settings.py \
   "$(nix eval --raw .#packages.x86_64-linux.lg-buddy.outPath)/bin/lg-buddy" --nix
 ```
 
-The package build runs the Rust runtime library suite. The installed-package
-check verifies matching CLI/GUI identities, store-bound launch assets and an
-unchanged KWin source payload. It then reuses the GUI launch smoke on a private
-D-Bus session and virtual X11 display: once through a profile symlink to the CLI,
-and once through the GTK wrapper. Both paths exercise activation, the brightness
-deep link, single-instance replacement and clean application exit.
+The package builds matching CLI/GUI binaries, wraps GTK and installs their
+matching launchers, icon, GNOME brightness extension and KWin inspection payload.
+The CLI remains an ELF for executable-ownership and companion discovery. Flake
+builds embed their revision and retain the `dev` channel; packaging is not release
+publication. `flake.lock` pins nixpkgs and the Home Manager test interface;
+`Cargo.lock` pins Rust dependencies. Python is a test input, not a direct runtime
+requirement; retired `swayidle`/dialog tools are not dependencies.
 
-The ownership smoke runs outside the build sandbox against the built store
-executable and a profile alias. It verifies successful check/background/notification
-commands, installer refusal and unchanged user state, both without configuration
-and with invalid, inactive update preferences. Build
-namespaces can expose the store owner as an unmapped UID; those observations do
-not qualify as a trusted root-owned runtime.
-
-These checks verify packaging and installed launch behavior. Native NixOS
-pairing, lifecycle, Plasma integration and generation rollback remain part of
-the full #253 acceptance, after the module implementation.
+Module checks evaluate valid/invalid options and use real NixOS/Home Manager
+activation and systemd managers in a disposable VM. Real CLI publication/settings
+are paired with recording TV/session command peers. They cover absent initial
+config, regular selectors, update masks, matching paths (including spaces and a
+percent sign), active refresh, inactive-session preservation, package/declaration
+switches, rollback, removal and retained preferences/credentials without contacting
+a physical TV. The separate KWin check loads and queries the compiled plugin in
+the matching headless compositor. Existing package/GTK launch and external-update
+ownership checks remain in CI. aarch64 outputs evaluate; native aarch64 execution
+and full desktop/TV lifecycle qualification are separate acceptance evidence.

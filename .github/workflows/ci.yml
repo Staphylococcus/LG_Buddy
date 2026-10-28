@@ -28,10 +28,20 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           install_url: https://releases.nixos.org/nix/nix-2.34.8/install
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Allow the disposable NixOS test VM to use KVM
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
       - name: Evaluate public package outputs
         run: nix flake check --no-build --all-systems
       - name: Build and exercise the installed package
         run: nix build --print-build-logs --no-link --cores 2 --max-jobs 2 .#checks.x86_64-linux.package
+      - name: Validate public module options and activation in a disposable NixOS VM
+        run: nix build --print-build-logs --no-link --cores 2 --max-jobs 2 .#checks.x86_64-linux.module-evaluation .#checks.x86_64-linux.modules
+      - name: Load the optional bridge in the matching Nix KWin
+        run: nix build --print-build-logs --no-link --cores 2 --max-jobs 2 .#checks.x86_64-linux.kwin
       - name: Verify update ownership on the real store filesystem
         run: |
           package="$(nix eval --raw .#packages.x86_64-linux.lg-buddy.outPath)"

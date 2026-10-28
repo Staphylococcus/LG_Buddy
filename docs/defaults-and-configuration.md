@@ -226,8 +226,8 @@ preferences, credentials and the user's config selection remain. Republishing
 an earlier immutable generation provides declaration rollback. This does not
 roll back writable user data or qualify a native NixOS generation rollback.
 
-The public NixOS/Home Manager modules and native rebuild/rollback qualification
-remain the final integration stage in #253.
+The [public NixOS/Home Manager modules](nix.md) consume this protocol. Native
+rebuild/rollback and physical-TV qualification remain acceptance work in #253.
 
 ## Installer Behavior
 

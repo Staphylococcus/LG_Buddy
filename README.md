@@ -122,11 +122,10 @@ Without native idle support, disable **Idle blanking** to keep other LG Buddy
 features available, or use [external idle automation](docs/user-guide.md#external-idle-automation).
 
 The shell installer supports conventional Linux installations with writable
-system locations. A [public Nix package](docs/nix.md) provides the build foundation
-for NixOS integration planned for 2.1.0. Store-owned installations defer updates
+system locations. The [public Nix package and NixOS/Home Manager modules](docs/nix.md) provide
+the declarative installation route being qualified for 2.1.0. Store-owned installations defer updates
 to Nix, and generated declarations can make individual settings read-only while
-preserving user preferences. Public NixOS and Home Manager modules are still in progress;
-see [issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253).
+preserving user preferences. Native end-to-end NixOS qualification remains open; see [issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253).
 
 ## Install
 
