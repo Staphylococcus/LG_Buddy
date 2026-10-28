@@ -10,6 +10,8 @@ let
   common = import ./common.nix { inherit lib; };
   runtime = lib.getExe cfg.package;
   selected = lib.escapeShellArg cfg.configPath;
+  # NixOS quotes Environment= values but leaves systemd specifiers active.
+  systemdConfigPath = lib.replaceStrings [ "%" ] [ "%%" ] cfg.configPath;
   publish = pkgs.writeShellScript "lg-buddy-publish-machine" ''
     exec ${runtime} config-binding publish-machine ${selected}
   '';
@@ -124,7 +126,8 @@ in
       # Ordinary switches/removal must not execute a TV power cycle.
       restartIfChanged = false;
       stopIfChanged = false;
-      environment.LG_BUDDY_CONFIG = cfg.configPath;
+      unitConfig.X-StopOnRemoval = false;
+      environment.LG_BUDDY_CONFIG = systemdConfigPath;
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
@@ -139,7 +142,7 @@ in
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
       path = machinePath;
-      environment.LG_BUDDY_CONFIG = cfg.configPath;
+      environment.LG_BUDDY_CONFIG = systemdConfigPath;
       serviceConfig = {
         Type = "simple";
         ExecStart = lifecycle;

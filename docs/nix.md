@@ -173,8 +173,10 @@ to clear any retained declaration before garbage collection removes its target.
 Disable the NixOS module and rebuild to remove machine integration. Ordinary
 rebuilds and removal do not stop/restart the boot/shutdown oneshot, avoiding an
 unintended TV power action. An already-active oneshot retains its shutdown
-behavior until the next boot. Never use the mutable-root installer/uninstaller
-to manage these Nix declarations.
+behavior across ordinary rebuilds. Removal also removes its shutdown action;
+the previous oneshot may remain active in systemd until it is stopped, without
+controlling the TV. Never use the mutable-root installer/uninstaller to manage
+these Nix declarations.
 
 ## Updates belong to Nix
 
@@ -244,10 +246,11 @@ requirement; retired `swayidle`/dialog tools are not dependencies.
 Module checks evaluate valid/invalid options and use real NixOS/Home Manager
 activation and systemd managers in a disposable VM. Real CLI publication/settings
 are paired with recording TV/session command peers. They cover absent initial
-config, regular selectors, update masks, matching paths (including spaces and a
-percent sign), active refresh, inactive-session preservation, package/declaration
-switches, rollback, removal and retained preferences/credentials without contacting
-a physical TV. The separate KWin check loads and queries the compiled plugin in
+config, regular selectors, update masks, literal paths (including spaces and
+systemd percent specifiers), active refresh, inactive-session preservation,
+package/declaration switches, rollback, machine removal without a shutdown action,
+installed startup/shutdown behavior, and preserved preferences/credentials without
+contacting a physical TV. The separate KWin check loads and queries the compiled plugin in
 the matching headless compositor. Existing package/GTK launch and external-update
 ownership checks remain in CI. aarch64 outputs evaluate; native aarch64 execution
 and full desktop/TV lifecycle qualification are separate acceptance evidence.

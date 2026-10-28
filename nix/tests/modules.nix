@@ -6,7 +6,7 @@
 }:
 let
   inherit (pkgs) lib;
-  configPath = "/home/alice/TV settings%$/config.env";
+  configPath = "/home/alice/TV settings%u$/config.env";
   # Exercise real publication/settings and real systemd managers. TV/session
   # operations are recording peers, so this test cannot contact a physical TV.
   peer =
@@ -17,8 +17,11 @@ let
         config-binding|settings) exec ${package}/bin/lg-buddy "$@" ;;
         monitor)
           printf '%s\n' ${revision} >> "$HOME/monitor-starts"
+          printf '%s\n' "$LG_BUDDY_CONFIG" >> "$HOME/monitor-configs"
           exec ${pkgs.coreutils}/bin/sleep infinity ;;
-        lifecycle) exec ${pkgs.coreutils}/bin/sleep infinity ;;
+        lifecycle)
+          printf '%s\n' "$LG_BUDDY_CONFIG" >> /run/lg-buddy-lifecycle-configs
+          exec ${pkgs.coreutils}/bin/sleep infinity ;;
         *) printf '%s\t%s\n' "$*" "$LG_BUDDY_CONFIG" >> /run/lg-buddy-machine-actions ;;
       esac
     '';
@@ -97,6 +100,10 @@ pkgs.testers.runNixOSTest {
       lib.mkForce null;
     specialisation.disabled.configuration.home-manager.users.alice.services.lg-buddy.enable =
       lib.mkForce false;
+    specialisation.machine-disabled.configuration = {
+      services.lg-buddy.enable = lib.mkForce false;
+      home-manager.users.alice.services.lg-buddy.enable = lib.mkForce false;
+    };
   };
   testScript = ''
     import shlex
@@ -106,7 +113,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("home-manager-bob.service")
     machine.wait_for_file("/run/user/1000/bus")
     config = ${builtins.toJSON configPath}
-    token = "/home/alice/TV settings%$/tvs/primary/access-token.json"
+    token = config.rsplit("/", 1)[0] + "/tvs/primary/access-token.json"
     qconfig = shlex.quote(config)
     user = "runuser -u alice -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
     ctl = user + "systemctl --user "
@@ -142,10 +149,15 @@ pkgs.testers.runNixOSTest {
         machine.succeed(hook + " eth0 pre-down")
         assert machine.succeed("cat /run/lg-buddy-machine-actions").splitlines() == ["nm-pre-down\t" + config]
         machine.succeed("rm /run/lg-buddy-machine-actions")
+        machine.wait_for_file("/run/lg-buddy-lifecycle-configs")
+        lifecycle_configs = machine.succeed("cat /run/lg-buddy-lifecycle-configs").splitlines()
+        assert lifecycle_configs == [config], lifecycle_configs
         machine.succeed(ctl + "start test-desktop.target")
         machine.wait_until_succeeds(ctl + "is-active LG_Buddy_screen.service", timeout=60)
         machine.wait_for_file("/home/alice/monitor-starts")
         assert machine.succeed("cat /home/alice/monitor-starts").splitlines() == ["first"]
+        monitor_configs = machine.succeed("cat /home/alice/monitor-configs").splitlines()
+        assert monitor_configs == [config], monitor_configs
 
     with subtest("rebuild publishes then refreshes the active matching monitor without TV power actions"):
         legacy = {
@@ -192,8 +204,23 @@ pkgs.testers.runNixOSTest {
         assert machine.succeed("sha256sum " + qconfig + " " + shlex.quote(token)) == saved
         machine.fail("test -e /run/lg-buddy-machine-actions")
 
-    with subtest("shutdown uses state paired after the boot oneshot began"):
+    with subtest("installed shutdown and startup use the literal config paired after boot"):
         machine.succeed("systemctl stop LG_Buddy.service")
         assert machine.succeed("cat /run/lg-buddy-machine-actions").splitlines() == ["shutdown\t" + config]
+        machine.succeed("rm /run/lg-buddy-machine-actions")
+        machine.succeed("systemctl start LG_Buddy.service")
+        assert machine.succeed("cat /run/lg-buddy-machine-actions").splitlines() == ["startup boot\t" + config]
+        machine.succeed("rm /run/lg-buddy-machine-actions")
+
+    with subtest("machine removal leaves the TV unchanged and removes future integration"):
+        machine.succeed(base + "/specialisation/machine-disabled/bin/switch-to-configuration test")
+        machine.fail("test -e /etc/systemd/system/LG_Buddy.service")
+        machine.succeed("systemctl is-active LG_Buddy.service")
+        machine.fail("systemctl is-active LG_Buddy_lifecycle.service")
+        machine.fail("test -e /run/lg-buddy-machine-actions")
+        assert machine.succeed("sha256sum " + qconfig + " " + shlex.quote(token)) == saved
+
+        machine.succeed("systemctl stop LG_Buddy.service")
+        machine.fail("test -e /run/lg-buddy-machine-actions")
   '';
 }
