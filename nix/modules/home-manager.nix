@@ -139,6 +139,9 @@ in
             "PATH=${
               lib.makeBinPath [
                 cfg.package
+                # Setup inspection invokes the installed KWin launcher through
+                # bash, including its NotApplicable check on GNOME.
+                pkgs.bash
                 pkgs.systemd
               ]
             }"

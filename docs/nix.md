@@ -3,9 +3,10 @@
 The flake exports `nixosModules.lg-buddy` and `homeManagerModules.lg-buddy`
 (with `default` aliases), plus matching CLI/GTK packages for `x86_64-linux` and
 `aarch64-linux`. These are the public declarations for the v2.1 NixOS route.
-Native desktop, physical-TV and generation-lifecycle qualification remains open
-in [#253](https://github.com/Staphylococcus/LG_Buddy/issues/253); development
-module availability does not establish that final support claim.
+The native runner below exercises fresh x86_64 GNOME/Plasma installations and
+generation changes in desktop VMs. Physical-TV and hardware lifecycle
+qualification remains open in [#253](https://github.com/Staphylococcus/LG_Buddy/issues/253);
+development module availability does not establish that final support claim.
 
 ## Install both layers
 

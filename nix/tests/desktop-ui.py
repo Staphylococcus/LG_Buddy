@@ -7,9 +7,20 @@ from pathlib import Path
 
 import dbus
 import pyatspi
+
 recovery = importlib.import_module("test-native-setup-recovery")
 ui = recovery.ui
 scenario = sys.argv[1]
+
+
+def sensitivity_path(item):
+    path = []
+    while item is not None and ui.role(item) != pyatspi.ROLE_APPLICATION:
+        path.append({"name": ui.name(item), "role": ui.role_name(item),
+                     "sensitive": ui.is_sensitive(item)})
+        item = item.parent
+    return path
+
 
 if scenario == "inhibit":
     bus = dbus.SessionBus()
@@ -38,11 +49,17 @@ elif scenario == "gate":
     assert not recovery.functional()
 elif scenario == "settings":
     recovery.wait("functional GUI", recovery.functional)
-    tab = ui.wait_for_accessible(
-        lambda item: ui.name(item) == "Settings" and ui.role(item) == pyatspi.ROLE_PAGE_TAB
-        and ui.is_showing(item), 30, "Settings tab")
-    if not tab.getState().contains(pyatspi.STATE_SELECTED):
-        assert tab.queryAction().doAction(0)
+    def select_settings():
+        for item in recovery.controls():
+            if ui.name(item) == "Settings":
+                try:
+                    if item.queryAction().doAction(0):
+                        return True
+                except NotImplementedError:
+                    pass
+        return False
+
+    recovery.wait("Settings navigation action", select_settings)
     expected = sys.argv[2]
     editable = "editable" in sys.argv[3:]
 
@@ -52,7 +69,10 @@ elif scenario == "settings":
                    and ui.name(item) == "Idle timeout"]
         if not entries or ui.text_value(entries[0]) != expected:
             return False
-        assert ui.is_sensitive(entries[0]) == editable
+        # AT-SPI exposes the child's own state even when its preferences row
+        # disables the subtree. Observe the effective native control hierarchy.
+        path = sensitivity_path(entries[0])
+        assert all(node["sensitive"] for node in path) == editable, path
         names = {ui.name(item) for item in controls}
         assert "Managed externally" in names
         notice = "Some settings are disabled because they are managed declaratively in your nix configuration"

@@ -141,6 +141,10 @@ pkgs.testers.runNixOSTest {
     ui = user + observer
     token = "${builtins.dirOf configPath}/tvs/primary/access-token.json"
     base = machine.succeed("readlink -f /run/current-system").strip()
+    changed = machine.succeed("readlink -f " + base + "/specialisation/changed").strip()
+    # Test images boot a store path directly; establish the installer's initial
+    # profile generation before exercising ordinary nix-env generation rollback.
+    machine.succeed("nix-env --profile /nix/var/nix/profiles/system --set " + base)
 
     def session():
         machine.wait_for_unit("display-manager.service")
@@ -152,6 +156,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(ui + "assessment " + status, timeout=90)
 
     def launch():
+        machine.send_key("esc")
         machine.succeed(user + "systemd-run --user --collect --unit=qualification-gui ${package}/bin/lg-buddy-gui")
 
     def quit_gui():
@@ -175,10 +180,11 @@ pkgs.testers.runNixOSTest {
         quit_gui()
 
     with subtest("normal CLI pairs with WebOS and the real verifier admits the GUI"):
-        machine.succeed(cli + "setup --yes --non-interactive --tv-ip 127.0.0.1 --tv-mac 02:11:22:33:44:55 --input HDMI_1")
+        machine.succeed(cli + "setup --yes --non-interactive --tv-ip 127.0.0.1 --tv-mac 02:11:22:33:44:55 --input HDMI_3")
         assessment("Complete")
         assert machine.succeed("systemctl show LG_Buddy_lifecycle.service -p MainPID --value") == lifecycle_pid
         assert machine.succeed("systemctl show LG_Buddy_lifecycle.service -p NRestarts --value").strip() == "0"
+        machine.wait_until_succeeds("test $(readlink -f /proc/" + lifecycle_pid.strip() + "/exe) = ${package}/bin/lg-buddy")
         machine.succeed("test -s " + token)
         assert tv()["pairing_prompt_count"] == 1, tv()
         saved_token = machine.succeed("sha256sum " + token)
@@ -200,7 +206,7 @@ pkgs.testers.runNixOSTest {
     with subtest("real desktop idle blanking and native input restore"):
         machine.succeed(user + "systemd-run --user --collect --unit=qualification-inhibitor " + observer + "inhibit")
         machine.wait_for_file("/tmp/qualification-inhibitor-ready")
-        machine.send_key("a")
+        machine.send_key("esc")
         for _ in range(3):
             machine.sleep(5)
             assert tv()["screen_on"], tv()
@@ -208,14 +214,15 @@ pkgs.testers.runNixOSTest {
         machine.sleep(5)
         assert tv()["screen_on"], tv()
         machine.wait_until_succeeds("${pkgs.jq}/bin/jq -e '.screen_on == false' /var/lib/lg-buddy-test-tv/state.json", timeout=45)
-        machine.send_key("b")
+        machine.send_key("esc")
         machine.wait_until_succeeds("${pkgs.jq}/bin/jq -e '.screen_on == true' /var/lib/lg-buddy-test-tv/state.json", timeout=20)
 
     with subtest("activation changes effective policy without a TV power cycle"):
         before = tv()
         pid = machine.succeed(ctl + "show LG_Buddy_screen.service -p MainPID --value")
-        machine.succeed("nix-env --profile /nix/var/nix/profiles/system --set " + base + "/specialisation/changed")
-        machine.succeed(base + "/specialisation/changed/bin/switch-to-configuration switch")
+        machine.succeed("nix-env --profile /nix/var/nix/profiles/system --set " + changed)
+        assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == changed
+        machine.succeed(changed + "/bin/switch-to-configuration switch")
         machine.wait_until_succeeds(cli + "settings get screen.idle_timeout | ${pkgs.gnugrep}/bin/grep -x 20")
         assert machine.succeed(ctl + "show LG_Buddy_screen.service -p MainPID --value") != pid
         assert tv()["power_off_count"] == before["power_off_count"]
@@ -228,6 +235,7 @@ pkgs.testers.runNixOSTest {
         machine.start(allow_reboot=True)
         session()
         assert machine.succeed("cat /proc/sys/kernel/random/boot_id") != boot
+        assert machine.succeed("readlink -f /run/current-system").strip() == changed
         assert machine.succeed(cli + "settings get screen.idle_timeout").strip() == "20"
         assert machine.succeed("sha256sum ${configPath} " + token) == saved
         assessment("Complete")
@@ -235,6 +243,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("generation rollback and declaration removal retain writable state"):
         machine.succeed("nix-env --profile /nix/var/nix/profiles/system --rollback")
+        assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == base
         machine.succeed("/nix/var/nix/profiles/system/bin/switch-to-configuration switch")
         assert machine.succeed(cli + "settings get screen.idle_timeout").strip() == "10"
         machine.succeed(base + "/specialisation/removed/bin/switch-to-configuration test")
@@ -249,6 +258,16 @@ pkgs.testers.runNixOSTest {
 
     print("QUALIFIED RUNTIME:", machine.succeed("${package}/bin/lg-buddy --version"))
     print("QUALIFIED OS:", machine.succeed("nixos-version"))
+    print("QUALIFIED KERNEL:", machine.succeed("uname -r"))
+    print("COMPONENT PACKAGES:", ${
+      builtins.toJSON {
+        compositor = if plasma then pkgs.kdePackages.kwin.version else pkgs.gnome-shell.version;
+        gtk = pkgs.gtk4.version;
+        libadwaita = pkgs.libadwaita.version;
+        systemd = pkgs.systemd.version;
+        qt = if plasma then pkgs.kdePackages.qtbase.version else "not applicable";
+      }
+    })
     print("QUALIFIED SESSION:", machine.succeed(ctl + "show-environment"))
     print("SYSTEM SERVICES:", machine.succeed("systemctl show LG_Buddy.service LG_Buddy_lifecycle.service -p MainPID -p ExecStart -p ActiveState"))
     print("USER SERVICE:", machine.succeed(ctl + "show LG_Buddy_screen.service -p MainPID -p ExecStart -p ActiveState"))
