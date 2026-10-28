@@ -72,8 +72,9 @@ Run `sudo nixos-rebuild switch --flake .#desktop`, then enter a graphical sessio
 and launch **LG Buddy** from the application menu, or run `lg-buddy`. Pair through
 the normal GUI or `lg-buddy setup`. There is no config-restoration prerequisite:
 activation publishes discovery before a config or native credentials exist.
-The monitor serves setup before pairing; the lifecycle daemon can retry until
-valid writable state exists. The boot oneshot stays active without contacting
+The monitor serves setup before pairing; the lifecycle service waits for the
+first writable config and then starts the real daemon without a restart or
+another rebuild. The boot oneshot stays active without contacting
 a TV when no config exists, allowing later shutdown to use newly paired state.
 
 Both modules must select the same package and canonical absolute `configPath`.
@@ -249,3 +250,23 @@ a physical TV. The separate KWin check loads and queries the compiled plugin in
 the matching headless compositor. Existing package/GTK launch and external-update
 ownership checks remain in CI. aarch64 outputs evaluate; native aarch64 execution
 and full desktop/TV lifecycle qualification are separate acceptance evidence.
+
+For public-module qualification on real disposable desktops, run each VM
+separately (about 6 GiB guest RAM):
+
+```sh
+nix build --impure --no-link --print-build-logs \
+  --file scripts/test-native-setup-nixos.nix --argstr desktop gnome
+nix build --impure --no-link --print-build-logs \
+  --file scripts/test-native-setup-nixos.nix --argstr desktop plasma
+```
+
+The runner uses the public modules, unchanged packaged runtime, real GTK,
+systemd and compositor, replacing only the TV with the loopback WebOS fixture.
+It begins without preferences or credentials and checks pairing, setup admission,
+managed/editor state, CLI mutations, external update ownership, native idle
+inhibition/restore, activation, bootloader power-cycle, generation rollback and
+declaration removal with retained credentials. Plasma also checks the live bridge.
+The resulting test output contains screenshots, component and service identities,
+and transport observations. Physical TV approval, visible HDMI output and actual
+hardware sleep/wake and power behavior still require a host pass.

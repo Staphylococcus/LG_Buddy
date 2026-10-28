@@ -36,6 +36,14 @@ let
         exec ${runtime} ${command}
       fi
     '';
+  lifecycle = pkgs.writeShellScript "lg-buddy-lifecycle" ''
+    # A fresh declaration precedes pairing. Stay active while waiting for the
+    # user's atomic config publication, then keep this PID for the real daemon.
+    while [ ! -f ${selected} ]; do
+      ${pkgs.coreutils}/bin/sleep 1
+    done
+    exec ${runtime} lifecycle
+  '';
 in
 {
   options.services.lg-buddy = {
@@ -134,7 +142,7 @@ in
       environment.LG_BUDDY_CONFIG = cfg.configPath;
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${runtime} lifecycle";
+        ExecStart = lifecycle;
         Restart = "on-failure";
         RestartSec = 10;
       };

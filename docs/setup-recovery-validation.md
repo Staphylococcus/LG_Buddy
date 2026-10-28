@@ -128,17 +128,17 @@ Never clear the notification ledger and call that a new login. Either use an
 actual fresh session or introduce a genuinely different published requirement.
 Do not modify installed source while a repair mutation is in progress.
 
-The [NixOS fixture](../scripts/test-native-setup-nixos.nix) builds both actual
-system specialisations and activates the repaired one **inside its VM**, not on
-the host. Supply the downstream package and module implementing
-`vas.services.lgBuddy`:
+The historical NixOS evidence above used the downstream module and an incorrect
+update-service binding. External update ownership has since made that fault
+inapplicable. The [NixOS runner](../scripts/test-native-setup-nixos.nix) now
+qualifies the public modules, real desktop/runtime and generation lifecycle.
+It uses the repository's locked inputs and a loopback WebOS transport fixture:
 
 ```sh
-nix-build scripts/test-native-setup-nixos.nix --no-out-link \
-  --arg pkgs 'import /path/to/pinned/nixpkgs {}' \
-  --arg packageFile /path/to/nix-config/pkgs/lg-buddy.nix \
-  --arg serviceModule /path/to/nix-config/modules/services/lg-buddy.nix \
-  --arg src /path/to/candidate --argstr buildCommit CANDIDATE_COMMIT
+nix build --impure --no-link --print-build-logs \
+  --file scripts/test-native-setup-nixos.nix --argstr desktop gnome
+# Repeat with --argstr desktop plasma for the native KWin route.
+# Optionally pin --argstr src 'github:Staphylococcus/LG_Buddy/<commit>'.
 ```
 
 ## Cleanup and harness corrections
