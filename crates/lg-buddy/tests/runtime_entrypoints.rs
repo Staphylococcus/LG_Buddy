@@ -125,6 +125,193 @@ fn incomplete_install_keeps_the_session_endpoint_reachable_and_cached_reads_do_n
 }
 
 #[test]
+fn running_monitor_leaves_passive_mode_after_first_pairing_and_honors_declared_policy() {
+    use lg_buddy::config::HdmiInput;
+    use lg_buddy::pairing::{EnvironmentPairingBackend, PairingBackend, PairingIntent};
+    use lg_buddy::tvs::{TvsApplication, TvsIntent};
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Monitor(std::process::Child);
+    impl Drop for Monitor {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let mut env = TestEnv::new();
+    for (enabled, invalid_profile, explicit_path) in [
+        (true, false, true),
+        (true, false, false),
+        (true, true, true),
+        (false, false, true),
+    ] {
+        let bus = MockSessionBusIdleMonitor::new("first-pairing-bus");
+        bus.set_shell_available(true);
+        bus.set_screen_saver_available(true);
+        bus.set_idle_monitor_available(true);
+        let logind = MockSystemLogind::new("first-pairing-logind");
+        logind.reset();
+        let tv = web_os::MockWebOsTv::with_version(
+            web_os::MockWebOsVersion::WebOs24Version92261,
+            "HDMI_2",
+        );
+        let config = TestConfigFile::new("first-pairing-config");
+        let runtime = RuntimeStateLayout::new("first-pairing-runtime");
+        let config_home = config.path().with_file_name("xdg");
+        let generation = config.path().with_file_name("generation.json");
+        fs::write(
+            &generation,
+            serde_json::to_vec(&serde_json::json!({
+                "version":1, "source":"nix", "settings": {
+                    "screen.idle_blank":enabled, "screen.idle_timeout":1
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o444)).unwrap();
+        let publication = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"))
+            .args(["config-binding", "publish-user"])
+            .arg(config.path())
+            .arg(&generation)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env_remove("SUDO_USER")
+            .env_remove("SUDO_UID")
+            .output()
+            .unwrap();
+        assert!(publication.status.success(), "{publication:?}");
+        if invalid_profile {
+            config.write_contents("tvs_primary_platform=lg_webos\ntvs_primary_ip=invalid\n");
+        }
+        env.set("LG_BUDDY_CONFIG", config.path());
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove("SUDO_USER");
+        env.remove("SUDO_UID");
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lg-buddy"));
+        if !explicit_path {
+            command.env_remove("LG_BUDDY_CONFIG");
+        }
+        let mut monitor = Monitor(
+            command
+                .arg("monitor")
+                .env("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir())
+                .env("DBUS_SESSION_BUS_ADDRESS", bus.address())
+                .env("DBUS_SYSTEM_BUS_ADDRESS", logind.address())
+                .env("XDG_SESSION_ID", "test-session")
+                .env("LG_BUDDY_SCREEN_BACKEND", "auto")
+                .env_remove("WAYLAND_DISPLAY")
+                .env_remove("WAYLAND_SOCKET")
+                .env("LG_BUDDY_GAMEPAD_ACTIVITY_SOURCE", "disabled")
+                .env("LG_BUDDY_GNOME_MONITOR_TEST_TIMEOUT_SECS", "60")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let connection = dbus::blocking::Connection::new_address(bus.address()).unwrap();
+        let owner = || -> Option<String> {
+            let (owner,): (String,) = connection
+                .with_proxy(
+                    "org.freedesktop.DBus",
+                    "/org/freedesktop/DBus",
+                    Duration::from_millis(200),
+                )
+                .method_call(
+                    "org.freedesktop.DBus",
+                    "GetNameOwner",
+                    ("io.github.Staphylococcus.LGBuddy",),
+                )
+                .ok()?;
+            Some(owner)
+        };
+        wait_until(Duration::from_secs(3), || owner().is_some());
+        let original_owner = owner().unwrap();
+        let snapshot = || -> Option<lg_buddy::setup::published::SetupSnapshot> {
+            let (json,): (String,) = connection
+                .with_proxy(
+                    &original_owner,
+                    "/io/github/Staphylococcus/LGBuddy/Session",
+                    Duration::from_millis(200),
+                )
+                .method_call(
+                    "io.github.Staphylococcus.LGBuddy.Session1",
+                    "GetSetupAssessment",
+                    (),
+                )
+                .ok()?;
+            serde_json::from_str(&json).ok()
+        };
+        wait_until(Duration::from_secs(3), || snapshot().is_some());
+        let original_instance = snapshot().unwrap().instance;
+        assert_eq!(config.path().exists(), invalid_profile);
+        assert_eq!(bus.user_active_watch_count(), 0);
+        assert_eq!(tv.snapshot().connection_count, 0);
+        if invalid_profile {
+            // Repair the rejected profile before pairing; pairing deliberately
+            // refuses to overwrite malformed TV data on its own.
+            fs::remove_file(config.path()).unwrap();
+        }
+
+        // Drive the production pairing backend, including verification and atomic
+        // config/credential publication, while the original monitor stays alive.
+        let (mut app, opened) = TvsApplication::open();
+        app.complete_read(opened.read_operation().unwrap(), Ok(Vec::new()))
+            .unwrap();
+        app.handle_intent(TvsIntent::PairTv).unwrap();
+        for intent in [
+            PairingIntent::SetAddress("127.0.0.1".into()),
+            PairingIntent::SetMac("02:11:22:33:44:55".into()),
+            PairingIntent::SetInput(HdmiInput::Hdmi2),
+        ] {
+            app.handle_intent(TvsIntent::Pairing(intent)).unwrap();
+        }
+        let transition = app
+            .handle_intent(TvsIntent::Pairing(PairingIntent::Submit))
+            .unwrap();
+        let operation = transition.pairing_operation().unwrap();
+        let paired = EnvironmentPairingBackend
+            .pair(operation, &mut |_| {})
+            .unwrap_or_else(|error| {
+                panic!("pairing failed (enabled={enabled}, invalid={invalid_profile}, explicit={explicit_path}): {error:?}")
+            });
+        app.complete_pairing(operation, Ok(paired.into_profile()))
+            .unwrap();
+        assert_eq!(tv.snapshot().pairing_prompt_count, 1);
+        let token = config
+            .path()
+            .with_file_name("tvs")
+            .join("primary/access-token.json");
+        let credential = fs::read(&token).unwrap();
+        let saved = fs::read(config.path()).unwrap();
+
+        if enabled {
+            wait_until(Duration::from_secs(6), || !tv.snapshot().screen_on);
+            assert!(bus.user_active_watch_count() > 0);
+            runtime.assert_session_marker_exists();
+            bus.emit_screen_saver_active();
+            wait_until(Duration::from_secs(3), || tv.snapshot().screen_on);
+            runtime.assert_session_marker_absent();
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                assert!(tv.snapshot().screen_on);
+                assert_eq!(bus.user_active_watch_count(), 0);
+                thread::sleep(Duration::from_millis(100));
+            }
+            runtime.assert_session_marker_absent();
+        }
+        assert!(monitor.0.try_wait().unwrap().is_none());
+        assert_eq!(owner().as_deref(), Some(original_owner.as_str()));
+        assert_eq!(snapshot().unwrap().instance, original_instance);
+        assert_eq!(fs::read(config.path()).unwrap(), saved);
+        assert_eq!(fs::read(&token).unwrap(), credential);
+        assert_eq!(tv.snapshot().pairing_prompt_count, 1);
+        tv.assert_healthy();
+    }
+}
+
+#[test]
 fn setup_notification_keeps_reads_fast_and_only_trusted_action_opens_ordinary_gui() {
     use std::os::unix::fs::PermissionsExt;
     let _env = TestEnv::new();
