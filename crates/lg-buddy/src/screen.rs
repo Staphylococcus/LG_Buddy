@@ -361,7 +361,7 @@ pub(crate) fn run_screen_off_with_result_for_event<
     let tv = TvDevice::new(tv_client, config.tv_ip);
     let mut blank_succeeded = false;
 
-    match tv.input().current() {
+    match tv.input().current_with_connection_recovery() {
         Ok(current_input) => {
             let decision = decide_screen_off_after_input(
                 config.input,

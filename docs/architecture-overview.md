@@ -905,11 +905,11 @@ and resume operations. Legacy clients are rebuilt per action, and one-shot
 commands drop their owner on completion. A consumed or invalidated native
 session reconnects on demand; there is no background connection maintenance.
 
-If an input query invalidates a reused session, the adapter retries that read
-once on a fresh connection before returning a failure to policy. This prevents
-a socket closed between events from triggering the screen-off fallback without
-checking the TV's current input. Fresh-session failures return normally, and
-effectful operations are never replayed by this recovery path.
+If an input query invalidates a reused session, the adapter reconnects and
+retries the read once. For screen-off, the same retry also covers transport
+failures while opening or using a fresh session. The screen-off policy can
+consider power-off if the input check still fails. Recovery retries only the
+read.
 
 Native picture settings have two known service-invocation paths. A direct SSAP
 write sends `ssap://settings/setSystemSettings` on the websocket. The Luna path
