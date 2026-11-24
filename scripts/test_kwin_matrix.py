@@ -43,17 +43,24 @@ class KWinMatrixTests(unittest.TestCase):
         record_path.write_text(json.dumps(record))
 
     def test_committed_floor_and_qt_coverage(self):
-        expected_versions = {f"6.{minor}.{patch}" for minor, last in ((4, 6), (5, 6), (6, 6), (7, 5)) for patch in range(last + 1)}
-        self.assertEqual({r["kwin_version"] for r in self.rows}, expected_versions)
-        self.assertEqual(len(self.rows), 33)
-        self.assertEqual(len(matrix.targets(self.manifest, "6.4", "6.8")), 7)
-        for row in self.rows:
-            minimum = {"6.4": 8, "6.5": 9, "6.6": 10, "6.7": 10}[row["kwin_version"].rsplit(".", 1)[0]]
-            self.assertGreaterEqual(int(row["qt_minor"].split(".")[1]), minimum)
+        releases = {
+            "6.4": (6, ("6.8",)),
+            "6.5": (6, ("6.9",)),
+            "6.6": (7, ("6.10",)),
+            "6.7": (6, ("6.10", "6.11")),
+            "6.8": (3, ("6.11",)),
+        }
+        expected = {
+            (f"{series}.{patch}", qt)
+            for series, (latest, qt_minors) in releases.items()
+            for patch in range(latest + 1)
+            for qt in qt_minors
+        }
+        self.assertEqual({(r["kwin_version"], r["qt_minor"]) for r in self.rows}, expected)
 
     def test_complete_matrix_and_missing_variant(self):
         paths = [self.artifact(row) for row in self.rows]
-        self.assertEqual(matrix.verify(self.output, self.rows), 33)
+        self.assertEqual(matrix.verify(self.output, self.rows), len(self.rows))
         shutil.rmtree(paths[-1])
         with self.assertRaisesRegex(ValueError, "Missing KWin artifacts"):
             matrix.verify(self.output, self.rows)
