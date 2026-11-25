@@ -51,12 +51,7 @@ let
     # KWin 6.6.6 already includes this NixOS capability fix upstream.
     patches = builtins.filter (patch: !(lib.versionAtLeast kwinVersion "6.6.6"
       && lib.hasInfix "Lower-CAP_SYS_NICE" (toString patch))) (old.patches or [ ])
-      # The 6.8.0 QPA backend dereferences a null render device on headless CI.
-      # Backport the 6.8.1 fix without changing the compositor's plugin ABI ID.
-      ++ lib.optional (kwinVersion == "6.8.0") (pkgs.fetchurl {
-        url = "https://github.com/KDE/kwin/commit/e749ee86174d30e3780be030e2bbb29f114ecdb1.patch";
-        hash = "sha256-SKyhUCXbjHZIdUA+MZ8AB7rc9vLwf1Ah3CKc5O76v8I=";
-      });
+      ++ builtins.map (patch: pkgs.fetchurl { inherit (patch) url hash; }) (target.patches or [ ]);
     src = pkgs.fetchzip {
       url = "https://api.github.com/repos/KDE/kwin/tarball/${target.rev}";
       extension = "tar.gz";

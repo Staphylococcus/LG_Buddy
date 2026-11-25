@@ -213,7 +213,7 @@ an observed compatibility gap. No KWin version in the stated range is dropped.
 
 ### Building and checking coverage
 
-Nix is used only for the CI build environments. Exported plugins contain no Nix
+Nix supplies the pinned toolchains for portable prebuilts. Exported plugins contain no Nix
 store references or runtime search paths. Nix is not installed on users' machines
 by bridge setup, and the local compilation fallback keeps its existing tools.
 
@@ -229,15 +229,21 @@ python3 scripts/kwin_matrix.py build --directory target/kwin-probe \
   --kwin-version 6.4.0 --qt-minor 6.8
 ```
 
-The reusable `kwin-bridge.yml` workflow groups builds by KWin series and Qt minor.
-It caches only artifacts that passed the loader test, keyed by their exact build
-and test inputs. On a cache miss, it can reuse the latest successful `dev` push's
-prebuilt artifacts after verifying the complete group against the current source,
-build inputs and checksums. This lets promotion and release branches reuse builds
-despite Actions cache isolation. Missing, expired or mismatched artifacts fall
-back to the pinned source build. Each artifact includes `metadata.tsv` and `build.json`, recording
-the source revision, toolchain pins, plugin checksum and successful loader check.
-A final coverage job rejects missing, duplicate, stale or corrupt artifacts.
+The [prebuilt repository](https://github.com/Staphylococcus/LG_Buddy-prebuilts)
+indexes immutable release assets by each target's exact build and loader-test
+inputs. Maintainers build any missing targets locally, then publish the verified
+outputs using an authenticated GitHub CLI.
+
+```sh
+python3 scripts/kwin_prebuilts.py publish --directory target/kwin-probe
+```
+
+The reusable `kwin-bridge.yml` workflow restores a complete group from an Actions
+cache or downloads individual targets from the prebuilt repository. It checks
+the archive checksum, plugin checksum, and input identity. A missing target
+prints its version and input hash so a maintainer can build it locally.
+CI still verifies full coverage and runs the Fedora loader tests against the
+assembled set.
 
 CI and release bundling use `--require-kwin-matrix`; a partial collection cannot
 produce their release bundle. The copied payload is checked again and includes
