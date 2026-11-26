@@ -201,6 +201,14 @@
       ]
     },
     {
+      "version": "6.6.7",
+      "rev": "6446224f5304796d9855400ff0ade3b213b16437",
+      "sha256": "13263va1ing44gmn8lq5v7mfksjc4nkw2h4wl9ax39ilynl17a4j",
+      "qt_minors": [
+        "6.10"
+      ]
+    },
+    {
       "version": "6.7.0",
       "rev": "365683c0442f20a76df115405c50bdf20413b05c",
       "sha256": "1zkz3nbdi559w8wq8gc76gsmknzsd3hz42djk1g77xd5yfzsy2g7",
@@ -251,6 +259,54 @@
       "sha256": "04masrnay03vg3g3y6gxfkm6pbjx6smnn6yb33rgyx9v9mwq702b",
       "qt_minors": [
         "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.7.6",
+      "rev": "db89f853c0c1e32ec10fdf24f1a8e9725633de6e",
+      "sha256": "0xwyzbgkmi5qk8sygnsv3sm3w2rh4qqvcbngkndz06iwj5rnhd8s",
+      "qt_minors": [
+        "6.10",
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.8.0",
+      "rev": "066d1e17c945d9a89fee645e10a2bbd77f2e93a6",
+      "sha256": "1ybvsqhqi840ny93n0ll8b3x2v9h546nb175w0w1a7110vgqqy4v",
+      "patches": [
+        {
+          "description": "Backport the KWin 6.8.1 QPA startup fix for headless systems without a render device",
+          "url": "https://github.com/KDE/kwin/commit/e749ee86174d30e3780be030e2bbb29f114ecdb1.patch",
+          "hash": "sha256-SKyhUCXbjHZIdUA+MZ8AB7rc9vLwf1Ah3CKc5O76v8I="
+        }
+      ],
+      "qt_minors": [
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.8.1",
+      "rev": "1b798c05c19b1124edb1e16623191fcd2c128fd0",
+      "sha256": "1y2wm0fl01bzpsps0yjxxygx3wrlhnn7qgyfismfjdmrfkfgb3il",
+      "qt_minors": [
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.8.2",
+      "rev": "f130ab33c8e6f3b9d728aade87836086ae9a8ed4",
+      "sha256": "1nrxcsjch1h8jyx1qxd4j7ya5yi7d6fkgyd7dvdk480sljnw79pi",
+      "qt_minors": [
+        "6.11"
+      ]
+    },
+    {
+      "version": "6.8.3",
+      "rev": "3e528155d822d41285a509d09751a88fa956267f",
+      "sha256": "16z0xbzqbfpba23s8jy3n770fc33qbrpry71c3kvpi52ph74cf20",
+      "qt_minors": [
         "6.11"
       ]
     }
@@ -330,42 +386,79 @@
       "rev": "ffe209c20b131499796c6fb7dfbb93a3df202d0b",
       "hash": "sha256-ekxVxETqu86AheXLqi9oTgpBwzb6tzaOfS9qfID3rG0=",
       "plasma": {
-        "version": "6.6.6",
+        "version": "6.6.7",
         "sources": {
           "aurorae": {
-            "rev": "af2b530e0997ddd2f57546f39a16c55bd4ee17fc",
-            "sha256": "0r7vf9gyyahzgk5x864q30nkni5s40qa1xm4cy3aazsby4mk3jy1"
+            "rev": "d008d8b787c2e07be5e71562049489aa44069ec1",
+            "sha256": "153msn7yw3wqyfcslfppi0q0sq2490qr3nj5hnli1mcry9nl3hrz"
           },
           "breeze": {
-            "rev": "f01a6d29787cfe8b9736b221d121199b2d8bfa34",
-            "sha256": "0g9vcv8qrfwl34zmhf01r3yg7zsxnd849as8c2csy7dyj9vn5q7k"
+            "rev": "037f97ea1832900780f776d19e2dfe5847907472",
+            "sha256": "1nqgm16ndlygrvnpglgbrig7lcnf0gz7xfnw1ncrpn63mzpxxhr4"
           },
           "kdecoration": {
-            "rev": "80b838cec6ebc8fe7dbb2d5a2d3e464059835c30",
-            "sha256": "0ss0pln6i343a1850pdm4ddrcxyn8qx9gl2nfb8glnaflw10f1fy"
+            "rev": "49fa391a401672bc877bb664d9d08f4e95512306",
+            "sha256": "1sn06546hiw14zp7jl637fid5wggm36nrj4sw84a5pfd81ys497l"
           },
           "kwayland": {
-            "rev": "0e4900cdb12684758ab57d1b8a5933f9ddf49a59",
-            "sha256": "159qj647lmi8qiq3h7pb8ma219b0qq07w91w6rbyx21mjvm2da86"
+            "rev": "26547f6b59b14f5f11be687cb3218454835cac37",
+            "sha256": "1d8qaxl6p79md29rw6ywz89kvrwb270bsgc20an06n10z9i73q06"
           },
           "libplasma": {
-            "rev": "ad46e96eef08dc7f9ed91fe389a860c3f938e186",
-            "sha256": "15brw7cbbbkh4jxwmbpqnk8mmbb4r9zhzfhf48mahh525jvgmn3f"
+            "rev": "0694154987d0094a0cc88dca3bcd7ae11896dbf1",
+            "sha256": "0mlv59gg67gbbsff0d03m1pky3vm0vra4s1sgaxc4mmwm8mwj9ib"
           },
           "plasma-activities": {
-            "rev": "bd86dd7198db2cffb6f82026b97369511d54e29c",
-            "sha256": "1jh539m6pzax27njhzr36fz915r6mcl8iy5gfnsx4m0sbswaj819"
+            "rev": "7d96919395f8594fe7d8db47692d53ba6d3a64c4",
+            "sha256": "12j3yh7zhzcp3zzc47rdaclrs2kg7i8f6m96jz3mvxdnd39d0afv"
           },
           "knighttime": {
-            "rev": "1e70a43b4e583ef3702ad15bde0d5bad7546ba3f",
-            "sha256": "14ay8q4wdqvs1q621dccf4q9aamr6xpiz7lqg7y9pr327v3gx030"
+            "rev": "36dcddb89301849bd31ddd3ac784f7ac39a81a49",
+            "sha256": "16wr9364ylpsagjcmkpsf2cnc3i68fp4n1z9ap5h1z2rv92fryqj"
           }
         }
       }
     },
     "6.7": {
       "rev": "eaad089433ca2bb662274377d33df3d0e51ef28b",
-      "hash": "sha256-H6GwaZzZf+4npqv0tph94w9tZddSjFjmQrVsW0z78uk="
+      "hash": "sha256-H6GwaZzZf+4npqv0tph94w9tZddSjFjmQrVsW0z78uk=",
+      "plasma": {
+        "version": "6.7.6",
+        "sources": {
+          "aurorae": {
+            "rev": "9bbf38d4c9d1b6e9a5f0ae1916a91402bd5f4c05",
+            "sha256": "12xy2zb17zmpk161hng46cl0df9b56ss74a7q2k6zgkmkv267lys"
+          },
+          "breeze": {
+            "rev": "73a865d6eece5eb454f0922f087b0b4d777ee9a9",
+            "sha256": "1p8br6jr4phhdyavmv1in7r2kiz4xwnmilz6kp6vmni4bzp7hs5g"
+          },
+          "kdecoration": {
+            "rev": "60e188666dd1d1ac39e7008a973cc51376d0efa2",
+            "sha256": "1qj3i5mjz4n9iz16v6f78gasla8by7pzxclm1ivchy06d4x1mg1p"
+          },
+          "kwayland": {
+            "rev": "d006bb5a56429fa09091945c9b607656e6095286",
+            "sha256": "1lfxf18ld4hsgv4dbd9dysff0n33affin851nz076y3jmcssqas0"
+          },
+          "libplasma": {
+            "rev": "4a3c342ec3007bbcea0e9262031185e0858a9ac3",
+            "sha256": "04y16kksg211bp14zzy0jrwak8mb8zyjs7frir95mdr7b6qygpna"
+          },
+          "plasma-activities": {
+            "rev": "9a793b3cd5f42e2f7c0a1b931b8608cf9ac89672",
+            "sha256": "1xxz4j21ykflb8z3l2a8w6v33cp65cb4pk82dinsda01m1fpbdnl"
+          },
+          "knighttime": {
+            "rev": "d172bb21e305debfdc0da9933eaed175631d86eb",
+            "sha256": "1y0kvppybp50024nxk15snx8dcjhs7w33fhi0kx8pkdcabjgnqzr"
+          }
+        }
+      }
+    },
+    "6.8": {
+      "rev": "9c42318f008b96b166758066274bdc4025d9b0d1",
+      "hash": "sha256-KfPBFI1Su+FRRBlAH+eb+5CRonYckZk4+GzOqFbVm2U="
     }
   }
 }

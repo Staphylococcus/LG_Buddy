@@ -57,22 +57,28 @@ the [screen behavior and troubleshooting guide](docs/user-guide.md#automatic-scr
 
 ## Distribution Support
 
-Official downloads target **x86_64 Linux** with a writable systemd installation.
-In-app updates are available through LG Buddy's update screen or CLI.
+Official release downloads target **x86_64 Linux** with a writable systemd
+installation and support in-app updates. NixOS uses the public flake and
+NixOS/Home Manager modules, with updates managed by Nix.
 
-| Distribution | Official downloads | Updates |
+| Distribution | Installation | Updates |
 | --- | --- | --- |
 | Ubuntu 24.04 LTS | `.deb` or release bundle | In-app updates. |
 | Fedora, standard writable installation | `.rpm` or release bundle | In-app updates; RPM updates require **44+**. Fedora **43** RPMs: [update manually](docs/user-guide.md#manual-rpm-updates). |
 | Arch Linux, fully updated | Official release bundle | In-app updates. |
+| NixOS (since 2.1.0) | [Public flake and NixOS/Home Manager modules](docs/nix.md) | Update the flake input, then rebuild and activate. |
 
 - **Other Debian/Ubuntu releases and derivatives such as Pop!_OS** may work
   when they meet the requirements below, but are not separately supported baselines.
 - **Other RPM distributions, including RHEL-family and openSUSE:** no in-app
   RPM updates. Release bundles require a compatible system.
-- **NixOS and immutable systems, including Fedora Atomic:** the installer and
-  in-app updates are unsupported. Distribution-specific integration is planned
+- **Fedora Atomic, Bazzite and SteamOS:** the installer and in-app updates
+  are unsupported. Distribution-specific integration is planned
   under [#24](https://github.com/Staphylococcus/LG_Buddy/issues/24).
+
+NixOS physical-TV/lifecycle and native aarch64 qualification remain open in
+[#253](https://github.com/Staphylococcus/LG_Buddy/issues/253); see the
+[NixOS guide](docs/nix.md) for current limits.
 
 Use a distribution release still maintained by its vendor. See
 [Before You Install](#before-you-install) for library and desktop requirements.
@@ -121,13 +127,11 @@ The built-in `swayidle` backend has been removed. Saved selections convert to
 Without native idle support, disable **Idle blanking** to keep other LG Buddy
 features available, or use [external idle automation](docs/user-guide.md#external-idle-automation).
 
-The shell installer supports conventional Linux installations with writable
-system locations. The [public Nix package and NixOS/Home Manager modules](docs/nix.md) provide
-the declarative installation route being qualified for 2.1.0. Store-owned installations defer updates
-to Nix, and generated declarations can make individual settings read-only while
-preserving user preferences. Native end-to-end NixOS qualification remains open; see [issue #253](https://github.com/Staphylococcus/LG_Buddy/issues/253).
-
 ## Install
+
+For NixOS, follow the [NixOS and Home Manager installation guide](docs/nix.md#install-both-layers).
+Declared settings are read-only in the app; other preferences and pairing
+credentials remain user-owned.
 
 For `.deb` or `.rpm` downloads, follow the [package installation steps](docs/user-guide.md#install-a-native-package).
 For the release bundle:
@@ -179,6 +183,10 @@ resumes incomplete setup; `configure.sh` forwards to the same command.
 Command-line alternatives are listed in the [user guide](docs/user-guide.md#common-commands).
 
 ## Update from the installed app
+
+On NixOS, follow the [flake update and activation steps](docs/nix.md#update-and-rollback).
+Settings shows **Managed externally**. For release bundles and native packages,
+use the in-app update flow below.
 
 Read what changed in the [release notes on GitHub](https://github.com/Staphylococcus/LG_Buddy/releases).
 

@@ -289,6 +289,10 @@ impl AudioStatus {
 pub trait TvClient {
     fn model_name(&self) -> Result<String, TvError>;
     fn current_input(&self) -> Result<CurrentInput, TvError>;
+    /// Allow the adapter to recover from a failed fresh connection.
+    fn current_input_with_connection_recovery(&self) -> Result<CurrentInput, TvError> {
+        self.current_input()
+    }
     fn oled_brightness(&self) -> Result<OledBrightness, TvError>;
     fn audio_status(&self) -> Result<AudioStatus, TvError>;
     fn set_input(&self, input: HdmiInput) -> Result<(), TvError>;
@@ -471,6 +475,10 @@ pub struct TvInput<'a, C> {
 impl<'a, C: TvClient> TvInput<'a, C> {
     pub fn current(&self) -> Result<CurrentInput, TvError> {
         self.client.current_input()
+    }
+
+    pub(crate) fn current_with_connection_recovery(&self) -> Result<CurrentInput, TvError> {
+        self.client.current_input_with_connection_recovery()
     }
 
     pub fn set(&self, input: HdmiInput) -> Result<(), TvError> {
