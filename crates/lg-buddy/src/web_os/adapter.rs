@@ -265,16 +265,8 @@ impl WebOsTvClient {
             },
         }
     }
-}
 
-impl TvClient for WebOsTvClient {
-    fn model_name(&self) -> Result<String, TvError> {
-        self.with_session(TvOperation::ReadModelName, |client| {
-            client.model_name().map_err(model_name_failure)
-        })
-    }
-
-    fn current_input(&self) -> Result<CurrentInput, TvError> {
+    fn read_current_input(&self, recover_fresh_transport: bool) -> Result<CurrentInput, TvError> {
         let operation = TvOperation::ReadInput;
         let mut session = self.lock_session(operation)?;
         let reused_session = session.is_some();
@@ -285,14 +277,34 @@ impl TvClient for WebOsTvClient {
                 .map_err(foreground_app_failure)
         };
         let result = self.run_on_session(&mut session, operation, read);
-        // A socket closed between events must not turn an input check into
-        // policy's power-off fallback. Retry only this read, once, when it
-        // invalidated a reused session; failures on a fresh session still return.
-        if reused_session && result.is_err() && session.is_none() {
+        // Screen-off also recovers failures on a fresh session before it can
+        // fall back to a power-off command.
+        if session.is_none()
+            && result.as_ref().is_err_and(|error| {
+                reused_session
+                    || (recover_fresh_transport && error.kind() == TvErrorKind::Transport)
+            })
+        {
             self.run_on_session(&mut session, operation, read)
         } else {
             result
         }
+    }
+}
+
+impl TvClient for WebOsTvClient {
+    fn model_name(&self) -> Result<String, TvError> {
+        self.with_session(TvOperation::ReadModelName, |client| {
+            client.model_name().map_err(model_name_failure)
+        })
+    }
+
+    fn current_input(&self) -> Result<CurrentInput, TvError> {
+        self.read_current_input(false)
+    }
+
+    fn current_input_with_connection_recovery(&self) -> Result<CurrentInput, TvError> {
+        self.read_current_input(true)
     }
 
     fn oled_brightness(&self) -> Result<OledBrightness, TvError> {
@@ -982,6 +994,24 @@ mod tests {
             CurrentInput::Hdmi(HdmiInput::Hdmi2)
         );
         assert_eq!(server.snapshot().connection_count, 2);
+        server.finish();
+    }
+
+    #[test]
+    fn input_read_reconnects_after_a_fresh_handshake_fails() {
+        let server =
+            WebOsTestServer::active(WebOsTestVersion::WebOs24Version92261, WebOsTestInput::Hdmi3);
+        server.interrupt_next_handshakes(1);
+        let token_fixture = TestAccessTokenStore::new();
+        let client = client_for_server(&server, &token_fixture);
+
+        assert_eq!(
+            client
+                .current_input_with_connection_recovery()
+                .expect("recover the connection"),
+            CurrentInput::Hdmi(HdmiInput::Hdmi3)
+        );
+        assert_eq!(server.snapshot().connection_count, 1);
         server.finish();
     }
 

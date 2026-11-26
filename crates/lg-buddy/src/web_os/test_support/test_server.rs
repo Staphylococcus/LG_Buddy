@@ -567,6 +567,7 @@ impl WebOsTestTv {
 struct WebOsTestRuntime {
     tv: WebOsTestTv,
     scenario: WebOsTestScenario,
+    handshakes_to_interrupt: u64,
     connection_count: u64,
     pairing_prompt_count: u64,
     registration_tokens: Vec<Option<String>>,
@@ -734,6 +735,7 @@ impl WebOsTestServer {
         let runtime = Arc::new(Mutex::new(WebOsTestRuntime {
             tv: WebOsTestTv::new(version, power_state, input),
             scenario,
+            handshakes_to_interrupt: 0,
             connection_count: 0,
             pairing_prompt_count: 0,
             registration_tokens: Vec::new(),
@@ -848,6 +850,15 @@ impl WebOsTestServer {
             .lock()
             .expect("webOS test server state")
             .scenario = scenario;
+    }
+
+    /// Simulate a transport interruption before the next peers can register.
+    #[allow(dead_code)] // Some fixture consumers do not inject connection failures.
+    pub(crate) fn interrupt_next_handshakes(&self, count: u64) {
+        self.runtime
+            .lock()
+            .expect("webOS test server state")
+            .handshakes_to_interrupt = count;
     }
 
     /// Inject a request failure without changing unrelated TV capabilities.
@@ -1015,6 +1026,13 @@ fn serve_accepted_connection(
     stop: &AtomicBool,
     connection: &ActiveConnection,
 ) {
+    {
+        let mut runtime = runtime.lock().expect("webOS test server state");
+        if runtime.handshakes_to_interrupt > 0 {
+            runtime.handshakes_to_interrupt -= 1;
+            return;
+        }
+    }
     match transport {
         WebOsTestTransport::Plain => {
             if let Ok(socket) = accept(stream) {

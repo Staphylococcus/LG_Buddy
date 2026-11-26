@@ -999,6 +999,33 @@ fn run_screen_off_loads_config_and_uses_session_runtime_override() {
 }
 
 #[test]
+fn run_screen_off_falls_back_after_one_failed_reconnect() {
+    let mut env = TestEnv::new();
+    let (tv, config) = native_config("entrypoint-screen-off-reconnect-config", "HDMI_2", false);
+    tv.interrupt_next_handshakes(2);
+    let runtime = RuntimeStateLayout::new("entrypoint-screen-off-reconnect-runtime");
+    env.set("LG_BUDDY_CONFIG", config.path());
+    env.set("LG_BUDDY_SESSION_RUNTIME_DIR", runtime.session_dir());
+
+    let mut output = Vec::new();
+    run_screen_off(&mut output).expect("screen-off should fall back to power-off");
+
+    runtime.assert_session_marker_exists();
+    let snapshot = tv.snapshot();
+    assert_eq!(
+        snapshot.request_uris,
+        vec![
+            "ssap://com.webos.service.tvpower/power/getPowerState",
+            "ssap://system/turnOff",
+        ]
+    );
+    assert_eq!(snapshot.power_off_count, 1);
+    assert!(String::from_utf8(output)
+        .expect("utf8 output")
+        .contains("Fallback power_off succeeded."));
+}
+
+#[test]
 fn run_screen_on_loads_config_and_clears_session_marker() {
     let mut env = TestEnv::new();
     let (tv, config) = native_config("entrypoint-screen-on-config", "HDMI_3", true);

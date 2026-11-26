@@ -176,6 +176,11 @@ fn native_webos_tv_stalls_first_response(world: &mut LgBuddyWorld) {
     world.stall_native_tv_response();
 }
 
+#[given("the native webOS TV interrupts its first handshake")]
+fn native_webos_tv_interrupts_first_handshake(world: &mut LgBuddyWorld) {
+    world.webos_tv().interrupt_next_handshakes(1);
+}
+
 #[given("the native webOS TV interrupts the first restore session and acknowledges input without unblanking")]
 fn native_webos_tv_has_ambiguous_restore(world: &mut LgBuddyWorld) {
     world.make_native_restore_ambiguous();

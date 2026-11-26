@@ -92,6 +92,11 @@ impl MockWebOsTv {
             .set_scenario(WebOsTestScenario::StallFirstRequest);
     }
 
+    #[allow(dead_code)] // The installed GUI fixture also shares this adapter.
+    pub fn interrupt_next_handshakes(&self, count: u64) {
+        self.server.interrupt_next_handshakes(count);
+    }
+
     pub fn interrupt_restore_and_ack_input_without_unblanking(&self) {
         self.server
             .set_scenario(WebOsTestScenario::RestoreSessionInterruptedAndInputAckLeavesScreenOff);
