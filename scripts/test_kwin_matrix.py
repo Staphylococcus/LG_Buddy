@@ -6,8 +6,10 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import kwin_matrix as matrix
+import kwin_prebuilts as prebuilts
 
 
 class KWinMatrixTests(unittest.TestCase):
@@ -43,20 +45,56 @@ class KWinMatrixTests(unittest.TestCase):
         record_path.write_text(json.dumps(record))
 
     def test_committed_floor_and_qt_coverage(self):
-        expected_versions = {f"6.{minor}.{patch}" for minor, last in ((4, 6), (5, 6), (6, 6), (7, 5)) for patch in range(last + 1)}
-        self.assertEqual({r["kwin_version"] for r in self.rows}, expected_versions)
-        self.assertEqual(len(self.rows), 33)
-        self.assertEqual(len(matrix.targets(self.manifest, "6.4", "6.8")), 7)
-        for row in self.rows:
-            minimum = {"6.4": 8, "6.5": 9, "6.6": 10, "6.7": 10}[row["kwin_version"].rsplit(".", 1)[0]]
-            self.assertGreaterEqual(int(row["qt_minor"].split(".")[1]), minimum)
+        releases = {
+            "6.4": (6, ("6.8",)),
+            "6.5": (6, ("6.9",)),
+            "6.6": (7, ("6.10",)),
+            "6.7": (6, ("6.10", "6.11")),
+            "6.8": (3, ("6.11",)),
+        }
+        expected = {
+            (f"{series}.{patch}", qt)
+            for series, (latest, qt_minors) in releases.items()
+            for patch in range(latest + 1)
+            for qt in qt_minors
+        }
+        self.assertEqual({(r["kwin_version"], r["qt_minor"]) for r in self.rows}, expected)
 
     def test_complete_matrix_and_missing_variant(self):
         paths = [self.artifact(row) for row in self.rows]
-        self.assertEqual(matrix.verify(self.output, self.rows), 33)
+        self.assertEqual(matrix.verify(self.output, self.rows), len(self.rows))
         shutil.rmtree(paths[-1])
         with self.assertRaisesRegex(ValueError, "Missing KWin artifacts"):
             matrix.verify(self.output, self.rows)
+
+    def test_target_patch_changes_only_one_prebuilt_identity(self):
+        manifest = copy.deepcopy(self.manifest)
+        target = next(row for row in manifest["kwin"] if row["version"] == "6.8.0")
+        target["patches"][0]["hash"] = "sha256-" + "0" * 43 + "="
+        changed = [
+            (row["kwin_version"], row["qt_minor"])
+            for row, updated in zip(self.rows, matrix.targets(manifest), strict=True)
+            if matrix.input_identity([row]) != matrix.input_identity([updated])
+        ]
+        self.assertEqual(changed, [("6.8.0", "6.11")])
+
+    def test_restore_durable_archive_checks_identity_and_checksum(self):
+        row = self.rows[0]
+        content = prebuilts.archive_bytes(self.artifact(row))
+        identity = matrix.input_identity([row])
+        catalog = {identity: {"release": "kwin-" + "0" * 64, "sha256": matrix.digest(content)}}
+        download = [json.dumps(catalog).encode(), content]
+        destination = self.output / "download"
+        with patch.object(prebuilts, "download", side_effect=download):
+            self.assertEqual(prebuilts.restore(destination, [row]), 1)
+        with patch.object(prebuilts, "download", side_effect=download):
+            self.assertEqual(prebuilts.restore(destination, [row]), 1)
+        with patch.object(prebuilts, "download", side_effect=[download[0], content + b"corrupt"]):
+            with self.assertRaisesRegex(ValueError, "archive checksum mismatch"):
+                prebuilts.restore(destination, [row])
+        with patch.object(prebuilts, "download", return_value=b"{}"):
+            with self.assertRaisesRegex(ValueError, identity):
+                prebuilts.restore(destination, [row])
 
     def test_corruption_stale_source_and_missing_validation(self):
         row = self.rows[0]
