@@ -50,7 +50,8 @@ let
     version = target.version;
     # KWin 6.6.6 already includes this NixOS capability fix upstream.
     patches = builtins.filter (patch: !(lib.versionAtLeast kwinVersion "6.6.6"
-      && lib.hasInfix "Lower-CAP_SYS_NICE" (toString patch))) (old.patches or [ ]);
+      && lib.hasInfix "Lower-CAP_SYS_NICE" (toString patch))) (old.patches or [ ])
+      ++ builtins.map (patch: pkgs.fetchurl { inherit (patch) url hash; }) (target.patches or [ ]);
     src = pkgs.fetchzip {
       url = "https://api.github.com/repos/KDE/kwin/tarball/${target.rev}";
       extension = "tar.gz";
